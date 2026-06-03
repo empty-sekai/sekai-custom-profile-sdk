@@ -66,8 +66,6 @@ const SHARPNESS: f32 = 0.0;
 const DEFAULT_RUNTIME_PADDING: f32 = 5.3125;
 const DEFAULT_RUNTIME_SCALE_RATIO_C: f32 = 0.6770833;
 const DEFAULT_OUTLINE_GRAY_BIAS: f32 = 0.0;
-const DEFAULT_RUNTIME_UV2_Y_SLOPE: f32 = 4.3205228389072795e-05;
-const DEFAULT_RUNTIME_UV2_Y_INTERCEPT: f32 = 3.1031384151839956e-07;
 const DEFAULT_RUNTIME_SCREEN_X: f32 = 1920.0;
 const DEFAULT_RUNTIME_SCREEN_Y: f32 = 1080.0;
 const DEFAULT_RUNTIME_PROJ0_X: f32 = 0.5625;
@@ -188,82 +186,13 @@ fn runtime_scale_ratio_c() -> f32 {
     *RATIO.get_or_init(|| env_f32("SCAPUS_TMP_SCALE_RATIO_C", DEFAULT_RUNTIME_SCALE_RATIO_C))
 }
 
-fn runtime_uv2_y_slope() -> f32 {
-    static SLOPE: OnceLock<f32> = OnceLock::new();
-    *SLOPE.get_or_init(|| {
-        env_f32(
-            "SCAPUS_TMP_RUNTIME_UV2_Y_SLOPE",
-            DEFAULT_RUNTIME_UV2_Y_SLOPE,
-        )
-    })
-}
-
-fn runtime_uv2_y_intercept() -> f32 {
-    static INTERCEPT: OnceLock<f32> = OnceLock::new();
-    *INTERCEPT.get_or_init(|| {
-        std::env::var("SCAPUS_TMP_RUNTIME_UV2_Y_INTERCEPT")
-            .ok()
-            .and_then(|value| value.trim().parse::<f32>().ok())
-            .filter(|value| value.is_finite())
-            .unwrap_or(DEFAULT_RUNTIME_UV2_Y_INTERCEPT)
-    })
-}
-
 fn runtime_uv2_y_from_point_size(point_size: f32) -> f32 {
-    const SAMPLES: &[(f32, f32)] = &[
-        (24.0, 0.001037),
-        (37.573, 0.001624),
-        (41.76, 0.001804),
-        (45.919, 0.001984),
-        (66.8, 0.002886),
-        (72.705, 0.003142),
-        (85.761, 0.003706),
-        (94.507, 0.004084),
-        (96.0, 0.004148),
-    ];
-
-    let point_size = point_size.abs();
-    if !point_size.is_finite() || point_size <= 0.0 {
-        return runtime_uv2_y_intercept().abs().max(1e-8);
+    const K: f32 = 1.0 / 20250.0;
+    let ps = point_size.abs();
+    if !ps.is_finite() || ps <= 0.0 {
+        return 1e-8;
     }
-
-    for &(sample_size, sample_uv2) in SAMPLES {
-        if (point_size - sample_size).abs() < 1e-4 {
-            return sample_uv2;
-        }
-    }
-
-    let interpolate = |a: (f32, f32), b: (f32, f32), x: f32| {
-        let t = (x - a.0) / (b.0 - a.0);
-        a.1 + (b.1 - a.1) * t
-    };
-
-    let uv2_y = if point_size < SAMPLES[0].0 {
-        interpolate(SAMPLES[0], SAMPLES[1], point_size)
-    } else if point_size > SAMPLES[SAMPLES.len() - 1].0 {
-        interpolate(
-            SAMPLES[SAMPLES.len() - 2],
-            SAMPLES[SAMPLES.len() - 1],
-            point_size,
-        )
-    } else {
-        let mut found = None;
-        for window in SAMPLES.windows(2) {
-            let a = window[0];
-            let b = window[1];
-            if point_size >= a.0 && point_size <= b.0 {
-                found = Some(interpolate(a, b, point_size));
-                break;
-            }
-        }
-        found.unwrap_or(point_size * runtime_uv2_y_slope() + runtime_uv2_y_intercept().abs())
-    };
-
-    if uv2_y.is_finite() && uv2_y > 0.0 {
-        uv2_y
-    } else {
-        runtime_uv2_y_intercept().abs().max(1e-8)
-    }
+    (ps * K).max(1e-8)
 }
 
 pub fn runtime_like_mesh_carrier(
@@ -983,22 +912,13 @@ mod tests {
 
     #[test]
     fn runtime_uv2_y_from_point_size_matches_runtime_samples() {
-        let samples = [
-            (24.0, 0.001037),
-            (37.573, 0.001624),
-            (41.76, 0.001804),
-            (45.919, 0.001984),
-            (66.8, 0.002886),
-            (72.705, 0.003142),
-            (85.761, 0.003706),
-            (94.507, 0.004084),
-            (96.0, 0.004148),
-        ];
-        for (point_size, expected) in samples {
-            let uv2_y = runtime_uv2_y_from_point_size(point_size);
+        const K: f32 = 1.0 / 20250.0;
+        for ps in [8.0, 10.0, 18.0, 24.0, 48.0, 72.0, 96.0] {
+            let uv2_y = runtime_uv2_y_from_point_size(ps);
+            let expected = ps * K;
             assert!(
-                (uv2_y - expected).abs() < 1e-6,
-                "point_size={point_size} uv2_y={uv2_y}"
+                (uv2_y - expected).abs() < 1e-8,
+                "point_size={ps} uv2_y={uv2_y} expected={expected}"
             );
         }
     }
@@ -1022,6 +942,6 @@ mod tests {
             runtime_uv2_y_from_point_size(96.0),
             compute_orthographic_pixel_scale(),
         );
-        assert!((shader_scale - 19.006351).abs() < 1e-4);
+        assert!((shader_scale - 21.7215).abs() < 1e-4);
     }
 }
