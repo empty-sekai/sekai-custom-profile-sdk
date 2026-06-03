@@ -130,6 +130,8 @@ pub fn render_honor(
             } else {
                 (40.0, 3.0)
             }
+        } else if resolved.honor_type == "rank_match" {
+            if full_size { (190.0, 0.0) } else { (17.0, 42.0) }
         } else if (full_size && iw == 380.0) || (!full_size && ih == 80.0) {
             (0.0, 0.0)
         } else if full_size {
