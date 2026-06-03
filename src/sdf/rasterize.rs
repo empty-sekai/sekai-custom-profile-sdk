@@ -835,8 +835,12 @@ fn render_char_sdf_from_outline(
             // 逐位成立）。故两次 gather 取逐位相同的坐标与值，合并为一次，砍掉每像素一次
             // 冗余双线性采样（gather 是热路径瓶颈）。
             let sdf = sample_sdf_alpha(glyph, local_rect, local_x, local_y);
-            let underlay_t =
-                (sdf * shader.underlay_scale - shader.underlay_bias).clamp(0.0, 1.0);
+            // SDF spread band cutoff: multiply underlay alpha by a linear ramp
+            // sdf ≤ 0.08 → zero underlay. Beyond 0.08 the underlay is unmodified.
+            // 0.08 ≈ (spread-1)/spread where spread=6. Eliminates the faint
+            // outline-coloured halo that fills the glyph rect at small sizes.
+            let underlay_t = (sdf * shader.underlay_scale - shader.underlay_bias).clamp(0.0, 1.0)
+                * (sdf * 12.5).clamp(0.0, 1.0);
             let face_t = (sdf * shader.face_scale - shader.face_bias).clamp(0.0, 1.0);
             if underlay_t <= 0.0 && face_t <= 0.0 {
                 return None;
