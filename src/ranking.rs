@@ -10,7 +10,7 @@ use crate::error::RenderError;
 use crate::traits::RenderOutput;
 
 const OUTPUT_QUALITY: u8 = 85;
-const BOARD_WIDTH: u32 = 1280;
+const BOARD_WIDTH: u32 = 907;
 const PANEL_RADIUS: f32 = 8.0;
 const DETAIL_WIDTH: u32 = 1040;
 const LIVE_BOARD_NOTE_HEIGHT: f32 = 106.0;
@@ -418,7 +418,7 @@ fn render_live_board(input: &RankingLiveBoardInput) -> Result<RenderOutput, Rend
     } else {
         input.players.len()
     };
-    let height = (header_h + 34.0 + row_h * player_rows as f32 + bottom_h + 32.0)
+    let height = (header_h + 34.0 + row_h * player_rows as f32 + bottom_h + 32.0 + FOOTER_HEIGHT as f32)
         .ceil()
         .max(360.0) as u32;
 
@@ -435,12 +435,15 @@ fn render_live_board(input: &RankingLiveBoardInput) -> Result<RenderOutput, Rend
 }
 
 fn render_border_summary(input: &RankingBorderSummaryInput) -> Result<RenderOutput, RenderError> {
-    let rows = input.borders.len().div_ceil(2).max(1);
-    let height = (112 + rows as u32 * 58 + 34).max(330);
+    let row_h = 42.0;
+    let header_h = 146.0;
+    let height = (header_h + 34.0 + row_h * input.borders.len() as f32 + 32.0 + FOOTER_HEIGHT as f32)
+        .ceil()
+        .max(330.0) as u32;
 
     #[cfg(feature = "skia")]
     {
-        return render_border_summary_skia(input, BOARD_WIDTH, height);
+        return render_border_summary_skia(input, BOARD_WIDTH, height, row_h, header_h);
     }
 
     #[cfg(not(feature = "skia"))]
@@ -450,7 +453,7 @@ fn render_border_summary(input: &RankingBorderSummaryInput) -> Result<RenderOutp
 fn render_player_detail(input: &RankingPlayerDetailInput) -> Result<RenderOutput, RenderError> {
     let _ = input;
     let width = DETAIL_WIDTH;
-    let height = 704;
+    let height = 704 + FOOTER_HEIGHT;
 
     #[cfg(feature = "skia")]
     {
@@ -509,7 +512,7 @@ fn render_top100_compact_skia(
     let panel_x = 40.0;
     let panel_y = 92.0;
     let panel_w = width as f32 - panel_x * 2.0;
-    canvas.glass(panel_x, panel_y, panel_w, height as f32 - panel_y - 32.0);
+    canvas.glass(panel_x, panel_y, panel_w, height as f32 - panel_y - 32.0 - FOOTER_HEIGHT as f32);
 
     let col_gap = 18.0;
     let col_w = (panel_w - 48.0 - col_gap) / 2.0;
@@ -532,6 +535,7 @@ fn render_top100_compact_skia(
 
     let note_y = header_h + 28.0 + rows as f32 * row_h + 10.0;
     draw_activity_note(&mut canvas, panel_x + 12.0, note_y, panel_w - 24.0);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -580,7 +584,7 @@ fn render_live_board_skia(
     let table_x = 40.0;
     let table_y = 92.0;
     let table_w = width as f32 - table_x * 2.0;
-    canvas.glass(table_x, table_y, table_w, height as f32 - table_y - 32.0);
+    canvas.glass(table_x, table_y, table_w, height as f32 - table_y - 32.0 - FOOTER_HEIGHT as f32);
     canvas.panel(
         table_x + 12.0,
         header_h - 33.0,
@@ -616,6 +620,7 @@ fn render_live_board_skia(
     }
 
     draw_activity_note(&mut canvas, table_x + 12.0, y + 5.0, table_w - 24.0);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -624,6 +629,8 @@ fn render_border_summary_skia(
     input: &RankingBorderSummaryInput,
     width: u32,
     height: u32,
+    row_h: f32,
+    header_h: f32,
 ) -> Result<RenderOutput, RenderError> {
     let mut canvas = RankingCanvas::new(width, height)?;
     canvas.background();
@@ -634,30 +641,46 @@ fn render_border_summary_skia(
         input.character_id,
         input.last_snapshot_ts,
         48.0,
-        26.0,
+        28.0,
         22.0,
         18.0,
-        840.0,
+        820.0,
     );
     canvas.text(
         &format!("{} 条可查榜线", input.borders.len()),
         width as f32 - 48.0,
-        70.0,
+        72.0,
         18.0,
         Color::MUTED,
         TextAlign::Right,
         240.0,
     );
 
-    let card_w = (width as f32 - 96.0 - 24.0) / 2.0;
-    let rows = input.borders.len().div_ceil(2).max(1);
-    for (index, border) in input.borders.iter().enumerate() {
-        let col = index / rows;
-        let row = index % rows;
-        let x = 48.0 + col as f32 * (card_w + 24.0);
-        let y = 104.0 + row as f32 * 58.0;
-        draw_border_card(&mut canvas, border, x, y, card_w);
-    }
+    let table_x = 40.0;
+    let table_y = 92.0;
+    let table_w = 827.0;
+    canvas.glass(
+        table_x,
+        table_y,
+        table_w,
+        height as f32 - table_y - 32.0 - FOOTER_HEIGHT as f32,
+    );
+
+    // 表头
+    canvas.panel(
+        table_x + 12.0,
+        header_h - 33.0,
+        table_w - 24.0,
+        34.0,
+        Color::PANEL_ALT,
+    );
+    draw_border_table_columns(
+        &mut canvas,
+        table_x + 24.0,
+        header_h - 10.0,
+        table_w - 48.0,
+    );
+
     if input.borders.is_empty() {
         canvas.text(
             "当前没有可查榜线",
@@ -668,8 +691,29 @@ fn render_border_summary_skia(
             TextAlign::Center,
             480.0,
         );
+    } else {
+        // 绘制每一行
+        let mut y = header_h + 34.0;
+        for (index, border) in input.borders.iter().enumerate() {
+            let bg = if index % 2 == 0 {
+                Color::ROW
+            } else {
+                Color::ROW_ALT
+            };
+            canvas.panel(table_x + 12.0, y - 23.0, table_w - 24.0, row_h - 4.0, bg);
+            draw_border_table_row(
+                &mut canvas,
+                border,
+                input.last_snapshot_ts,
+                table_x + 24.0,
+                y,
+                table_w - 48.0,
+            );
+            y += row_h;
+        }
     }
 
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -702,6 +746,7 @@ fn render_player_detail_skia(
         548.0,
         width as f32 - 96.0,
     );
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -764,12 +809,15 @@ fn render_speed_detail(_input: &RankingSpeedDetailInput) -> Result<RenderOutput,
 }
 
 fn render_speed_borders(input: &RankingSpeedBordersInput) -> Result<RenderOutput, RenderError> {
-    let rows = input.borders.len().div_ceil(2).max(1);
-    let height = (112 + rows as u32 * 58 + FOOTER_HEIGHT).max(330);
+    let row_h = 42.0;
+    let header_h = 146.0;
+    let height = (header_h + 34.0 + row_h * input.borders.len() as f32 + FOOTER_HEIGHT as f32 + 32.0)
+        .ceil()
+        .max(330.0) as u32;
 
     #[cfg(feature = "skia")]
     {
-        return render_speed_borders_skia(input, BOARD_WIDTH, height);
+        return render_speed_borders_skia(input, BOARD_WIDTH, height, row_h, header_h);
     }
 
     #[cfg(not(feature = "skia"))]
@@ -805,12 +853,15 @@ fn render_daily_detail(_input: &RankingDailyDetailInput) -> Result<RenderOutput,
 }
 
 fn render_daily_borders(input: &RankingDailyBordersInput) -> Result<RenderOutput, RenderError> {
-    let rows = input.borders.len().div_ceil(2).max(1);
-    let height = (112 + rows as u32 * 58 + FOOTER_HEIGHT).max(330);
+    let row_h = 42.0;
+    let header_h = 146.0;
+    let height = (header_h + 34.0 + row_h * input.borders.len() as f32 + FOOTER_HEIGHT as f32 + 32.0)
+        .ceil()
+        .max(330.0) as u32;
 
     #[cfg(feature = "skia")]
     {
-        return render_daily_borders_skia(input, BOARD_WIDTH, height);
+        return render_daily_borders_skia(input, BOARD_WIDTH, height, row_h, header_h);
     }
 
     #[cfg(not(feature = "skia"))]
@@ -909,12 +960,12 @@ fn render_speed_detail_skia(
     }
     y += chip_h + 16.0;
 
-    // 5 mini_chips: 停车状态 / 本小时周回 / 窗口 / 20m×3 / 日速对比
+    // 5 mini_chips: 停车状态 / 近1小时 / 窗口 / 20m×3 / 活跃
     let mini_w = (inner_w - 32.0) / 5.0;
     let (status_label, status_color) = player_activity_status(p.parked);
     let mini_chips: [(&str, &str, Color); 5] = [
         ("状态", status_label, status_color),
-        ("本时周回", &p.plays_this_hour.to_string(), Color::TEXT),
+        ("近1小时", &p.plays_this_hour.to_string(), Color::TEXT),
         ("窗口", &format_window(p.tracking_window_secs), Color::MUTED),
         ("20m×3", &display_hourly_rate(p.projected_20m_x3, p.tracking_window_secs), rate_color(p.projected_20m_x3, p.tracking_window_secs)),
         ("活跃", &format_plays(p.plays_this_hour), Color::MUTED),
@@ -924,7 +975,7 @@ fn render_speed_detail_skia(
     }
 
     // footer
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
 
     canvas.finish(OUTPUT_QUALITY)
 }
@@ -934,6 +985,8 @@ fn render_speed_borders_skia(
     input: &RankingSpeedBordersInput,
     width: u32,
     height: u32,
+    row_h: f32,
+    header_h: f32,
 ) -> Result<RenderOutput, RenderError> {
     let mut canvas = RankingCanvas::new(width, height)?;
     canvas.background();
@@ -944,32 +997,75 @@ fn render_speed_borders_skia(
         input.character_id,
         input.last_snapshot_ts,
         48.0,
-        26.0,
+        28.0,
         22.0,
         18.0,
-        840.0,
+        820.0,
     );
     canvas.text(
         &format!("{} 条榜线时速", input.borders.len()),
         width as f32 - 48.0,
-        70.0,
+        72.0,
         18.0,
         Color::MUTED,
         TextAlign::Right,
         240.0,
     );
 
-    let card_w = (width as f32 - 96.0 - 24.0) / 2.0;
-    let rows = input.borders.len().div_ceil(2).max(1);
-    for (index, border) in input.borders.iter().enumerate() {
-        let col = index / rows;
-        let row = index % rows;
-        let x = 48.0 + col as f32 * (card_w + 24.0);
-        let y = 104.0 + row as f32 * 58.0;
-        draw_speed_border_card(&mut canvas, border, x, y, card_w);
+    let table_x = 40.0;
+    let table_y = 92.0;
+    let table_w = 827.0;
+    let table_h = height as f32 - table_y - FOOTER_HEIGHT as f32 - 32.0;
+    canvas.glass(table_x, table_y, table_w, table_h);
+
+    // 表头
+    canvas.panel(
+        table_x + 12.0,
+        header_h - 33.0,
+        table_w - 24.0,
+        34.0,
+        Color::PANEL_ALT,
+    );
+    draw_speed_border_table_columns(
+        &mut canvas,
+        table_x + 24.0,
+        header_h - 10.0,
+        table_w - 48.0,
+    );
+
+    if input.borders.is_empty() {
+        canvas.text(
+            "当前没有榜线时速数据",
+            width as f32 / 2.0,
+            table_y + table_h / 2.0,
+            28.0,
+            Color::MUTED,
+            TextAlign::Center,
+            480.0,
+        );
+    } else {
+        // 绘制每一行
+        let mut y = header_h + 34.0;
+        for (index, border) in input.borders.iter().enumerate() {
+            let bg = if index % 2 == 0 {
+                Color::ROW
+            } else {
+                Color::ROW_ALT
+            };
+            canvas.panel(table_x + 12.0, y - 23.0, table_w - 24.0, row_h - 4.0, bg);
+            draw_speed_border_table_row(
+                &mut canvas,
+                border,
+                input.last_snapshot_ts,
+                table_x + 24.0,
+                y,
+                table_w - 48.0,
+            );
+            y += row_h;
+        }
     }
 
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -1068,7 +1164,7 @@ fn render_speed_compare_skia(
         );
     }
 
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -1159,7 +1255,7 @@ fn render_daily_detail_skia(
         draw_mini_chip(&mut canvas, label, value, inner_x + i as f32 * (mini_w + 8.0), y, mini_w, *color);
     }
 
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -1168,6 +1264,8 @@ fn render_daily_borders_skia(
     input: &RankingDailyBordersInput,
     width: u32,
     height: u32,
+    row_h: f32,
+    header_h: f32,
 ) -> Result<RenderOutput, RenderError> {
     let mut canvas = RankingCanvas::new(width, height)?;
     canvas.background();
@@ -1178,32 +1276,75 @@ fn render_daily_borders_skia(
         input.character_id,
         input.last_snapshot_ts,
         48.0,
-        26.0,
+        28.0,
         22.0,
         18.0,
-        840.0,
+        820.0,
     );
     canvas.text(
         &format!("{} 条榜线日速", input.borders.len()),
         width as f32 - 48.0,
-        70.0,
+        72.0,
         18.0,
         Color::MUTED,
         TextAlign::Right,
         240.0,
     );
 
-    let card_w = (width as f32 - 96.0 - 24.0) / 2.0;
-    let rows = input.borders.len().div_ceil(2).max(1);
-    for (index, border) in input.borders.iter().enumerate() {
-        let col = index / rows;
-        let row = index % rows;
-        let x = 48.0 + col as f32 * (card_w + 24.0);
-        let y = 104.0 + row as f32 * 58.0;
-        draw_daily_border_card(&mut canvas, border, x, y, card_w);
+    let table_x = 40.0;
+    let table_y = 92.0;
+    let table_w = 827.0;
+    let table_h = height as f32 - table_y - FOOTER_HEIGHT as f32 - 32.0;
+    canvas.glass(table_x, table_y, table_w, table_h);
+
+    // 表头
+    canvas.panel(
+        table_x + 12.0,
+        header_h - 33.0,
+        table_w - 24.0,
+        34.0,
+        Color::PANEL_ALT,
+    );
+    draw_daily_border_table_columns(
+        &mut canvas,
+        table_x + 24.0,
+        header_h - 10.0,
+        table_w - 48.0,
+    );
+
+    if input.borders.is_empty() {
+        canvas.text(
+            "当前没有榜线日速数据",
+            width as f32 / 2.0,
+            table_y + table_h / 2.0,
+            28.0,
+            Color::MUTED,
+            TextAlign::Center,
+            480.0,
+        );
+    } else {
+        // 绘制每一行
+        let mut y = header_h + 34.0;
+        for (index, border) in input.borders.iter().enumerate() {
+            let bg = if index % 2 == 0 {
+                Color::ROW
+            } else {
+                Color::ROW_ALT
+            };
+            canvas.panel(table_x + 12.0, y - 23.0, table_w - 24.0, row_h - 4.0, bg);
+            draw_daily_border_table_row(
+                &mut canvas,
+                border,
+                input.last_snapshot_ts,
+                table_x + 24.0,
+                y,
+                table_w - 48.0,
+            );
+            y += row_h;
+        }
     }
 
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -1297,7 +1438,7 @@ fn render_daily_compare_skia(
         );
     }
 
-    draw_footer(&mut canvas, input.last_snapshot_ts, width, height);
+    draw_footer(&mut canvas, width, height);
     canvas.finish(OUTPUT_QUALITY)
 }
 
@@ -1585,139 +1726,194 @@ fn draw_compact_player_row(
 }
 
 #[cfg(feature = "skia")]
-fn draw_border_card(
+fn draw_border_table_columns(canvas: &mut RankingCanvas, x: f32, y: f32, width: f32) {
+    let cols = border_table_columns(x, width);
+    canvas.text("排名", cols.rank, y, 18.0, Color::MUTED, TextAlign::Left, 120.0);
+    canvas.text("分数", cols.score_rate, y, 18.0, Color::MUTED, TextAlign::Right, 360.0);
+    canvas.text("更新时间", cols.timestamp, y, 18.0, Color::MUTED, TextAlign::Right, 180.0);
+}
+
+#[cfg(feature = "skia")]
+fn draw_speed_border_table_columns(canvas: &mut RankingCanvas, x: f32, y: f32, width: f32) {
+    let cols = border_table_columns(x, width);
+    canvas.text("排名", cols.rank, y, 18.0, Color::MUTED, TextAlign::Left, 120.0);
+    canvas.text("时速", cols.score_rate, y, 18.0, Color::MUTED, TextAlign::Right, 360.0);
+    canvas.text("更新时间", cols.timestamp, y, 18.0, Color::MUTED, TextAlign::Right, 180.0);
+}
+
+#[cfg(feature = "skia")]
+fn draw_daily_border_table_columns(canvas: &mut RankingCanvas, x: f32, y: f32, width: f32) {
+    let cols = border_table_columns(x, width);
+    canvas.text("排名", cols.rank, y, 18.0, Color::MUTED, TextAlign::Left, 120.0);
+    canvas.text("日速", cols.score_rate, y, 18.0, Color::MUTED, TextAlign::Right, 360.0);
+    canvas.text("更新时间", cols.timestamp, y, 18.0, Color::MUTED, TextAlign::Right, 180.0);
+}
+
+#[cfg(feature = "skia")]
+fn draw_border_table_row(
     canvas: &mut RankingCanvas,
     border: &RankingBorderRecord,
+    last_snapshot_ts: Option<i64>,
     x: f32,
     y: f32,
     width: f32,
 ) {
-    canvas.glass(x, y, width, 48.0);
+    let cols = border_table_columns(x, width);
+
+    // 排名
     canvas.text(
         &format!("#{}", border.rank),
-        x + 18.0,
-        y + 32.0,
+        cols.rank,
+        y,
         24.0,
         Color::NIIGO,
         TextAlign::Left,
         120.0,
     );
+
+    // 分数（单行显示）
     canvas.text(
         &format_number(border.score),
-        x + width - 20.0,
-        y + 28.0,
-        24.0,
+        cols.score_rate,
+        y,
+        26.0,
         Color::TEXT,
         TextAlign::Right,
-        280.0,
+        480.0,
     );
+
+    // 更新时间
     canvas.text(
-        &format!(
-            "时速 {}",
-            display_rate(border.hourly_rate, border.tracking_window_secs)
-        ),
-        x + width - 20.0,
-        y + 44.0,
-        15.0,
-        rate_color(border.hourly_rate, border.tracking_window_secs),
+        &display_time_ago(last_snapshot_ts),
+        cols.timestamp,
+        y,
+        18.0,
+        Color::MUTED,
         TextAlign::Right,
-        220.0,
+        180.0,
     );
 }
 
 #[cfg(feature = "skia")]
-fn draw_speed_border_card(
+#[derive(Debug, Clone, Copy)]
+struct BorderTableColumns {
+    rank: f32,
+    score_rate: f32,
+    timestamp: f32,
+}
+
+#[cfg(feature = "skia")]
+fn border_table_columns(x: f32, _width: f32) -> BorderTableColumns {
+    // Fixed 827px table: rank(80px) | score/rate(500px) | timestamp(199px)
+    // x is content start (table_x + 24), content width = 779px
+    BorderTableColumns {
+        rank: x + 18.0,         // Left-aligned in rank column
+        score_rate: x + 562.0,  // Right-aligned in score/rate column (80+500-18)
+        timestamp: x + 761.0,   // Right-aligned in timestamp column (779-18)
+    }
+}
+
+#[cfg(feature = "skia")]
+fn draw_speed_border_table_row(
     canvas: &mut RankingCanvas,
     border: &RankingSpeedBorderCard,
+    last_snapshot_ts: Option<i64>,
     x: f32,
     y: f32,
     width: f32,
 ) {
-    canvas.glass(x, y, width, 48.0);
+    let cols = border_table_columns(x, width);
+
+    // 排名
     canvas.text(
         &format!("#{}", border.rank),
-        x + 18.0,
-        y + 32.0,
-        24.0,
+        cols.rank,
+        y,
+        20.0,
         Color::NIIGO,
         TextAlign::Left,
         120.0,
     );
+
+    // 时速（单独显示，不带分数）
     canvas.text(
-        &format_number(border.score),
-        x + width - 20.0,
-        y + 28.0,
-        24.0,
-        Color::TEXT,
-        TextAlign::Right,
-        280.0,
-    );
-    canvas.text(
-        &format!(
-            "时速 {}",
-            display_rate(border.hourly_rate, border.tracking_window_secs)
-        ),
-        x + width - 20.0,
-        y + 44.0,
-        15.0,
+        &display_hourly_rate(border.hourly_rate, border.tracking_window_secs),
+        cols.score_rate,
+        y,
+        20.0,
         rate_color(border.hourly_rate, border.tracking_window_secs),
         TextAlign::Right,
-        220.0,
+        480.0,
+    );
+
+    // 更新时间
+    canvas.text(
+        &display_time_ago(last_snapshot_ts),
+        cols.timestamp,
+        y,
+        17.0,
+        Color::MUTED,
+        TextAlign::Right,
+        180.0,
     );
 }
 
 #[cfg(feature = "skia")]
-fn draw_daily_border_card(
+fn draw_daily_border_table_row(
     canvas: &mut RankingCanvas,
     border: &RankingDailyBorderCard,
+    last_snapshot_ts: Option<i64>,
     x: f32,
     y: f32,
     width: f32,
 ) {
-    canvas.glass(x, y, width, 48.0);
+    let cols = border_table_columns(x, width);
+
+    // 排名
     canvas.text(
         &format!("#{}", border.rank),
-        x + 18.0,
-        y + 32.0,
-        24.0,
+        cols.rank,
+        y,
+        20.0,
         Color::NIIGO,
         TextAlign::Left,
         120.0,
     );
+
+    // 日速（单独显示，不带分数）
     canvas.text(
-        &format_number(border.score),
-        x + width - 20.0,
-        y + 28.0,
-        24.0,
-        Color::TEXT,
-        TextAlign::Right,
-        280.0,
-    );
-    canvas.text(
-        &format!(
-            "日速 {}",
-            display_daily_rate(border.daily_rate, border.daily_tracking_window_secs, false)
-        ),
-        x + width - 20.0,
-        y + 44.0,
-        15.0,
+        &display_daily_rate(border.daily_rate, border.daily_tracking_window_secs, false),
+        cols.score_rate,
+        y,
+        20.0,
         rate_color(border.daily_hourly_rate, border.daily_tracking_window_secs),
         TextAlign::Right,
-        220.0,
+        480.0,
+    );
+
+    // 更新时间
+    canvas.text(
+        &display_time_ago(last_snapshot_ts),
+        cols.timestamp,
+        y,
+        17.0,
+        Color::MUTED,
+        TextAlign::Right,
+        180.0,
     );
 }
 
 #[cfg(feature = "skia")]
-fn draw_footer(canvas: &mut RankingCanvas, last_snapshot_ts: Option<i64>, width: u32, height: u32) {
+fn draw_footer(canvas: &mut RankingCanvas, width: u32, height: u32) {
     let footer_y = height as f32 - FOOTER_HEIGHT as f32;
     // footer 背景线
     canvas.panel(0.0, footer_y, width as f32, FOOTER_HEIGHT as f32, Color::SURFACE);
-    // 更新时间
+    // 数据来源
     canvas.text(
-        &display_ts(last_snapshot_ts),
+        "数据来源自 allium-scapus",
         width as f32 / 2.0,
-        footer_y + 24.0,
-        14.0,
+        footer_y + 23.0,
+        12.0,
         Color::MUTED,
         TextAlign::Center,
         width as f32 - 40.0,
@@ -1986,7 +2182,7 @@ fn draw_player_detail_card(
     );
     draw_mini_chip(
         canvas,
-        "本小时",
+        "近1小时",
         &format!("{}局", card.metrics.plays_this_hour),
         x + 44.0 + small_w * 2.0,
         small_y,
@@ -2531,6 +2727,32 @@ fn display_time(ts: Option<i64>) -> Option<String> {
             .format("%-m月%-d日 %H:%M:%S")
             .to_string(),
     )
+}
+
+fn display_time_ago(ts: Option<i64>) -> String {
+    let Some(value) = ts else {
+        return "--".to_string();
+    };
+    let now = Utc::now().timestamp();
+    let diff = now - value;
+
+    if diff < 0 {
+        return "刚刚".to_string();
+    }
+
+    if diff < 60 {
+        return format!("{}秒前", diff);
+    }
+
+    if diff < 3600 {
+        return format!("{}分钟前", diff / 60);
+    }
+
+    if diff < 86400 {
+        return format!("{}小时前", diff / 3600);
+    }
+
+    format!("{}天前", diff / 86400)
 }
 
 fn display_remaining(remaining_secs: i64) -> String {
