@@ -1,0 +1,48 @@
+[changelog]
+header = "Changelog"
+body = """
+{% if version %}\
+    ## [{{ version }}](https://github.com/empty-sekai/allium-renderer/compare/v{{ previous.version }}..v{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+    ## [unreleased]
+{% endif %}\
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") %}
+    ### {{ group | upper_first }}
+    {% for commit in commits | sort(attribute="committer.timestamp") -%}
+        - {{ commit.breaking | upper_first }} {{ commit.message | split(pat="\n") | first | trim | replace(from="\\(", to="(") | replace(from="\\)", to=")") | replace(from="\\.", to=".") | replace(from="\\\\", to="\\") | upper_first -}}
+        {% if commit.footers %}\
+            {% for footer in commit.footers -%}
+                ({{ footer.key }}{% if footer.value %}={{ footer.value }}{% endif %})
+            {% endfor -%}
+        {% endif -%}
+    {% endfor %}
+{% endfor %}
+"""
+footer = ""
+trim = true
+postprocessors = []
+render_always = true
+
+[git]
+conventional_commits = true
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+
+[commit_types]
+feat = { description = "Features" }
+fix = { description = "Bug Fixes" }
+perf = { description = "Performance" }
+refactor = { description = "Refactoring" }
+docs = { description = "Documentation" }
+test = { description = "Tests" }
+ci = { description = "CI/CD" }
+build = { description = "Build" }
+chore = { description = "Chore" }
+revert = { description = "Reverts" }
+
+[changelog.dependencies]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
