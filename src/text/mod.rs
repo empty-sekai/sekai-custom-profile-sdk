@@ -20,7 +20,7 @@ use crate::text::richtext::{parse_rich_segments, Indent, InlineAlign, LineIndent
 #[cfg(feature = "skia")]
 use crate::types::TextElement;
 #[cfg(feature = "skia")]
-use skia_safe::{Canvas, Color4f, Font, FontMgr, FontStyle, Paint, PaintStyle, Point, Rect};
+use skia_safe::{Canvas, Color4f, Font, FontMgr, FontStyle, Matrix, Paint, PaintStyle, Point, Rect};
 #[cfg(feature = "skia")]
 use crate::sdf::outline::{self as sdf_outline, lookup_or_generate};
 
@@ -132,6 +132,54 @@ struct DrawCharOp {
     face: Paint,
     sdf_params: Option<crate::sdf::rasterize::SdfOutlineParams>,
     mesh_carrier: crate::sdf::rasterize::RuntimeLikeGlyphMeshCarrier,
+}
+
+/// 构造单字形的局部变换矩阵（相对画布当前 CTM 的增量），与渲染循环逐字绘制时
+/// 对 canvas 施加的链式调用保持**逐字节同源**。debug 顶点输出与渲染都只走这一处，
+/// 保证 debug 数值 == 实际渲染。
+///
+/// 复合顺序对齐游戏真机（il2cpp FX 块 `v' = C + M·(v−C)`，`M = Rotate·Scale`）：
+/// 绕 glyph center（= anchor）施加 **R 外层、S 内层**，italic skew 最内层（真机
+/// 在 FX 前先改顶点）。即：
+///   T(anchor) · R(-rotate_deg) · S(scale_x,1) · Skew(skew_x)
+/// 字形随后画在 (-pivot_x, -pivot_y)，使 glyph center 落在 anchor 上。
+///
+/// 退化等价：skew_x=0 时为 `T·R·S`；当 scale_x=1 或 rotate_deg=0 其一为平凡，
+/// `R·S = S·R`，与旧 canvas 链 `T·S·R` 逐字节一致——剪切偏差仅在 scale 与 rotate
+/// 同时非平凡时出现，正是 #4 要修的复合。
+#[cfg(feature = "skia")]
+fn glyph_local_matrix(op: &DrawCharOp) -> Matrix {
+    let mut m = Matrix::new_identity();
+    m.pre_translate((op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y));
+    if op.rotate_deg.abs() > 0.001 {
+        // TMP <rotate> 是 Unity Y-up/CCW，Skia Y-down/CW，取负翻转（与元素级
+        // transform::quaternion_to_degrees 负号同源）。R 外层。
+        m.pre_rotate(-op.rotate_deg, None);
+    }
+    m.pre_scale((op.scale_x, 1.0), None); // S 内层（先把字形横向拉成矩形）
+    if op.skew_x != 0.0 {
+        // italic skew 最内层：真机在 FX 块前先改顶点。
+        m.pre_concat(&Matrix::from_affine(&[1.0, 0.0, op.skew_x, 1.0, 0.0, 0.0]));
+    }
+    m
+}
+
+/// 计算字形 footprint 四角经 `glyph_local_matrix` 变换后的设备前坐标（TMP 等效坐标系，
+/// 乘 TEXT_SCALE）。footprint 取绕 glyph center 的 ±pivot 盒；刚性旋转下保持矩形，
+/// 复合产生剪切时退化为平行四边形——四角即可直接量化剪切。
+/// 返回 [TL, TR, BR, BL] 各 (x, y)。
+#[cfg(feature = "skia")]
+fn glyph_quad_corners(op: &DrawCharOp) -> [(f32, f32); 4] {
+    let m = glyph_local_matrix(op);
+    // 字形相对其 center（绘制原点在 -pivot）的局部盒。center 在原点，半展为 pivot。
+    let (hx, hy) = (op.pivot_x.abs().max(1.0), op.pivot_y.abs().max(1.0));
+    let local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)];
+    let mut out = [(0.0f32, 0.0f32); 4];
+    for (i, (lx, ly)) in local.iter().enumerate() {
+        let p = m.map_point(Point::new(*lx, *ly));
+        out[i] = (p.x * TEXT_SCALE, -p.y * TEXT_SCALE);
+    }
+    out
 }
 
 /// 绘制文本（逐段排版 + 描边 + 富文本标签支持）。
@@ -542,11 +590,6 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
 
     let total_h_tmp = effective_max_asc - effective_min_des;
     let _total_h = total_h_tmp / TEXT_SCALE;
-    // anchor 基于 logical box 居中（TMP 行为：首行 asc + 末行 des）。
-    // Use the effective vertical bounds (which include voffset) so that
-    // the visual centre of the text box is at the origin. When voffset=0
-    // the effective bounds equal the logical bounds, so this is a no-op
-    // for text without <voffset>.
     let anchor_base = (effective_max_asc + effective_min_des) / (2.0 * TEXT_SCALE);
     let has_outline = text.outline_size > 0.0;
     let max_rw = rect_widths.iter().cloned().fold(0.0f32, f32::max);
@@ -971,16 +1014,9 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
             continue;
         }
         canvas.save();
-        canvas.translate(Point::new(op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y));
-        if op.skew_x != 0.0 {
-            canvas.skew((op.skew_x, 0.0));
-        }
-        canvas.scale((op.scale_x, 1.0));
-        if op.rotate_deg.abs() > 0.001 {
-            // TMP <rotate> 是 Unity Y-up/CCW 角度，Skia 是 Y-down/CW，需取负翻转，
-            // 与元素级旋转 transform::quaternion_to_degrees 的负号同源。漏翻则字反向 180°。
-            canvas.rotate(-op.rotate_deg, None);
-        }
+        // 逐字复合矩阵走 glyph_local_matrix（与 debug char_quads 同源）：绕 glyph center
+        // R 外层·S 内层·italic skew 最内层，对齐 il2cpp FX 块的 Rotate·Scale，消除 #4 剪切。
+        canvas.concat(&glyph_local_matrix(op));
         if let Some(ref sdf_p) = op.sdf_params {
             let fc = op.face.color4f();
             crate::sdf::rasterize::render_char_sdf(
@@ -1072,6 +1108,12 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
                 )
             })
             .collect();
+        // 变换后字形 footprint 四角（[TL,TR,BR,BL]），用于 #4 剪切/尺寸的顶点级回归。
+        // 刚性旋转下为矩形；S·R 复合剪切时为平行四边形。与 glyph_local_matrix 同源。
+        let char_quads: Vec<(String, [(f32, f32); 4])> = draw_ops
+            .iter()
+            .map(|op| (op.ch.clone(), glyph_quad_corners(op)))
+            .collect();
         let raw_text_json = serde_json::to_string(&text.text).unwrap_or_else(|_| "\"<encode-error>\"".to_string());
         let raw_text_escaped = text.text.replace('\n', "\\n").replace('\r', "\\r");
         tracing::info!(
@@ -1081,6 +1123,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
             final_metrics = ?final_metrics,
             char_positions = ?char_positions,
             char_ops = ?char_ops,
+            char_quads = ?char_quads,
             "TMP_DEBUG_DRAW"
         );
     }
