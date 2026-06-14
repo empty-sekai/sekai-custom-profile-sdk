@@ -1,0 +1,32 @@
+allium-renderer-wasm — Additional permission under GNU AGPL version 3 section 7
+
+Copyright (C) the allium-renderer contributors
+
+The npm-distributed WebAssembly artifact of allium-renderer-wasm (the files
+`allium_renderer_wasm.wasm`, `allium_renderer_wasm.js`, and the TypeScript/
+JavaScript wrapper published under the package `@allium/renderer-wasm`,
+collectively "the Artifact") is licensed under the GNU Affero General Public
+License version 3 (AGPL-3.0-only), as found in the accompanying LICENSE file,
+with the following additional permission granted under section 7 of that
+license:
+
+  As an additional permission, you may load and run an unmodified copy of the
+  Artifact within a web page executing in an end user's web browser, and link
+  it with your own front-end code running in that same browser, without that
+  front-end code thereby becoming subject to the terms of the AGPL. Your
+  front-end code is not, by virtue of this in-browser linking alone, a work
+  based on the Artifact.
+
+This additional permission applies ONLY to the unmodified Artifact running in a
+web browser. It does NOT apply if you:
+
+  - modify the Artifact or the renderer engine it is built from; or
+  - run the Artifact, or any work based on it, on a server or in any
+    non-browser environment (including but not limited to Node.js, Deno,
+    serverless functions, or native host processes).
+
+In those cases the full terms of the AGPL-3.0-only apply, including the
+network-use source-disclosure obligation of section 13.
+
+If you modify the Artifact, you may, at your option, remove this additional
+permission from your modified copy; you are not required to do so.

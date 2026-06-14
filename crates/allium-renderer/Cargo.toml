@@ -1,0 +1,100 @@
+[package]
+name = "allium-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "Skia CPU rendering engine: Renderable trait + render executor"
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lru = "0.12"
+rayon = { version = "1.11", optional = true }
+tokio = { version = "1.43", features = ["sync", "rt", "time"], optional = true }
+chrono = { version = "0.4", optional = true }
+skia-safe = { version = "0.97", optional = true }
+freetype-rs = { version = "0.38", optional = true }
+ttf-parser = { version = "0.25", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+
+[dev-dependencies]
+axum = "0.8"
+allium-renderer-host = { path = "../allium-renderer-host" }
+
+[package.metadata.docs.rs]
+features = ["skia"]
+
+[features]
+default = []
+# 内部实现 gate：所有 Skia 渲染代码位于此 feature 之下。
+# 不直接启用——用 `skia`（native 全量）或 `skia-minimal`（wasm 最小集）。
+skia-core = ["dep:skia-safe", "dep:freetype-rs", "dep:ttf-parser"]
+# native 生产预设：skia-binaries 有预编译包的 feature 组合，勿增减。
+skia = [
+    "skia-core",
+    "parallel",
+    "scenes",
+    "executor",
+    "skia-safe/textlayout",
+    "skia-safe/svg",
+    "skia-safe/vulkan",
+    "skia-safe/webp",
+]
+# wasm 最小集：无 GPU/textlayout/svg，保留 webp 编码。skia 必须源码编译。
+skia-minimal = ["skia-core", "skia-safe/webp"]
+# rayon 光栅化线程池。关闭时退化为串行执行，输出逐字节不变。
+parallel = ["dep:rayon"]
+# 非名片场景：ranking / mysekai_harvest / personal_profile。
+scenes = ["dep:chrono"]
+# 已弃用的 RenderExecutor（tokio + rayon 线程池示例）。
+executor = ["dep:tokio", "dep:rayon", "scenes"]
+dev = ["skia", "dep:tracing-subscriber"]
+
+[[example]]
+name = "bench_render"
+required-features = ["dev"]
+
+[[example]]
+name = "compare_sdf"
+required-features = ["dev"]
+
+[[example]]
+name = "render_bonds_honor"
+required-features = ["dev"]
+
+[[bin]]
+name = "calibrate-text"
+path = "tools/calibrate_text.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "check-fonts"
+path = "tools/check_fonts.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "dump-outline-sdf"
+path = "tools/dump_outline_sdf.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "render-deck"
+path = "tools/render_deck.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "render-ranking-preview"
+path = "tools/render_ranking_preview.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "render-task043-layer"
+path = "tools/render_task043_layer.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "render-profile"
+path = "tools/render_profile.rs"
+required-features = ["dev"]

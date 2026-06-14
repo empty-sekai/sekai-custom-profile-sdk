@@ -1,0 +1,25 @@
+[package]
+name = "allium-renderer-cli"
+version = "0.1.0"
+edition = "2021"
+description = "render-card: custom profile card rendering CLI"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "render-card"
+path = "src/main.rs"
+
+[features]
+# 默认启用 skia（生产形态）。无 skia 工具链的环境可
+# `--no-default-features` 做编译检查，渲染调用在运行时报错。
+default = ["skia"]
+skia = ["allium-renderer/skia"]
+
+[dependencies]
+allium-renderer = { path = "../allium-renderer" }
+allium-renderer-host = { path = "../allium-renderer-host" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"

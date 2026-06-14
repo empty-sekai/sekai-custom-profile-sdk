@@ -1,0 +1,135 @@
+<!doctype html>
+<!--
+  allium-renderer-wasm browser layer viewer demo.
+
+  Loads the wasm package in a Web Worker, renders all layers of a custom
+  profile card, and presents them as a stack of absolutely-positioned
+  <img> elements with per-layer visibility toggles. The layout and
+  interaction model follow the original viewer layout
+  (vanilla TS/CSS reimplementation, no React/Tailwind).
+
+  All resources (card JSON, masterdata tables, fonts, images) are loaded
+  from a CDN base configured at runtime or supplied by the user — nothing
+  is bundled.
+-->
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>allium-renderer-wasm — layer viewer</title>
+    <link rel="stylesheet" href="./demo.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="topbar-brand">allium-renderer-wasm</span>
+        <span class="topbar-sep">·</span>
+        <span class="topbar-sub">layer viewer demo</span>
+      </div>
+      <div class="topbar-right">
+        <span class="hint">资源由你提供，渲染全在浏览器里跑。</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- Left: canvas + page navigator + loading HUD -->
+      <section class="canvas-pane">
+        <div class="canvas-wrap" id="canvas-wrap">
+          <div class="canvas-frame" id="canvas-frame">
+            <!-- Layered <img> stack injected by demo.ts -->
+            <div class="hud" id="hud" hidden>
+              <div class="hud-spinner"></div>
+              <div class="hud-text" id="hud-text">加载中…</div>
+              <div class="hud-progress" id="hud-progress" hidden>
+                <div class="hud-progress-bar" id="hud-progress-bar"></div>
+              </div>
+            </div>
+            <div class="empty" id="empty">
+              <p class="empty-title">还没有加载名片。</p>
+              <p class="empty-hint">
+                把 <code>userCustomProfileCards</code> JSON 拖到这里，或在右侧选择文件。
+              </p>
+            </div>
+          </div>
+          <button class="page-arrow page-arrow-left" id="page-prev" hidden aria-label="上一页">‹</button>
+          <button class="page-arrow page-arrow-right" id="page-next" hidden aria-label="下一页">›</button>
+          <div class="page-dots" id="page-dots" hidden></div>
+        </div>
+      </section>
+
+      <!-- Right: control panel -->
+      <aside class="panel">
+        <section class="panel-section">
+          <h2 class="panel-h">输入</h2>
+
+          <label class="field">
+            <span class="field-label">名片 JSON</span>
+            <input type="file" id="card-file" accept=".json" />
+            <span class="field-hint">
+              <code>CustomProfileCard</code> 单页或 <code>userCustomProfileCards</code> 数组。
+              支持拖拽到画布。
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">区服</span>
+            <select id="region">
+              <option value="cn">CN（国服）</option>
+              <option value="jp">JP（日服）</option>
+              <option value="tw">TW（繁中）</option>
+              <option value="en">EN（英文）</option>
+              <option value="kr">KR（韩文）</option>
+            </select>
+            <span class="field-hint">
+              masterdata 与素材将从 CDN base 自动拉取。
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">字体（多选 .ttf / .otf）</span>
+            <input type="file" id="font-files" accept=".ttf,.otf" multiple />
+            <span class="field-hint">
+              文件名即 family（如 <code>FZLanTingHei-DB-GBK.ttf</code>）。
+              缺字体的文本元素不会渲染。
+            </span>
+          </label>
+
+          <details class="field-advanced">
+            <summary>高级</summary>
+            <label class="field">
+              <span class="field-label">CDN base</span>
+              <input type="text" id="cdn-base" value="" placeholder="自动检测 /cdn 代理…" />
+            </label>
+            <label class="field">
+              <span class="field-label">profile JSON（可选）</span>
+              <input type="file" id="profile-file" accept=".json" />
+              <span class="field-hint">
+                注入 <code>generals</code> / 称号等级等 profile-side 字段，可省略。
+              </span>
+            </label>
+          </details>
+
+          <div class="actions">
+            <button id="render-btn" class="btn btn-primary" disabled>渲染</button>
+            <span id="status" class="status">未加载</span>
+          </div>
+        </section>
+
+        <section class="panel-section panel-section-grow">
+          <div class="panel-h-row">
+            <h2 class="panel-h">图层 <span id="layer-count" class="layer-count">0</span></h2>
+            <div class="layer-controls">
+              <button id="show-all" class="btn-mini" disabled>全显</button>
+              <button id="hide-all" class="btn-mini" disabled>全隐</button>
+              <button id="reset-vis" class="btn-mini" disabled>重置</button>
+            </div>
+          </div>
+          <div class="page-tabs" id="page-tabs" hidden></div>
+          <ul class="layer-list" id="layer-list">
+        </section>
+      </aside>
+    </main>
+
+    <script type="module" src="./demo.js"></script>
+  </body>
+</html>

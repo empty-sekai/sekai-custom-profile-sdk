@@ -1,0 +1,270 @@
+name: release
+
+# Triggered by pushing a SemVer tag (vX.Y.Z). Workflow_dispatch lets a
+# maintainer dry-run the build matrix without cutting a release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  # ── 1. Lint + tests on Linux. Gates every other job. ─────────────
+  test:
+    name: test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy, rustfmt }
+      - uses: Swatinem/rust-cache@v2
+
+      # Engine-only checks — skia / freetype build is heavy and covered
+      # in the binary jobs below. The non-skia path is the contract for
+      # downstream consumers (deck, host).
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --lib --tests -- -D warnings
+      - run: cargo test --workspace --lib
+
+  # ── 2. Cross-platform render-card binaries. ─────────────────────
+  # First v0.1.0 covers the four platforms with a known-good skia-binaries
+  # cache (linux gnu, windows MSVC, macOS arm64, macOS x86_64). musl and
+  # aarch64 linux require cross toolchains for skia and are deferred.
+  build:
+    name: build (${{ matrix.target }})
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.xz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.xz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.xz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: ${{ matrix.target }} }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: ${{ matrix.target }} }
+
+      # System deps for skia-binaries on Linux runners.
+      - name: Install Linux build deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libssl-dev pkg-config
+
+      - name: Build render-card
+        run: cargo build --release --target ${{ matrix.target }} -p allium-renderer-cli
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="render-card-${VERSION}-${{ matrix.target }}"
+          OUT="dist/${NAME}"
+          mkdir -p "${OUT}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/render-card.exe" "${OUT}/"
+          else
+            cp "target/${{ matrix.target }}/release/render-card" "${OUT}/"
+          fi
+          cp LICENSE README.md "${OUT}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${NAME}.zip" "${NAME}" >/dev/null
+          else
+            tar -cJf "${NAME}.tar.xz" "${NAME}"
+          fi
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/render-card-*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  # ── 3. wasm npm package (containerized; pinned emsdk/Rust/FreeType). ──
+  wasm:
+    name: build wasm + npm package
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile pins emsdk 4.0.10 / Rust 1.94 / libclang-18 /
+      # FreeType 2.12.1 for reproducible builds.
+      - name: Build wasm in container
+        run: bash crates/allium-renderer-wasm/build.sh
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      # tsc produces dist/*.{js,d.ts}; the dist/*.{js,wasm} from the
+      # Docker step are copied into place by copy-artifacts.mjs.
+      - name: Build TypeScript wrapper
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          npm install --no-audit --no-fund
+          npm run build:ts
+
+      - name: Verify package contents
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          ls -la dist/
+          test -f dist/allium_renderer_wasm.wasm
+          test -f dist/allium_renderer_wasm.js
+          test -f dist/index.js
+          test -f dist/worker-client.js
+          npm pack --dry-run
+
+      - name: Upload wasm artifacts (for GitHub Release + Pages)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-package
+          path: crates/allium-renderer-wasm/dist/
+
+      - name: Publish to npm
+        if: startsWith(github.ref, 'refs/tags/v') && env.NPM_TOKEN != ''
+        working-directory: crates/allium-renderer-wasm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
+          # Only publish stable tags; pre-release tags (vX.Y.Z-rcN) use
+          # the `next` dist-tag so they don't poison `npm install`.
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            npm publish --access public --tag next
+          else
+            npm publish --access public
+          fi
+
+  # ── 4. GitHub Pages deploy (demo + wasm dist). ─────────────────
+  pages:
+    name: deploy demo to pages
+    needs: wasm
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wasm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-package
+          path: public/dist
+
+      - name: Copy demo to public
+        run: |
+          cp -r crates/allium-renderer-wasm/demo public/demo
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  # ── 5. CHANGELOG generation + GitHub Release. ───────────────────
+  release:
+    name: github release
+    needs: [build, wasm, pages]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked --version 2.6.1
+
+      - name: Generate CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git-cliff --tag "v${VERSION}" --output CHANGELOG.md
+          cat CHANGELOG.md
+
+      - name: Open PR with updated CHANGELOG
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "docs(release): update CHANGELOG for ${{ github.ref_name }}"
+          title: "docs(release): CHANGELOG for ${{ github.ref_name }}"
+          body: |
+            Auto-generated by the release workflow for `${{ github.ref_name }}`.
+            Merging this commits the rendered CHANGELOG back to `main`.
+          branch: release/changelog-${{ github.ref_name }}
+          base: main
+          add-paths: CHANGELOG.md
+          delete-branch: true
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download wasm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-package
+          path: dist/wasm
+
+      - name: Bundle wasm runtime as zip
+        run: |
+          cd dist/wasm
+          zip -j "../allium-renderer-wasm-${GITHUB_REF_NAME#v}.zip" \
+            allium_renderer_wasm.js allium_renderer_wasm.wasm
+          cd ..
+          rm -rf wasm
+          ls -la
+
+      - name: Compute SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*

@@ -1,0 +1,28 @@
+[package]
+name = "allium-renderer-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "emscripten C ABI export layer for browser wasm builds"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+# emscripten 链接由 bin 目标驱动：skia / freetype 的 build-script 链接指令
+# 只在真正 link 时生效，纯 staticlib 不触发最终链接。main 为空壳，
+# 仅强引用导出符号防止 rustc 在 emcc 的 EXPORTED_FUNCTIONS 之前剪掉它们。
+[[bin]]
+name = "allium_renderer_wasm"
+path = "src/main.rs"
+
+[features]
+# wasm 构建启用 skia（emscripten 目标源码编译）。默认关闭使
+# native `cargo check` 不强制 skia 工具链。
+default = []
+skia = ["allium-renderer/skia-minimal"]
+
+[dependencies]
+allium-renderer = { path = "../allium-renderer" }
+allium-renderer-host = { path = "../allium-renderer-host" }
+serde_json = { workspace = true }

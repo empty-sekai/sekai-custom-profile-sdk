@@ -1,0 +1,41 @@
+name: lint-commits
+
+# Enforces conventional commit titles so git-cliff can drive CHANGELOG
+# generation cleanly. See cliff.toml for the type → SemVer-bump map.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: conventional commit lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Install commitlint
+        run: npm install -g @commitlint/cli @commitlint/config-conventional
+
+      - name: Write commitlint config
+        run: |
+          cat > commitlint.config.cjs <<'EOF'
+          module.exports = {
+            extends: ['@commitlint/config-conventional'],
+            rules: {
+              'body-max-line-length': [0],
+              'footer-max-line-length': [0],
+              'header-max-length': [2, 'always', 100],
+            },
+          };
+          EOF
+
+      - name: Lint PR commits
+        run: |
+          npx commitlint \
+            --from=${{ github.event.pull_request.base.sha }} \
+            --to=${{ github.event.pull_request.head.sha }} \
+            --verbose

@@ -1,66 +1,21 @@
-[package]
-name = "allium-renderer"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/allium-renderer",
+    "crates/allium-renderer-host",
+    "crates/allium-renderer-cli",
+    "crates/allium-renderer-wasm",
+]
+
+[workspace.package]
 edition = "2021"
-description = "Skia CPU rendering engine: Renderable trait + render executor"
 license = "AGPL-3.0-only"
 
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-rayon = "1.11"
-tokio = { version = "1.43", features = ["full"] }
-chrono = "0.4"
-lru = "0.12"
-skia-safe = { version = "0.97", optional = true, features = ["textlayout", "svg", "vulkan", "webp"] }
-freetype-rs = { version = "0.38", optional = true }
-ttf-parser = { version = "0.25", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 
-[dev-dependencies]
-axum = "0.8"
-
-[package.metadata.docs.rs]
-features = ["skia"]
-
-[features]
-default = []
-skia = ["dep:skia-safe", "dep:freetype-rs", "dep:ttf-parser"]
-dev = ["skia", "dep:tracing-subscriber"]
-
-[[bin]]
-name = "calibrate-text"
-path = "tools/calibrate_text.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "check-fonts"
-path = "tools/check_fonts.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "dump-outline-sdf"
-path = "tools/dump_outline_sdf.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "render-deck"
-path = "tools/render_deck.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "render-ranking-preview"
-path = "tools/render_ranking_preview.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "render-task043-layer"
-path = "tools/render_task043_layer.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "render-profile"
-path = "tools/render_profile.rs"
-required-features = ["dev"]
+[profile.release]
+lto = "thin"

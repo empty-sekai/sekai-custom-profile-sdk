@@ -1,0 +1,44 @@
+# git-cliff config — drives CHANGELOG generation from conventional
+# commits, with a SemVer bump policy aligned to allium-deck.
+
+[changelog]
+header = "# Changelog\n"
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}](https://github.com/empty-sekai/allium-renderer/compare/{{ previous.version }}..{{ version }}) — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [unreleased]
+{% endif %}\
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits | sort(attribute="committer.timestamp") -%}
+- {% if commit.breaking %}**BREAKING** {% endif %}{{ commit.message | split(pat="\n") | first | trim }}{% if commit.scope %} _(_{{ commit.scope }}_)_{% endif %}
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+render_always = true
+
+[git]
+conventional_commits = true
+filter_commits = true
+topo_order = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^ci", group = "CI/CD" },
+  { message = "^build", group = "Build" },
+  { message = "^chore", group = "Chore" },
+  { message = "^revert", group = "Reverts" },
+  { message = ".*", skip = true },
+]
+
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true

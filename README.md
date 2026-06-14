@@ -1,6 +1,17 @@
 # allium-renderer
 
-PJSK（Project Sekai）自定义名片的服务端渲染层。输入玩家 profile JSON，输出名片图片（JPEG/WebP）。
+自定义名片的渲染层。输入玩家 profile JSON，输出名片图片（JPEG/WebP）。
+
+## 仓库结构
+
+Cargo workspace，四个 crate：
+
+| Crate | 职责 |
+| --- | --- |
+| `crates/allium-renderer` | 渲染引擎（本文档主体） |
+| `crates/allium-renderer-host` | CLI / wasm 共享宿主层：`JsonMasterDataProvider` |
+| `crates/allium-renderer-cli` | `render-card` 二进制：单次渲染 + `--serve` NDJSON 常驻模式 |
+| `crates/allium-renderer-wasm` | 浏览器 wasm 导出层（emscripten C ABI） |
 
 ## 渲染路径
 
@@ -32,9 +43,9 @@ PJSK（Project Sekai）自定义名片的服务端渲染层。输入玩家 profi
 - **外层（串行）**：单个渲染任务全程单线程，一次画一张图，控制内存峰值与调度公平性。由调用方提供，不在本 crate 内。
 - **内层（并行）**：`sdf` 模块将字形轮廓光栅化为像素位图时，各行独立只读共享状态，切分到专用 rayon 线程池（池内线程命名 `raster-*`）并行执行。
 
-专用池不复用 rayon 全局池，线程数由 `SCAPUS_RASTER_THREADS` 控制（默认 2）。外层保证至多一个渲染在跑，池进程内全局共享。设为 1 时并行迭代退化为串行，无需单独代码路径。
+专用池不复用 rayon 全局池，线程数由 `ALLIUM_RASTER_THREADS` 控制（默认 2）。外层保证至多一个渲染在跑，池进程内全局共享。设为 1 时并行迭代退化为串行，无需单独代码路径。
 
-> 当前生产配置为 1 个渲染线程 + 2 个光栅化线程。逐像素数学与串行版逐字节一致，输出不随线程数变化。
+> 默认配置为 1 个渲染线程 + 2 个光栅化线程。逐像素数学与串行版逐字节一致，输出不随线程数变化。
 
 ## 模块
 
@@ -43,18 +54,18 @@ PJSK（Project Sekai）自定义名片的服务端渲染层。输入玩家 profi
 | `renderer` | `CustomProfileRenderer` 高层 API |
 | `elements` | `RenderElement` 枚举、`flatten_and_sort`、逐元素分发绘制 |
 | `text` | TMP 富文本解析、字体测量、逐字排版、SDF 文字绘制 |
-| `sdf` | SDF 字形轮廓的逐像素并行光栅化（需 `skia` feature） |
+| `sdf` | SDF 字形轮廓的逐像素光栅化（需 `skia` feature；`parallel` 开启时按行并行） |
 | `widgets` | 控件绘制（面板、徽章、缩略图等）与主题 |
 | `widget_node` | `WidgetDocument` / `WidgetNode` 前后端合约 |
-| `personal_profile` | 平台个人资料默认图渲染 |
-| `ranking` | 排行榜预览图渲染 |
-| `mysekai_harvest` | 采集地图渲染 |
+| `personal_profile` | 平台个人资料默认图渲染（需 `scenes` feature） |
+| `ranking` | 排行榜预览图渲染（需 `scenes` feature） |
+| `mysekai_harvest` | 采集地图渲染（需 `scenes` feature） |
 | `primitives` | 图元定义（`SceneTree`） |
 | `traits` | `Renderable` trait 与 `RenderOutput` |
 | `masterdata` | 游戏数据解析（字体/颜色/称号） |
 | `assets` | 素材 LRU 内存缓存 |
 | `init` | 启动初始化（字体安装） |
-| `executor` | 线程池隔离示例（已弃用，仅供参考） |
+| `executor` | 线程池隔离示例（已弃用，需 `executor` feature） |
 | `transform` | Unity 坐标 → Skia 坐标转换、四元数旋转解析 |
 | `profile` | 玩家数据模型（跨管线共享） |
 
@@ -62,10 +73,15 @@ PJSK（Project Sekai）自定义名片的服务端渲染层。输入玩家 profi
 
 | Feature | 说明 |
 | --- | --- |
-| `skia` | 启用 Skia 后端，提供光栅化能力 |
-| `dev` | 额外启用 `tracing-subscriber`，供 `tools/` 下的诊断 bin 使用 |
+| `skia` | native 生产预设：`skia-core` + `parallel` + `scenes` + `executor`，skia-safe 启用 `textlayout/svg/vulkan/webp`（skia-binaries 预编译组合，勿增减） |
+| `skia-minimal` | wasm 最小集：`skia-core` + skia-safe `webp`，无 GPU/textlayout/svg，skia 需源码编译 |
+| `parallel` | rayon 光栅化线程池。关闭时逐行串行执行，输出逐字节不变 |
+| `scenes` | 非名片场景：`ranking` / `mysekai_harvest` / `personal_profile` |
+| `executor` | 已弃用的 `RenderExecutor`（依赖 tokio），仅 `render-deck` 示例使用 |
+| `dev` | `skia` + `tracing-subscriber`，供 `tools/` 下的诊断 bin 使用 |
 
-不启用 feature 时 `compose` 等纯数据路径可独立编译与测试。
+`skia-core` 是内部实现 gate，请通过 `skia` 或 `skia-minimal` 启用。
+不启用任何 feature 时 `compose` 等纯数据路径可独立编译与测试。
 
 ## 构建
 
@@ -75,6 +91,17 @@ PJSK（Project Sekai）自定义名片的服务端渲染层。输入玩家 profi
 cargo build -p allium-renderer --features skia
 ```
 
+## 发布
+
+`v*` tag 推到 GitHub 触发 `.github/workflows/release.yml`：
+
+- Linux / Windows / macOS（arm64 + x86_64）四平台 release 二进制 `render-card`，打包为 `tar.xz`（unix） / `zip`（windows），上传到 GitHub Release。
+- 通过 `crates/allium-renderer-wasm/Dockerfile`（emsdk 4.0.10 / Rust 1.94 / FreeType 2.12.1）构建 wasm 包，发布到 npm（`@allium/renderer-wasm`，附带浏览器范围 linking exception）。
+- `git-cliff` 从 conventional commits 生成 `CHANGELOG.md`，作为 Release 正文，并通过 PR 提交回 `main`。
+- 五个产物 + `SHA256SUMS` 一并附加到 Release。
+
+commit 必须遵循 [conventional commits](https://www.conventionalcommits.org/)；`.github/workflows/commitlint.yml` 在 PR 阶段强制校验。
+
 ## 许可证
 
-[AGPL-3.0-only](./LICENSE)。Copyright (C) allium / emptysekai。
+[AGPL-3.0-only](./LICENSE)。Copyright (C) allium-renderer contributors。

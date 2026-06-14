@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "generator": "unity_textcore_sdfaa",
+  "success": true,
+  "fontFilePath": "C:/fonts/FOT-RodinNTLGPro-DB.otf",
+  "requestedCharacters": "（对",
+  "missingCharacters": "",
+  "faceIndex": 0,
+  "samplingPointSize": 75,
+  "atlasPadding": 5,
+  "atlasWidth": 1024,
+  "atlasHeight": 1024,
+  "renderMode": 4165,
+  "packingMode": 0,
+  "faceInfo": {
+    "familyName": "FOT-RodinNTLG Pro",
+    "styleName": "DB",
+    "pointSize": 75,
+    "scale": 2.0,
+    "lineHeight": 150.0,
+    "ascentLine": 66.0,
+    "capLine": 59.0,
+    "meanLine": 42.0,
+    "baseline": 0.0,
+    "descentLine": -9.0
+  },
+  "glyphs": [
+    {
+      "glyphIndex": 1234,
+      "metrics": {
+        "width": 40.0,
+        "height": 88.0,
+        "horizontalBearingX": 5.0,
+        "horizontalBearingY": 74.0,
+        "horizontalAdvance": 50.0
+      },
+      "glyphRect": {
+        "x": 12,
+        "y": 34,
+        "width": 40,
+        "height": 88
+      },
+      "scale": 1.0,
+      "atlasIndex": 0
+    },
+    {
+      "glyphIndex": 5678,
+      "metrics": {
+        "width": 52.0,
+        "height": 76.0,
+        "horizontalBearingX": 4.0,
+        "horizontalBearingY": 70.0,
+        "horizontalAdvance": 60.0
+      },
+      "glyphRect": {
+        "x": 60,
+        "y": 34,
+        "width": 52,
+        "height": 76
+      },
+      "scale": 1.0,
+      "atlasIndex": 0
+    }
+  ],
+  "characters": [
+    {
+      "unicode": 65288,
+      "glyphIndex": 1234
+    },
+    {
+      "unicode": 23545,
+      "glyphIndex": 5678
+    }
+  ],
+  "atlases": [
+    {
+      "atlasIndex": 0,
+      "width": 1024,
+      "height": 1024,
+      "fileName": "atlas_0.png"
+    }
+  ]
+}

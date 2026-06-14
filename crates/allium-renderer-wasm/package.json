@@ -1,0 +1,39 @@
+{
+  "name": "@allium/renderer-wasm",
+  "version": "0.1.0",
+  "description": "Browser wasm build of the allium custom-profile-card renderer (skia CPU + FreeType).",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "files": [
+    "dist/",
+    "src/",
+    "LICENSE",
+    "LICENSE-EXCEPTION",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker-client.d.ts",
+      "import": "./dist/worker-client.js"
+    },
+    "./allium_renderer_wasm.wasm": "./dist/allium_renderer_wasm.wasm"
+  },
+  "scripts": {
+    "build:wasm": "bash ./build.sh",
+    "build:ts": "tsc -p tsconfig.json && node ./scripts/copy-artifacts.mjs",
+    "build": "npm run build:wasm && npm run build:ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

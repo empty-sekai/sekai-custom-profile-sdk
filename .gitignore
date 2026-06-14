@@ -1,3 +1,11 @@
 /target
 **/*.rs.bk
 *.pdb
+
+# wasm 包构建产物 / 依赖
+crates/allium-renderer-wasm/dist/
+crates/allium-renderer-wasm/node_modules/
+crates/allium-renderer-wasm/build.log
+crates/allium-renderer-wasm/serve-demo.cjs
+*.log
+node_modules/

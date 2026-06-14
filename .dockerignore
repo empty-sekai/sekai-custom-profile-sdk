@@ -1,0 +1,7 @@
+# wasm 构建上下文 = 仓库根；排除重产物，只保留 manifest + src。
+/target
+**/*.rs.bk
+*.pdb
+.git
+crates/allium-renderer-wasm/dist
+crates/allium-renderer-wasm/node_modules
