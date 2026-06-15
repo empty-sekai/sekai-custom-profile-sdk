@@ -35,7 +35,18 @@ use allium_renderer_host::JsonMasterDataProvider;
 use base64::Engine;
 use serde_json::{json, Value};
 
-pub fn run(renderer: CustomProfileRenderer, assets: Arc<AssetStore>) -> ExitCode {
+/// 可选的素材 URL 前缀：缺失素材按需从此拉取（动态 + 静态）。
+#[derive(Clone, Default)]
+pub struct AssetUrls {
+    pub dynamic: Option<String>,
+    pub static_: Option<String>,
+}
+
+pub fn run(
+    renderer: CustomProfileRenderer,
+    assets: Arc<AssetStore>,
+    asset_urls: AssetUrls,
+) -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     tracing::info!("serve 模式就绪，等待 NDJSON 请求");
@@ -79,7 +90,7 @@ pub fn run(renderer: CustomProfileRenderer, assets: Arc<AssetStore>) -> ExitCode
                 write_result(&stdout, id, result);
             }
             "render" => {
-                let result = handle_render(&renderer, &assets, &request);
+                let result = handle_render(&renderer, &assets, &asset_urls, &request);
                 write_result(&stdout, id, result);
             }
             other => {
@@ -127,6 +138,7 @@ fn handle_reload(renderer: &CustomProfileRenderer, request: &Value) -> Result<Va
 fn handle_render(
     renderer: &CustomProfileRenderer,
     assets: &Arc<AssetStore>,
+    asset_urls: &AssetUrls,
     request: &Value,
 ) -> Result<Value, String> {
     let params = request.get("params").ok_or("render 缺少 params")?;
@@ -158,6 +170,22 @@ fn handle_render(
         .map(|body| crate::enrich_from_profile_value(body, renderer, &mut card));
 
     let warnings = renderer.validate_card(&card);
+
+    // 配了 --assets-url 时，按需从 URL 补齐本地缺失的素材。
+    if let Some(dyn_url) = &asset_urls.dynamic {
+        let want =
+            crate::missing_asset_keys_with_profile(renderer, &card, profile.as_ref(), assets);
+        if !want.is_empty() {
+            let (ok, fail) = crate::fetch::load_assets_url(
+                assets,
+                &want,
+                dyn_url,
+                asset_urls.static_.as_deref(),
+            );
+            tracing::debug!(ok, fail, "serve 素材 URL 拉取完成");
+        }
+    }
+
     let missing_assets = crate::missing_asset_keys(renderer, &card, assets);
 
     let data = crate::render_with_format(renderer, &card, profile.as_ref(), format)?;

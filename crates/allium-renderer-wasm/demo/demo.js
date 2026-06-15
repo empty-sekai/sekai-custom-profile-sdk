@@ -1,8 +1,8 @@
 // allium-renderer-wasm browser layer viewer demo.
 //
 // Loads the wasm renderer in a Web Worker, fetches masterdata + assets
-// from a CDN base the user supplies, renders all layers of a custom
-// profile card, and presents them as an interactive stack with
+// from a resource base URL the user supplies, renders all layers of a
+// custom profile card, and presents them as an interactive stack with
 // per-layer visibility toggles, page navigation, and a property
 // inspector.
 //
@@ -11,10 +11,9 @@
 // for this file beyond the npm package's own tsc build of dist/).
 //
 // Resources are not bundled. Card JSON, fonts, masterdata, and assets
-// all come from the user side. The CDN base is left blank by default
-// — fill it in once and the demo will persist it in localStorage. If
-// the CDN does not return CORS headers, use the bundled `serve.py`
-// (same directory) which exposes a same-origin `/cdn/` proxy.
+// all come from the user side. The resource base is left blank by
+// default — fill it in once and the demo persists it in localStorage.
+// The base must serve /masterdata and /assets with CORS enabled.
 
 import { AlliumWorkerClient } from "../dist/worker-client.js";
 
@@ -46,6 +45,21 @@ const REQUIRED_TABLES = [
   "eventStories",
   "unitStoryEpisodeGroups",
 ];
+
+// Asset keys whose first path segment is one of these are static assets
+// (frames, icons, badges, masks) that ship with the engine and are
+// fetched from the static-asset URL. Every other key is a dynamic game
+// asset fetched from the dynamic-asset URL.
+// Mirrors the static asset tree shipped with the engine.
+const STATIC_ASSET_PREFIXES = new Set([
+  "card",
+  "chara_avatar",
+  "general",
+  "honor",
+  "mysekai",
+  "sprite",
+  "ui",
+]);
 
 // File-name → font family aliases for the FOT fonts shipped with the
 // game. masterdata's customProfileTextFonts table references both the
@@ -103,9 +117,10 @@ const els = {
   pageDots:     $("page-dots"),
   pageTabs:     $("page-tabs"),
   cardFile:     $("card-file"),
-  region:       $("region"),
   fontFiles:    $("font-files"),
-  cdnBase:      $("cdn-base"),
+  masterdataUrl:   $("masterdata-url"),
+  dynamicAssetUrl: $("dynamic-asset-url"),
+  staticAssetUrl:  $("static-asset-url"),
   profileFile:  $("profile-file"),
   renderBtn:    $("render-btn"),
   status:       $("status"),
@@ -188,10 +203,10 @@ function normalizeCardJsonPages(text) {
   return pages;
 }
 
-// ── CDN fetching ──
+// ── Resource fetching ──
 
-async function fetchMasterdata(region, cdnBase, onProgress) {
-  const base = `${cdnBase}/masterdata/${region}/latest`;
+async function fetchMasterdata(masterdataUrl, onProgress) {
+  const base = masterdataUrl;
   const out = {};
   let done = 0;
   let failed = 0;
@@ -215,7 +230,7 @@ async function fetchMasterdata(region, cdnBase, onProgress) {
   return out;
 }
 
-async function fetchAssets(client, cardJsons, masterData, region, cdnBase, onProgress) {
+async function fetchAssets(client, cardJsons, masterData, dynamicUrl, staticUrl, onProgress) {
   // Union asset keys across all pages (collectAssetKeys per page, then
   // dedupe). Cards typically share many keys — fetching once is enough.
   const keySet = new Set();
@@ -227,7 +242,18 @@ async function fetchAssets(client, cardJsons, masterData, region, cdnBase, onPro
   const assets = [];
   if (keys.length === 0) return assets;
 
-  const base = `${cdnBase}/assets/${region}`;
+  // Asset keys fall into two namespaces, each with its own base URL:
+  //  - static assets (frames, icons, badges, masks) ship with the engine
+  //    and don't change; their key's first path segment is in
+  //    STATIC_ASSET_PREFIXES.
+  //  - dynamic assets (card art, stamps, thumbnails) change per game
+  //    version. Both URLs are plain prefixes — the key (plus .png) is
+  //    appended verbatim, no region/path segments are inserted.
+  const assetUrl = (key) =>
+    STATIC_ASSET_PREFIXES.has(key.split("/", 1)[0])
+      ? `${staticUrl}/${key}.png`
+      : `${dynamicUrl}/${key}.png`;
+
   const CONCURRENCY = 6;
   const queue = keys.slice();
   let done = 0;
@@ -237,7 +263,7 @@ async function fetchAssets(client, cardJsons, masterData, region, cdnBase, onPro
     while (queue.length > 0) {
       const key = queue.shift();
       try {
-        const res = await fetch(`${base}/${key}.png`);
+        const res = await fetch(assetUrl(key));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const buf = await res.arrayBuffer();
         assets.push({ key, bytes: new Uint8Array(buf) });
@@ -308,21 +334,23 @@ async function doRender() {
     console.log(`[demo] 名片页数: ${pageInputs.length}`, pageInputs.map(p => ({ seq: p.seq, cardId: p.cardId, bytes: p.cardJson.length })));
     const profileJson = await readProfileText();
 
-    const region = els.region.value;
-    const cdnBase = els.cdnBase.value.trim().replace(/\/+$/, "");
-    if (!cdnBase) {
-      setStatus("请填写 CDN base", "error");
+    const trimUrl = (v) => v.trim().replace(/\/+$/, "");
+    const masterdataUrl = trimUrl(els.masterdataUrl.value);
+    const dynamicUrl = trimUrl(els.dynamicAssetUrl.value);
+    const staticUrl = trimUrl(els.staticAssetUrl.value);
+    if (!masterdataUrl) {
+      setStatus("请填写 masterdata URL", "error");
       els.empty.hidden = false;
       setHud(false);
       return;
     }
-    persistInputs(region, cdnBase, rawCard, profileJson);
+    persistInputs(masterdataUrl, dynamicUrl, staticUrl, rawCard, profileJson);
 
     setStatus("加载中…");
     const client = await ensureClient();
 
     setHud(true, "拉取 masterdata…", 0);
-    const masterData = await fetchMasterdata(region, cdnBase, (p, t) => {
+    const masterData = await fetchMasterdata(masterdataUrl, (p, t) => {
       setHud(true, t, p * 0.3);
     });
 
@@ -334,7 +362,7 @@ async function doRender() {
 
     setHud(true, "收集素材列表…", 0.32);
     const cardJsons = pageInputs.map((p) => p.cardJson);
-    const assets = await fetchAssets(client, cardJsons, masterData, region, cdnBase, (p, t) => {
+    const assets = await fetchAssets(client, cardJsons, masterData, dynamicUrl, staticUrl, (p, t) => {
       setHud(true, t, 0.35 + p * 0.4);
     });
 
@@ -732,32 +760,22 @@ function lstoreSet(name, value) {
 // file input can't be repopulated, but the render button is enabled
 // when cached card text exists.
 function restoreInputs() {
-  const region = lstoreGet("region");
-  if (region) els.region.value = region;
-
-  const cdnBase = lstoreGet("cdn-base");
-  if (cdnBase) {
-    els.cdnBase.value = cdnBase;
-  } else {
-    // Default to same-origin proxy. The fetch probe is best-effort —
-    // if the proxy is down we'll get a 404 and that's fine too.
-    els.cdnBase.value = `${location.origin}/cdn`;
-    fetch("/cdn/", { method: "HEAD" })
-      .catch(() => {
-        // Proxy unreachable — clear the guess so the user knows to fill it in.
-        // But keep it if localStorage has since been populated.
-        if (!lstoreGet("cdn-base")) els.cdnBase.value = "";
-      });
-  }
+  const md = lstoreGet("masterdata-url");
+  if (md) els.masterdataUrl.value = md;
+  const dyn = lstoreGet("dynamic-asset-url");
+  if (dyn) els.dynamicAssetUrl.value = dyn;
+  const stat = lstoreGet("static-asset-url");
+  if (stat) els.staticAssetUrl.value = stat;
 
   // Cached card JSON lets the user render without re-selecting a file.
   if (lstoreGet("card-json")) els.renderBtn.disabled = false;
 }
 
 // Called from doRender on success — cache the inputs that worked.
-function persistInputs(region, cdnBase, rawCard, profileJson) {
-  lstoreSet("region", region);
-  lstoreSet("cdn-base", cdnBase);
+function persistInputs(masterdataUrl, dynamicUrl, staticUrl, rawCard, profileJson) {
+  lstoreSet("masterdata-url", masterdataUrl);
+  lstoreSet("dynamic-asset-url", dynamicUrl);
+  lstoreSet("static-asset-url", staticUrl);
   lstoreSet("card-json", rawCard);
   if (profileJson) lstoreSet("profile-json", profileJson);
 }
@@ -780,11 +798,14 @@ async function readProfileText() {
 els.cardFile.addEventListener("change", () => {
   els.renderBtn.disabled = els.cardFile.files.length === 0;
 });
-els.region.addEventListener("change", () => {
-  lstoreSet("region", els.region.value);
+els.masterdataUrl.addEventListener("change", () => {
+  lstoreSet("masterdata-url", els.masterdataUrl.value.trim());
 });
-els.cdnBase.addEventListener("change", () => {
-  lstoreSet("cdn-base", els.cdnBase.value.trim());
+els.dynamicAssetUrl.addEventListener("change", () => {
+  lstoreSet("dynamic-asset-url", els.dynamicAssetUrl.value.trim());
+});
+els.staticAssetUrl.addEventListener("change", () => {
+  lstoreSet("static-asset-url", els.staticAssetUrl.value.trim());
 });
 els.renderBtn.addEventListener("click", doRender);
 els.pagePrev.addEventListener("click", () => setPage(state.activePage - 1));

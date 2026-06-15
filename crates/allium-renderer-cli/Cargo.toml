@@ -23,3 +23,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
+# Synchronous HTTP for fetching masterdata/assets from a URL prefix.
+# rustls TLS so https works without a system OpenSSL dependency.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

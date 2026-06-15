@@ -24,24 +24,19 @@ you need the package built first:
 npm install && npm run build   # in crates/allium-renderer-wasm/
 ```
 
-Then start the bundled server. It serves the **crate root** (not just
-`demo/`) so that `../dist/` module imports resolve, and reverse-proxies
-`/cdn/*` to the URL in `ALLIUM_CDN_BASE`, sidestepping CORS on upstream
-mirrors that don't set `Access-Control-Allow-Origin`:
+Then serve the **crate root** (not just `demo/`) so that `../dist/`
+module imports resolve, with any static file server:
 
 ```sh
-ALLIUM_CDN_BASE=https://your-cdn.example.com \
-  python crates/allium-renderer-wasm/demo/serve.py 8088
+python -m http.server 8088   # in crates/allium-renderer-wasm/
 # then open http://localhost:8088/demo/
 ```
 
-The demo auto-detects the `/cdn/` proxy and populates the CDN-base field
-with `http://localhost:8088/cdn`. If you'd rather hit a CORS-enabled CDN
-directly, leave `ALLIUM_CDN_BASE` unset and type the full URL into the
-field — it persists in `localStorage`.
-
-`serve.py` is stdlib-only (no pip install required) and runs on
-Python 3.8+.
+Fill in the three resource URLs in the demo (they persist in
+`localStorage`). Each is a plain prefix the demo appends to directly —
+no region or path segments are inserted, so any layout works as long as
+the files sit directly under the URL you give. The host must send CORS
+headers.
 
 ## What you'll need
 
@@ -49,10 +44,15 @@ Python 3.8+.
 |----------|-----------|
 | Card JSON | Your own `userCustomProfileCards` API response. The demo accepts the wrapper, a bare array, or a single card. |
 | Fonts (`.ttf`/`.otf`) | The FOT fonts shipped with the game. The demo auto-aliases common filenames (e.g. `FOT-RodinNTLGPro-DB.ttf` → both `FOT-RodinNTLGPro-DB` and `FZLanTingHei-DB-GBK`). |
-| masterdata | A mirror you control, exposing `/masterdata/{region}/latest/<table>.json`. |
-| Asset images | The same mirror, exposing `/assets/{region}/<key>.png`. |
+| masterdata URL | A host you control. The demo fetches `<masterdata-url>/<table>.json`. |
+| Dynamic asset URL | Card art, stamps, thumbnails (change per game version). The demo fetches `<dynamic-url>/<key>.png`. |
+| Static asset URL | Frames, icons, badges, masks (ship with the engine). The demo fetches `<static-url>/<key>.png`. May point at the same host as dynamic. |
 
-Nothing is bundled. No CDN is hardcoded. The demo is meant as a
+Which keys are static vs dynamic is decided by the key's first path
+segment (`card/`, `honor/`, `general/`, `sprite/`, `ui/`,
+`chara_avatar/`, `mysekai/` are static; everything else is dynamic).
+
+Nothing is bundled. No URL is hardcoded. The demo is meant as a
 reference for wiring `@empty-sekai/renderer-wasm` into a host page — you can
 also import the package directly and feed it bytes from wherever you
 like.

@@ -9,7 +9,7 @@
   (vanilla TS/CSS reimplementation, no React/Tailwind).
 
   All resources (card JSON, masterdata tables, fonts, images) are loaded
-  from a CDN base configured at runtime or supplied by the user — nothing
+  from a resource base URL supplied by the user at runtime — nothing
   is bundled.
 -->
 <html lang="zh">
@@ -78,20 +78,6 @@
           </label>
 
           <label class="field">
-            <span class="field-label">区服</span>
-            <select id="region">
-              <option value="cn">CN（国服）</option>
-              <option value="jp">JP（日服）</option>
-              <option value="tw">TW（繁中）</option>
-              <option value="en">EN（英文）</option>
-              <option value="kr">KR（韩文）</option>
-            </select>
-            <span class="field-hint">
-              masterdata 与素材将从 CDN base 自动拉取。
-            </span>
-          </label>
-
-          <label class="field">
             <span class="field-label">字体（多选 .ttf / .otf）</span>
             <input type="file" id="font-files" accept=".ttf,.otf" multiple />
             <span class="field-hint">
@@ -100,11 +86,28 @@
             </span>
           </label>
 
-          <details class="field-advanced">
-            <summary>高级</summary>
+          <details class="field-advanced" open>
+            <summary>资源地址</summary>
             <label class="field">
-              <span class="field-label">CDN base</span>
-              <input type="text" id="cdn-base" value="" placeholder="自动检测 /cdn 代理…" />
+              <span class="field-label">masterdata URL</span>
+              <input type="text" id="masterdata-url" value="" placeholder="https://your-mirror.example.com/masterdata" />
+              <span class="field-hint">
+                程序在后面接 <code>/&lt;table&gt;.json</code>。留空则需自行注入。
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">动态素材 URL</span>
+              <input type="text" id="dynamic-asset-url" value="" placeholder="https://your-mirror.example.com/assets" />
+              <span class="field-hint">
+                卡面、图章、缩略图等。程序在后面接 <code>/&lt;key&gt;.png</code>。
+              </span>
+            </label>
+            <label class="field">
+              <span class="field-label">静态素材 URL</span>
+              <input type="text" id="static-asset-url" value="" placeholder="https://your-mirror.example.com/assets/static" />
+              <span class="field-hint">
+                边框、图标、徽章等引擎附带素材。可与动态填同一地址。
+              </span>
             </label>
             <label class="field">
               <span class="field-label">profile JSON（可选）</span>

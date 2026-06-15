@@ -12,6 +12,7 @@
 //!       [--format jpeg|png|png-transparent] [--page <seq>]
 //!   render-card --serve --masterdata <dir> [--assets-dir <dir>] [--font-dir <dir>]
 
+mod fetch;
 mod serve;
 
 use std::path::PathBuf;
@@ -36,23 +37,36 @@ render-card：自定义名片渲染 CLI
   render-card --serve --masterdata <dir> [--assets-dir <dir>] [--font-dir <dir>]
 
 参数：
-  --masterdata <dir>   masterdata JSON 表目录（<dir>/<table>.json）
-  --card <file>        名片 JSON：CustomProfileCard 或 UserCustomProfileCard 数组
-  --page <seq>         --card 为数组时选择的页码（默认第一张）
-  --profile <file>     profile API 响应 JSON（注入 generals 数据与称号等级）
-  --assets-dir <dir>   素材目录（key = 相对路径去扩展名）
-  --font-dir <dir>     字体目录（等效 SCAPUS_FONT_DIR）
-  --format <fmt>       输出格式：jpeg（默认）/ png / png-transparent
-  -o <file>            输出文件路径（单次模式必填）
-  --serve              常驻模式
+  --masterdata <dir>     masterdata JSON 表目录（<dir>/<table>.json）
+  --masterdata-url <url> 从 URL 前缀拉取 masterdata（接 /<table>.json）；
+                         与 --masterdata 二选一
+  --card <file>          名片 JSON：CustomProfileCard 或 UserCustomProfileCard 数组
+  --page <seq>           --card 为数组时选择的页码（默认第一张）
+  --profile <file>       profile API 响应 JSON（注入 generals 数据与称号等级）
+  --assets-dir <dir>     本地素材目录（key = 相对路径去扩展名）
+  --assets-url <url>     动态素材 URL 前缀（接 /<key>.png）。本地缺失的 key
+                         才走网络；与 --assets-dir 可叠加
+  --static-url <url>     静态素材 URL 前缀（边框/图标等，接 /<key>.png）；
+                         省略时静态 key 也走 --assets-url
+  --font-dir <dir>       字体目录（等效 SCAPUS_FONT_DIR）
+  --format <fmt>         输出格式：jpeg（默认）/ png / png-transparent
+  -o <file>              输出文件路径（单次模式必填）
+  --serve                常驻模式
+
+素材 URL 为纯前缀，程序只在后面接 /<key>.png，不插入 region/assets 等子路径。
+key 第一段命中 card/chara_avatar/general/honor/mysekai/sprite/ui 走 --static-url，
+其余走 --assets-url。
 ";
 
 struct Args {
     masterdata: Option<PathBuf>,
+    masterdata_url: Option<String>,
     card: Option<PathBuf>,
     page: Option<i32>,
     profile: Option<PathBuf>,
     assets_dir: Option<PathBuf>,
+    assets_url: Option<String>,
+    static_url: Option<String>,
     font_dir: Option<PathBuf>,
     format: String,
     output: Option<PathBuf>,
@@ -62,10 +76,13 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         masterdata: None,
+        masterdata_url: None,
         card: None,
         page: None,
         profile: None,
         assets_dir: None,
+        assets_url: None,
+        static_url: None,
         font_dir: None,
         format: "jpeg".into(),
         output: None,
@@ -78,6 +95,7 @@ fn parse_args() -> Result<Args, String> {
         };
         match arg.as_str() {
             "--masterdata" => args.masterdata = Some(PathBuf::from(take("--masterdata")?)),
+            "--masterdata-url" => args.masterdata_url = Some(take("--masterdata-url")?),
             "--card" => args.card = Some(PathBuf::from(take("--card")?)),
             "--page" => {
                 args.page = Some(
@@ -88,6 +106,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--profile" => args.profile = Some(PathBuf::from(take("--profile")?)),
             "--assets-dir" => args.assets_dir = Some(PathBuf::from(take("--assets-dir")?)),
+            "--assets-url" => args.assets_url = Some(take("--assets-url")?),
+            "--static-url" => args.static_url = Some(take("--static-url")?),
             "--font-dir" => args.font_dir = Some(PathBuf::from(take("--font-dir")?)),
             "--format" => args.format = take("--format")?,
             "-o" | "--output" => args.output = Some(PathBuf::from(take("-o")?)),
@@ -230,6 +250,26 @@ fn missing_asset_keys(
         .collect()
 }
 
+/// 收集名片 + profile 所需但 AssetStore 中缺失的素材 key（URL 取材用）。
+fn missing_asset_keys_with_profile(
+    renderer: &CustomProfileRenderer,
+    card: &CustomProfileCard,
+    profile: Option<&ProfileData>,
+    store: &AssetStore,
+) -> Vec<String> {
+    let md = renderer.snapshot_masterdata();
+    let mut keys = allium_renderer::asset_keys::collect_card_asset_keys(card, &md);
+    if let Some(p) = profile {
+        keys.extend(allium_renderer::asset_keys::collect_profile_asset_keys(
+            p, &md,
+        ));
+    }
+    keys.sort();
+    keys.dedup();
+    keys.retain(|key| !store.contains(key));
+    keys
+}
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -252,15 +292,29 @@ fn main() -> ExitCode {
         std::env::set_var("SCAPUS_FONT_DIR", font_dir);
     }
 
-    let Some(md_dir) = &args.masterdata else {
-        eprintln!("缺少 --masterdata\n\n{USAGE}");
-        return ExitCode::from(2);
-    };
-    let provider = match JsonMasterDataProvider::from_dir(md_dir) {
-        Ok(p) => p,
-        Err(err) => {
-            eprintln!("加载 masterdata 失败: {err}");
-            return ExitCode::FAILURE;
+    // masterdata 来源：本地目录或 URL 前缀（二选一，目录优先）。
+    let provider = match (&args.masterdata, &args.masterdata_url) {
+        (Some(md_dir), _) => match JsonMasterDataProvider::from_dir(md_dir) {
+            Ok(p) => p,
+            Err(err) => {
+                eprintln!("加载 masterdata 失败: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        (None, Some(url)) => {
+            let mut p = JsonMasterDataProvider::empty();
+            match fetch::load_masterdata_url(&mut p, url) {
+                Ok(count) => tracing::info!(count, %url, "masterdata 拉取完成"),
+                Err(err) => {
+                    eprintln!("从 URL 加载 masterdata 失败: {err}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            p
+        }
+        (None, None) => {
+            eprintln!("缺少 --masterdata 或 --masterdata-url\n\n{USAGE}");
+            return ExitCode::from(2);
         }
     };
     let missing = provider.missing_tables();
@@ -282,7 +336,11 @@ fn main() -> ExitCode {
     let renderer = CustomProfileRenderer::new(Arc::new(provider)).with_assets(Arc::clone(&assets));
 
     if args.serve {
-        return serve::run(renderer, assets);
+        let asset_urls = serve::AssetUrls {
+            dynamic: args.assets_url.clone(),
+            static_: args.static_url.clone(),
+        };
+        return serve::run(renderer, assets, asset_urls);
     }
 
     // 单次模式
@@ -318,6 +376,20 @@ fn main() -> ExitCode {
     for warning in &warnings {
         tracing::warn!("{warning}");
     }
+
+    // 本地缺失的素材按需从 URL 拉取（动态 + 静态，并发 + 重试）。
+    if let Some(dyn_url) = &args.assets_url {
+        let want = missing_asset_keys_with_profile(&renderer, &card, profile.as_ref(), &assets);
+        if !want.is_empty() {
+            let (ok, fail) =
+                fetch::load_assets_url(&assets, &want, dyn_url, args.static_url.as_deref());
+            tracing::info!(ok, fail, "素材 URL 拉取完成");
+        }
+    } else if args.static_url.is_some() {
+        eprintln!("--static-url 需配合 --assets-url 使用");
+        return ExitCode::from(2);
+    }
+
     let missing_assets = missing_asset_keys(&renderer, &card, &assets);
     if !missing_assets.is_empty() {
         tracing::warn!(count = missing_assets.len(), keys = ?missing_assets, "缺失素材");
