@@ -2,6 +2,8 @@
 
 自定义名片的渲染层。输入玩家 profile JSON，输出名片图片（JPEG/WebP）。
 
+**在线 Demo**：<https://empty-sekai.github.io/allium-renderer/>（浏览器 wasm 分层预览，资源自备）
+
 ## 仓库结构
 
 Cargo workspace，四个 crate：
