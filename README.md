@@ -93,6 +93,93 @@ Cargo workspace，四个 crate：
 cargo build -p allium-renderer --features skia
 ```
 
+## 使用
+
+资源（masterdata 表、字体、素材）一律由调用方提供，本仓库不内嵌任何游戏数据。
+素材分两类，各取自不同基址：
+
+- **静态素材**（边框、图标、遮罩、徽章）随引擎发布、不随版本变化，列在内嵌清单
+  （`static_manifest.rs` / `static-manifest.js`）里；命中清单的 key 走静态基址。
+- **动态素材**（卡面、图章、缩略图）随游戏版本变化，其余 key 走动态基址。
+
+判定不能按 key 首段前缀——`honor/` 等前缀既含静态边框（`honor/frame_degree_*`）
+又含动态图（`honor/<abn>/degree_*`），只有清单成员判定才区分得开。
+
+### npm 包（浏览器 wasm）
+
+```bash
+npm install @empty-sekai/renderer-wasm
+```
+
+浏览器中推荐用 Worker 入口，skia 光栅化在 Worker 内同步执行，不阻塞 UI：
+
+```ts
+import { AlliumWorkerClient } from "@empty-sekai/renderer-wasm/worker";
+
+const client = await AlliumWorkerClient.spawn({
+  workerUrl: new URL("@empty-sekai/renderer-wasm/worker.js", import.meta.url),
+  moduleUrl: new URL("@empty-sekai/renderer-wasm/allium_renderer_wasm.js", import.meta.url).href,
+});
+
+const jpeg = await client.render({ cardJson, masterData, fonts, assets });
+// masterData: Record<table, json>，fonts/assets: Record<name|key, Uint8Array>
+```
+
+主线程直接驱动（注意 skia 同步阻塞）：
+
+```ts
+import createAlliumRenderer from "@empty-sekai/renderer-wasm/allium_renderer_wasm.js";
+import { AlliumRenderer, ImageFormat } from "@empty-sekai/renderer-wasm";
+
+const r = await AlliumRenderer.create(createAlliumRenderer);
+r.registerFont("FZLanTingHei-DB-GBK", await fetchBytes("/fonts/lanting.ttf"));
+for (const [name, json] of tables) r.loadMasterData(name, json);
+r.init();
+for (const key of r.collectAssetKeys(cardJson)) {
+  r.putAsset(key, await fetchBytes(assetUrl(key)));
+}
+const jpeg = r.render(cardJson, ImageFormat.Jpeg);
+```
+
+包不内嵌字体 / masterdata / 素材，全部由使用方注入。完整 demo 见
+`crates/allium-renderer-wasm/demo/`（在线版见顶部链接）。
+
+### CLI（`render-card`）
+
+单次渲染一张名片：
+
+```bash
+render-card --masterdata <dir> --card <card.json> -o out.jpg \
+    [--profile <profile.json>] [--assets-dir <dir>] [--font-dir <dir>] \
+    [--format jpeg|png|png-transparent] [--page <seq>]
+```
+
+masterdata 与素材都可改从 URL 前缀按需拉取（本地缺什么拉什么，并发 + 指数退避重试）。
+三个 URL 各是纯前缀，程序只在后面接 `/<table>.json` 或 `/<key>.png`，不插入
+region / latest 等任何子路径，兼容任意镜像布局：
+
+```bash
+render-card \
+    --masterdata-url https://your-mirror.example.com/masterdata \
+    --assets-url     https://your-mirror.example.com/assets \
+    --static-url     https://your-mirror.example.com/assets/static \
+    --card card.json -o out.jpg
+```
+
+`--serve` 常驻模式：stdin/stdout 走 NDJSON，请求严格串行，字体 / masterdata /
+glyph 缓存 / 素材跨请求常驻，日志只走 stderr：
+
+```bash
+render-card --serve --masterdata <dir> [--assets-dir <dir>] [--font-dir <dir>]
+# 每行一个请求：
+#   {"id":1,"method":"render","params":{"card":{...},"output":"out.jpg"}}
+#   {"id":2,"method":"reload_masterdata","params":{"dir":"..."}}
+#   {"id":3,"method":"ping"}
+#   {"id":4,"method":"shutdown"}
+```
+
+完整参数见 `render-card --help`。
+
 ## 许可证
 
 [AGPL-3.0-only](./LICENSE)。Copyright (C) allium-renderer contributors。

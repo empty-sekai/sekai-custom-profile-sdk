@@ -27,6 +27,8 @@
       "types": "./dist/worker-client.d.ts",
       "import": "./dist/worker-client.js"
     },
+    "./worker.js": "./dist/worker.js",
+    "./allium_renderer_wasm.js": "./dist/allium_renderer_wasm.js",
     "./allium_renderer_wasm.wasm": "./dist/allium_renderer_wasm.wasm"
   },
   "scripts": {
