@@ -1,94 +1,85 @@
 name: release
 
+# Triggered by a v* tag (real release) or manual dispatch (dry-run: builds
+# and deploys the demo, but never publishes to npm or cuts a GitHub Release).
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
+# One release run per ref; a re-pushed tag cancels the stale run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  # -- 1. Lint + tests on Linux. Gates every other job. ---------------
+  # -- 1. Lint + tests. Gates everything else. ----------------------
   test:
-    name: test (linux)
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Linux build deps
+      - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libfontconfig1-dev libfreetype6-dev libssl-dev pkg-config
 
       - run: cargo fmt --all -- --check
+      # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
+      # lints don't gate the release without touching engine source.
       - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
       - run: cargo test --workspace --lib
 
   # -- 2. Linux render-card binary. ---------------------------------
   build:
-    name: build (${{ matrix.target }})
+    name: build render-card
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
 
-      - name: Install Linux build deps
-        if: runner.os == 'Linux'
+      - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libfontconfig1-dev libfreetype6-dev libssl-dev pkg-config
 
       - name: Build render-card
-        run: cargo build --release --target ${{ matrix.target }} -p allium-renderer-cli
+        run: cargo build --release -p allium-renderer-cli
 
-      - name: Rename binary
-        shell: bash
-        run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/render-card.exe" "render-card-${{ matrix.target }}.exe"
-          else
-            cp "target/${{ matrix.target }}/release/render-card" "render-card-${{ matrix.target }}"
-          fi
+      - name: Stage binary
+        run: cp "target/release/render-card" "render-card-${TARGET}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.target }}
-          path: render-card-${{ matrix.target }}*
+          name: render-card-${{ env.TARGET }}
+          path: render-card-${{ env.TARGET }}
           if-no-files-found: error
 
-  # -- 3. wasm npm package. -----------------------------------------
+  # -- 3. wasm build + npm package. ---------------------------------
   wasm:
-    name: build wasm + npm package
+    name: build wasm
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write   # npm Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
 
@@ -112,14 +103,16 @@ jobs:
           test -f dist/allium_renderer_wasm.wasm
           test -f dist/allium_renderer_wasm.js
           test -f dist/index.js
+          test -f dist/worker.js
           test -f dist/worker-client.js
           npm pack --dry-run
 
-      - name: Upload wasm artifacts
+      - name: Upload wasm dist
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-package
+          name: wasm-dist
           path: crates/allium-renderer-wasm/dist/
+          if-no-files-found: error
 
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/v')
@@ -134,46 +127,59 @@ jobs:
             npm publish --access public --provenance
           fi
 
-  # -- 4. GitHub Pages deploy (demo + wasm dist). -------------------
+  # -- 4. GitHub Pages: demo + wasm dist. ---------------------------
   pages:
-    name: deploy demo to pages
+    name: deploy demo
     needs: wasm
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       pages: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download wasm artifacts
+      - name: Download wasm dist
         uses: actions/download-artifact@v4
         with:
-          name: wasm-package
+          name: wasm-dist
           path: public/dist
 
-      - name: Copy demo to public
+      - name: Copy demo into site
         run: cp -r crates/allium-renderer-wasm/demo public/demo
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
+      - name: Write root landing page
+        run: |
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta http-equiv="refresh" content="0; url=./demo/" />
+              <title>allium-renderer</title>
+            </head>
+            <body>
+              <p>Redirecting to the <a href="./demo/">layer viewer demo</a>.</p>
+            </body>
+          </html>
+          HTML
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: public
-
-      - name: Deploy to Pages
-        id: deploy
+      - id: deploy
         uses: actions/deploy-pages@v4
 
-  # -- 5. CHANGELOG generation + GitHub Release. --------------------
+  # -- 5. GitHub Release: binary + wasm zip + checksums. ------------
+  # CHANGELOG is generated fresh and used as the release body only --
+  # nothing is committed back to the repo.
   release:
     name: github release
     needs: [build, wasm, pages]
-    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,59 +190,37 @@ jobs:
       - name: Install git-cliff
         run: cargo install git-cliff --locked --version 2.6.1
 
-      - name: Generate CHANGELOG
+      - name: Generate release notes
         run: |
+          git-cliff --latest --strip all --output RELEASE_NOTES.md
+          echo "----- release notes -----"
+          cat RELEASE_NOTES.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release assets
+        run: |
+          mkdir -p dist
           VERSION="${GITHUB_REF_NAME#v}"
-          git-cliff --tag "v${VERSION}" --output CHANGELOG.md
-          cat CHANGELOG.md
-
-      - name: Open PR with updated CHANGELOG
-        uses: peter-evans/create-pull-request@v7
-        with:
-          commit-message: "docs(release): update CHANGELOG for ${{ github.ref_name }}"
-          title: "docs(release): CHANGELOG for ${{ github.ref_name }}"
-          body: |
-            Auto-generated by the release workflow for `${{ github.ref_name }}`.
-            Merging this commits the rendered CHANGELOG back to `main`.
-          branch: release/changelog-${{ github.ref_name }}
-          base: main
-          add-paths: CHANGELOG.md
-          delete-branch: true
-
-      - name: Download all binary artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: bin-*
-          path: dist
-          merge-multiple: true
-
-      - name: Download wasm artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: wasm-package
-          path: dist/wasm
-
-      - name: Bundle wasm runtime as zip
-        run: |
-          cd dist/wasm
-          zip -j "../allium-renderer-wasm-${GITHUB_REF_NAME#v}.zip" \
-            allium_renderer_wasm.js allium_renderer_wasm.wasm
-          cd ..
-          rm -rf wasm
-          ls -la
-
-      - name: Compute SHA256SUMS
-        run: |
-          cd dist
-          sha256sum * > SHA256SUMS
-          cat SHA256SUMS
+          # render-card binary (artifact name == file name)
+          cp artifacts/render-card-*/render-card-* dist/
+          # wasm browser runtime, bundled as a zip
+          (cd artifacts/wasm-dist && zip -j \
+            "../../dist/allium-renderer-wasm-${VERSION}.zip" \
+            allium_renderer_wasm.js allium_renderer_wasm.wasm)
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -la dist
+          cat dist/SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: RELEASE_NOTES.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: dist/*
