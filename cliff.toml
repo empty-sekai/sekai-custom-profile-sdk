@@ -29,13 +29,8 @@ commit_parsers = [
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
   { message = "^perf", group = "Performance" },
-  { message = "^refactor", group = "Refactoring" },
-  { message = "^docs", group = "Documentation" },
-  { message = "^test", group = "Tests" },
-  { message = "^ci", group = "CI/CD" },
-  { message = "^build", group = "Build" },
-  { message = "^chore", group = "Chore" },
-  { message = "^revert", group = "Reverts" },
+  # Housekeeping types (refactor/docs/test/ci/build/chore/revert) are kept
+  # out of the user-facing release notes.
   { message = ".*", skip = true },
 ]
 
