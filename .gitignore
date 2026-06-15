@@ -10,3 +10,6 @@ crates/allium-renderer-wasm/build.log
 crates/allium-renderer-wasm/serve-demo.cjs
 *.log
 node_modules/
+
+# 本地 agent 指引（私有，不发布）
+AGENTS.md
