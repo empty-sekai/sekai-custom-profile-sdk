@@ -86,10 +86,26 @@ input[type="file"], input[type="text"], select {
   border-bottom: 1px solid var(--surface-line);
 }
 .topbar-title { display: flex; gap: 8px; align-items: baseline; }
+.topbar-logo {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--accent), var(--teal));
+}
 .topbar-brand { font-weight: 600; font-size: 14px; }
 .topbar-sep { color: var(--text-muted); }
 .topbar-sub { color: var(--text-muted); font-size: 13px; }
-.hint { color: var(--text-muted); font-size: 12px; }
+.topbar-link {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-decoration: none;
+  padding: 4px 10px;
+  border: 1px solid var(--surface-line);
+  border-radius: 5px;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.topbar-link:hover { color: var(--text); border-color: #3a3f4d; }
 
 /* ── layout ─────────────────────────────────────────────────────── */
 
@@ -204,6 +220,12 @@ input[type="file"], input[type="text"], select {
   pointer-events: none;
 }
 .empty[hidden] { display: none; }
+.empty-icon {
+  width: 44px;
+  height: 44px;
+  color: var(--surface-line);
+  margin-bottom: 4px;
+}
 .empty-title { font-size: 14px; margin: 0; }
 .empty-hint { font-size: 12px; margin: 0; max-width: 280px; text-align: center; }
 

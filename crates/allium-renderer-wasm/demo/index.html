@@ -22,12 +22,13 @@
   <body>
     <header class="topbar">
       <div class="topbar-title">
+        <span class="topbar-logo" aria-hidden="true"></span>
         <span class="topbar-brand">allium-renderer-wasm</span>
         <span class="topbar-sep">·</span>
         <span class="topbar-sub">layer viewer demo</span>
       </div>
       <div class="topbar-right">
-        <span class="hint">资源由你提供，渲染全在浏览器里跑。</span>
+        <a class="topbar-link" href="https://github.com/empty-sekai/allium-renderer" target="_blank" rel="noopener">GitHub</a>
       </div>
     </header>
 
@@ -45,6 +46,11 @@
               </div>
             </div>
             <div class="empty" id="empty">
+              <svg class="empty-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+                <path d="M3 16l4.5-4.5 3 3L15 10l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="9" cy="9.5" r="1.5" fill="currentColor"/>
+              </svg>
               <p class="empty-title">还没有加载名片。</p>
               <p class="empty-hint">
                 把 <code>userCustomProfileCards</code> JSON 拖到这里，或在右侧选择文件。
