@@ -48,7 +48,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     env:
-      TARGET: x86_64-unknown-linux-gnu
+      ASSET: render-card-linux-x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,13 +64,13 @@ jobs:
         run: cargo build --release -p allium-renderer-cli
 
       - name: Stage binary
-        run: cp "target/release/render-card" "render-card-${TARGET}"
+        run: cp "target/release/render-card" "${ASSET}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: render-card-${{ env.TARGET }}
-          path: render-card-${{ env.TARGET }}
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
           if-no-files-found: error
 
   # -- 3. wasm build + npm package. ---------------------------------
@@ -170,7 +170,7 @@ jobs:
       - id: deploy
         uses: actions/deploy-pages@v4
 
-  # -- 5. GitHub Release: binary + wasm zip + checksums. ------------
+  # -- 5. GitHub Release: binary + wasm zip. ------------------------
   # CHANGELOG is generated fresh and used as the release body only --
   # nothing is committed back to the repo.
   release:
@@ -206,14 +206,12 @@ jobs:
           mkdir -p dist
           VERSION="${GITHUB_REF_NAME#v}"
           # render-card binary (artifact name == file name)
-          cp artifacts/render-card-*/render-card-* dist/
+          cp artifacts/render-card-linux-x86_64/render-card-linux-x86_64 dist/
           # wasm browser runtime, bundled as a zip
           (cd artifacts/wasm-dist && zip -j \
             "../../dist/allium-renderer-wasm-${VERSION}.zip" \
             allium_renderer_wasm.js allium_renderer_wasm.wasm)
-          (cd dist && sha256sum * > SHA256SUMS)
           ls -la dist
-          cat dist/SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
