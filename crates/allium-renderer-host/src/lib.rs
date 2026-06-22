@@ -7,5 +7,6 @@
 mod provider;
 mod table;
 
+pub use allium_renderer::region::Region;
 pub use provider::{JsonMasterDataProvider, REQUIRED_TABLES};
 pub use table::Table;
