@@ -1,4 +1,4 @@
-﻿// Auto-split from generals/mod.rs
+// Auto-split from generals/mod.rs
 
 use super::*;
 
@@ -15,7 +15,9 @@ pub(super) fn draw_challenge_live(
     draw_horizontal_line(canvas, els[4].cx, els[4].cy, els[4].w);
 
     // "挑战演出" [0] — 取 customProfilePlayerInfoResources[id=10].name
-    let title = md.resolve_player_info_label(10).unwrap_or_else(|| "挑战演出".to_string());
+    let title = md
+        .resolve_player_info_label(10)
+        .unwrap_or_else(|| "挑战演出".to_string());
     draw_general_text(
         canvas,
         &title,

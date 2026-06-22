@@ -181,13 +181,7 @@ mod tests {
 
     #[test]
     fn region_roundtrip() {
-        for r in [
-            Region::Cn,
-            Region::Jp,
-            Region::Tw,
-            Region::Kr,
-            Region::En,
-        ] {
+        for r in [Region::Cn, Region::Jp, Region::Tw, Region::Kr, Region::En] {
             assert_eq!(Region::from_str(r.as_str()), Some(r));
         }
     }

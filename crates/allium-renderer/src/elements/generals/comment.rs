@@ -1,4 +1,4 @@
-﻿// Auto-split from generals/mod.rs
+// Auto-split from generals/mod.rs
 
 use super::*;
 
@@ -13,7 +13,9 @@ pub(super) fn draw_comment(canvas: &Canvas, profile: &ProfileData, md: &MasterDa
     draw_textbox(canvas, txtbox.cx, txtbox.cy, txtbox.w, txtbox.h);
 
     // "个性签名" 标题（文本元素，h=字号）— 取 customProfilePlayerInfoResources[id=4].name
-    let title = md.resolve_player_info_label(4).unwrap_or_else(|| "个性签名".to_string());
+    let title = md
+        .resolve_player_info_label(4)
+        .unwrap_or_else(|| "个性签名".to_string());
     draw_general_text(
         canvas,
         &title,

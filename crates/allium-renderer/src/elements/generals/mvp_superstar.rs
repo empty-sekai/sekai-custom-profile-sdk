@@ -1,4 +1,4 @@
-﻿// Auto-split from generals/mod.rs
+// Auto-split from generals/mod.rs
 
 use super::*;
 
@@ -10,7 +10,9 @@ pub(super) fn draw_mvp_superstar(canvas: &Canvas, profile: &ProfileData, md: &Ma
     draw_horizontal_line(canvas, els[5].cx, els[5].cy, els[5].w);
 
     // "多人演出" [0]（文本元素，h=字号）— 取 customProfilePlayerInfoResources[id=9].name
-    let title = md.resolve_player_info_label(9).unwrap_or_else(|| "多人演出".to_string());
+    let title = md
+        .resolve_player_info_label(9)
+        .unwrap_or_else(|| "多人演出".to_string());
     draw_general_text(
         canvas,
         &title,
