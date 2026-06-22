@@ -895,7 +895,7 @@ pub fn render_char_sdf(
         return;
     }
 
-    tracing::warn!(
+    tracing::debug!(
         text = ch,
         font_family = font_family.unwrap_or("<none>"),
         "outline SDF glyph generation failed; falling back to plain text draw"

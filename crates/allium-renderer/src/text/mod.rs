@@ -274,7 +274,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
         None => &global.clean,
     };
     let line_texts: Vec<&str> = clean.split('\n').collect();
-    tracing::info!(lines=%line_texts.len(), clean_bytes=%clean.len(), clean_escaped=%clean.escape_debug().to_string().chars().take(200).collect::<String>(), "text_lines");
+    tracing::debug!(lines=%line_texts.len(), clean_bytes=%clean.len(), clean_escaped=%clean.escape_debug().to_string().chars().take(200).collect::<String>(), "text_lines");
 
     let mut line_segs: Vec<Vec<&TextSegment>> = vec![Vec::new()];
     for seg in &segments {
@@ -633,7 +633,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
     if debug_probe {
         let raw_text_json =
             serde_json::to_string(&text.text).unwrap_or_else(|_| "\"<encode-error>\"".to_string());
-        tracing::info!(
+        tracing::debug!(
             layer = text.object_data.layer,
             raw_text = %text.text,
             raw_text_json = %raw_text_json,
@@ -1011,6 +1011,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
     }
 
     let _ = (SDF_DILATE_SCALE, TMP_POINT_SIZE_OUTLINE);
+    let mut sdf_face_fallback_count: u32 = 0;
     for op in &draw_ops {
         if op.ch.chars().all(char::is_whitespace) {
             continue;
@@ -1046,7 +1047,8 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
                 fc,
             );
             if !rendered {
-                tracing::warn!(
+                sdf_face_fallback_count += 1;
+                tracing::debug!(
                     text = %op.ch,
                     font_family = resolved_name_ref.unwrap_or("<none>"),
                     "outline SDF face glyph generation failed; falling back to plain text draw"
@@ -1059,6 +1061,15 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
             }
         }
         canvas.restore();
+    }
+
+    // SDF 字形回退汇总：每文本元素最多一条 WARN（而非每字形一条），避免大量缺字形时刷屏。
+    if sdf_face_fallback_count > 0 {
+        tracing::warn!(
+            count = sdf_face_fallback_count,
+            font_family = resolved_name_ref.unwrap_or("<none>"),
+            "SDF 字形回退到纯文本绘制"
+        );
     }
 
     if debug_probe {
@@ -1119,7 +1130,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
         let raw_text_json =
             serde_json::to_string(&text.text).unwrap_or_else(|_| "\"<encode-error>\"".to_string());
         let raw_text_escaped = text.text.replace('\n', "\\n").replace('\r', "\\r");
-        tracing::info!(
+        tracing::debug!(
             layer = text.object_data.layer,
             raw_text = %raw_text_escaped,
             raw_text_json = %raw_text_json,
