@@ -68,10 +68,11 @@ pub(super) fn draw_char_rank(
         &tab_bg,
     );
 
-    // 3) 文字
+    // 3) 文字 — 表外标签（id=11 name 是连体串，分隔符各服不同），走 RegionLabels
+    let labels = md.labels();
     draw_general_text(
         canvas,
-        "角色收藏等级",
+        labels.char_rank_tab_active(),
         tab_active,
         1,
         md,
@@ -81,7 +82,7 @@ pub(super) fn draw_char_rank(
     );
     draw_general_text(
         canvas,
-        "挑战舞台",
+        labels.char_rank_tab_inactive(),
         tab_inactive,
         1,
         md,

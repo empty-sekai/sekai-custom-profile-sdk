@@ -7,21 +7,22 @@ pub(super) fn draw_comment(canvas: &Canvas, profile: &ProfileData, md: &MasterDa
 
     let els = &COMMENT.elements;
     let txtbox = &els[0]; // 文本框
-    let title = &els[1]; // "个性签名" 标题
+    let title_el = &els[1]; // "个性签名" 标题
 
     // 文本框
     draw_textbox(canvas, txtbox.cx, txtbox.cy, txtbox.w, txtbox.h);
 
-    // "个性签名" 标题（文本元素，h=字号）
+    // "个性签名" 标题（文本元素，h=字号）— 取 customProfilePlayerInfoResources[id=4].name
+    let title = md.resolve_player_info_label(4).unwrap_or_else(|| "个性签名".to_string());
     draw_general_text(
         canvas,
-        "个性签名",
-        title,
+        &title,
+        title_el,
         1,
         md,
         Color4f::new(0.53, 0.53, 0.53, 1.0),
         Align::Center,
-        title.h,
+        title_el.h,
     );
 
     // 签名内容（文本框内带 Padding，fontId=3）

@@ -9,10 +9,11 @@ pub(super) fn draw_mvp_superstar(canvas: &Canvas, profile: &ProfileData, md: &Ma
     // 横线 [5]
     draw_horizontal_line(canvas, els[5].cx, els[5].cy, els[5].w);
 
-    // "多人演出" [0]（文本元素，h=字号）
+    // "多人演出" [0]（文本元素，h=字号）— 取 customProfilePlayerInfoResources[id=9].name
+    let title = md.resolve_player_info_label(9).unwrap_or_else(|| "多人演出".to_string());
     draw_general_text(
         canvas,
-        "多人演出",
+        &title,
         &els[0],
         1,
         md,
@@ -35,9 +36,10 @@ pub(super) fn draw_mvp_superstar(canvas: &Canvas, profile: &ProfileData, md: &Ma
     );
 
     // MVP 次数 [2]（与 SUPERSTAR 统一字号，用 els[4].h = 31）
+    let mvp_text = format!("{}{}", profile.mvp, md.labels().mvp_count_suffix());
     draw_general_text(
         canvas,
-        &format!("{}次", profile.mvp),
+        &mvp_text,
         &els[2],
         1,
         md,
@@ -76,9 +78,10 @@ pub(super) fn draw_mvp_superstar(canvas: &Canvas, profile: &ProfileData, md: &Ma
     );
 
     // SUPERSTAR 次数 [4]（文本元素，h=字号）
+    let superstar_text = format!("{}{}", profile.superstar, md.labels().mvp_count_suffix());
     draw_general_text(
         canvas,
-        &format!("{}次", profile.superstar),
+        &superstar_text,
         &els[4],
         1,
         md,

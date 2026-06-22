@@ -117,15 +117,15 @@ fn draw_general_text(
     let font_mgr = FontMgr::default();
     let resolved_name = md.resolve_font(font_id);
     let style = FontStyle::normal();
+    let cjk_fallback = md.region().cjk_fallback_font();
 
     // 1. 优先使用 MasterData 指定的字体（匹配游戏内视觉效果）。
-    // 2. 若该字体不支持文本中的某些字符（如韩文、emoji），fallback 到 Noto Sans CJK SC。
+    // 2. 若该字体不支持文本中的某些字符（如韩文、emoji），fallback 到 region 对应的 Noto Sans CJK。
     // 3. 最后 fallback 到系统默认字体。
-    // 此逻辑不影响自定义名片：自定义名片文本通常为中文，MasterData 字体已支持。
     let typeface = resolved_name
         .and_then(|name| font_mgr.match_family_style(name, style))
         .filter(|tf| typeface_supports_text(tf, text))
-        .or_else(|| font_mgr.match_family_style("Noto Sans CJK SC", style))
+        .or_else(|| font_mgr.match_family_style(cjk_fallback, style))
         .or_else(|| font_mgr.legacy_make_typeface(None, style));
 
     let typeface = match typeface {

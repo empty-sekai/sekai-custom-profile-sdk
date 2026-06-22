@@ -7,10 +7,11 @@ pub(super) fn draw_total_power(canvas: &Canvas, profile: &ProfileData, md: &Mast
 
     let els = &TOTAL_POWER.elements;
 
-    // "综合力" 文本（文本元素，h=字号）
+    // "综合力" 文本（文本元素，h=字号）— 取 customProfilePlayerInfoResources[id=2].name
+    let title = md.resolve_player_info_label(2).unwrap_or_else(|| "综合力".to_string());
     draw_general_text(
         canvas,
-        "综合力",
+        &title,
         &els[0],
         1,
         md,
