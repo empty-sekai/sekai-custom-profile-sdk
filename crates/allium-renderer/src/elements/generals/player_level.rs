@@ -49,14 +49,15 @@ pub(super) fn draw_player_level(
         }
     }
 
-    // 绘制 "等级" 文本（与数字同字号）
-    let label = "等级";
+    // 绘制 "等级" 文本（与数字同字号）— 表外标签，走 RegionLabels
+    let label = _md.labels().player_level_label();
     let label_font_size = 26.0;
     let label_x = icon_x + icon_size + 8.0;
 
     let font_mgr = FontMgr::default();
+    let cjk_fallback = _md.region().cjk_fallback_font();
     let typeface = font_mgr
-        .match_family_style("Noto Sans CJK SC", FontStyle::normal())
+        .match_family_style(cjk_fallback, FontStyle::normal())
         .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()));
 
     if let Some(tf) = typeface.clone() {

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use allium_renderer::assets::AssetStore;
 use allium_renderer::profile::ProfileData;
+use allium_renderer::region::Region;
 use allium_renderer::renderer::CustomProfileRenderer;
 use allium_renderer::types::{CustomProfileCard, UserCustomProfileCard};
 use allium_renderer_host::JsonMasterDataProvider;
@@ -51,6 +52,9 @@ render-card：自定义名片渲染 CLI
                          省略时静态 key 也走 --assets-url
   --font-dir <dir>       字体目录（等效 SCAPUS_FONT_DIR）
   --format <fmt>         输出格式：jpeg（默认）/ png / png-transparent
+  --region <code>        服务器 region：cn（默认）/ jp / tw / kr / en。
+                         驱动字体 FOT→FZ 映射（仅 cn）、CJK fallback 字体族、
+                         general 面板表外标签本地化
   -o <file>              输出文件路径（单次模式必填）
   --serve                常驻模式
 
@@ -72,6 +76,7 @@ struct Args {
     format: String,
     output: Option<PathBuf>,
     serve: bool,
+    region: Region,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -88,6 +93,7 @@ fn parse_args() -> Result<Args, String> {
         format: "jpeg".into(),
         output: None,
         serve: false,
+        region: Region::Cn,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -111,6 +117,11 @@ fn parse_args() -> Result<Args, String> {
             "--static-url" => args.static_url = Some(take("--static-url")?),
             "--font-dir" => args.font_dir = Some(PathBuf::from(take("--font-dir")?)),
             "--format" => args.format = take("--format")?,
+            "--region" => {
+                let code = take("--region")?;
+                args.region = Region::from_str(&code)
+                    .ok_or_else(|| format!("未知 region: {code}（支持 cn/jp/tw/kr/en）"))?;
+            }
             "-o" | "--output" => args.output = Some(PathBuf::from(take("-o")?)),
             "--serve" => args.serve = true,
             "-h" | "--help" => {
@@ -317,7 +328,8 @@ fn main() -> ExitCode {
             eprintln!("缺少 --masterdata 或 --masterdata-url\n\n{USAGE}");
             return ExitCode::from(2);
         }
-    };
+    }
+    .with_region(args.region);
     let missing = provider.missing_tables();
     if !missing.is_empty() {
         tracing::warn!(?missing, "部分 masterdata 表缺失，相关元素将按缺映射渲染");
@@ -341,7 +353,7 @@ fn main() -> ExitCode {
             dynamic: args.assets_url.clone(),
             static_: args.static_url.clone(),
         };
-        return serve::run(renderer, assets, asset_urls);
+        return serve::run(renderer, assets, asset_urls, args.region);
     }
 
     // 单次模式

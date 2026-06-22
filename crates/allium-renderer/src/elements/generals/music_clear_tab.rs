@@ -117,9 +117,9 @@ pub(super) fn draw_music_clear_tab(canvas: &Canvas, profile: &ProfileData, md: &
         &sp,
     );
 
-    // 底部标题行 [0] — 连体药丸（完成 / Full Combo / AP）
+    // 底部标题行 [0] — 连体药丸（完成 / Full Combo / AP）— 表外标签，走 RegionLabels
     let tab_el = &els[0];
-    let labels = ["完成", "Full Combo", "AP"];
+    let labels = md.labels().music_clear_labels();
     let label_count = labels.len() as f32;
     let label_w = tab_el.w / label_count;
     let pill_r = tab_el.h / 2.0;

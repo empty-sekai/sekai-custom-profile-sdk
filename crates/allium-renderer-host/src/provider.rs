@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use allium_renderer::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
+use allium_renderer::region::Region;
 use allium_renderer::types::{
     BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, HonorGroupEntry, StampEntry,
 };
@@ -40,18 +41,34 @@ pub const REQUIRED_TABLES: &[&str] = &[
 /// 从 JSON 表集合构建的 MasterDataProvider。
 pub struct JsonMasterDataProvider {
     tables: HashMap<String, Arc<Table>>,
+    region: Region,
 }
 
 impl JsonMasterDataProvider {
-    /// 从已解析的表集合构建。
+    /// 从已解析的表集合构建（默认国服，保留历史行为）。
     pub fn new(tables: HashMap<String, Arc<Table>>) -> Self {
-        Self { tables }
+        Self {
+            tables,
+            region: Region::Cn,
+        }
     }
 
-    /// 空 provider（逐张 [`Self::insert_table`] 注入时的起点）。
+    /// 设置 region（链式 builder）。
+    ///
+    /// region 驱动：
+    /// - `map_font_name` 的 FOT→FZ 映射仅在 [`Region::Cn`] 生效，其余原样返回；
+    /// - `draw_general_text` 的 CJK fallback 字体族按 region 切换；
+    /// - `RegionLabels` 表外兜底标签按 region 取。
+    pub fn with_region(mut self, region: Region) -> Self {
+        self.region = region;
+        self
+    }
+
+    /// 空 provider（逐张 [`Self::insert_table`] 注入时的起点）。默认国服。
     pub fn empty() -> Self {
         Self {
             tables: HashMap::new(),
+            region: Region::Cn,
         }
     }
 
@@ -108,7 +125,14 @@ impl JsonMasterDataProvider {
     }
 
     /// FOT 日文字体名 → CN 服方正字体名。
-    fn map_font_name(name: &str) -> &str {
+    ///
+    /// 仅 [`Region::Cn`] 做映射（CN 服本地字体文件是方正系列，而 masterdata
+    /// `fontName` 字段沿用日服 FOT 名）。其余 region 原样返回 FOT 名——
+    /// JP/EN/KR/TC 服字体文件本身就是 FOT 系列，无需映射。
+    fn map_font_name<'a>(&self, name: &'a str) -> &'a str {
+        if !self.region.is_cn() {
+            return name;
+        }
         match name {
             "FOT-RodinNTLGPro-DB" => "FZLanTingHei-DB-GBK",
             "FOT-SkipProN-B" => "FZZhengHei-EB-GBK",
@@ -149,7 +173,7 @@ impl MasterDataProvider for JsonMasterDataProvider {
     fn resolve_font(&self, font_id: i32) -> Option<String> {
         let t = self.table("customProfileTextFonts")?;
         let name = t.by_id(font_id as i64)?["fontName"].as_str()?;
-        Some(Self::map_font_name(name).to_string())
+        Some(self.map_font_name(name).to_string())
     }
 
     fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
@@ -175,6 +199,16 @@ impl MasterDataProvider for JsonMasterDataProvider {
             load_val: v["resourceLoadVal"].as_str()?.to_string(),
             resource_type: v["customProfileResourceType"].as_str()?.to_string(),
         })
+    }
+
+    fn region(&self) -> Region {
+        self.region
+    }
+
+    fn resolve_player_info_label(&self, id: i32) -> Option<String> {
+        let t = self.table("customProfilePlayerInfoResources")?;
+        let v = t.by_id(id as i64)?;
+        v["name"].as_str().map(|s| s.to_string())
     }
 
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
@@ -299,8 +333,32 @@ mod tests {
             "customProfileTextFonts",
             r#"[{"id": 1, "fontName": "FOT-RodinNTLGPro-DB"}, {"id": 9, "fontName": "Custom"}]"#,
         );
+        // 默认 region=Cn，FOT 名映射成 FZ 名；非 FOT 名原样返回。
         assert_eq!(p.resolve_font(1).as_deref(), Some("FZLanTingHei-DB-GBK"));
         assert_eq!(p.resolve_font(9).as_deref(), Some("Custom"));
+    }
+
+    #[test]
+    fn non_cn_region_does_not_map_font_names() {
+        let p = provider_with(
+            "customProfileTextFonts",
+            r#"[{"id": 1, "fontName": "FOT-RodinNTLGPro-DB"}, {"id": 4, "fontName": "FOT-HummingPro-B"}]"#,
+        )
+        .with_region(Region::Jp);
+        // JP 服字体文件本身就是 FOT 系列，原样返回 FOT 名。
+        assert_eq!(p.resolve_font(1).as_deref(), Some("FOT-RodinNTLGPro-DB"));
+        assert_eq!(p.resolve_font(4).as_deref(), Some("FOT-HummingPro-B"));
+        assert_eq!(p.region(), Region::Jp);
+    }
+
+    #[test]
+    fn resolve_player_info_label_reads_name_field() {
+        let p = provider_with(
+            "customProfilePlayerInfoResources",
+            r#"[{"id": 2, "name": "Total", "fileName": "TotalPower", "resourceLoadVal": "x", "customProfileResourceType": "player_info"}]"#,
+        );
+        assert_eq!(p.resolve_player_info_label(2).as_deref(), Some("Total"));
+        assert!(p.resolve_player_info_label(99).is_none());
     }
 
     #[test]

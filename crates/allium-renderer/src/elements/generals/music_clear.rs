@@ -7,11 +7,12 @@ pub(super) fn draw_music_clear(canvas: &Canvas, profile: &ProfileData, md: &Mast
     let els = &MUSIC_CLEAR.elements;
     let stats = profile.music_results.as_ref();
 
-    // 三组: (标题, 灰泡索引, 数据栏索引, 取值函数)
+    // 三组: (标题, 灰泡索引, 数据栏索引, 取值函数) — 标题走 RegionLabels
+    let clear_labels = md.labels().music_clear_detail_labels();
     let groups: [(&str, usize, usize, fn(&MusicDifficultyStats) -> i32); 3] = [
-        ("完成", 0, 1, |s| s.clear),
-        ("FULL COMBO", 2, 3, |s| s.full_combo),
-        ("AP", 4, 5, |s| s.all_perfect),
+        (clear_labels[0], 0, 1, |s| s.clear),
+        (clear_labels[1], 2, 3, |s| s.full_combo),
+        (clear_labels[2], 4, 5, |s| s.all_perfect),
     ];
 
     let diff_colors = [

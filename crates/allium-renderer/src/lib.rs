@@ -40,6 +40,7 @@ pub mod personal_profile;
 pub mod primitives;
 pub mod profile;
 pub mod profile_card;
+pub mod region;
 #[cfg(feature = "scenes")]
 pub mod ranking;
 pub mod render_document;

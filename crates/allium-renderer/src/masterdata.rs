@@ -71,6 +71,26 @@ pub trait MasterDataProvider: Send + Sync {
     fn font_count(&self) -> usize;
     fn color_count(&self) -> usize;
 
+    /// 当前 region（默认国服，保留内网历史行为）。
+    ///
+    /// 驱动：
+    /// - `map_font_name` 的 FOT→FZ 映射仅在 CN 服生效；
+    /// - `draw_general_text` 的 CJK fallback 字体族按 region 切换；
+    /// - `RegionLabels` 的表外兜底标签按 region 取。
+    fn region(&self) -> crate::region::Region {
+        crate::region::Region::Cn
+    }
+
+    /// 查 `customProfilePlayerInfoResources[id].name` 取面板标题本地化文本。
+    ///
+    /// 用于 general 面板标题（综合力 / 个性签名 / 挑战演出 / 多人演出 /
+    /// 最喜欢的剧情 / 玩家名称）。默认实现返回 `None`，由 host 侧
+    /// provider 覆盖（直接查原始 JSON 表的 `name` 字段）；表缺失或字段
+    /// 缺失时调用方走 `RegionLabels` 兜底。
+    fn resolve_player_info_label(&self, _id: i32) -> Option<String> {
+        None
+    }
+
     fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         match element_type {
             "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
@@ -154,5 +174,20 @@ impl MasterData {
 
     pub fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         self.provider.resolve_asset_path(element_type, id)
+    }
+
+    /// 当前 region。见 [`MasterDataProvider::region`]。
+    pub fn region(&self) -> crate::region::Region {
+        self.provider.region()
+    }
+
+    /// 面板标题本地化文本。见 [`MasterDataProvider::resolve_player_info_label`]。
+    pub fn resolve_player_info_label(&self, id: i32) -> Option<String> {
+        self.provider.resolve_player_info_label(id)
+    }
+
+    /// 表外兜底标签集（语法糖）。
+    pub fn labels(&self) -> crate::region::RegionLabels {
+        self.region().labels()
     }
 }

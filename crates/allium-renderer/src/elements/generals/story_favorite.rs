@@ -11,10 +11,13 @@ pub(super) fn draw_story_favorite(
     use layout::STORY_FAVORITE;
     let els = &STORY_FAVORITE.elements;
 
-    // 标题文本 [0]（使用游戏字体 fontId=1）
+    // 标题文本 [0]（使用游戏字体 fontId=1）— 取 customProfilePlayerInfoResources[id=14].name
+    let title = md
+        .resolve_player_info_label(14)
+        .unwrap_or_else(|| "最喜欢的剧情".to_string());
     draw_general_text(
         canvas,
-        "最喜欢的剧情",
+        &title,
         &els[0],
         1,
         md,

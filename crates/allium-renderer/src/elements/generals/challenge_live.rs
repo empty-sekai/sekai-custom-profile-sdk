@@ -14,10 +14,11 @@ pub(super) fn draw_challenge_live(
     // 横线 [4]
     draw_horizontal_line(canvas, els[4].cx, els[4].cy, els[4].w);
 
-    // "挑战演出" [0]
+    // "挑战演出" [0] — 取 customProfilePlayerInfoResources[id=10].name
+    let title = md.resolve_player_info_label(10).unwrap_or_else(|| "挑战演出".to_string());
     draw_general_text(
         canvas,
-        "挑战演出",
+        &title,
         &els[0],
         1,
         md,
@@ -26,11 +27,12 @@ pub(super) fn draw_challenge_live(
         els[0].h,
     );
 
-    // "独奏" 图标 [1]
+    // "独奏" 图标 [1] — 表外标签，走 RegionLabels 兜底
+    let solo_label = md.labels().challenge_solo_label();
     draw_gray_icon_bg(canvas, els[1].cx, els[1].cy, els[1].w, els[1].h, 16.0);
     draw_general_text(
         canvas,
-        "独奏",
+        solo_label,
         &els[1],
         1,
         md,

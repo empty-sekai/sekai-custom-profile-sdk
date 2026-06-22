@@ -30,6 +30,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use allium_renderer::assets::AssetStore;
+use allium_renderer::region::Region;
 use allium_renderer::renderer::CustomProfileRenderer;
 use allium_renderer_host::JsonMasterDataProvider;
 use base64::Engine;
@@ -46,6 +47,7 @@ pub fn run(
     renderer: CustomProfileRenderer,
     assets: Arc<AssetStore>,
     asset_urls: AssetUrls,
+    region: Region,
 ) -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -86,7 +88,7 @@ pub fn run(
                 return ExitCode::SUCCESS;
             }
             "reload_masterdata" => {
-                let result = handle_reload(&renderer, &request);
+                let result = handle_reload(&renderer, &request, region);
                 write_result(&stdout, id, result);
             }
             "render" => {
@@ -124,12 +126,16 @@ fn write_response(stdout: &std::io::Stdout, value: &Value) {
     }
 }
 
-fn handle_reload(renderer: &CustomProfileRenderer, request: &Value) -> Result<Value, String> {
+fn handle_reload(
+    renderer: &CustomProfileRenderer,
+    request: &Value,
+    region: Region,
+) -> Result<Value, String> {
     let dir = request
         .pointer("/params/dir")
         .and_then(|d| d.as_str())
         .ok_or("reload_masterdata 缺少 params.dir")?;
-    let provider = JsonMasterDataProvider::from_dir(std::path::Path::new(dir))?;
+    let provider = JsonMasterDataProvider::from_dir(std::path::Path::new(dir))?.with_region(region);
     let missing = provider.missing_tables();
     renderer.swap_masterdata(Arc::new(provider));
     Ok(json!({"reloaded": true, "missing_tables": missing}))
