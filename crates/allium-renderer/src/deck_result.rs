@@ -5,7 +5,7 @@
 
 use crate::widget_node::{
     CanvasSpec, Layout, NodeKind, OutputFormat, Position, TextAlignValue, VAlignValue,
-    WidgetDocument, WidgetNode, WIDGET_DOCUMENT_SCHEMA_VERSION,
+    WIDGET_DOCUMENT_SCHEMA_VERSION, WidgetDocument, WidgetNode,
 };
 use crate::widgets::card_util::{rarity_suffix, star_icon_key};
 use crate::widgets::image::AssetImageFit;
@@ -295,10 +295,13 @@ pub struct DeckResultCard {
 /// 组卡结果卡面缩略图当前设计尺寸。
 pub const DECK_CARD_THUMBNAIL_SIZE: f32 = layout::card::IMAGE;
 
-pub fn deck_result_glass_specs() -> Vec<(f32, f32, f32)> {
+const DEFAULT_VISIBLE_DECKS: usize = 5;
+const CHALLENGE_ALL_VISIBLE_DECKS: usize = 26;
+
+pub fn deck_result_glass_specs(visible_decks: usize) -> Vec<(f32, f32, f32)> {
     let mut specs = vec![(layout::user::W, layout::user::H, 0.10)];
     specs.push((layout::page::CONTENT_W, layout::footer::H, 0.16));
-    for rank in 1..=5 {
+    for rank in 1..=visible_decks.max(1) {
         let is_top = rank == 1;
         let rank_variance = glass_variance(rank, if is_top { 0.34 } else { 0.24 }, 0.035);
         let body_variance = glass_variance(rank, if is_top { 0.28 } else { 0.18 }, 0.030);
@@ -354,7 +357,11 @@ impl DeckResultCard {
     }
 
     pub fn to_widget_document(&self) -> WidgetDocument {
-        let shown = self.decks.iter().take(5).collect::<Vec<_>>();
+        let shown = self
+            .decks
+            .iter()
+            .take(visible_deck_limit(self.header.as_ref()))
+            .collect::<Vec<_>>();
         let n = shown.len().max(1);
         let body_h = n as f32 * layout::row::H + (n.saturating_sub(1)) as f32 * layout::row::GAP;
         // 参数摘要 strip 只在有摘要时占高度；无摘要时整体布局与旧版完全一致。
@@ -433,6 +440,17 @@ impl DeckResultCard {
             },
             output: OutputFormat::Jpeg(self.output_quality.unwrap_or(layout::page::OUTPUT_QUALITY)),
         }
+    }
+}
+
+fn visible_deck_limit(header: Option<&DeckResultHeader>) -> usize {
+    if header
+        .and_then(|header| header.recommend_type.as_deref())
+        .is_some_and(|recommend_type| recommend_type == "challenge_all")
+    {
+        CHALLENGE_ALL_VISIBLE_DECKS
+    } else {
+        DEFAULT_VISIBLE_DECKS
     }
 }
 
@@ -1886,11 +1904,7 @@ fn fmt_i64(v: i64) -> String {
         out.push(c);
     }
     let result: String = out.chars().rev().collect();
-    if v < 0 {
-        format!("-{result}")
-    } else {
-        result
-    }
+    if v < 0 { format!("-{result}") } else { result }
 }
 
 fn fmt_pct(v: f64) -> String {
@@ -1908,5 +1922,63 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit(rank: usize) -> DeckRenderUnit {
+        DeckRenderUnit {
+            rank,
+            cards: Vec::new(),
+            total_power: 0,
+            live_score: 0,
+            event_point: None,
+            target_value: Some(rank as i64),
+            skill_score: 0.0,
+            multi_live_score_up: None,
+            event_bonus_total: None,
+        }
+    }
+
+    fn card(recommend_type: Option<&str>, decks: usize) -> DeckResultCard {
+        DeckResultCard {
+            header: Some(DeckResultHeader {
+                event_id: None,
+                event_name: None,
+                event_banner_key: None,
+                recommend_type: recommend_type.map(ToString::to_string),
+                target: Some("score".to_string()),
+                music_title: None,
+                music_jacket_key: None,
+                difficulty: None,
+                user_name: None,
+                user_id: None,
+                user_avatar_key: None,
+            }),
+            decks: (1..=decks).map(unit).collect(),
+            cost_info: None,
+            algorithm_info: None,
+            param_summary: None,
+            timing_lines: Vec::new(),
+            timing_stages: Vec::new(),
+            output_quality: None,
+        }
+    }
+
+    #[test]
+    fn challenge_all_document_keeps_twenty_six_visible_decks() {
+        let normal = card(Some("challenge"), 26).to_widget_document();
+        let challenge_all = card(Some("challenge_all"), 26).to_widget_document();
+        let expected_delta = ((CHALLENGE_ALL_VISIBLE_DECKS - DEFAULT_VISIBLE_DECKS) as f32
+            * (layout::row::H + layout::row::GAP)) as u32;
+
+        assert_eq!(challenge_all.canvas.width, layout::page::CANVAS_W);
+        assert_eq!(
+            challenge_all.canvas.height - normal.canvas.height,
+            expected_delta
+        );
     }
 }
