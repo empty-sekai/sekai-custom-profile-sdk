@@ -99,6 +99,7 @@ mod layout {
 
     pub mod rank {
         pub const NUMBER_Y: f32 = 92.0;
+        pub const CHARACTER_Y: f32 = 88.0;
         pub const MARK_X: f32 = 56.0;
         pub const MARK_Y: f32 = 110.0;
         pub const MARK_W: f32 = 48.0;
@@ -140,6 +141,7 @@ mod layout {
         pub const W: f32 = 160.0;
         pub const X: f32 = row::DECK_W - W - row::INNER_PAD_X;
         pub const BLOCK_H: f32 = (row::H - row::INNER_PAD_Y * 2.0) / 3.0;
+        pub const CHALLENGE_BLOCK_H: f32 = (row::H - row::INNER_PAD_Y * 2.0) / 2.0;
         pub const BLOCK_GAP: f32 = 0.0;
         pub const LABEL_X: f32 = 12.0;
         pub const LABEL_Y: f32 = 17.0;
@@ -178,6 +180,7 @@ mod type_size {
     pub const USER_NAME: f32 = 22.0;
     pub const USER_ID: f32 = 14.0;
     pub const RANK: f32 = 56.0;
+    pub const CHARACTER: f32 = 29.0;
     pub const RANK_LABEL: f32 = 15.0;
     pub const RANK_VALUE: f32 = 24.0;
     pub const STAT_LABEL: f32 = 12.0;
@@ -241,6 +244,10 @@ pub struct DeckRenderCard {
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DeckRenderUnit {
     pub rank: usize,
+    #[serde(default)]
+    pub character_id: Option<i32>,
+    #[serde(default)]
+    pub character_name: Option<String>,
     pub cards: Vec<DeckRenderCard>,
     pub total_power: i32,
     pub live_score: i32,
@@ -357,6 +364,8 @@ impl DeckResultCard {
     }
 
     pub fn to_widget_document(&self) -> WidgetDocument {
+        let is_challenge_all = is_challenge_all_header(self.header.as_ref());
+        let is_challenge = is_challenge_header(self.header.as_ref());
         let shown = self
             .decks
             .iter()
@@ -405,7 +414,7 @@ impl DeckResultCard {
             children.push(entry(
                 layout::page::PAD,
                 y,
-                deck_panel(deck, i, max_skill, target),
+                deck_panel(deck, i, max_skill, target, is_challenge, is_challenge_all),
             ));
             y += layout::row::H + layout::row::GAP;
         }
@@ -444,14 +453,23 @@ impl DeckResultCard {
 }
 
 fn visible_deck_limit(header: Option<&DeckResultHeader>) -> usize {
-    if header
-        .and_then(|header| header.recommend_type.as_deref())
-        .is_some_and(|recommend_type| recommend_type == "challenge_all")
-    {
+    if is_challenge_all_header(header) {
         CHALLENGE_ALL_VISIBLE_DECKS
     } else {
         DEFAULT_VISIBLE_DECKS
     }
+}
+
+fn is_challenge_all_header(header: Option<&DeckResultHeader>) -> bool {
+    header
+        .and_then(|header| header.recommend_type.as_deref())
+        .is_some_and(|recommend_type| recommend_type == "challenge_all")
+}
+
+fn is_challenge_header(header: Option<&DeckResultHeader>) -> bool {
+    header
+        .and_then(|header| header.recommend_type.as_deref())
+        .is_some_and(|recommend_type| matches!(recommend_type, "challenge" | "challenge_all"))
 }
 
 /// 给节点打上父容器坐标系里的定位（v2：position 直接落在节点上）。
@@ -686,12 +704,21 @@ enum ResultTarget {
 }
 
 fn resolve_target(header: Option<&DeckResultHeader>) -> ResultTarget {
-    match header
+    let recommend_type = header.and_then(|h| h.recommend_type.as_deref());
+    let raw_target = header
         .and_then(|h| h.target.as_deref())
         .unwrap_or("score")
         .to_ascii_lowercase()
-        .as_str()
+        .to_string();
+    if matches!(recommend_type, Some("challenge" | "challenge_all"))
+        && !matches!(
+            raw_target.as_str(),
+            "power" | "skill" | "mysekai" | "mysekai_point" | "mysekai_internal"
+        )
     {
+        return ResultTarget::Score;
+    }
+    match raw_target.as_str() {
         "ep" | "event_point" | "eventpoint" | "point" => ResultTarget::EventPoint,
         "power" => ResultTarget::Power,
         "skill" => ResultTarget::Skill,
@@ -738,6 +765,16 @@ fn target_metric(deck: &DeckRenderUnit, target: ResultTarget) -> (&'static str, 
     }
 }
 
+fn challenge_target_metric(deck: &DeckRenderUnit) -> (&'static str, String, Color) {
+    (
+        "挑战分",
+        deck.target_value
+            .map(fmt_i64)
+            .unwrap_or_else(|| fmt(deck.live_score)),
+        pal::MIKU,
+    )
+}
+
 fn background_debris(_height: f32) -> Vec<WidgetNode> {
     vec![entry(
         54.0,
@@ -753,6 +790,12 @@ fn header(h: Option<&DeckResultHeader>) -> WidgetNode {
     let target = resolve_target(h);
     let title = title_for(recommend_type, target);
     let protocol = protocol_for(recommend_type, target);
+    let is_challenge = is_challenge_header(h);
+    let protocol_text = if is_challenge_all_header(h) {
+        format!("推荐类型：{protocol} · 排序：挑战分从高到低")
+    } else {
+        format!("推荐类型：{protocol}")
+    };
 
     let mut items = vec![
         entry(
@@ -784,12 +827,7 @@ fn header(h: Option<&DeckResultHeader>) -> WidgetNode {
         entry(
             layout::header::PROTOCOL_X,
             layout::header::PROTOCOL_Y,
-            text(
-                "protocol",
-                format!("推荐类型：{protocol}"),
-                type_size::PROTOCOL,
-                pal::GRAY,
-            ),
+            text("protocol", protocol_text, type_size::PROTOCOL, pal::GRAY),
         ),
         entry(
             layout::header::TITLE_X,
@@ -807,7 +845,9 @@ fn header(h: Option<&DeckResultHeader>) -> WidgetNode {
             ));
         }
 
-        if h.event_name.is_some() || h.event_id.is_some() || h.event_banner_key.is_some() {
+        if !is_challenge
+            && (h.event_name.is_some() || h.event_id.is_some() || h.event_banner_key.is_some())
+        {
             items.push(entry(
                 layout::header::EVENT_X,
                 layout::header::EVENT_Y,
@@ -1139,6 +1179,8 @@ fn deck_panel(
     index: usize,
     max_skill: f64,
     target: ResultTarget,
+    is_challenge: bool,
+    is_challenge_all: bool,
 ) -> WidgetNode {
     let is_top = index == 0;
     let rank_variance = glass_variance(deck.rank, if is_top { 0.34 } else { 0.24 }, 0.035);
@@ -1165,11 +1207,22 @@ fn deck_panel(
                 shadow_variance,
             ),
         ),
-        entry(0.0, 0.0, rank_panel(deck, is_top, target, rank_variance)),
+        entry(
+            0.0,
+            0.0,
+            rank_panel(
+                deck,
+                is_top,
+                target,
+                is_challenge,
+                is_challenge_all,
+                rank_variance,
+            ),
+        ),
         entry(
             layout::row::RANK_W + layout::row::RANK_GAP,
             0.0,
-            deck_body(deck, is_top, max_skill, body_variance),
+            deck_body(deck, is_top, max_skill, is_challenge, body_variance),
         ),
     ];
 
@@ -1193,9 +1246,37 @@ fn rank_panel(
     deck: &DeckRenderUnit,
     is_top: bool,
     target: ResultTarget,
+    is_challenge: bool,
+    is_challenge_all: bool,
     variance: f32,
 ) -> WidgetNode {
-    let (label, value, color) = target_metric(deck, target);
+    let (label, value, color) = if is_challenge {
+        challenge_target_metric(deck)
+    } else {
+        target_metric(deck, target)
+    };
+    let rank_text = if is_challenge_all {
+        deck.character_name
+            .as_deref()
+            .map(|name| truncate_chars(name, 7))
+            .unwrap_or_else(|| {
+                deck.character_id
+                    .map(|id| format!("角色{id}"))
+                    .unwrap_or_else(|| format!("#{}", deck.rank))
+            })
+    } else {
+        format!("#{}", deck.rank)
+    };
+    let rank_size = if is_challenge_all {
+        type_size::CHARACTER
+    } else {
+        type_size::RANK
+    };
+    let rank_y = if is_challenge_all {
+        layout::rank::CHARACTER_Y
+    } else {
+        layout::rank::NUMBER_Y
+    };
     let mut items = vec![
         entry(
             0.0,
@@ -1204,11 +1285,11 @@ fn rank_panel(
         ),
         entry(
             layout::row::RANK_W * 0.5,
-            layout::rank::NUMBER_Y,
+            rank_y,
             text_align(
                 "rank",
-                format!("#{}", deck.rank),
-                type_size::RANK,
+                rank_text,
+                rank_size,
                 pal::WHITE,
                 TextAlignValue::Center,
                 is_top,
@@ -1271,7 +1352,13 @@ fn rank_panel(
     container(format!("rank_{}", deck.rank), Layout::Absolute, items)
 }
 
-fn deck_body(deck: &DeckRenderUnit, _is_top: bool, max_skill: f64, variance: f32) -> WidgetNode {
+fn deck_body(
+    deck: &DeckRenderUnit,
+    _is_top: bool,
+    max_skill: f64,
+    is_challenge: bool,
+    variance: f32,
+) -> WidgetNode {
     let mut items = vec![
         entry(
             0.0,
@@ -1295,7 +1382,7 @@ fn deck_body(deck: &DeckRenderUnit, _is_top: bool, max_skill: f64, variance: f32
 
     let mut cards = Vec::new();
     for (ci, card) in deck.cards.iter().take(5).enumerate() {
-        let mut node = card_chip(card, deck.rank, ci);
+        let mut node = card_chip(card, deck.rank, ci, !is_challenge);
         node.position = pos(card_slot_x(ci), 0.0);
         cards.push(node);
     }
@@ -1308,13 +1395,18 @@ fn deck_body(deck: &DeckRenderUnit, _is_top: bool, max_skill: f64, variance: f32
     items.push(entry(
         layout::stats::X,
         layout::row::INNER_PAD_Y,
-        stats_panel(deck, max_skill),
+        stats_panel(deck, max_skill, !is_challenge),
     ));
 
     container(format!("deck_body_{}", deck.rank), Layout::Absolute, items)
 }
 
-fn card_chip(card: &DeckRenderCard, rank: usize, index: usize) -> WidgetNode {
+fn card_chip(
+    card: &DeckRenderCard,
+    rank: usize,
+    index: usize,
+    show_event_bonus: bool,
+) -> WidgetNode {
     let mut items = vec![
         entry(
             0.0,
@@ -1368,7 +1460,7 @@ fn card_chip(card: &DeckRenderCard, rank: usize, index: usize) -> WidgetNode {
     items.push(entry(
         layout::card::CONTENT_X,
         layout::card::STATUS_Y,
-        card_status_row(card),
+        card_status_row(card, show_event_bonus),
     ));
     items.push(entry(
         layout::card::CONTENT_X,
@@ -1443,33 +1535,41 @@ fn card_skill_row(card: &DeckRenderCard) -> WidgetNode {
     )
 }
 
-fn card_status_row(card: &DeckRenderCard) -> WidgetNode {
+fn card_status_row(card: &DeckRenderCard, show_event_bonus: bool) -> WidgetNode {
     let bonus_text = card
         .event_bonus
         .filter(|bonus| *bonus > 0.0)
         .map(|bonus| format!("+{}", fmt_pct(bonus)))
         .unwrap_or_else(|| "-".to_string());
+    let mut items = Vec::new();
+    if show_event_bonus {
+        items.push(auto(status_badge(
+            "bonus",
+            bonus_text,
+            layout::card::BONUS_W,
+            pal::BONUS_SOFT,
+            pal::BONUS,
+            type_size::CARD_BONUS,
+        )));
+    }
+    items.push(auto(episode_badge("ep1", "前篇", card.episode1_read)));
+    items.push(auto(episode_badge("ep2", "后篇", card.episode2_read)));
+
     container(
         "card_status",
         Layout::Horizontal {
             gap: layout::card::STATUS_GAP,
         },
-        vec![
-            auto(status_badge(
-                "bonus",
-                bonus_text,
-                layout::card::BONUS_W,
-                pal::BONUS_SOFT,
-                pal::BONUS,
-                type_size::CARD_BONUS,
-            )),
-            auto(episode_badge("ep1", "前篇", card.episode1_read)),
-            auto(episode_badge("ep2", "后篇", card.episode2_read)),
-        ],
+        items,
     )
 }
 
-fn stats_panel(deck: &DeckRenderUnit, max_skill: f64) -> WidgetNode {
+fn stats_panel(deck: &DeckRenderUnit, max_skill: f64, show_event_bonus: bool) -> WidgetNode {
+    let block_h = if show_event_bonus {
+        layout::stats::BLOCK_H
+    } else {
+        layout::stats::CHALLENGE_BLOCK_H
+    };
     let mut blocks = vec![auto(stat_block(
         "power",
         "卡组综合力",
@@ -1478,6 +1578,7 @@ fn stats_panel(deck: &DeckRenderUnit, max_skill: f64) -> WidgetNode {
         pal::GOLD,
         pal::BLACK_70,
         false,
+        block_h,
     ))];
 
     if let Some(skill) = deck.multi_live_score_up {
@@ -1494,20 +1595,24 @@ fn stats_panel(deck: &DeckRenderUnit, max_skill: f64) -> WidgetNode {
                 pal::BLACK_70
             },
             highlight,
+            block_h,
         )));
     }
 
-    if let Some(bonus) = deck.event_bonus_total {
-        if bonus > 0.0 {
-            blocks.push(auto(stat_block(
-                "bonus",
-                "活动加成",
-                "卡组加成",
-                format!("+{}", fmt_pct(bonus)),
-                pal::BONUS,
-                pal::BLACK_70,
-                false,
-            )));
+    if show_event_bonus {
+        if let Some(bonus) = deck.event_bonus_total {
+            if bonus > 0.0 {
+                blocks.push(auto(stat_block(
+                    "bonus",
+                    "活动加成",
+                    "卡组加成",
+                    format!("+{}", fmt_pct(bonus)),
+                    pal::BONUS,
+                    pal::BLACK_70,
+                    false,
+                    block_h,
+                )));
+            }
         }
     }
 
@@ -1533,6 +1638,7 @@ fn stat_block(
     accent: Color,
     bg: Color,
     glow: bool,
+    height: f32,
 ) -> WidgetNode {
     let items = vec![
         entry(
@@ -1541,7 +1647,7 @@ fn stat_block(
             panel(
                 "bg",
                 layout::stats::W,
-                layout::stats::BLOCK_H,
+                height,
                 7.0,
                 bg,
                 Some(if glow { accent } else { pal::WHITE_16 }),
@@ -1932,6 +2038,8 @@ mod tests {
     fn unit(rank: usize) -> DeckRenderUnit {
         DeckRenderUnit {
             rank,
+            character_id: Some(rank as i32),
+            character_name: Some(format!("角色{rank}")),
             cards: Vec::new(),
             total_power: 0,
             live_score: 0,
@@ -1980,5 +2088,47 @@ mod tests {
             challenge_all.canvas.height - normal.canvas.height,
             expected_delta
         );
+    }
+
+    #[test]
+    fn challenge_all_uses_character_rows_and_challenge_score() {
+        let mut card = card(Some("challenge_all"), 1);
+        card.decks[0].character_name = Some("初音未来".to_string());
+        card.decks[0].target_value = Some(2_337_915);
+        card.decks[0].live_score = 1_234;
+        card.decks[0].event_point = Some(999);
+        card.decks[0].event_bonus_total = Some(150.0);
+
+        let document = card.to_widget_document();
+        let text = collect_text(&document.root);
+
+        assert!(text.iter().any(|value| value == "初音未来"));
+        assert!(text.iter().any(|value| value == "挑战分"));
+        assert!(text.iter().any(|value| value == "2,337,915"));
+        assert!(
+            text.iter()
+                .any(|value| value == "推荐类型：挑战 · 排序：挑战分从高到低")
+        );
+        assert!(!text.iter().any(|value| value == "#1"));
+        assert!(!text.iter().any(|value| value == "活动点数"));
+        assert!(!text.iter().any(|value| value == "活动加成"));
+    }
+
+    fn collect_text(node: &WidgetNode) -> Vec<String> {
+        let mut values = Vec::new();
+        collect_text_into(node, &mut values);
+        values
+    }
+
+    fn collect_text_into(node: &WidgetNode, values: &mut Vec<String>) {
+        match &node.kind {
+            NodeKind::SimpleText { content, .. } => values.push(content.clone()),
+            NodeKind::Container { children, .. } => {
+                for child in children {
+                    collect_text_into(child, values);
+                }
+            }
+            _ => {}
+        }
     }
 }
