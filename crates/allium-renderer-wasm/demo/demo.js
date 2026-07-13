@@ -1,810 +1,602 @@
-// allium-renderer-wasm browser layer viewer demo.
-//
-// Loads the wasm renderer in a Web Worker, fetches masterdata + assets
-// from a resource base URL the user supplies, renders all layers of a
-// custom profile card, and presents them as an interactive stack with
-// per-layer visibility toggles, page navigation, and a property
-// inspector.
-//
-// Layout, type chips, and visibility model follow the original viewer
-// design (vanilla TS reimplementation — no React, no build step required
-// for this file beyond the npm package's own tsc build of dist/).
-//
-// Resources are not bundled. Card JSON, fonts, masterdata, and assets
-// all come from the user side. The resource base is left blank by
-// default — fill it in once and the demo persists it in localStorage.
-// The base must serve /masterdata and /assets with CORS enabled.
+import { WorkbenchSession } from "./workbench/session.js";
+import { SceneInspector } from "./workbench/inspector.js";
+import { InteractionOverlay, handleInteractionAction } from "./workbench/interactions.js";
+import { TelemetryPanel } from "./workbench/telemetry.js";
 
-import { AlliumWorkerClient } from "../dist/worker-client.js";
-import { isStaticKey } from "./static-manifest.js";
-
-// ── Constants ──
-
-const DEFAULT_WIDTH = 1830;
-const DEFAULT_HEIGHT = 812;
-
-// Tables consumed by allium-renderer-host's JsonMasterDataProvider.
-// If a table is missing the renderer falls back to safe defaults
-// (most often: skip the element).
-const REQUIRED_TABLES = [
-  "cards",
-  "stamps",
-  "honors",
-  "honorGroups",
-  "bondsHonors",
-  "bondsHonorWords",
-  "gameCharacterUnits",
-  "customProfileTextColors",
-  "customProfileTextFonts",
-  "customProfileShapeResources",
-  "customProfileEtcResources",
-  "customProfileCollectionResources",
-  "customProfileGeneralBackgroundResources",
-  "customProfileMemberStandingPictureResources",
-  "customProfilePlayerInfoResources",
-  "customProfileStoryBackgroundResources",
-  "eventStories",
-  "unitStoryEpisodeGroups",
-];
-
-// Asset routing: a key is static (engine-shipped frame/icon/mask/badge)
-// iff it appears in the embedded static manifest, otherwise it is a dynamic
-// per-version game asset. See static-manifest.js — the split cannot be done
-// by first path segment because mixed prefixes such as honor/ hold both.
-
-// File-name → font family aliases for the FOT fonts shipped with the
-// game. masterdata's customProfileTextFonts table references both the
-// FOT names and the FZ fallbacks; supplying one TTF as both means the
-// user only needs to drop one file per typeface.
-const FONT_ALIASES = {
-  "FOT-RodinNTLGPro-DB.ttf":     ["FOT-RodinNTLGPro-DB", "FZLanTingHei-DB-GBK"],
-  "FOT-RodinNTLGPro-DB.otf":     ["FOT-RodinNTLGPro-DB", "FZLanTingHei-DB-GBK"],
-  "FOT-SkipProN-B.otf":          ["FOT-SkipProN-B", "FZZhengHei-EB-GBK"],
-  "FOT-PopHappinessStd-EB.otf":  ["FOT-PopHappinessStd-EB", "FZShaoEr-M11-JF"],
-  "FOT-YurukaStd-UB.otf":        ["FOT-YurukaStd-UB", "FOT-Yuruka Std UB"],
+const byId = (id) => document.getElementById(id);
+const elements = {
+  canvas: byId("scene-canvas"),
+  stageShell: byId("stage-shell"),
+  stageViewport: byId("stage-viewport"),
+  stageEmpty: byId("stage-empty"),
+  stageBusy: byId("stage-busy"),
+  stageBusyLabel: byId("stage-busy-label"),
+  stageBusyDetail: byId("stage-busy-detail"),
+  contextBanner: byId("context-banner"),
+  contextMessage: byId("context-message"),
+  runtimeDot: byId("runtime-dot"),
+  runtimeStatus: byId("runtime-status"),
+  schemaPill: byId("schema-pill"),
+  cardFile: byId("card-file"),
+  profileFile: byId("profile-file"),
+  fontFiles: byId("font-files"),
+  cardFileName: byId("card-file-name"),
+  profileFileName: byId("profile-file-name"),
+  fontList: byId("font-list"),
+  fontCount: byId("font-count"),
+  region: byId("region"),
+  revision: byId("revision"),
+  masterdataBase: byId("masterdata-base"),
+  assetBase: byId("asset-base"),
+  providerPreview: byId("provider-preview"),
+  sdfBackend: byId("sdf-backend"),
+  persistence: byId("persistence"),
+  debugLevel: byId("debug-level"),
+  createScene: byId("create-scene"),
+  resetSession: byId("reset-session"),
+  sessionProgress: byId("session-progress"),
+  sessionMessage: byId("session-message"),
+  pageTabs: byId("page-tabs"),
+  previousPage: byId("previous-page"),
+  nextPage: byId("next-page"),
+  timelinePlay: byId("timeline-play"),
+  timelineStepBack: byId("timeline-step-back"),
+  timelineStepForward: byId("timeline-step-forward"),
+  timelineRange: byId("timeline-range"),
+  timelineOutput: byId("timeline-output"),
+  timelineLoop: byId("timeline-loop"),
+  timelineFinal: byId("timeline-final"),
+  toggleOverlays: byId("toggle-overlays"),
+  exportDump: byId("export-dump"),
+  copyDump: byId("copy-dump"),
+  loseContext: byId("lose-context"),
+  fitStage: byId("fit-stage"),
+  eventLog: byId("event-log"),
+  clearEvents: byId("clear-events"),
+  toastRegion: byId("toast-region"),
 };
 
-const TYPE_LABELS = {
-  text: "文本",
-  shape: "形状",
-  card_member: "卡面",
-  stamp: "印章",
-  other: "装饰",
-  bonds_honor: "羁绊称号",
-  honor: "称号",
-  collection: "收藏品",
-  general: "通用贴图",
-  stand_member: "立绘",
-  general_background: "通用背景",
-  story_background: "剧情背景",
-};
+const session = new WorkbenchSession(elements.canvas);
+const telemetry = new TelemetryPanel(byId("telemetry-dashboard"), byId("stage-fps"));
+const overlay = new InteractionOverlay(byId("interaction-overlay"), byId("hover-card"), {
+  onEvent: emitInteractionEvent,
+  onScroll: (controlId, delta, region) => guarded(async () => {
+    await session.scrollBy(controlId, delta);
+    pushEvent("scroll", region.role, { controlId, delta });
+  }),
+});
+const inspector = new SceneInspector({
+  layerTree: byId("layer-tree"),
+  layerSearch: byId("layer-search"),
+  layerType: byId("layer-type"),
+  groupLayers: byId("group-layers"),
+  showAll: byId("show-all-layers"),
+  hideAll: byId("hide-all-layers"),
+  detailTabs: document.querySelectorAll(".detail-tab"),
+  layerDetail: byId("layer-detail"),
+  controls: byId("component-controls"),
+  interactions: byId("interaction-list"),
+  controlSearch: byId("control-search"),
+  clearInteraction: byId("clear-interaction-focus"),
+  dumpPreview: byId("dump-preview"),
+  dumpSize: byId("dump-size"),
+  dumpSearch: byId("dump-search"),
+  dumpPath: byId("dump-path"),
+  dumpUp: byId("dump-up"),
+  dumpViewMode: byId("dump-view-mode"),
+  copyDump: elements.copyDump,
+}, {
+  onLayerVisible: (layerId, visible) => guarded(() => session.setLayerVisible(layerId, visible)),
+  onLayerMasks: (overrides) => guarded(() => session.setLayerMasks(overrides)),
+  onLayerSelected: selectLayerRegions,
+  onTab: (controlId, value) => guarded(async () => {
+    await session.setTab(controlId, value);
+    pushEvent("control", "tab", { controlId, value });
+  }),
+  onScrollOffset: (controlId, offset) => guarded(() => session.setScrollOffset(controlId, offset)),
+  onScrollBy: (controlId, delta) => guarded(() => session.scrollBy(controlId, delta)),
+  onInteraction: (region, action) => guarded(() => handleInteractionAction(region, action, emitInteractionEvent)),
+  onInteractionSelected: (regionId) => overlay.select(regionId),
+});
 
-const TYPE_COLORS = {
-  card_member: "var(--type-card)",
-  stand_member: "var(--type-stand)",
-  stamp: "var(--type-stamp)",
-  honor: "var(--type-honor)",
-  bonds_honor: "var(--type-honor)",
-  collection: "var(--type-honor)",
-  text: "var(--type-text)",
-  shape: "var(--type-shape)",
-  general_background: "var(--type-bg)",
-  story_background: "var(--type-bg)",
-};
+let playing = false;
+let animationEpoch = 0;
+let animationStartTick = 0;
+let advancePending = false;
+let statsTimer = null;
 
-// ── DOM refs ──
+bindInputs();
+bindNavigation();
+bindTimeline();
+bindInspectorTabs();
+bindContextRecovery();
+bindKeyboard();
+updateProviderPreview();
+updateInputState();
+telemetry.render(null);
 
-const $ = (id) => document.getElementById(id);
-const els = {
-  canvasWrap:   $("canvas-wrap"),
-  canvasFrame:  $("canvas-frame"),
-  hud:          $("hud"),
-  hudText:      $("hud-text"),
-  hudProgress:  $("hud-progress"),
-  hudProgressBar: $("hud-progress-bar"),
-  empty:        $("empty"),
-  pagePrev:     $("page-prev"),
-  pageNext:     $("page-next"),
-  pageDots:     $("page-dots"),
-  pageTabs:     $("page-tabs"),
-  cardFile:     $("card-file"),
-  fontFiles:    $("font-files"),
-  masterdataUrl:   $("masterdata-url"),
-  dynamicAssetUrl: $("dynamic-asset-url"),
-  staticAssetUrl:  $("static-asset-url"),
-  profileFile:  $("profile-file"),
-  renderBtn:    $("render-btn"),
-  status:       $("status"),
-  layerCount:   $("layer-count"),
-  showAll:      $("show-all"),
-  hideAll:      $("hide-all"),
-  resetVis:     $("reset-vis"),
-  layerList:    $("layer-list"),
-};
+session.addEventListener("inputchange", () => {
+  renderFonts();
+  updateInputState();
+});
+session.addEventListener("busy", ({ detail }) => setBusy(detail.busy, detail.label, detail.detail));
+session.addEventListener("ready", ({ detail }) => {
+  elements.stageEmpty.hidden = true;
+  setRuntime("ready", `${detail.pages} page${detail.pages === 1 ? "" : "s"} ready`);
+  enableSceneControls(true);
+  renderPages();
+  setSessionMessage("Scene created. All source inputs remain in session memory.", "success");
+  startStatsPolling();
+});
+session.addEventListener("pagechange", ({ detail }) => {
+  renderPages();
+  applyDump(detail.dump);
+  setTick(detail.dump?.tick ?? 0, false);
+});
+session.addEventListener("scenechange", ({ detail }) => applyDump(detail.dump));
+session.addEventListener("dump", ({ detail }) => applyDump(detail.dump));
+session.addEventListener("error", ({ detail }) => {
+  stopPlayback();
+  elements.stageEmpty.hidden = false;
+  enableSceneControls(false);
+  inspector.setDump(null);
+  overlay.render(null);
+  setRuntime("error", "Scene failed");
+  toast(errorMessage(detail.error), "error");
+});
+session.addEventListener("reset", resetUi);
 
-// ── State ──
-
-const state = {
-  /** AlliumWorkerClient | null — lazily spawned on first render. */
-  client: null,
-  /** Per-page layer arrays. Each layer: { z, type, original_visible,
-   *  data, x, y, width, height, properties?, userVisible, blobUrl } */
-  pages: [],
-  /** Active page index. */
-  activePage: 0,
-  /** Output canvas size (driven by the wasm output, may vary by card). */
-  canvasW: DEFAULT_WIDTH,
-  canvasH: DEFAULT_HEIGHT,
-};
-
-// ── Helpers ──
-
-function setStatus(text, kind) {
-  els.status.textContent = text;
-  els.status.className = "status" + (kind ? " " + kind : "");
-}
-
-function setHud(visible, text, progress) {
-  if (!visible) {
-    els.hud.hidden = true;
-    return;
-  }
-  els.hud.hidden = false;
-  els.hudText.textContent = text || "";
-  if (progress == null) {
-    els.hudProgress.hidden = true;
-  } else {
-    els.hudProgress.hidden = false;
-    els.hudProgressBar.style.width = Math.round(Math.min(1, Math.max(0, progress)) * 100) + "%";
-  }
-}
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-// ── Card normalization ──
-//
-// The renderer takes one CustomProfileCard at a time, but the
-// `userCustomProfileCards` API returns up to N cards per user (each
-// with its own `seq`, sorted ascending = display order). This helper
-// returns the full list as `[{ seq, cardId, cardJson }]` so the demo
-function normalizeCardJsonPages(text) {
-  let v = JSON.parse(text);
-  if (v && !Array.isArray(v) && Array.isArray(v.userCustomProfileCards)) {
-    v = v.userCustomProfileCards;
-  }
-  // Tolerate three shapes: { userCustomProfileCards: [...] } |
-  // [{ customProfileCard, ... }, ...] | a single CustomProfileCard.
-  const entries = Array.isArray(v) ? v : [v];
-  if (entries.length === 0) throw new Error("名片数组为空");
-
-  const pages = entries.map((entry, i) => {
-    const seq = typeof entry?.seq === "number" ? entry.seq : i + 1;
-    const cardId = entry?.customProfileCardId ?? null;
-    const cardObj = entry?.customProfileCard ?? entry;
-    return { seq, cardId, cardJson: JSON.stringify(cardObj) };
-  });
-
-  // Sort by seq ascending so page 1 is first regardless of input order.
-  pages.sort((a, b) => a.seq - b.seq);
-  return pages;
-}
-
-// ── Resource fetching ──
-
-async function fetchMasterdata(masterdataUrl, onProgress) {
-  const base = masterdataUrl;
-  const out = {};
-  let done = 0;
-  let failed = 0;
-
-  await Promise.all(REQUIRED_TABLES.map(async (table) => {
-    try {
-      const res = await fetch(`${base}/${table}.json`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      out[table] = await res.text();
-    } catch {
-      failed++;
-    } finally {
-      done++;
-      onProgress(done / REQUIRED_TABLES.length, `masterdata: ${done}/${REQUIRED_TABLES.length}`);
+function bindInputs() {
+  elements.cardFile.addEventListener("change", () => {
+    const file = elements.cardFile.files?.[0];
+    if (file) {
+      session.setCardFile(file);
+      elements.cardFileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
     }
+  });
+  elements.profileFile.addEventListener("change", () => {
+    const file = elements.profileFile.files?.[0];
+    if (file) {
+      session.setProfileFile(file);
+      elements.profileFileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
+    }
+  });
+  elements.fontFiles.addEventListener("change", () => guarded(async () => {
+    await session.addFontFiles([...elements.fontFiles.files]);
+    elements.fontFiles.value = "";
   }));
-
-  if (failed > 0) {
-    console.warn(`masterdata: ${failed} 表拉取失败，渲染可能不完整`);
-  }
-  return out;
-}
-
-async function fetchAssets(client, cardJsons, masterData, dynamicUrl, staticUrl, onProgress) {
-  // Union asset keys across all pages (collectAssetKeys per page, then
-  // dedupe). Cards typically share many keys — fetching once is enough.
-  const keySet = new Set();
-  for (const cardJson of cardJsons) {
-    const keys = await client.collectAssetKeys(cardJson, masterData);
-    for (const k of keys) keySet.add(k);
-  }
-  const keys = Array.from(keySet);
-  const assets = [];
-  if (keys.length === 0) return assets;
-
-  // Asset keys fall into two namespaces, each with its own base URL:
-  //  - static assets (frames, icons, badges, masks) ship with the engine
-  //    and don't change; they are listed in the embedded static manifest.
-  //  - dynamic assets (card art, stamps, thumbnails) change per game
-  //    version. Both URLs are plain prefixes — the key (plus .png) is
-  //    appended verbatim, no region/path segments are inserted.
-  const assetUrl = (key) =>
-    isStaticKey(key)
-      ? `${staticUrl}/${key}.png`
-      : `${dynamicUrl}/${key}.png`;
-
-  const CONCURRENCY = 6;
-  const queue = keys.slice();
-  let done = 0;
-  let failed = 0;
-
-  async function pull() {
-    while (queue.length > 0) {
-      const key = queue.shift();
-      try {
-        const res = await fetch(assetUrl(key));
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = await res.arrayBuffer();
-        assets.push({ key, bytes: new Uint8Array(buf) });
-      } catch {
-        failed++;
-      } finally {
-        done++;
-        onProgress(done / keys.length, `素材: ${done}/${keys.length}`);
-      }
+  setupDrop(byId("card-drop"), (file) => {
+    session.setCardFile(file);
+    elements.cardFileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
+  }, (file) => file.name.toLowerCase().endsWith(".json"));
+  setupDrop(byId("profile-drop"), (file) => {
+    session.setProfileFile(file);
+    elements.profileFileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
+  }, (file) => file.name.toLowerCase().endsWith(".json"));
+  setupDrop(elements.stageViewport, async (file) => {
+    if (file.name.toLowerCase().endsWith(".json")) {
+      session.setCardFile(file);
+      elements.cardFileName.textContent = `${file.name} · ${formatBytes(file.size)}`;
+    } else {
+      await session.addFontFiles([file]);
     }
-  }
+  }, (file) => /\.(?:json|ttf|otf)$/i.test(file.name));
 
-  await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, keys.length) }, () => pull())
-  );
-
-  if (failed > 0) {
-    console.warn(`素材: ${failed} 个缺失`);
-  }
-  return assets;
-}
-
-// ── Font collection ──
-
-async function readFontEntries(files) {
-  const entries = [];
-  for (const file of files) {
-    const families = FONT_ALIASES[file.name]
-      || [file.name.replace(/\.(ttf|otf|TTF|OTF)$/, "")];
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    for (const family of families) {
-      // slice() so the worker can transfer each buffer independently
-      entries.push({ family, bytes: bytes.slice() });
-    }
-  }
-  return entries;
-}
-
-// ── Worker client ──
-
-async function ensureClient() {
-  if (state.client) return state.client;
-  setHud(true, "加载 wasm Worker…");
-  state.client = await AlliumWorkerClient.spawn({
-    workerUrl: new URL("../dist/worker.js", import.meta.url),
-    moduleUrl: new URL("../dist/allium_renderer_wasm.js", import.meta.url).href,
-    wasmUrl:   new URL("../dist/allium_renderer_wasm.wasm", import.meta.url).href,
+  byId("provider-toggle").addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!expanded));
+    byId("provider-fields").hidden = expanded;
   });
-  return state.client;
+  elements.region.addEventListener("change", () => {
+    const region = elements.region.value;
+    elements.masterdataBase.value = `https://cdn.emptysekai.com/masterdata/${region}/${elements.revision.value || "latest"}`;
+    elements.assetBase.value = `https://cdn.emptysekai.com/assets/${region}`;
+    updateProviderPreview();
+  });
+  elements.revision.addEventListener("change", () => {
+    const region = elements.region.value;
+    elements.masterdataBase.value = `https://cdn.emptysekai.com/masterdata/${region}/${elements.revision.value || "latest"}`;
+    updateProviderPreview();
+  });
+  elements.masterdataBase.addEventListener("input", updateProviderPreview);
+  elements.assetBase.addEventListener("input", updateProviderPreview);
+
+  elements.createScene.addEventListener("click", () => guarded(async () => {
+    stopPlayback();
+    setRuntime("busy", "Building scene");
+    await session.build(readConfig());
+  }));
+  elements.resetSession.addEventListener("click", () => guarded(() => session.reset()));
 }
 
-// ── Render orchestration ──
-//
-// The card JSON may describe N pages (an array) or a single card. We
-// render each page independently and keep them in state.pages; the
-// page navigator switches between them.
+function bindNavigation() {
+  elements.previousPage.addEventListener("click", () => guarded(() => session.switchPage(session.activePage - 1)));
+  elements.nextPage.addEventListener("click", () => guarded(() => session.switchPage(session.activePage + 1)));
+  elements.fitStage.addEventListener("click", () => {
+    elements.stageShell.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+    toast("Stage fitted to the available viewport.");
+  });
+  elements.toggleOverlays.addEventListener("click", () => {
+    const enabled = elements.toggleOverlays.getAttribute("aria-pressed") !== "true";
+    elements.toggleOverlays.setAttribute("aria-pressed", String(enabled));
+    elements.toggleOverlays.textContent = enabled ? "Overlays" : "Overlays off";
+    overlay.setEnabled(enabled);
+  });
+  elements.exportDump.addEventListener("click", exportDump);
+  elements.copyDump.addEventListener("click", () => guarded(async () => {
+    await navigator.clipboard.writeText(JSON.stringify(session.dump, null, 2));
+    toast("Scene dump copied.");
+  }));
+  elements.clearEvents.addEventListener("click", () => {
+    elements.eventLog.replaceChildren(muted("Interaction events will appear here."));
+  });
+}
 
-async function doRender() {
-  els.renderBtn.disabled = true;
-  els.empty.hidden = true;
-  clearPages();
+function bindTimeline() {
+  elements.timelinePlay.addEventListener("click", () => playing ? stopPlayback() : startPlayback());
+  elements.timelineStepBack.addEventListener("click", () => moveTick(-1));
+  elements.timelineStepForward.addEventListener("click", () => moveTick(1));
+  elements.timelineRange.addEventListener("input", () => {
+    stopPlayback();
+    setTick(Number(elements.timelineRange.value));
+  });
+  elements.timelineFinal.addEventListener("click", () => {
+    stopPlayback();
+    setTick(Number(elements.timelineRange.max));
+  });
+}
 
-  const t0 = performance.now();
+function bindInspectorTabs() {
+  for (const tab of document.querySelectorAll(".inspector-tab")) {
+    tab.addEventListener("click", () => {
+      for (const candidate of document.querySelectorAll(".inspector-tab")) {
+        const active = candidate === tab;
+        candidate.classList.toggle("active", active);
+        candidate.setAttribute("aria-selected", String(active));
+      }
+      for (const panel of document.querySelectorAll(".inspector-panel")) {
+        panel.classList.toggle("active", panel.id === `panel-${tab.dataset.panel}`);
+      }
+      if (tab.dataset.panel === "telemetry") updateStats();
+    });
+  }
+}
 
-  try {
-    const rawCard = await readCardText();
-    const pageInputs = normalizeCardJsonPages(rawCard);
-    console.log(`[demo] 名片页数: ${pageInputs.length}`, pageInputs.map(p => ({ seq: p.seq, cardId: p.cardId, bytes: p.cardJson.length })));
-    const profileJson = await readProfileText();
+function bindContextRecovery() {
+  elements.canvas.addEventListener("webglcontextlost", (event) => {
+    event.preventDefault();
+    telemetry.contextLost();
+    elements.contextBanner.hidden = false;
+    elements.contextMessage.textContent = "WebGL context lost. Waiting for resource and atlas restoration.";
+    setRuntime("error", "Context lost");
+  });
+  elements.canvas.addEventListener("webglcontextrestored", () => guarded(async () => {
+    elements.contextMessage.textContent = "Context restored. Rebinding GPU resources.";
+    if (typeof session.renderer?.restoreContext === "function") await session.renderer.restoreContext();
+    session.draw();
+    telemetry.contextRestored();
+    window.setTimeout(() => { elements.contextBanner.hidden = true; }, 1400);
+    setRuntime("ready", "Context restored");
+    pushEvent("runtime", "context-restored", {});
+  }));
+  elements.loseContext.addEventListener("click", () => {
+    if (!session.triggerContextLoss()) toast("WEBGL_lose_context is unavailable in this browser.", "warning");
+  });
+}
 
-    const trimUrl = (v) => v.trim().replace(/\/+$/, "");
-    const masterdataUrl = trimUrl(els.masterdataUrl.value);
-    const dynamicUrl = trimUrl(els.dynamicAssetUrl.value);
-    const staticUrl = trimUrl(els.staticAssetUrl.value);
-    if (!masterdataUrl) {
-      setStatus("请填写 masterdata URL", "error");
-      els.empty.hidden = false;
-      setHud(false);
+function bindKeyboard() {
+  window.addEventListener("keydown", (event) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+    if (event.code === "Space" && session.activeScene) {
+      event.preventDefault();
+      playing ? stopPlayback() : startPlayback();
+    } else if (event.key === "ArrowLeft" && session.activeScene) {
+      event.preventDefault();
+      moveTick(event.shiftKey ? -60 : -1);
+    } else if (event.key === "ArrowRight" && session.activeScene) {
+      event.preventDefault();
+      moveTick(event.shiftKey ? 60 : 1);
+    } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s" && session.dump) {
+      event.preventDefault();
+      exportDump();
+    }
+  });
+}
+
+function startPlayback() {
+  if (!session.activeScene) return;
+  playing = true;
+  animationEpoch = performance.now();
+  animationStartTick = Number(elements.timelineRange.value);
+  elements.timelinePlay.textContent = "❚❚";
+  elements.timelinePlay.setAttribute("aria-label", "Pause timeline");
+  requestAnimationFrame(animationFrame);
+}
+
+function stopPlayback() {
+  playing = false;
+  elements.timelinePlay.textContent = "▶";
+  elements.timelinePlay.setAttribute("aria-label", "Play timeline");
+}
+
+function animationFrame(now) {
+  if (!playing) return;
+  telemetry.recordFrame(now);
+  const maximum = Number(elements.timelineRange.max);
+  let tick = animationStartTick + Math.floor((now - animationEpoch) * .06);
+  if (tick > maximum) {
+    if (elements.timelineLoop.checked) {
+      tick %= maximum + 1;
+      animationEpoch = now;
+      animationStartTick = tick;
+    } else {
+      setTick(maximum);
+      stopPlayback();
       return;
     }
-    persistInputs(masterdataUrl, dynamicUrl, staticUrl, rawCard, profileJson);
+  }
+  if (!advancePending && tick !== Number(elements.timelineRange.value)) {
+    advancePending = true;
+    setTick(tick, true).finally(() => { advancePending = false; });
+  }
+  requestAnimationFrame(animationFrame);
+}
 
-    setStatus("加载中…");
-    const client = await ensureClient();
+function moveTick(delta) {
+  stopPlayback();
+  const current = Number(elements.timelineRange.value);
+  setTick(Math.max(0, Math.min(Number(elements.timelineRange.max), current + delta)));
+}
 
-    setHud(true, "拉取 masterdata…", 0);
-    const masterData = await fetchMasterdata(masterdataUrl, (p, t) => {
-      setHud(true, t, p * 0.3);
-    });
+async function setTick(tick, advance = true) {
+  const value = Math.max(0, Math.floor(Number(tick) || 0));
+  elements.timelineRange.value = String(value);
+  elements.timelineOutput.value = `${value} / ${elements.timelineRange.max}`;
+  elements.timelineOutput.textContent = `${value} / ${elements.timelineRange.max}`;
+  if (advance && session.activeScene) await session.advance(value);
+}
 
-    let fonts = [];
-    if (els.fontFiles.files.length > 0) {
-      setHud(true, "读取字体…", 0.3);
-      fonts = await readFontEntries(els.fontFiles.files);
-    }
+function applyDump(dump) {
+  if (!dump) return;
+  inspector.setDump(dump);
+  overlay.render(dump);
+  elements.schemaPill.textContent = `schema ${dump.schema_major}.${dump.schema_minor}`;
+  elements.timelineRange.value = String(dump.tick ?? 0);
+  elements.timelineOutput.textContent = `${dump.tick ?? 0} / ${elements.timelineRange.max}`;
+  updateStats();
+}
 
-    setHud(true, "收集素材列表…", 0.32);
-    const cardJsons = pageInputs.map((p) => p.cardJson);
-    const assets = await fetchAssets(client, cardJsons, masterData, dynamicUrl, staticUrl, (p, t) => {
-      setHud(true, t, 0.35 + p * 0.4);
-    });
+function renderPages() {
+  elements.pageTabs.replaceChildren();
+  for (const [index, page] of session.pages.entries()) {
+    const button = document.createElement("button");
+    button.className = `page-tab${index === session.activePage ? " active" : ""}`;
+    button.type = "button";
+    button.role = "tab";
+    button.setAttribute("aria-selected", String(index === session.activePage));
+    button.textContent = String(page.sequence);
+    button.title = `Page ${page.sequence}${page.cardId == null ? "" : ` · card ${page.cardId}`}`;
+    button.addEventListener("click", () => guarded(() => session.switchPage(index)));
+    elements.pageTabs.append(button);
+  }
+  elements.previousPage.disabled = session.activePage <= 0;
+  elements.nextPage.disabled = session.activePage < 0 || session.activePage >= session.pages.length - 1;
+}
 
-    // Render every page. The wasm ABI is one card at a time; we loop
-    // here. renderAllLayers *transfers* font/asset ArrayBuffers to the
-    // worker (postMessage ownership handover). After the first page
-    // those buffers are detached, so we must slice() fresh copies for
-    // every page. masterData (plain JSON strings) is cloned, not
-    // transferred — no copy needed.
-    const pages = [];
-    for (let i = 0; i < pageInputs.length; i++) {
-      const { cardJson, seq, cardId } = pageInputs[i];
-      const phaseLabel = pageInputs.length > 1
-        ? `渲染分层… (${i + 1}/${pageInputs.length})`
-        : "渲染分层…";
-      setHud(true, phaseLabel, 0.78 + (i / pageInputs.length) * 0.2);
-
-      // Fresh copies for each page — the worker transfers them.
-      const fontsCopy = fonts.map((f) => ({ family: f.family, bytes: f.bytes.slice() }));
-      const assetsCopy = assets.map((a) => ({ key: a.key, bytes: a.bytes.slice() }));
-
-      const result = await client.renderAllLayers({
-        cardJson,
-        profileJson,
-        quality: 80,
-        includeProperties: true,
-        masterData,
-        fonts: fontsCopy,
-        assets: assetsCopy,
-      });
-
-      const layers = result.map((l, idx) => ({
-        ...l,
-        index: idx,
-        userVisible: l.original_visible,
-        blobUrl: (l.data && l.data.byteLength > 0)
-          ? URL.createObjectURL(new Blob([l.data], { type: "image/webp" }))
-          : null,
-      }));
-
-      pages.push({
-        seq,
-        cardId,
-        layers,
-        width: DEFAULT_WIDTH,
-        height: DEFAULT_HEIGHT,
-      });
-    }
-
-    state.pages = pages;
-    state.activePage = 0;
-    state.canvasW = DEFAULT_WIDTH;
-    state.canvasH = DEFAULT_HEIGHT;
-
-    renderActivePage();
-    buildLayerList();
-    updatePageNav();
-    setHud(false);
-
-    const ms = performance.now() - t0;
-    const totalLayers = pages.reduce((n, p) => n + p.layers.length, 0);
-    const summary = pages.length > 1
-      ? `完成 · ${(ms / 1000).toFixed(1)}s · ${pages.length} 页 · ${totalLayers} 层`
-      : `完成 · ${(ms / 1000).toFixed(1)}s · ${totalLayers} 层`;
-    setStatus(summary, "ok");
-    els.showAll.disabled = els.hideAll.disabled = els.resetVis.disabled = false;
-  } catch (err) {
-    console.error(err);
-    setStatus(`渲染失败：${err.message || err}`, "error");
-    setHud(false);
-    els.empty.hidden = false;
-  } finally {
-    els.renderBtn.disabled = false;
+function renderFonts() {
+  elements.fontList.replaceChildren();
+  elements.fontCount.textContent = String(session.fonts.length);
+  if (session.fonts.length === 0) return elements.fontList.append(empty("Register every family referenced by the selected region."));
+  for (const font of session.fonts) {
+    const item = document.createElement("article");
+    item.className = "font-entry";
+    const name = document.createElement("input");
+    name.className = "font-family-input";
+    name.value = font.families.join(", ");
+    name.title = "Comma-separated family names supplied to the renderer";
+    name.setAttribute("aria-label", `Font families for ${font.file.name}`);
+    name.addEventListener("change", () => guarded(() => session.updateFontFamilies(font.id, name.value)));
+    const hash = document.createElement("small");
+    hash.textContent = `${font.file.name} · ${formatBytes(font.file.size)} · renderer fingerprints internally`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = `Remove ${font.file.name}`;
+    remove.setAttribute("aria-label", `Remove ${font.file.name}`);
+    remove.addEventListener("click", () => session.removeFont(font.id));
+    item.append(name, hash, remove);
+    elements.fontList.append(item);
   }
 }
 
-// ── Page management ──
-//
-// Even when a single card is rendered, the page model still applies
-// (just one page). This keeps the navigator code uniform with future
-// multi-page support.
-
-function clearPages() {
-  for (const page of state.pages) {
-    for (const l of page.layers) {
-      if (l.blobUrl) URL.revokeObjectURL(l.blobUrl);
-    }
-  }
-  state.pages = [];
-  state.activePage = 0;
-  els.canvasFrame.querySelectorAll("img.layer").forEach((el) => el.remove());
-  els.layerList.innerHTML = '<li class="layer-empty">渲染后将列出所有图层。</li>';
-  els.layerCount.textContent = "0";
-  els.showAll.disabled = els.hideAll.disabled = els.resetVis.disabled = true;
+function updateInputState() {
+  elements.createScene.disabled = !session.cardFile || session.fonts.length === 0 || session.busy;
+  if (!session.cardFile) setSessionMessage("Choose a card and at least one font.");
+  else if (session.fonts.length === 0) setSessionMessage("Add every font family required by the profile.");
+  else setSessionMessage("Inputs ready. Build the semantic scene when providers are configured.");
 }
 
-function renderActivePage() {
-  // Wipe existing layer <img>s but keep HUD/empty.
-  els.canvasFrame.querySelectorAll("img.layer").forEach((el) => el.remove());
-  const page = state.pages[state.activePage];
-  if (!page) return;
+function updateProviderPreview() {
+  const masterdata = elements.masterdataBase.value.replace(/\/+$/, "");
+  const assets = elements.assetBase.value.replace(/\/+$/, "");
+  elements.providerPreview.textContent = `Tables: ${masterdata}/{table}.json\nAssets: ${assets}/{canonical-key}.png`;
+}
 
-  els.canvasFrame.style.aspectRatio = `${state.canvasW} / ${state.canvasH}`;
+function readConfig() {
+  return {
+    region: elements.region.value,
+    revision: elements.revision.value,
+    masterdataBase: elements.masterdataBase.value,
+    assetBase: elements.assetBase.value,
+    sdfBackend: elements.sdfBackend.value,
+    persistence: elements.persistence.value,
+    debugLevel: elements.debugLevel.value,
+  };
+}
 
-  for (const layer of page.layers) {
-    if (!layer.blobUrl) continue;
-    const img = document.createElement("img");
-    img.className = "layer" + (layer.userVisible ? "" : " hidden");
-    img.src = layer.blobUrl;
-    img.alt = TYPE_LABELS[layer.type] || layer.type;
-    img.dataset.layerIndex = String(layer.index);
-    img.style.zIndex = String(layer.z);
-    img.style.left = (layer.x / state.canvasW * 100).toFixed(4) + "%";
-    img.style.top = (layer.y / state.canvasH * 100).toFixed(4) + "%";
-    img.style.width = (layer.width / state.canvasW * 100).toFixed(4) + "%";
-    img.style.height = (layer.height / state.canvasH * 100).toFixed(4) + "%";
-    els.canvasFrame.appendChild(img);
+function setBusy(busy, label = "", detail = "") {
+  elements.stageBusy.hidden = !busy;
+  elements.sessionProgress.hidden = !busy;
+  elements.stageBusyLabel.textContent = label || "Preparing scene";
+  elements.stageBusyDetail.textContent = detail || "Working in the renderer worker";
+  elements.createScene.disabled = busy || !session.cardFile || session.fonts.length === 0;
+  if (busy) {
+    setRuntime("busy", label || "Working");
+    setSessionMessage(`${label}${detail ? ` · ${detail}` : ""}`);
   }
 }
 
-function updatePageNav() {
-  const n = state.pages.length;
-  if (n <= 1) {
-    els.pagePrev.hidden = true;
-    els.pageNext.hidden = true;
-    els.pageDots.hidden = true;
-    els.pageTabs.hidden = true;
-    return;
-  }
-  els.pagePrev.hidden = state.activePage === 0;
-  els.pageNext.hidden = state.activePage === n - 1;
-  els.pageDots.hidden = false;
-  els.pageDots.innerHTML = "";
-  for (let i = 0; i < n; i++) {
-    const dot = document.createElement("button");
-    dot.className = "page-dot" + (i === state.activePage ? " active" : "");
-    dot.setAttribute("aria-label", `第 ${i + 1} 页`);
-    dot.addEventListener("click", () => setPage(i));
-    els.pageDots.appendChild(dot);
-  }
-
-  // Panel page tabs
-  els.pageTabs.hidden = false;
-  els.pageTabs.innerHTML = "";
-  for (let i = 0; i < n; i++) {
-    const tab = document.createElement("button");
-    tab.className = "page-tab" + (i === state.activePage ? " active" : "");
-    tab.textContent = `第 ${i + 1} 页`;
-    tab.addEventListener("click", () => setPage(i));
-    els.pageTabs.appendChild(tab);
-  }
-
+function setRuntime(kind, message) {
+  elements.runtimeDot.className = `status-dot ${kind}`;
+  elements.runtimeStatus.textContent = message;
 }
 
-function setPage(i) {
-  if (i < 0 || i >= state.pages.length || i === state.activePage) return;
-  state.activePage = i;
-  renderActivePage();
-  buildLayerList();
-  updatePageNav();
-}
-
-// ── Layer list ──
-
-function buildLayerList() {
-  els.layerList.innerHTML = "";
-  const page = state.pages[state.activePage];
-  if (!page) return;
-
-  if (page.layers.length === 0) {
-    const li = document.createElement("li");
-    li.className = "layer-empty";
-    li.textContent = "此页无图层。";
-    els.layerList.appendChild(li);
-    return;
-  }
-
-  let totalVisible = 0;
-  let userVisible = 0;
-  for (const l of page.layers) {
-    if (l.original_visible) totalVisible++;
-    if (l.userVisible && l.original_visible) userVisible++;
-  }
-  els.layerCount.textContent = `${userVisible}/${totalVisible}`;
-
-  for (const layer of page.layers) {
-    const li = document.createElement("li");
-    li.className = "layer-row";
-    li.dataset.layerIndex = String(layer.index);
-
-    const head = document.createElement("div");
-    head.className = "layer-head";
-
-    const bar = document.createElement("span");
-    bar.className = "layer-type-bar";
-    bar.style.background = TYPE_COLORS[layer.type] || "transparent";
-    head.appendChild(bar);
-
-    const eye = document.createElement("button");
-    eye.className = "layer-eye " + (layer.userVisible ? "on" : "off");
-    eye.title = layer.userVisible ? "隐藏此层" : "显示此层";
-    eye.textContent = layer.userVisible ? "●" : "○";
-    eye.disabled = !layer.original_visible;
-    eye.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleLayer(layer.index);
-    });
-    head.appendChild(eye);
-
-    const name = document.createElement("div");
-    name.className = "layer-name";
-    const typeLabel = TYPE_LABELS[layer.type] || layer.type;
-    const sizeStr = layer.width > 0 ? `${layer.width}×${layer.height}` : "—";
-    const visMark = layer.original_visible ? "" : " · 不可见";
-    name.innerHTML =
-      `<span class="layer-z">z${layer.z}</span>` +
-      `<span class="layer-type">${escHtml(typeLabel)}</span>` +
-      `<span class="layer-detail">${sizeStr}${visMark}</span>`;
-    head.appendChild(name);
-
-    const hasProps = layer.properties && Object.keys(layer.properties).length > 0;
-    if (hasProps) {
-      const arrow = document.createElement("span");
-      arrow.className = "layer-toggle-arrow";
-      arrow.textContent = "▸";
-      head.appendChild(arrow);
-      head.addEventListener("click", () => {
-        li.classList.toggle("expanded");
-      });
-    } else {
-      head.style.cursor = "default";
-      head.appendChild(document.createElement("span"));
-    }
-
-    li.appendChild(head);
-
-    if (hasProps) {
-      const props = document.createElement("div");
-      props.className = "layer-props";
-      const grid = document.createElement("div");
-      grid.className = "layer-props-grid";
-      for (const [key, value] of Object.entries(layer.properties)) {
-        if (value == null || value === "") continue;
-        const strVal = typeof value === "string" ? value : String(value);
-        const isColor = typeof value === "string" && /^#[0-9a-fA-F]{3,8}$/.test(value);
-        const isText = key === "text" || key === "label" || key === "content";
-
-        const k = document.createElement("span");
-        k.className = "k";
-        k.textContent = key;
-
-        const v = document.createElement("span");
-        if (isColor) {
-          v.className = "v";
-          v.innerHTML =
-            `<span class="swatch" style="background:${escHtml(strVal)}"></span>${escHtml(strVal)}`;
-        } else if (isText) {
-          v.className = "v mono";
-          v.textContent = strVal;
-        } else {
-          v.className = "v";
-          v.textContent = strVal;
-        }
-
-        grid.appendChild(k);
-        grid.appendChild(v);
-      }
-      props.appendChild(grid);
-      li.appendChild(props);
-    }
-
-    els.layerList.appendChild(li);
+function enableSceneControls(enabled) {
+  for (const control of [elements.timelinePlay, elements.timelineStepBack, elements.timelineStepForward, elements.timelineRange, elements.timelineFinal, elements.exportDump, elements.loseContext]) {
+    control.disabled = !enabled;
   }
 }
 
-function toggleLayer(layerIndex) {
-  const page = state.pages[state.activePage];
-  if (!page) return;
-  const layer = page.layers[layerIndex];
-  if (!layer || !layer.original_visible) return;
-  layer.userVisible = !layer.userVisible;
-
-  const img = els.canvasFrame.querySelector(`img.layer[data-layer-index="${layerIndex}"]`);
-  if (img) img.classList.toggle("hidden", !layer.userVisible);
-
-  const row = els.layerList.querySelector(`.layer-row[data-layer-index="${layerIndex}"]`);
-  if (row) {
-    const eye = row.querySelector(".layer-eye");
-    eye.className = "layer-eye " + (layer.userVisible ? "on" : "off");
-    eye.textContent = layer.userVisible ? "●" : "○";
-    eye.title = layer.userVisible ? "隐藏此层" : "显示此层";
-  }
-  updateCount();
+async function updateStats() {
+  if (!session.renderer) return telemetry.render(null);
+  try { telemetry.render(await session.stats()); } catch { telemetry.render(null); }
 }
 
-function updateCount() {
-  const page = state.pages[state.activePage];
-  if (!page) return;
-  let totalVisible = 0;
-  let userVisible = 0;
-  for (const l of page.layers) {
-    if (l.original_visible) totalVisible++;
-    if (l.userVisible && l.original_visible) userVisible++;
-  }
-  els.layerCount.textContent = `${userVisible}/${totalVisible}`;
+function startStatsPolling() {
+  clearInterval(statsTimer);
+  statsTimer = window.setInterval(updateStats, 1000);
+  updateStats();
 }
 
-function bulkVisibility(setter) {
-  const page = state.pages[state.activePage];
-  if (!page) return;
-  for (const layer of page.layers) {
-    if (!layer.original_visible) continue;
-    layer.userVisible = setter(layer);
-  }
-  // Re-sync DOM in one pass.
-  for (const layer of page.layers) {
-    const img = els.canvasFrame.querySelector(`img.layer[data-layer-index="${layer.index}"]`);
-    if (img) img.classList.toggle("hidden", !layer.userVisible);
-    const row = els.layerList.querySelector(`.layer-row[data-layer-index="${layer.index}"]`);
-    if (row) {
-      const eye = row.querySelector(".layer-eye");
-      eye.className = "layer-eye " + (layer.userVisible ? "on" : "off");
-      eye.textContent = layer.userVisible ? "●" : "○";
-    }
-  }
-  updateCount();
+function selectLayerRegions(layerId) {
+  const region = [
+    ...(session.dump?.interaction_regions ?? []),
+    ...(session.dump?.numeric_text_regions ?? []),
+  ].find((candidate) => candidate.layer_id === layerId);
+  inspector.selectRegion(region?.id ?? null);
 }
 
-// ── Drag-and-drop ──
+async function emitInteractionEvent(event) {
+  if (!event.quiet) {
+    pushEvent(event.type, event.region?.role ?? "region", event.value);
+    if (event.type === "copy") toast(`Copied ${event.value || "numeric text"}.`);
+    if (event.type === "activate") toast("Navigation event emitted. The renderer did not navigate.");
+  }
+  inspector.selectLayer(event.region?.layer_id);
+  inspector.selectRegion(event.region?.id ?? null);
+}
 
-function bindDropTarget() {
-  const frame = els.canvasFrame;
-  frame.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    frame.classList.add("drag-over");
+function pushEvent(type, role, value) {
+  if (elements.eventLog.querySelector(".muted")) elements.eventLog.replaceChildren();
+  const entry = document.createElement("span");
+  entry.className = "event-entry";
+  const time = document.createElement("span");
+  time.className = "event-time";
+  time.textContent = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  entry.append(time, document.createTextNode(`${type}:${role} ${compactJson(value)}`));
+  elements.eventLog.prepend(entry);
+  while (elements.eventLog.children.length > 6) elements.eventLog.lastElementChild.remove();
+}
+
+function exportDump() {
+  if (!session.dump) return;
+  const blob = new Blob([JSON.stringify(session.dump, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `allium-scene-${session.dump.scene_id}-tick-${session.dump.tick}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+  pushEvent("debug", "dump-export", { sceneId: session.dump.scene_id, tick: session.dump.tick });
+}
+
+async function resetUi() {
+  stopPlayback();
+  clearInterval(statsTimer);
+  elements.cardFile.value = "";
+  elements.profileFile.value = "";
+  elements.fontFiles.value = "";
+  elements.cardFileName.textContent = "Drop or choose a file";
+  elements.profileFileName.textContent = "Optional component data";
+  elements.stageEmpty.hidden = false;
+  elements.contextBanner.hidden = true;
+  elements.pageTabs.replaceChildren();
+  inspector.setDump(null);
+  overlay.render(null);
+  telemetry.render(null);
+  renderFonts();
+  enableSceneControls(false);
+  setRuntime("", "No active scene");
+  elements.schemaPill.textContent = "schema --";
+  setTick(0, false);
+  updateInputState();
+}
+
+function setupDrop(host, accept, predicate) {
+  host.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    host.classList.add("dragging");
   });
-  frame.addEventListener("dragleave", () => frame.classList.remove("drag-over"));
-  frame.addEventListener("drop", (e) => {
-    e.preventDefault();
-    frame.classList.remove("drag-over");
-    const file = e.dataTransfer?.files?.[0];
-    if (!file || !file.name.toLowerCase().endsWith(".json")) return;
-    const dt = new DataTransfer();
-    dt.items.add(file);
-    els.cardFile.files = dt.files;
-    setStatus(`已载入 ${file.name}`);
-    els.renderBtn.disabled = false;
+  host.addEventListener("dragleave", () => host.classList.remove("dragging"));
+  host.addEventListener("drop", (event) => {
+    event.preventDefault();
+    host.classList.remove("dragging");
+    const file = [...event.dataTransfer.files].find(predicate);
+    if (file) guarded(() => accept(file));
+    else toast("The dropped file is not supported here.", "warning");
   });
 }
 
-// ── Page swipe (touch only — buttons handle mouse navigation) ──
-
-function bindPageSwipe() {
-  const SWIPE_MIN = 30;
-  const SWIPE_RATIO = 1.5;
-  let start = null;
-
-  els.canvasFrame.addEventListener("pointerdown", (e) => {
-    if (!e.isPrimary || e.pointerType === "mouse") return;
-    start = { x: e.clientX, y: e.clientY, aborted: false };
-  });
-  els.canvasFrame.addEventListener("pointermove", (e) => {
-    if (!start || start.aborted) return;
-    const absDy = Math.abs(e.clientY - start.y);
-    const absDx = Math.abs(e.clientX - start.x);
-    if (absDy > absDx && absDy > 10) start.aborted = true;
-  });
-  els.canvasFrame.addEventListener("pointerup", (e) => {
-    const s = start; start = null;
-    if (!s || s.aborted) return;
-    const dx = e.clientX - s.x;
-    const dy = e.clientY - s.y;
-    if (Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * SWIPE_RATIO) {
-      if (dx < 0) setPage(state.activePage + 1);
-      else setPage(state.activePage - 1);
-    }
-  });
+async function guarded(action) {
+  try { return await action(); }
+  catch (error) {
+    const message = errorMessage(error);
+    setSessionMessage(message, "error");
+    toast(message, "error");
+    console.error(error);
+    return undefined;
+  }
 }
 
-// ── localStorage persistence ──
-
-function lstoreKey(name) { return `allium-demo-${name}`; }
-
-function lstoreGet(name) {
-  try { return localStorage.getItem(lstoreKey(name)); } catch { return null; }
+function toast(message, kind = "") {
+  const item = document.createElement("div");
+  item.className = `toast ${kind}`.trim();
+  item.textContent = message;
+  elements.toastRegion.append(item);
+  window.setTimeout(() => item.remove(), 4200);
 }
 
-function lstoreSet(name, value) {
-  try { localStorage.setItem(lstoreKey(name), value); } catch {}
+function setSessionMessage(message, kind = "") {
+  elements.sessionMessage.textContent = message;
+  elements.sessionMessage.className = `session-message ${kind}`.trim();
 }
 
-// Restore saved inputs so the user doesn't have to reselect everything
-// on each refresh. Fonts and files can't be persisted (binary, large);
-// only text values are cached. Card JSON is stored as plain text — the
-// file input can't be repopulated, but the render button is enabled
-// when cached card text exists.
-function restoreInputs() {
-  const md = lstoreGet("masterdata-url");
-  if (md) els.masterdataUrl.value = md;
-  const dyn = lstoreGet("dynamic-asset-url");
-  if (dyn) els.dynamicAssetUrl.value = dyn;
-  const stat = lstoreGet("static-asset-url");
-  if (stat) els.staticAssetUrl.value = stat;
-
-  // Cached card JSON lets the user render without re-selecting a file.
-  if (lstoreGet("card-json")) els.renderBtn.disabled = false;
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error ?? "Unknown renderer error");
 }
 
-// Called from doRender on success — cache the inputs that worked.
-function persistInputs(masterdataUrl, dynamicUrl, staticUrl, rawCard, profileJson) {
-  lstoreSet("masterdata-url", masterdataUrl);
-  lstoreSet("dynamic-asset-url", dynamicUrl);
-  lstoreSet("static-asset-url", staticUrl);
-  lstoreSet("card-json", rawCard);
-  if (profileJson) lstoreSet("profile-json", profileJson);
+function compactJson(value) {
+  if (value === undefined || value === null) return "";
+  const json = JSON.stringify(value);
+  return json.length > 90 ? `${json.slice(0, 87)}…` : json;
 }
 
-// Called from doRender — get card text from file or localStorage cache.
-async function readCardText() {
-  if (els.cardFile.files[0]) return els.cardFile.files[0].text();
-  const cached = lstoreGet("card-json");
-  if (cached) return cached;
-  throw new Error("请选择名片 JSON");
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
 }
 
-async function readProfileText() {
-  if (els.profileFile.files[0]) return els.profileFile.files[0].text();
-  return lstoreGet("profile-json") || undefined;
+function empty(text) {
+  const paragraph = document.createElement("p");
+  paragraph.className = "empty-copy";
+  paragraph.textContent = text;
+  return paragraph;
 }
 
-// ── Event wiring ──
-
-els.cardFile.addEventListener("change", () => {
-  els.renderBtn.disabled = els.cardFile.files.length === 0;
-});
-els.masterdataUrl.addEventListener("change", () => {
-  lstoreSet("masterdata-url", els.masterdataUrl.value.trim());
-});
-els.dynamicAssetUrl.addEventListener("change", () => {
-  lstoreSet("dynamic-asset-url", els.dynamicAssetUrl.value.trim());
-});
-els.staticAssetUrl.addEventListener("change", () => {
-  lstoreSet("static-asset-url", els.staticAssetUrl.value.trim());
-});
-els.renderBtn.addEventListener("click", doRender);
-els.pagePrev.addEventListener("click", () => setPage(state.activePage - 1));
-els.pageNext.addEventListener("click", () => setPage(state.activePage + 1));
-els.showAll.addEventListener("click", () => bulkVisibility(() => true));
-els.hideAll.addEventListener("click", () => bulkVisibility(() => false));
-els.resetVis.addEventListener("click", () => bulkVisibility((l) => l.original_visible));
-
-bindDropTarget();
-bindPageSwipe();
-restoreInputs();
-setStatus("未加载");
+function muted(text) {
+  const span = document.createElement("span");
+  span.className = "muted";
+  span.textContent = text;
+  return span;
+}

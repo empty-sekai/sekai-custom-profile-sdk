@@ -1,123 +1,136 @@
 # @empty-sekai/renderer-wasm
 
-自定义名片渲染引擎的浏览器 WebAssembly 构建。skia CPU 光栅化 + FreeType
-轮廓提取。输入名片 JSON，输出名片图片（JPEG / PNG / 透明 PNG）。
+`@empty-sekai/renderer-wasm` is the WebGL2 browser runtime for Allium profile-card scenes. Rust/WASM owns profile resolution, TMP rich-text parsing, layout, dynamic formulas, stable semantic IDs, glyph demand, FreeType metrics, SDF generation, and atlas placement. TypeScript performs persistent-cache I/O and GPU resource orchestration; WebGL2 draws the resulting semantic command stream.
 
-## 安装
+Version 0.2 is a breaking replacement for the 0.1 CPU image API. It does not ship a Skia/CPU renderer, image-layer worker, or compatibility shim.
 
-```
-npm install @empty-sekai/renderer-wasm
-```
+## Runtime requirements
 
-包内含构建好的 `allium_renderer_wasm.wasm` / `.js` 与 TypeScript wrapper。
+- WebGL2
+- Web Workers and ES modules
+- IndexedDB for optional persistent glyph records
+- Cache Storage for finite versioned renderer-static assets when available
+- application-provided profile/card JSON and font files
 
-## 资源由使用方注入
+The package never uses `CanvasRenderingContext2D.fillText`, `measureText`, or browser font fallback as rendering truth.
 
-本包**不内嵌任何字体、masterdata 或素材**。运行前必须注入：
+## Resource boundary
 
-- **字体**：`registerFont(family, bytes)`。family 名需与 masterdata 中
-  `customProfileTextFonts` 解析出的方正字体名一致（如 `FZLanTingHei-DB-GBK`）。
-  缺字体的文本元素不会渲染。
-- **masterdata**：`loadMasterData(name, json)` 逐表注入（约 18 张表，见
-  下方 `REQUIRED_TABLES`），从你自己镜像的 `/masterdata/{region}/latest/`
-  拷过来。
-- **素材**：`collectAssetKeys(cardJson)` 给出名片所需 key，逐个
-  `putAsset(key, bytes)` 注入。
+No fonts, player profiles, masterdata snapshots, or game images are bundled.
 
-## 用法
+Here, **host application** means package-external code such as a profile site or the demo. It provides:
 
-### 推荐：Web Worker（不阻塞 UI）
+- profile and card JSON;
+- each required font as an `ArrayBuffer`;
+- optional masterdata and asset URL resolvers.
 
-skia 光栅化是同步阻塞调用。浏览器中请用 Worker 客户端：
+The default resolvers read masterdata, versioned renderer cuts under `renderer-static/v0.2/`, and region-specific unpacked game assets from `https://cdn.emptysekai.com`. Resource namespaces come from the shared core; hosts do not infer them from filenames. Fonts are always supplied by the host.
 
-```ts
-import { AlliumWorkerClient, ImageFormat } from "@empty-sekai/renderer-wasm/worker";
+The host does **not** parse TMP, enumerate glyphs, construct an atlas, calculate layout, or provide dynamic-program metadata. Those operations remain inside the renderer worker and WASM runtime.
 
-const client = await AlliumWorkerClient.spawn({
-  workerUrl: new URL("@empty-sekai/renderer-wasm/worker.js", import.meta.url),
-  moduleUrl: new URL("@empty-sekai/renderer-wasm/allium_renderer_wasm.js", import.meta.url).href,
-});
+The package-internal TypeScript runtime is an I/O orchestrator, not another text engine. It consumes structured glyph demand produced by WASM, checks session and IndexedDB caches, and returns cached records plus missing requests to the worker. WASM performs FreeType rasterization, SDF generation, atlas packing, UV assignment, revisions, and eviction; TypeScript uploads the resulting dirty atlas pages to WebGL2.
 
-const jpeg = await client.render({
-  cardJson,                 // CustomProfileCard 或 UserCustomProfileCard[] 的 JSON
-  profileJson,              // 可选：profile API 响应（注入 generals / 称号等级）
-  format: ImageFormat.Jpeg, // 默认 JPEG
-  masterData,               // Record<tableName, jsonText>
-  fonts:  [{ family: "FZLanTingHei-DB-GBK", bytes: fontBytes }],
-  assets: [{ key, bytes }], // 由 collectAssetKeys 收集
-});
-// jpeg: Uint8Array
-```
-
-> 注意：`render()` 默认转移 fonts/assets 的 ArrayBuffer 以避免大缓冲拷贝，
-> 调用后这些 `Uint8Array` 会失效（detached）。需复用请先 `.slice()` 复制。
-
-### 主线程直用（会阻塞）
+## Basic usage
 
 ```ts
-import createAlliumRenderer from "@empty-sekai/renderer-wasm/allium_renderer_wasm.js";
-import { AlliumRenderer, ImageFormat } from "@empty-sekai/renderer-wasm";
+import { BrowserRenderer } from "@empty-sekai/renderer-wasm";
 
-const r = await AlliumRenderer.create(createAlliumRenderer);
-r.registerFont("FZLanTingHei-DB-GBK", fontBytes);
-for (const [name, json] of Object.entries(masterData)) r.loadMasterData(name, json);
-r.init();
-for (const key of r.collectAssetKeys(cardJson)) r.putAsset(key, await fetchBytes(key));
-const jpeg = r.render(cardJson, ImageFormat.Jpeg);
+const renderer = await BrowserRenderer.create({
+  canvas: document.querySelector("canvas")!,
+  region: "en",
+});
+
+await renderer.registerFont({
+  family: "Profile Font 1",
+  bytes: await fetch("/fonts/profile-font-1.ttf").then((response) => response.arrayBuffer()),
+});
+
+const masterData = await renderer.loadMasterData("latest");
+const scene = await renderer.createProfileScene({
+  masterData,
+  documentKey: "profile-preview",
+  card,
+  profile,
+});
+
+scene.draw();
 ```
 
-### 分层裁剪
-
-`renderLayerCropped` 把所有可见元素绘到透明画布，裁剪到不透明像素的紧凑包围盒，
-编码为 WebP，返回裁剪框在原画布坐标系的偏移。
+Destroy scenes and the renderer when their owner is disposed:
 
 ```ts
-// Worker 客户端
-const layer = await client.renderLayerCropped({
-  cardJson, profileJson, quality: 80, masterData, fonts, assets,
-});
-// layer: { data: Uint8Array /* WebP */, x, y, width, height }
-
-// 主线程直用
-const layer = r.renderLayerCropped(cardJson, 80, profileJson);
+await scene.destroy();
+await masterData.destroy();
+renderer.destroy();
 ```
 
-### 批量分层
+## State and interaction
 
-`renderAllLayers` 把名片按 layer 升序逐元素渲染为裁剪 WebP，一次返回所有层
-+ 元数据。`z` 字段为 layer 升序的 0-based 序号；不可见元素也出现在结果中，
-`data` 为空、rect 全 0。
+Renderer state mutations update compact GPU state buffers. They do not recreate the timeline, semantic command stream, layout, glyph atlas, or persistent glyph cache.
 
 ```ts
-const layers = await client.renderAllLayers({
-  cardJson, profileJson, quality: 80, includeProperties: true,
-  masterData, fonts, assets,
+await scene.advance(tick);
+await scene.setLayerVisible(layerId, false);
+await scene.setLayerMasks(layerTableRevision, overrides);
+await scene.setTab(controlId, value);
+await scene.scrollBy(controlId, delta);
+scene.draw();
+```
+
+Public layers correspond to game-authored card elements. Internal draw primitives are commands, not extra public layers.
+
+The renderer exposes interaction regions, control bindings, stable IDs, resolved data, geometry, source content, and numeric text regions. Hover, navigation, copying, selection, editing, scrolling policy, and DOM/SVG overlays remain application behavior.
+
+```ts
+const dump = await scene.dump();
+const numericRegions = dump.numeric_text_regions;
+```
+
+## Caching
+
+- The in-memory session atlas is bounded, leased, and shared across scenes owned by the same worker.
+- IndexedDB stores opaque, validated glyph records only. It never stores source text, profiles, font files, layout, commands, timelines, or masks.
+- All encoded CDN assets may use the browser HTTP cache. Only immutable `renderer-static/v0.2/` cuts additionally enter Cache Storage; mutable region game assets revalidate through HTTP caching.
+- Decoded images and GPU textures are bounded session resources.
+- A WebGL context restore reuploads retained atlas/image/buffer state without rerunning TMP parsing, layout, or SDF generation.
+
+Set `sdf.persistence` to `"memory-only"` for session-only glyph caching. The default is `"origin"`, which uses IndexedDB and safely falls back to memory when persistent storage is unavailable.
+
+## Debugging and telemetry
+
+`scene.dump()` returns the complete semantic scene description, including the authored layer tree, source content, resolved parameters, bounds, quads, matrices, hit geometry, commands, masks, and component controls.
+
+`scene.stats()` and `renderer.stats()` expose bounded, privacy-safe runtime metrics for worker activity, glyph generation, cache hits, atlas pages, texture uploads, GPU buffers, frame timings, and context recovery. Telemetry never includes player content, TMP source strings, font bytes, or asset payloads.
+
+## Custom providers
+
+Override URL construction without moving parsing or rendering policy into the host:
+
+```ts
+const renderer = await BrowserRenderer.create({
+  canvas,
+  region: "en",
+  resolveMasterDataUrl: (table, region, revision) =>
+    `/renderer-data/${region}/${revision}/${table}.json`,
+  resolveResourceUrl: (namespace, key, region) =>
+    `/renderer-assets/${region}/${namespace}/${key}.png`,
 });
-// layers: Array<{
-//   z, type, original_visible,
-//   data: Uint8Array, x, y, width, height,
-//   properties?: Record<string, unknown>,
-// }>
-
-// 主线程直用
-const layers = r.renderAllLayers(cardJson, 80, true, profileJson);
 ```
 
-`includeProperties=true` 时为每层填充 `properties`（字体名、颜色 hex、文本内容
-等元素字段）；不需要时关掉省一遍 masterdata 查询。
+## Building from source
 
-## 从源码构建 wasm
+The supported build runs in the repository development container. The toolchain is pinned by `Dockerfile` and `build.sh`.
 
-需要 Docker（构建链固定在 `Dockerfile`：emsdk 4.0.10 / Rust 1.94）：
-
+```sh
+npm run build
+npm run typecheck
+npm run test:gates
+npm run verify:wasm:runtime
+npm run measure:wasm:size
 ```
-npm run build:wasm   # bash build.sh：docker build + 取出 dist/*.{js,wasm}
-npm run build:ts     # tsc 编译 wrapper
-```
 
-## 许可
+The FreeType build enables only the TrueType, CFF, SFNT, PS auxiliary/name, and smooth raster modules required by the runtime. CPU EDT is the production SDF backend; the analytic backend is an explicit debug option.
 
-AGPL-3.0-only，附**浏览器范围 linking exception**（见 `LICENSE-EXCEPTION`）：
-未修改的本制品在浏览器网页中运行时，与你的前端代码在浏览器内链接不使前端代码
-受 AGPL 传染。修改引擎或在服务端/非浏览器环境运行，则适用完整 AGPL（含 §13
-网络使用源码披露义务）。
+## License
+
+AGPL-3.0-only with the browser linking exception in `LICENSE-EXCEPTION`. The exception applies to unmodified browser use of this package; modified renderer builds and server or non-browser use remain subject to the full AGPL, including the network-use source requirement.

@@ -5,7 +5,7 @@
 
 use crate::widget_node::{
     CanvasSpec, Layout, NodeKind, OutputFormat, Position, TextAlignValue, VAlignValue,
-    WIDGET_DOCUMENT_SCHEMA_VERSION, WidgetDocument, WidgetNode,
+    WidgetDocument, WidgetNode, WIDGET_DOCUMENT_SCHEMA_VERSION,
 };
 use crate::widgets::card_util::{rarity_suffix, star_icon_key};
 use crate::widgets::image::AssetImageFit;
@@ -2010,7 +2010,11 @@ fn fmt_i64(v: i64) -> String {
         out.push(c);
     }
     let result: String = out.chars().rev().collect();
-    if v < 0 { format!("-{result}") } else { result }
+    if v < 0 {
+        format!("-{result}")
+    } else {
+        result
+    }
 }
 
 fn fmt_pct(v: f64) -> String {
@@ -2105,10 +2109,9 @@ mod tests {
         assert!(text.iter().any(|value| value == "初音未来"));
         assert!(text.iter().any(|value| value == "挑战分"));
         assert!(text.iter().any(|value| value == "2,337,915"));
-        assert!(
-            text.iter()
-                .any(|value| value == "推荐类型：挑战 · 排序：挑战分从高到低")
-        );
+        assert!(text
+            .iter()
+            .any(|value| value == "推荐类型：挑战 · 排序：挑战分从高到低"));
         assert!(!text.iter().any(|value| value == "#1"));
         assert!(!text.iter().any(|value| value == "活动点数"));
         assert!(!text.iter().any(|value| value == "活动加成"));

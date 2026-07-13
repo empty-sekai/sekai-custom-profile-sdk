@@ -322,10 +322,7 @@ fn layout_children(
                             node_id: child.id.clone(),
                             severity: Severity::Warning,
                             code: DiagnosticCode::PositionIgnored,
-                            message: format!(
-                                "节点 {} 在 vertical 布局中忽略了 position",
-                                child.id
-                            ),
+                            message: format!("节点 {} 在 vertical 布局中忽略了 position", child.id),
                         });
                     }
                     let mut node = layout_node(child, ctx, diagnostics);

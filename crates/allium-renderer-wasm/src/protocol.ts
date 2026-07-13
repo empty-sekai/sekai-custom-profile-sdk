@@ -1,47 +1,123 @@
-/**
- * Worker 协议：主线程 ↔ 渲染 Worker 的消息类型。
- *
- * 渲染（skia CPU 光栅化）是同步阻塞，放进 Worker 避免卡主线程 UI。
- * 字节经 Transferable（ArrayBuffer）传递，避免结构化克隆复制大缓冲。
- */
+import type {
+  CoreSceneCreateResponse,
+  CoreSceneDelta,
+  CoreSceneDump,
+  StableId,
+} from "./types/core.js";
+import type { FreeTypeGlyphBatch, FreeTypeGlyphMapBatch } from "./types/freeType.js";
+import type { WasmGlyphDemandBatch, WasmLayoutBatch } from "./types/layout.js";
+import type {
+  AtlasGenerateRequest,
+  AtlasGlyphRecord,
+  AtlasPageUpdate,
+  GlyphRasterPlan,
+  AtlasResolveResult,
+  AtlasStats,
+} from "./types/atlas.js";
 
-import { ImageFormat } from "./renderer.js";
+export const RENDERER_WORKER_PROTOCOL = "allium.renderer-worker/2" as const;
 
-export { ImageFormat };
-export type { CroppedLayerOutput, LayerCrop } from "./renderer.js";
-
-/** 创建 Worker 时传入的初始化参数。 */
-export interface InitPayload {
-  /** wasm 工厂模块 URL（Worker 内 `import()` 加载）。 */
+export type RendererWorkerInit = {
   moduleUrl: string;
-  /** `.wasm` 文件 URL（可选，默认相对 moduleUrl 解析）。 */
   wasmUrl?: string;
-}
+};
 
-/** 一次渲染请求的全部输入（一次性注入，渲染后 Worker 状态可复用）。 */
-export interface RenderRequest {
-  cardJson: string;
-  profileJson?: string;
-  format?: ImageFormat;
-  /** 分层裁剪渲染的 WebP 质量（0-100，默认 80）。仅 renderLayerCropped / renderAllLayers 使用。 */
-  quality?: number;
-  /** renderAllLayers 是否填充每层 properties（默认 true）。 */
-  includeProperties?: boolean;
-  /** masterdata 表：name → JSON 文本。 */
-  masterData: Record<string, string>;
-  /** 字体：family → 字节。 */
-  fonts: Array<{ family: string; bytes: Uint8Array }>;
-  /** 素材：key → 字节。未提供的 key 渲染时按缺素材处理。 */
-  assets: Array<{ key: string; bytes: Uint8Array }>;
-}
+export type RegisteredFont = {
+  region: string;
+  family: string;
+  sourceHash: string;
+  bytes: ArrayBuffer;
+};
 
-export type RequestMessage =
-  | { id: number; kind: "init"; payload: InitPayload }
-  | { id: number; kind: "render"; payload: RenderRequest }
-  | { id: number; kind: "renderLayerCropped"; payload: RenderRequest }
-  | { id: number; kind: "renderAllLayers"; payload: RenderRequest }
-  | { id: number; kind: "collectAssetKeys"; payload: { cardJson: string; masterData: Record<string, string> } };
+export type GlyphBatchRequest = {
+  region: string;
+  family: string;
+  sourceHash: string;
+  chars: string[];
+  backend?: "edt" | "analytic";
+  supersample?: number;
+};
 
-export type ResponseMessage =
-  | { id: number; ok: true; result?: unknown }
-  | { id: number; ok: false; error: string };
+export type RendererFontContract = {
+  font_engine_fingerprint: string;
+  freetype_version: string;
+  modules: string[];
+  load_contract: string;
+};
+
+export type LayerMaskOverride = {
+  layerId: StableId;
+  visible: boolean | null;
+};
+
+export type RendererWorkerStats = {
+  protocol: typeof RENDERER_WORKER_PROTOCOL;
+  initialized: boolean;
+  scenes: number;
+  masterDataSessions: number;
+  atlasSessions: number;
+  fonts: number;
+  requests: number;
+  failures: number;
+  wasmMs: number;
+  bridgeBytes: number;
+};
+
+export type RendererWorkerRequest =
+  | { id: number; kind: "init"; payload: RendererWorkerInit }
+  | { id: number; kind: "contract"; payload: Record<string, never> }
+  | { id: number; kind: "registerFont"; payload: RegisteredFont }
+  | { id: number; kind: "mapGlyphs"; payload: GlyphBatchRequest }
+  | { id: number; kind: "planGlyphs"; payload: GlyphBatchRequest }
+  | { id: number; kind: "buildGlyphs"; payload: GlyphBatchRequest }
+  | { id: number; kind: "createAtlas"; payload: { pageWidth?: number; pageHeight?: number; softPages?: number; hardPages?: number } }
+  | { id: number; kind: "resolveAtlas"; payload: { atlasId: string; keys: string[]; cached: AtlasGlyphRecord[]; generate: AtlasGenerateRequest[] } }
+  | { id: number; kind: "atlasPages"; payload: { atlasId: string; revisions: Array<{ page: number; revision: number }> } }
+  | { id: number; kind: "releaseAtlas"; payload: { atlasId: string; lease: number } }
+  | { id: number; kind: "destroyAtlas"; payload: { atlasId: string } }
+  | { id: number; kind: "layoutText"; payload: { request: unknown } }
+  | { id: number; kind: "glyphDemand"; payload: { request: unknown } }
+  | { id: number; kind: "createMasterData"; payload: { region: string; revision: string } }
+  | { id: number; kind: "putMasterDataTable"; payload: { masterDataId: string; name: string; table: unknown } }
+  | { id: number; kind: "sealMasterData"; payload: { masterDataId: string } }
+  | { id: number; kind: "prepareProfile"; payload: { masterDataId: string; request: unknown } }
+  | { id: number; kind: "createProfileScene"; payload: { masterDataId: string; request: unknown; layoutRequest: unknown } }
+  | { id: number; kind: "destroyMasterData"; payload: { masterDataId: string } }
+  | { id: number; kind: "createScene"; payload: { request: unknown } }
+  | { id: number; kind: "advance"; payload: { sceneId: string; tick: number } }
+  | { id: number; kind: "setLayerMask"; payload: { sceneId: string; layerId: StableId; visible: boolean } }
+  | { id: number; kind: "setLayerMasks"; payload: { sceneId: string; expectedLayerTableRevision: number; overrides: LayerMaskOverride[] } }
+  | { id: number; kind: "setTab"; payload: { sceneId: string; controlId: StableId; value: string } }
+  | { id: number; kind: "scroll"; payload: { sceneId: string; controlId: StableId; offset?: number; delta?: number } }
+  | { id: number; kind: "dumpScene"; payload: { sceneId: string } }
+  | { id: number; kind: "destroyScene"; payload: { sceneId: string } }
+  | { id: number; kind: "stats"; payload: Record<string, never> };
+
+export type RendererWorkerResult =
+  | { kind: "init"; protocol: typeof RENDERER_WORKER_PROTOCOL }
+  | { kind: "contract"; contract: RendererFontContract }
+  | { kind: "registerFont"; registered: boolean }
+  | { kind: "mapGlyphs"; batch: FreeTypeGlyphMapBatch }
+  | { kind: "planGlyphs"; plan: GlyphRasterPlan }
+  | { kind: "buildGlyphs"; batch: FreeTypeGlyphBatch }
+  | { kind: "createAtlas"; atlasId: string; stats: AtlasStats }
+  | { kind: "resolveAtlas"; result: AtlasResolveResult }
+  | { kind: "atlasPages"; updates: AtlasPageUpdate[] }
+  | { kind: "releaseAtlas"; released: boolean }
+  | { kind: "destroyAtlas"; destroyed: boolean }
+  | { kind: "layoutText"; batch: WasmLayoutBatch }
+  | { kind: "glyphDemand"; batch: WasmGlyphDemandBatch }
+  | { kind: "createMasterData"; masterDataId: string; report: Record<string, unknown> }
+  | { kind: "masterDataReport"; report: Record<string, unknown> }
+  | { kind: "prepareProfile"; preparation: Record<string, unknown> }
+  | { kind: "destroyMasterData"; destroyed: boolean }
+  | { kind: "createProfileScene"; sceneId: string; response: CoreSceneCreateResponse; layout: WasmLayoutBatch }
+  | { kind: "createScene"; sceneId: string; response: CoreSceneCreateResponse }
+  | { kind: "delta"; delta: CoreSceneDelta }
+  | { kind: "dumpScene"; dump: CoreSceneDump }
+  | { kind: "destroyScene"; destroyed: boolean }
+  | { kind: "stats"; stats: RendererWorkerStats };
+
+export type RendererWorkerResponse =
+  | { id: number; ok: true; result: RendererWorkerResult }
+  | { id: number; ok: false; error: { code: string; message: string } };

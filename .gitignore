@@ -3,13 +3,15 @@
 **/*.rs.bk
 *.pdb
 
-# wasm 包构建产物 / 依赖
+# WASM package build output and dependencies
 crates/allium-renderer-wasm/dist/
 crates/allium-renderer-wasm/node_modules/
+crates/allium-renderer-wasm/target/
 crates/allium-renderer-wasm/build.log
 crates/allium-renderer-wasm/serve-demo.cjs
 *.log
 node_modules/
+/tmp/
 
-# 本地 agent 指引（私有，不发布）
+# Local agent instructions (private, never published)
 AGENTS.md

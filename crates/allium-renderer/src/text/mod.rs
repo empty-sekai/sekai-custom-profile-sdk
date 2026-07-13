@@ -404,11 +404,12 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
                 // 字符间距偏小、弧形变形。回退 Skia 仅用于 SDF 未覆盖字符。
                 let ft_hadv = lookup_or_generate(resolved_name_ref, *ch)
                     .as_ref()
-                    .map(|g| g.plane_advance_x() * (measure_size / sdf_outline::sampling_point_size()))
+                    .map(|g| {
+                        g.plane_advance_x() * (measure_size / sdf_outline::sampling_point_size())
+                    })
                     .filter(|v| *v > 0.0);
-                let glyph_hadv_tmp_layout = (ft_hadv.unwrap_or_else(|| {
-                    tmp_measure_advance(&display, &seg_font, measure_size)
-                }))
+                let glyph_hadv_tmp_layout = (ft_hadv
+                    .unwrap_or_else(|| tmp_measure_advance(&display, &seg_font, measure_size)))
                     * char_scale
                     * TEXT_SCALE;
                 measured += glyph_hadv_tmp_layout * seg_scale / TEXT_SCALE;
