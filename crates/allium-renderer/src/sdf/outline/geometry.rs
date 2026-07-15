@@ -187,7 +187,7 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
 unsafe fn get_point(
     current_point_index: &mut usize,
     point_positions: &[ffi::FT_Vector],
-    point_tags: &[i8],
+    point_tags: &[std::ffi::c_char],
     last_point_index_in_contour: usize,
 ) -> (Vec2, u8) {
     debug_assert!(*current_point_index <= last_point_index_in_contour);

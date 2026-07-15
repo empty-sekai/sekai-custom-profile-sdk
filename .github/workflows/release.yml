@@ -90,7 +90,11 @@ jobs:
       - name: Install Windows build dependencies
         if: runner.os == 'Windows'
         shell: pwsh
-        run: vcpkg install freetype:x64-windows
+        run: |
+          choco install pkgconfiglite --yes --no-progress
+          vcpkg install freetype:x64-windows
+          "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build render-card
         run: cargo build --release -p allium-renderer-cli --target ${{ matrix.target }}
@@ -167,7 +171,7 @@ jobs:
             sh -euxc '
               apk add --no-cache \
                 binutils brotli-static build-base bzip2-static clang cmake \
-                expat-static file fontconfig-dev fontconfig-static freetype-dev \
+                curl expat-static file fontconfig-dev fontconfig-static freetype-dev \
                 freetype-static git libpng-static ninja openssl-dev perl \
                 pkgconfig python3 xz zlib-static
               PKG_CONFIG_ALL_STATIC=1 \
