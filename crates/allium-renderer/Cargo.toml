@@ -1,11 +1,12 @@
 [package]
 name = "allium-renderer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Skia CPU rendering engine: scene-graph interpreter for game cards and WidgetDocument info-graphics"
 license = "AGPL-3.0-only"
 
 [dependencies]
+allium-renderer-core = { path = "../allium-renderer-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,10 +28,10 @@ features = ["skia"]
 
 [features]
 default = []
-# 内部实现 gate：所有 Skia 渲染代码位于此 feature 之下。
-# 不直接启用——用 `skia`（native 全量）或 `skia-minimal`（wasm 最小集）。
+# Internal implementation gate for all Skia rendering code.
+# Enable `skia` (complete native preset) or `skia-minimal`, not this feature directly.
 skia-core = ["dep:skia-safe", "dep:freetype-rs", "dep:ttf-parser"]
-# native 生产预设：skia-binaries 有预编译包的 feature 组合，勿增减。
+# Native production preset matching the feature combination shipped by skia-binaries.
 skia = [
     "skia-core",
     "parallel",
@@ -40,11 +41,11 @@ skia = [
     "skia-safe/vulkan",
     "skia-safe/webp",
 ]
-# wasm 最小集：无 GPU/textlayout/svg，保留 webp 编码。skia 必须源码编译。
+# Minimal Skia feature set for non-browser experiments; no GPU, text layout, or SVG.
 skia-minimal = ["skia-core", "skia-safe/webp"]
-# rayon 光栅化线程池。关闭时退化为串行执行，输出逐字节不变。
+# Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
-# 非名片场景：ranking / mysekai_harvest / personal_profile。
+# Application-specific native scenes.
 scenes = ["dep:chrono"]
 dev = ["skia", "dep:tracing-subscriber"]
 

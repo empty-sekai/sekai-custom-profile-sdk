@@ -1,0 +1,11 @@
+@empty-sekai/renderer-wasm
+Copyright (C) the Allium contributors
+
+This distribution includes FreeType 2.13.2, used under the FreeType Project
+License or GNU General Public License version 2. The FreeType copyright and
+license text are included in the generated distribution under
+third-party/freetype/.
+
+No fonts, game data, player profiles, or game assets are included in this
+package. Applications provide those resources and are responsible for their
+rights and distribution policy.

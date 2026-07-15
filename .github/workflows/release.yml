@@ -40,40 +40,158 @@ jobs:
       # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
       # lints don't gate the release without touching engine source.
       - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
-      - run: cargo test --workspace --lib
+      - run: cargo test --workspace --all-features
 
-  # -- 2. Linux render-card binary. ---------------------------------
-  build:
-    name: build render-card
+  # -- 2. Native render-card binaries. -------------------------------
+  # Native GitHub runners avoid pretending that a compile-only target is a
+  # distributable renderer: every archive below contains a Skia-enabled binary.
+  build-native:
+    name: build ${{ matrix.platform }}
     needs: test
-    runs-on: ubuntu-latest
-    env:
-      ASSET: render-card-linux-x86_64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64-gnu
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: allium-renderer-linux-x86_64-gnu.tar.xz
+          - platform: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: allium-renderer-windows-x86_64.zip
+          - platform: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: allium-renderer-macos-aarch64.tar.xz
+          - platform: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: allium-renderer-macos-x86_64.tar.xz
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install build deps
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfontconfig1-dev libfreetype6-dev libssl-dev pkg-config
+            libfontconfig1-dev libfreetype6-dev libssl-dev ninja-build pkg-config
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install fontconfig freetype ninja pkg-config
+
+      - name: Install Windows build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: vcpkg install freetype:x64-windows
 
       - name: Build render-card
-        run: cargo build --release -p allium-renderer-cli
+        run: cargo build --release -p allium-renderer-cli --target ${{ matrix.target }}
 
-      - name: Stage binary
-        run: cp "target/release/render-card" "${ASSET}"
+      - name: Archive Unix binary
+        if: runner.os != 'Windows'
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          TARGET: ${{ matrix.target }}
+        run: tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" render-card
+
+      - name: Archive Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+          TARGET: ${{ matrix.target }}
+        run: Compress-Archive -Path "target/$env:TARGET/release/render-card.exe" -DestinationPath $env:ARCHIVE
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ASSET }}
-          path: ${{ env.ASSET }}
+          name: native-${{ matrix.platform }}
+          path: ${{ matrix.archive }}
           if-no-files-found: error
 
-  # -- 3. wasm build + npm package. ---------------------------------
+  build-linux-arm64:
+    name: build linux-aarch64-gnu
+    needs: test
+    runs-on: ubuntu-24.04-arm
+    env:
+      ARCHIVE: allium-renderer-linux-aarch64-gnu.tar.xz
+      TARGET: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libssl-dev ninja-build pkg-config
+
+      - name: Build and archive render-card
+        run: |
+          cargo build --release -p allium-renderer-cli --target "${TARGET}"
+          tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" render-card
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-aarch64-gnu
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  build-linux-musl:
+    name: build linux-x86_64-musl
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      ARCHIVE: allium-renderer-linux-x86_64-musl.tar.xz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Skia-enabled musl binary in Alpine
+        run: |
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace \
+            rust:1.88-alpine3.22 \
+            sh -euxc '
+              apk add --no-cache \
+                binutils brotli-static build-base bzip2-static clang cmake \
+                expat-static file fontconfig-dev fontconfig-static freetype-dev \
+                freetype-static git libpng-static ninja openssl-dev perl \
+                pkgconfig python3 xz zlib-static
+              PKG_CONFIG_ALL_STATIC=1 \
+              RUSTFLAGS="-C target-feature=+crt-static" \
+              cargo build --release -p allium-renderer-cli \
+                --target x86_64-unknown-linux-musl
+              binary=target/x86_64-unknown-linux-musl/release/render-card
+              file "$binary"
+              if readelf -l "$binary" | grep -q "Requesting program interpreter"; then
+                echo "musl release binary is dynamically linked" >&2
+                exit 1
+              fi
+              tar -cJf allium-renderer-linux-x86_64-musl.tar.xz \
+                -C target/x86_64-unknown-linux-musl/release render-card
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-linux-x86_64-musl
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # -- 3. WASM build + npm package. ---------------------------------
   wasm:
     name: build wasm
     needs: test
@@ -88,7 +206,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Build TypeScript wrapper
         working-directory: crates/allium-renderer-wasm
@@ -107,6 +225,23 @@ jobs:
           test -f dist/worker-client.js
           npm pack --dry-run
 
+      - name: Browser release gates
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          npm run test:gates
+          npm run verify:wasm:runtime
+          npm run audit:public
+          npm run measure:wasm:size
+
+      - name: WebGL2 GPU contract gate
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          node --test \
+            scripts/test/m3-browser-semantic-resources.test.mjs \
+            scripts/test/m3-semantic-geometry.test.mjs \
+            scripts/test/m3-semantic-text-glyph-bridge.test.mjs \
+            scripts/test/m4-shape-sdf-shader.test.mjs
+
       - name: Upload wasm dist
         uses: actions/upload-artifact@v4
         with:
@@ -120,7 +255,10 @@ jobs:
         run: |
           npm install -g npm@latest
           VERSION="${GITHUB_REF_NAME#v}"
-          npm version --no-git-tag-version "$VERSION"
+          CURRENT_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "${CURRENT_VERSION}" != "${VERSION}" ]]; then
+            npm version --no-git-tag-version "$VERSION"
+          fi
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
             npm publish --access public --provenance --tag next
           else
@@ -135,6 +273,8 @@ jobs:
     permissions:
       pages: write
       id-token: write
+    env:
+      SITE_ROOT: public/builds/${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -142,23 +282,25 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wasm-dist
-          path: public/dist
+          path: public/builds/${{ github.sha }}/dist
 
       - name: Copy demo into site
-        run: cp -r crates/allium-renderer-wasm/demo public/demo
+        run: |
+          mkdir -p "${SITE_ROOT}"
+          cp -r crates/allium-renderer-wasm/demo "${SITE_ROOT}/demo"
 
       - name: Write root landing page
         run: |
-          cat > public/index.html <<'HTML'
+          cat > public/index.html <<HTML
           <!doctype html>
           <html lang="en">
             <head>
               <meta charset="utf-8" />
-              <meta http-equiv="refresh" content="0; url=./demo/" />
+              <meta http-equiv="refresh" content="0; url=./builds/${GITHUB_SHA}/demo/" />
               <title>allium-renderer</title>
             </head>
             <body>
-              <p>Redirecting to the <a href="./demo/">layer viewer demo</a>.</p>
+              <p>Redirecting to the <a href="./builds/${GITHUB_SHA}/demo/">layer viewer demo</a>.</p>
             </body>
           </html>
           HTML
@@ -175,7 +317,12 @@ jobs:
   # nothing is committed back to the repo.
   release:
     name: github release
-    needs: [build, wasm, pages]
+    needs:
+      - build-native
+      - build-linux-arm64
+      - build-linux-musl
+      - wasm
+      - pages
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -203,14 +350,25 @@ jobs:
 
       - name: Assemble release assets
         run: |
-          mkdir -p dist
+          mkdir -p dist artifacts/wasm-package/dist
           VERSION="${GITHUB_REF_NAME#v}"
-          # render-card binary (artifact name == file name)
-          cp artifacts/render-card-linux-x86_64/render-card-linux-x86_64 dist/
-          # wasm browser runtime, bundled as a zip
-          (cd artifacts/wasm-dist && zip -j \
-            "../../dist/allium-renderer-wasm-${VERSION}.zip" \
-            allium_renderer_wasm.js allium_renderer_wasm.wasm)
+          find artifacts -type f \( -name '*.tar.xz' -o -name '*.zip' \) \
+            -exec cp -v '{}' dist/ \;
+          for asset in \
+            allium-renderer-linux-x86_64-gnu.tar.xz \
+            allium-renderer-linux-x86_64-musl.tar.xz \
+            allium-renderer-linux-aarch64-gnu.tar.xz \
+            allium-renderer-windows-x86_64.zip \
+            allium-renderer-macos-aarch64.tar.xz \
+            allium-renderer-macos-x86_64.tar.xz; do
+            test -f "dist/${asset}"
+          done
+          # Preserve the complete browser dist tree, including third-party notices.
+          cp -a artifacts/wasm-dist/. artifacts/wasm-package/dist/
+          (cd artifacts/wasm-package && zip -r "../../dist/allium-renderer-wasm-${VERSION}.zip" dist)
+          unzip -Z1 "dist/allium-renderer-wasm-${VERSION}.zip" \
+            | grep -Fx 'dist/third-party/freetype/FTL.txt'
+          (cd dist && sha256sum ./* > SHA256SUMS)
           ls -la dist
 
       - name: Create GitHub Release

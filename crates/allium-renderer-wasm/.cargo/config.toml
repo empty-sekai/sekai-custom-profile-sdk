@@ -1,14 +1,5 @@
-# emscripten 链接配置：仅作用于 wasm32-unknown-emscripten 目标。
-# native（cargo check / test）走默认链接器，不受影响。
-# - MODULARIZE + EXPORT_ES6：产出 ES module 工厂，TS wrapper / Web Worker import。
-# - EXPORTED_FUNCTIONS：保留 alr_* 导出 + malloc/free（wrapper 兜底用）。
-# - EXPORTED_RUNTIME_METHODS：cwrap/ccall + HEAPU8/getValue/setValue 供 marshalling。
-# - ALLOW_MEMORY_GROWTH：名片渲染峰值内存随画布尺寸变化，不可预设上限。
-# - 不用 NODERAWFS：浏览器无文件系统；字体/素材/masterdata 全部经内存注入。
-# - ENVIRONMENT=web,worker,node：浏览器 / Worker 为目标运行时；附带 node 使
-#   像素对拍可在 Node 直接加载同一制品（不影响浏览器产物）。
-# - SUPPORT_LONGJMP=wasm：与 emcc 编译期一致，统一 skia 内嵌 libpng/freetype 的
-#   longjmp ABI 到 wasm 异常模型，否则出现 undefined emscripten_longjmp。
+# Emscripten linker contract for the semantic browser runtime.
+# The browser worker owns this module; rendering is performed by WebGL2.
 [target.wasm32-unknown-emscripten]
 rustflags = [
   "-C", "link-arg=-sMODULARIZE=1",
@@ -17,7 +8,7 @@ rustflags = [
   "-C", "link-arg=-sALLOW_MEMORY_GROWTH=1",
   "-C", "link-arg=-sSUPPORT_LONGJMP=wasm",
   "-C", "link-arg=-sENVIRONMENT=web,worker,node",
-  "-C", "link-arg=-sEXPORTED_FUNCTIONS=_alr_alloc,_alr_free,_alr_last_error,_alr_load_masterdata,_alr_register_font,_alr_init,_alr_collect_asset_keys,_alr_put_asset,_alr_render,_alr_render_layer_cropped,_alr_render_all_layers,_malloc,_free",
-  "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=cwrap,ccall,getValue,setValue,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,HEAPU32",
+  "-C", "link-arg=-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_sdf_layout_freetype_probe,_sdf_layout_freetype_contract_json,_sdf_layout_freetype_map_glyphs_json,_sdf_layout_freetype_build_glyph_json,_sdf_layout_freetype_build_glyph_json_edt,_sdf_layout_freetype_build_mask_json,_sdf_layout_freetype_build_layout_json,_sdf_renderer_core_scene_create_json,_sdf_renderer_core_profile_scene_create_json,_sdf_renderer_core_scene_advance_json,_sdf_renderer_core_scene_advance_binary,_sdf_renderer_core_scene_set_mask_json,_sdf_renderer_core_scene_set_masks_json,_sdf_renderer_core_scene_set_tab_json,_sdf_renderer_core_scene_scroll_json,_sdf_renderer_core_scene_dump_json,_sdf_renderer_core_scene_destroy,_sdf_renderer_core_resolve_locale_json,_sdf_renderer_core_resolve_profile_json,_sdf_layout_freetype_free_string",
+  "-C", "link-arg=-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString,HEAPU8,HEAPU32",
   "-C", "link-arg=-sEXIT_RUNTIME=0",
 ]

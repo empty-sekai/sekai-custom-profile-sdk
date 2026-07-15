@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "render-card: custom profile card rendering CLI"
 license = "AGPL-3.0-only"
@@ -10,8 +10,8 @@ name = "render-card"
 path = "src/main.rs"
 
 [features]
-# 默认启用 skia（生产形态）。无 skia 工具链的环境可
-# `--no-default-features` 做编译检查，渲染调用在运行时报错。
+# Skia is the production default. Environments without the native toolchain may use
+# `--no-default-features` for a compile-only check; rendering then fails at runtime.
 default = ["skia"]
 skia = ["allium-renderer/skia"]
 
