@@ -2,7 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-`@empty-sekai/renderer-wasm` is the WebGL2 browser runtime for Allium custom profile-card scenes.
+`@empty-sekai/renderer-wasm` is the WebGL2 browser runtime for Project SEKAI (PJSK) custom profile-card scenes.
+
+TMP rich text and layout implement a compatibility model for the Unity TextMesh Pro data and behavior used by PJSK. It covers the tags, layout, material, and dynamic semantics currently modeled and verified by the runtime. Unmodeled game behavior and later game updates may differ from the client, so complete reproduction of the game's rendering logic or final pixels is not guaranteed.
 
 Rust/WASM owns profile resolution, TMP rich text, layout, dynamic formulas, stable semantic IDs, glyph demand, FreeType metrics, glyph SDF generation, and atlas placement. TypeScript owns the worker boundary, asynchronous resource scheduling, cache I/O, and GPU resource orchestration. WebGL2 consumes the semantic command stream and compact state tables.
 
@@ -159,7 +161,7 @@ A provider may combine local files, HTTP caching, Cache Storage, IndexedDB, user
 - Decoded-cache hits reuse session leases while provider concurrency remains available for actual loads.
 - The provider receives an `AbortSignal`.
 - A `null` result, thrown error, or decode failure becomes a warning and transparent placeholder.
-- Internal resource errors such as a pinned decoded-image hard budget still fail closed.
+- Exhausting the decoded-image hard budget with pinned leases produces an explicit resource error.
 
 `cacheIdentity()` defines decoded session-cache identity. Include every catalog revision, region, user scope, or authentication domain that can change the bytes. The stable descriptor ID is used when the method is omitted. Persistent encoded-asset policy belongs entirely to the provider.
 
@@ -214,7 +216,7 @@ A session must be sealed before scene creation and should be destroyed when no l
 
 ## Fonts
 
-Font bytes are always host-provided. `family` is the logical name referenced by masterdata and text layers; the renderer does not interpret filenames, URLs, directories, or regional aliases.
+Font bytes are always host-provided. `family` is the opaque logical identity referenced by masterdata and text layers and is passed unchanged to the host's font-resolution policy.
 
 The recommended integration supplies a `FontProvider` to `BrowserRenderer.create()`. WASM requests only families used by the current scene, and the main thread invokes the provider with bounded `fontConcurrency`, which defaults to 4:
 

@@ -408,7 +408,7 @@ function renderFonts() {
     name.className = "font-family-input";
     name.textContent = font.file.name;
     const hash = document.createElement("small");
-    hash.textContent = `${formatBytes(font.file.size)} · production aliases registered automatically`;
+    hash.textContent = `${formatBytes(font.file.size)} · logical family aliases registered automatically`;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "×";

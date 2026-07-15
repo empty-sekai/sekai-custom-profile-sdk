@@ -2,7 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-`@empty-sekai/renderer-wasm` 是 Allium 自定义名片场景的 WebGL2 browser runtime。
+`@empty-sekai/renderer-wasm` 是面向 Project SEKAI（PJSK）自定义名片场景的 WebGL2 browser runtime。
+
+TMP 富文本与排版针对 PJSK 使用的 Unity TextMesh Pro 数据和行为提供兼容模型，覆盖当前已经建模和验证的标签、排版、材质与动态语义。尚未建模的游戏行为或后续游戏更新可能与客户端不同，因此不承诺完整复刻游戏的渲染逻辑或最终像素。
 
 Rust/WASM 负责 profile resolution、TMP 富文本、layout、动态公式、稳定语义 ID、glyph demand、FreeType 字体度量、glyph SDF 与 atlas placement；TypeScript 负责 worker、异步资源调度、缓存 I/O 和 GPU resource orchestration；WebGL2 消费 semantic command stream 和紧凑状态表完成绘制。
 
@@ -161,7 +163,7 @@ const provider: ResourceProvider = {
 - decoded cache hit 直接复用 session lease，provider 并发槽继续服务实际加载请求；
 - `AbortSignal` 会传给 provider；
 - provider 返回 `null`、抛错或图片解码失败时，该项变为透明占位并记录 warning；
-- decoded image hard budget 被 pinned 等内部资源错误仍会 fail closed。
+- pinned lease 耗尽 decoded image hard budget 时会产生显式资源错误。
 
 `cacheIdentity()` 用于声明 decoded session cache 的身份。它应包含会改变图片内容的 catalog revision、region、用户或鉴权域；若省略则使用 descriptor stable ID。encoded asset 是否持久化、保存多久以及如何失效，完全由 provider 决定。
 
@@ -216,7 +218,7 @@ await masterData.seal();
 
 ## 字体
 
-字体 bytes 始终由调用方提供。`family` 是 masterdata 和文本 layer 使用的逻辑名称；renderer 不解释文件名、URL、目录或区服别名。
+字体 bytes 始终由调用方提供。`family` 是 masterdata 和文本 layer 使用的 opaque 逻辑身份，并原样传给调用方的字体解析规则。
 
 推荐在 `BrowserRenderer.create()` 中提供 `FontProvider`。WASM 只请求当前 scene 实际使用的 family，主线程按 `fontConcurrency`（默认 4）有界并发调用 provider：
 

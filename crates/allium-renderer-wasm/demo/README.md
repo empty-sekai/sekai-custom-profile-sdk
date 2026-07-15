@@ -10,7 +10,7 @@ The workbench accepts one profile JSON response and the referenced font files. C
 - a dedicated worker that owns WASM, FreeType, glyph SDF generation, TMP parsing, layout, scene state, and dynamic evaluation;
 - an origin-persistent opaque glyph cache and a memory-only mode;
 - deterministic play, pause, stepping, scrubbing, looping, and final-state inspection;
-- multi-page profile navigation without retaining unbounded scene resources;
+- multi-page profile navigation with active-page leases and bounded session resource budgets;
 - stable game-authored layer IDs, ordering, filtering, per-layer visibility, and authored-subtree masks;
 - source content, resolved parameters, bounds, quads, matrices, hit geometry, line-indent diagnostics, glyphs, and semantic commands;
 - component tabs and scrolling driven by scene control bindings;
@@ -28,7 +28,7 @@ The single profile input must contain `userCustomProfileCards`. Each entry suppl
 
 Profile JSON and selected font files are stored in IndexedDB for this local origin so they survive a refresh. All input persistence remains local to the selected browser origin, and resetting the session removes the stored inputs.
 
-Font source files use their packaged names. The workbench maps logical production aliases to the selected files, then exposes that map through its application-owned `FontProvider`. WASM requests only families used by the active scene. An alias is another runtime family identity for the same bytes, not another file that the user must find.
+Font source files use their packaged names. The workbench maps logical family aliases to the selected files, then exposes that map through its application-owned `FontProvider`. WASM requests only families used by the active scene. Every alias shares the selected source bytes under its own runtime family identity.
 
 ## Demo resource provider
 
@@ -42,7 +42,7 @@ Its initial configuration uses:
 | CN game assets | `https://cdn.emptysekai.com/assets/cn` |
 | versioned renderer cuts | `https://cdn.emptysekai.com/renderer-static/v0.2` |
 
-Changing the region updates the editable masterdata and asset bases. The demo provider owns all mapping rules, asynchronous `fetch`, `AbortSignal` propagation, browser HTTP caching, and Cache Storage use for versioned renderer cuts. None of those rules are exported by the renderer package.
+Changing the region updates the editable masterdata and asset bases. The demo adapter contains all mapping rules, asynchronous `fetch`, `AbortSignal` propagation, browser HTTP caching, and Cache Storage use for versioned renderer cuts.
 
 Missing or undecodable images are reported as warnings and become transparent placeholders, allowing the remaining scene to continue. The selected resource origin supplies the required CORS permission.
 

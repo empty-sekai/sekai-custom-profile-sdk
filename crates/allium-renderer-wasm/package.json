@@ -1,7 +1,7 @@
 {
   "name": "@empty-sekai/renderer-wasm",
   "version": "0.2.0",
-  "description": "Shared semantic scene, minimal FreeType WASM, and WebGL2 runtime for Allium profile cards.",
+  "description": "WebGL2 and WASM runtime for Project SEKAI custom profile cards with FreeType and TMP-compatible layout.",
   "type": "module",
   "license": "AGPL-3.0-only",
   "repository": {

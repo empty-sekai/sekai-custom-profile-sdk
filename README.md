@@ -2,7 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Allium Renderer 用于把应用提供的玩家资料、名片数据、masterdata、字体与图片素材解析为可渲染的自定义名片场景。
+Allium Renderer 是面向 Project SEKAI（PJSK）自定义名片的渲染器。它把应用提供的玩家资料、名片数据、masterdata、字体与图片素材解析为可渲染场景。
+
+富文本与排版实现针对 PJSK 使用的 Unity TextMesh Pro 数据、标签和运行时行为建立兼容模型，覆盖本仓库已经建模和验证的标签、排版、材质与动态语义。尚未建模的游戏行为或后续游戏更新可能与客户端不同，因此不承诺完整复刻游戏的渲染逻辑或最终像素。
 
 仓库包含两个面向不同运行环境的适配器：
 
@@ -49,7 +51,7 @@ Rust/WASM 负责：
 
 ## 浏览器快速开始
 
-0.2 的 browser API 以 `BrowserRenderer` 为入口。调用方通过必填的 `ResourceProvider` 用任意异步规则解释 renderer 提供的语义 descriptor；包本身不规定资源位置、请求协议或存储形式。
+0.2 的 browser API 以 `BrowserRenderer` 为入口。调用方通过必填的 `ResourceProvider` 用任意异步规则解释 renderer 提供的语义 descriptor，并完整定义资源位置、请求协议和存储形式。
 
 ```ts
 import {
@@ -183,7 +185,7 @@ npm run verify:wasm:runtime
 npm run measure:wasm:size
 ```
 
-release gates 覆盖 ABI/schema、shared-core drift、TMP debug parity、glyph SDF parity、完整 profile command coverage、atlas/cache budget、worker singleflight、context restoration、bounded telemetry、npm contents 与 native/browser release matrix。
+release gates 覆盖 ABI/schema、shared-core source consistency、TMP debug parity、glyph SDF parity、完整 profile command coverage、atlas/cache budget、worker singleflight、context restoration、bounded telemetry、npm contents 与 native/browser release matrix。
 
 ## License
 

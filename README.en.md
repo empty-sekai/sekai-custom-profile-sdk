@@ -2,7 +2,9 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-Allium Renderer resolves application-provided player profiles, card data, masterdata, fonts, and image assets into renderable custom profile-card scenes.
+Allium Renderer renders Project SEKAI (PJSK) custom profile cards. It resolves application-provided player profiles, card data, masterdata, fonts, and image assets into renderable scenes.
+
+Rich text and layout follow a compatibility model for the Unity TextMesh Pro data, tags, and runtime behavior used by PJSK. It covers the tags, layout, material, and dynamic semantics modeled and verified by this repository. Unmodeled game behavior and later game updates may differ from the client, so complete reproduction of the game's rendering logic or final pixels is not guaranteed.
 
 The repository contains two adapters for different environments:
 
@@ -49,7 +51,7 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 
 ## Browser quick start
 
-The 0.2 browser API starts with `BrowserRenderer`. A required `ResourceProvider` interprets renderer-provided semantic descriptors with arbitrary asynchronous host logic; the package does not prescribe resource locations, request protocols, or storage forms.
+The 0.2 browser API starts with `BrowserRenderer`. A required `ResourceProvider` interprets renderer-provided semantic descriptors with arbitrary asynchronous host logic and fully defines resource locations, request protocols, and storage forms.
 
 ```ts
 import {
@@ -181,7 +183,7 @@ npm run verify:wasm:runtime
 npm run measure:wasm:size
 ```
 
-Release gates cover ABI/schema compatibility, shared-core drift, TMP debug parity, glyph SDF parity, complete-profile command coverage, atlas and cache budgets, worker singleflight, context restoration, bounded telemetry, npm contents, and the native/browser release matrix.
+Release gates cover ABI/schema compatibility, shared-core source consistency, TMP debug parity, glyph SDF parity, complete-profile command coverage, atlas and cache budgets, worker singleflight, context restoration, bounded telemetry, npm contents, and the native/browser release matrix.
 
 ## License
 
