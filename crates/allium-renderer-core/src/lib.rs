@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const SCHEMA_MAJOR: u16 = 1;
-pub const SCHEMA_MINOR: u16 = 13;
+pub const SCHEMA_MINOR: u16 = 14;
 pub const TICKS_PER_SECOND: u32 = 60;
 pub const TMP_PAD: f32 = 64.0;
 pub const TMP_SEED_WIDTH: f32 = 8.46;
@@ -505,7 +505,7 @@ pub struct InteractionRegionSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LineIndentSource {
     pub percent: f32,
-    pub advances_tmp: Vec<f32>,
+    pub line_advances_tmp: Vec<Vec<f32>>,
     pub rotation_deg: f32,
     pub scale_x: f32,
 }
@@ -595,8 +595,7 @@ pub struct AnimationPreflight {
 #[derive(Clone, Debug)]
 struct LineIndentRuntime {
     source: LineIndentSource,
-    natural_width_tmp: f32,
-    last_advance_tmp: f32,
+    lines: Vec<LineIndentMetrics>,
     static_width_tmp: f32,
     width_tmp: f32,
     produced_ticks: u64,
@@ -604,29 +603,58 @@ struct LineIndentRuntime {
     state: DynamicLayerState,
 }
 
-impl LineIndentRuntime {
-    fn new(source: LineIndentSource) -> Option<Self> {
-        let advances = source
-            .advances_tmp
+#[derive(Clone, Copy, Debug)]
+struct LineIndentMetrics {
+    natural_width_tmp: f32,
+    last_advance_tmp: f32,
+}
+
+impl LineIndentMetrics {
+    fn from_advances(advances: &[f32]) -> Option<Self> {
+        let advances = advances
             .iter()
             .copied()
             .filter(|value| value.is_finite() && *value > 0.0)
             .collect::<Vec<_>>();
-        let natural_width_tmp = advances.iter().sum::<f32>();
-        let last_advance_tmp = advances.last().copied()?;
-        if !source.percent.is_finite() || natural_width_tmp <= 0.0 {
+        Some(Self {
+            natural_width_tmp: advances.iter().sum(),
+            last_advance_tmp: advances.last().copied()?,
+        })
+    }
+
+    fn preferred_width_tmp(self, indent_tmp: f32) -> f32 {
+        let x_advance_tmp = self.natural_width_tmp + indent_tmp;
+        if x_advance_tmp >= self.last_advance_tmp {
+            x_advance_tmp
+        } else {
+            2.0 * self.last_advance_tmp - x_advance_tmp
+        }
+    }
+}
+
+impl LineIndentRuntime {
+    fn new(source: LineIndentSource) -> Option<Self> {
+        let lines = source
+            .line_advances_tmp
+            .iter()
+            .filter_map(|advances| LineIndentMetrics::from_advances(advances))
+            .collect::<Vec<_>>();
+        let reference_width_tmp = lines
+            .iter()
+            .map(|line| line.natural_width_tmp)
+            .reduce(f32::max)?;
+        if !source.percent.is_finite() || reference_width_tmp <= 0.0 {
             return None;
         }
         let pct = source.percent / 100.0;
         let static_width_tmp = if pct < 1.0 {
-            (natural_width_tmp + TMP_PAD) / (1.0 - pct)
+            (reference_width_tmp + TMP_PAD) / (1.0 - pct)
         } else {
-            natural_width_tmp + TMP_PAD
+            reference_width_tmp + TMP_PAD
         };
         let mut runtime = Self {
             source,
-            natural_width_tmp,
-            last_advance_tmp,
+            lines,
             static_width_tmp,
             width_tmp: TMP_SEED_WIDTH,
             produced_ticks: 0,
@@ -666,12 +694,12 @@ impl LineIndentRuntime {
             return;
         }
         let pct = self.source.percent / 100.0;
-        let x_advance_tmp = self.natural_width_tmp + pct * self.width_tmp;
-        let preferred_width_tmp = if x_advance_tmp >= self.last_advance_tmp {
-            x_advance_tmp
-        } else {
-            2.0 * self.last_advance_tmp - x_advance_tmp
-        };
+        let indent_tmp = pct * self.width_tmp;
+        let preferred_width_tmp = self
+            .lines
+            .iter()
+            .map(|line| line.preferred_width_tmp(indent_tmp))
+            .fold(0.0f32, f32::max);
         if !preferred_width_tmp.is_finite() {
             self.state.status = DynamicStatus::Held;
             self.produced_ticks += 1;
@@ -2354,7 +2382,7 @@ mod tests {
             hit_geometry: [[0.0; 2]; 4],
             line_indent: dynamic.then(|| LineIndentSource {
                 percent: 25.0,
-                advances_tmp: vec![20.0, 20.0, 20.0],
+                line_advances_tmp: vec![vec![20.0, 20.0, 20.0]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
             }),
@@ -4055,7 +4083,7 @@ mod tests {
         for percent in [-50.0, 0.0, 25.0, 50.0, 99.0, 100.0] {
             let source = LineIndentSource {
                 percent,
-                advances_tmp: vec![17.5, 31.25, 22.0, 19.75],
+                line_advances_tmp: vec![vec![17.5, 31.25, 22.0, 19.75]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
             };
@@ -4078,7 +4106,7 @@ mod tests {
         let divergent = materialize_line_indent(
             LineIndentSource {
                 percent: 150.0,
-                advances_tmp: vec![17.5, 31.25, 22.0, 19.75],
+                line_advances_tmp: vec![vec![17.5, 31.25, 22.0, 19.75]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
             },
@@ -4090,6 +4118,32 @@ mod tests {
             .iter()
             .all(|frame| frame.dx_local.is_finite()));
         assert!(divergent.frames.len() < 1_800);
+    }
+
+    #[test]
+    fn multiline_line_indent_feedback_uses_global_preferred_width() {
+        let multiline = materialize_line_indent(
+            LineIndentSource {
+                percent: 50.0,
+                line_advances_tmp: vec![vec![10.0], vec![20.0, 20.0]],
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+            },
+            512,
+        )
+        .unwrap();
+        let widest_line = materialize_line_indent(
+            LineIndentSource {
+                percent: 50.0,
+                line_advances_tmp: vec![vec![20.0, 20.0]],
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+            },
+            512,
+        )
+        .unwrap();
+
+        assert_eq!(multiline, widest_line);
     }
 
     #[test]
@@ -4129,8 +4183,8 @@ mod tests {
 
     fn legacy_materialize(source: &LineIndentSource, max_frames: usize) -> (bool, Vec<f32>) {
         let pct = source.percent / 100.0;
-        let natural = source.advances_tmp.iter().sum::<f32>();
-        let last = *source.advances_tmp.last().unwrap();
+        let natural = source.line_advances_tmp[0].iter().sum::<f32>();
+        let last = *source.line_advances_tmp[0].last().unwrap();
         let static_width = if pct < 1.0 {
             (natural + TMP_PAD) / (1.0 - pct)
         } else {
