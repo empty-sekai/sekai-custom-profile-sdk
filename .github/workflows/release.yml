@@ -170,11 +170,12 @@ jobs:
             rust:1.88-alpine3.22 \
             sh -euxc '
               apk add --no-cache \
-                binutils brotli-static build-base bzip2-static clang cmake \
+                binutils brotli-static build-base bzip2-static clang clang-dev cmake \
                 curl expat-static file fontconfig-dev fontconfig-static freetype-dev \
                 freetype-static git gn libpng-static ninja openssl-dev perl \
                 pkgconfig python3 xz zlib-static
               PKG_CONFIG_ALL_STATIC=1 \
+              LIBCLANG_PATH=/usr/lib \
               SKIA_GN_COMMAND=gn \
               SKIA_NINJA_COMMAND=ninja \
               RUSTFLAGS="-C target-feature=+crt-static" \
