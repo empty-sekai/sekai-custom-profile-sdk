@@ -172,7 +172,7 @@ jobs:
               apk add --no-cache \
                 binutils brotli-static build-base bzip2-static clang cmake \
                 curl expat-static file fontconfig-dev fontconfig-static freetype-dev \
-                freetype-static git libpng-static ninja openssl-dev perl \
+                freetype-static git gn libpng-static ninja openssl-dev perl \
                 pkgconfig python3 xz zlib-static
               PKG_CONFIG_ALL_STATIC=1 \
               RUSTFLAGS="-C target-feature=+crt-static" \
