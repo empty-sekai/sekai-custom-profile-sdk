@@ -89,7 +89,7 @@ struct CompileRequest {
 struct DynamicProgramInput {
     layer_id: String,
     percent: f32,
-    advances_tmp: Vec<f32>,
+    line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
 }
@@ -280,7 +280,7 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
         for program in request.dynamic_programs {
             let source = LineIndentSource {
                 percent: program.percent,
-                advances_tmp: program.advances_tmp,
+                line_advances_tmp: program.line_advances_tmp,
                 rotation_deg: program.rotation_deg,
                 scale_x: program.scale_x,
             };
@@ -475,7 +475,7 @@ mod tests {
             "documentKey": "session-card",
             "card": card,
             "frameMode": "final",
-            "dynamicPrograms": [{ "layerId": source_key, "percent": 50.0, "advancesTmp": [24.0, 24.0], "rotationDeg": 0.0, "scaleX": 1.0 }]
+            "dynamicPrograms": [{ "layerId": source_key, "percent": 50.0, "lineAdvancesTmp": [[24.0, 24.0]], "rotationDeg": 0.0, "scaleX": 1.0 }]
         }).to_string()).unwrap()).unwrap();
         assert_eq!(
             response["snapshot"]["layer_sources"][0]["line_indent"]["percent"],

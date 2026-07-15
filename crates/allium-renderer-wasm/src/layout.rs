@@ -150,9 +150,10 @@ fn layout_layer(
     let mut line_max_sizes = Vec::new();
     let mut vbounds_max_top = f32::NEG_INFINITY;
     let mut vbounds_min_bottom = f32::INFINITY;
-    let mut first_line_advances_tmp = Vec::new();
+    let mut line_advances_tmp = Vec::new();
 
-    for (line_index, line_text) in line_texts.iter().enumerate() {
+    for line_text in &line_texts {
+        let mut current_line_advances_tmp = Vec::new();
         let mut remaining = line_text.chars().collect::<Vec<_>>();
         let mut w_scaled = 0.0;
         let mut max_seg_size: f32 = 0.0;
@@ -183,9 +184,7 @@ fn layout_layer(
                 w_scaled += adv;
                 cpv_xadv_tmp += fixed;
                 caret_xadv_tmp += fixed;
-                if line_index == 0 {
-                    first_line_advances_tmp.push(fixed);
-                }
+                current_line_advances_tmp.push(fixed);
                 max_cpv_width_tmp = update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, 0.0);
                 has_chars = true;
                 max_seg_size = max_seg_size.max(seg_font_size);
@@ -259,9 +258,7 @@ fn layout_layer(
                     max_cpv_width_tmp =
                         update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, glyph_advance_tmp);
                     let glyph_advance_caret = glyph_advance_tmp * seg_scale;
-                    if line_index == 0 {
-                        first_line_advances_tmp.push(glyph_advance_caret + cspace_raw_tmp);
-                    }
+                    current_line_advances_tmp.push(glyph_advance_caret + cspace_raw_tmp);
                     let glyph_asc_tmp = measure_size * (66.0 / 75.0) * TEXT_SCALE;
                     let glyph_des_tmp = measure_size * (9.0 / 75.0) * TEXT_SCALE;
                     vbounds_max_top = vbounds_max_top.max(voffset_tmp + glyph_asc_tmp);
@@ -296,9 +293,7 @@ fn layout_layer(
                     update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, glyph_advance_tmp);
                 cpv_xadv_tmp += glyph_advance_tmp;
                 caret_xadv_tmp += glyph_advance_tmp;
-                if line_index == 0 {
-                    first_line_advances_tmp.push(glyph_advance_tmp);
-                }
+                current_line_advances_tmp.push(glyph_advance_tmp);
                 vbounds_max_top = vbounds_max_top.max(layer.font_size * (66.0 / 75.0) * TEXT_SCALE);
                 vbounds_min_bottom =
                     vbounds_min_bottom.min(-layer.font_size * (9.0 / 75.0) * TEXT_SCALE);
@@ -326,6 +321,11 @@ fn layout_layer(
             0.0
         });
         line_max_sizes.push(max_seg_size);
+        line_advances_tmp.push(if line_text.chars().any(|ch| !ch.is_whitespace()) {
+            current_line_advances_tmp
+        } else {
+            Vec::new()
+        });
         let _ = caret_xadv_tmp;
     }
 
@@ -587,7 +587,7 @@ fn layout_layer(
             .clone()
             .unwrap_or_else(|| layer.id.clone()),
         percent,
-        advances_tmp: first_line_advances_tmp,
+        line_advances_tmp,
         rotation_deg: dynamic_rotation_deg,
         scale_x: dynamic_scale_x,
     });
@@ -1295,17 +1295,23 @@ fn layer_base_matrix(layer: &TextLayer) -> Mat {
 }
 
 fn line_indent_dynamic_percent(raw: &str, segments: &[TextSegment]) -> Option<f32> {
-    if raw.contains('\n') {
-        return None;
-    }
-    match segments
+    let _ = raw;
+    let mut dynamic_percent = None;
+    for segment in segments
         .iter()
-        .find(|segment| !segment.text.is_empty())
-        .and_then(|segment| segment.line_indent.as_ref())
+        .filter(|segment| segment.text.chars().any(|ch| !ch.is_whitespace()))
     {
-        Some(LineIndent::Percent(value)) if value.is_finite() => Some(*value),
-        _ => None,
+        let LineIndent::Percent(value) = segment.line_indent.as_ref()? else {
+            return None;
+        };
+        if !value.is_finite()
+            || dynamic_percent.is_some_and(|current: f32| (current - *value).abs() > f32::EPSILON)
+        {
+            return None;
+        }
+        dynamic_percent = Some(*value);
     }
+    dynamic_percent
 }
 
 type Mat = [f32; 6];
@@ -1602,12 +1608,38 @@ mod tests {
         assert!(layout_metrics["lineOffsets"].is_array());
         assert!(layout_metrics.get("line_widths").is_none());
         assert_eq!(
-            output["dynamicPrograms"][0]["advancesTmp"]
+            output["dynamicPrograms"][0]["lineAdvancesTmp"][0]
                 .as_array()
                 .unwrap()
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn layout_compiles_one_global_line_indent_program_across_hard_breaks() {
+        let input = serde_json::json!({
+            "layers": [{
+                "id": "text-layer", "z": 0,
+                "text": " <line-indent=50%>A\nBB",
+                "region": "en", "fontFamily": "SyntheticSans", "fontSourceHash": "a".repeat(64),
+                "x": 0.0, "y": 0.0, "rotationDeg": 0.0, "scaleX": 1.0, "scaleY": 1.0,
+                "fontSize": 24.0, "color": [1.0,1.0,1.0,1.0], "outlineColor": [0.0,0.0,0.0,0.0],
+                "colorRgb": [255.0,255.0,255.0], "outlineWidth": 0.0, "lineSpacing": 0.0,
+                "textType": 0, "dynamic": null
+            }],
+            "atlas": { "baseSize": 75.0, "spread": 6.0, "glyphs": [] },
+            "tick": 0, "frameMode": "animate"
+        });
+        let output: serde_json::Value =
+            serde_json::from_str(&build_layout_json(&input.to_string()).unwrap()).unwrap();
+
+        let lines = output["dynamicPrograms"][0]["lineAdvancesTmp"]
+            .as_array()
+            .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].as_array().unwrap().len(), 2);
+        assert_eq!(lines[1].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -1780,7 +1812,7 @@ struct LayoutBatch {
 struct DynamicProgramDescriptor {
     layer_id: String,
     percent: f32,
-    advances_tmp: Vec<f32>,
+    line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
 }

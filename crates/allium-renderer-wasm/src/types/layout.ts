@@ -3,7 +3,7 @@ import type { GlyphInstance } from "./glyph.js";
 export type CoreDynamicProgramDescriptor = {
   layerId: string;
   percent: number;
-  advancesTmp: number[];
+  lineAdvancesTmp: number[][];
   rotationDeg: number;
   scaleX: number;
 };

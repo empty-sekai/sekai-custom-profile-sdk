@@ -171,7 +171,7 @@ struct LayerCreateInput {
 #[serde(rename_all = "camelCase")]
 struct LineIndentCreateInput {
     percent: f32,
-    advances_tmp: Vec<f32>,
+    line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
 }
@@ -225,7 +225,7 @@ pub fn create(input: &str) -> Result<String, String> {
                 hit_geometry: layer.hit_geometry,
                 line_indent: layer.line_indent.map(|program| LineIndentSource {
                     percent: program.percent,
-                    advances_tmp: program.advances_tmp,
+                    line_advances_tmp: program.line_advances_tmp,
                     rotation_deg: program.rotation_deg,
                     scale_x: program.scale_x,
                 }),
