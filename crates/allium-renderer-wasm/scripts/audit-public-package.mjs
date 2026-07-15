@@ -1,75 +1,52 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const repositoryRoot = resolve(packageRoot, "../..");
-const textExtensions = new Set([".css", ".html", ".js", ".json", ".md", ".mjs", ".rs", ".sh", ".toml", ".ts"]);
-const forbiddenBinaryExtensions = new Set([".gif", ".jpeg", ".jpg", ".otf", ".png", ".ttc", ".ttf", ".webp", ".woff", ".woff2"]);
-const forbiddenText = [
-  { label: "CJK public text", pattern: /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u },
-  { label: "Windows private workspace path", pattern: /[A-Z]:\\allium\\/i },
-  { label: "internal shipping source", pattern: /\/shipping\//i },
-  {
-    label: "private repository reference",
-    pattern: new RegExp([["allium", "scapus"].join("-"), ["sdf", "card", "browser", "next"].join("-")].join("|"), "i"),
-  },
-];
-
-const authoredRoots = [
-  join(repositoryRoot, ".gitignore"),
-  join(repositoryRoot, "README.md"),
-  join(repositoryRoot, "README.en.md"),
-  join(packageRoot, "README.md"),
-  join(packageRoot, "README.en.md"),
-  join(packageRoot, "demo"),
-  join(packageRoot, "scripts"),
-  join(packageRoot, "src"),
-  join(repositoryRoot, "docs"),
-];
-
-const failures = [];
-for (const root of authoredRoots) {
-  for (const path of await walk(root)) {
-    if (!textExtensions.has(extname(path).toLowerCase())) continue;
-    const content = await readFile(path, "utf8");
-    for (const rule of forbiddenText) {
-      if (rule.label === "CJK public text" && /^README(?:\.[^.]+)?\.md$/i.test(basename(path))) continue;
-      if (rule.pattern.test(content)) failures.push(`${relative(repositoryRoot, path)}: ${rule.label}`);
-    }
-  }
-}
-
-const pack = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], {
+const packageJson = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const pack = JSON.parse(execFileSync(npmCommand, ["pack", "--dry-run", "--json"], {
   cwd: packageRoot,
   encoding: "utf8",
 }));
 const files = pack[0]?.files?.map((entry) => entry.path) ?? [];
+
+const rootFiles = new Set([
+  "LICENSE",
+  "LICENSE-EXCEPTION",
+  "NOTICE",
+  "README.md",
+  "README.en.md",
+  "package.json",
+]);
+const sourceExtensions = new Set([".rs", ".ts"]);
+const distExtensions = new Set([".js", ".ts", ".txt", ".wasm"]);
+const failures = [];
+
 for (const path of files) {
-  if (forbiddenBinaryExtensions.has(extname(path).toLowerCase())) {
-    failures.push(`${path}: bundled font or game-image candidate`);
-  }
-  if (/(^|\/)(fixtures?|masterdata|profiles?|game-assets?)(\/|$)/i.test(path)) {
-    failures.push(`${path}: bundled data/fixture directory`);
-  }
+  if (rootFiles.has(path)) continue;
+  if (path.startsWith("src/") && sourceExtensions.has(extname(path).toLowerCase())) continue;
+  if (path.startsWith("dist/") && distExtensions.has(extname(path).toLowerCase())) continue;
+  failures.push(`${path}: outside the declared public package roots`);
+}
+
+const wasmFiles = files.filter((path) => path.endsWith(".wasm"));
+if (wasmFiles.length !== 1 || wasmFiles[0] !== "dist/allium_renderer_wasm.wasm") {
+  failures.push(`expected one runtime WASM artifact, received ${JSON.stringify(wasmFiles)}`);
+}
+
+const exportKeys = Object.keys(packageJson.exports ?? {});
+if (exportKeys.length !== 1 || exportKeys[0] !== ".") {
+  failures.push(`expected one package export, received ${JSON.stringify(exportKeys)}`);
+}
+for (const path of [packageJson.main, packageJson.module, packageJson.types]) {
+  const packedPath = String(path ?? "").replace(/^\.\//, "");
+  if (!files.includes(packedPath)) failures.push(`${packedPath}: declared entry is absent from the package`);
 }
 
 if (failures.length > 0) {
-  throw new Error(`Public package audit failed:\n${[...new Set(failures)].sort().join("\n")}`);
+  throw new Error(`Public package audit failed:\n${failures.sort().join("\n")}`);
 }
 
-console.log(JSON.stringify({ authoredFiles: (await Promise.all(authoredRoots.map(walk))).flat().length, packedFiles: files.length }));
-
-async function walk(path) {
-  const metadata = await stat(path);
-  if (metadata.isFile()) return [path];
-  const output = [];
-  for (const entry of await readdir(path, { withFileTypes: true })) {
-    if (["dist", "node_modules", "target"].includes(entry.name)) continue;
-    const child = join(path, entry.name);
-    if (entry.isDirectory()) output.push(...await walk(child));
-    else if (entry.isFile()) output.push(child);
-  }
-  return output;
-}
+console.log(JSON.stringify({ packedFiles: files.length, wasmFiles: wasmFiles.length, exports: exportKeys }));

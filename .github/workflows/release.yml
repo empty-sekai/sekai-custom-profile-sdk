@@ -61,11 +61,11 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: allium-renderer-windows-x86_64.zip
           - platform: macos-aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             archive: allium-renderer-macos-aarch64.tar.xz
           - platform: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
             archive: allium-renderer-macos-x86_64.tar.xz
     runs-on: ${{ matrix.os }}
@@ -197,6 +197,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write   # npm Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
@@ -211,7 +212,7 @@ jobs:
       - name: Build TypeScript wrapper
         working-directory: crates/allium-renderer-wasm
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build:ts
 
       - name: Verify package contents
@@ -271,6 +272,7 @@ jobs:
     needs: wasm
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pages: write
       id-token: write
     env:

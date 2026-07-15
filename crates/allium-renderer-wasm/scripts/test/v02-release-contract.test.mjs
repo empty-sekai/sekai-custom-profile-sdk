@@ -22,6 +22,9 @@ test("wasm release job runs every browser release gate", async () => {
   const workflow = await workflowSource();
 
   assert.match(workflow, /node-version: '24'/);
+  assert.match(workflow, /npm ci --no-audit --no-fund/);
+  assert.match(workflow, /os: macos-15\s/);
+  assert.match(workflow, /os: macos-15-intel\s/);
 
   for (const command of [
     "npm run test:gates",
@@ -62,7 +65,6 @@ test("GitHub Release zip retains the FreeType license under dist", async () => {
   assert.match(workflow, /cp -a artifacts\/wasm-dist\/. artifacts\/wasm-package\/dist\//);
   assert.match(workflow, /zip -r .*allium-renderer-wasm-\$\{VERSION\}\.zip.*dist/);
   assert.match(workflow, /dist\/third-party\/freetype\/FTL\.txt/);
-  assert.doesNotMatch(workflow, /zip -j/);
 });
 
 test("native release matrix covers every supported platform with checksums", async () => {

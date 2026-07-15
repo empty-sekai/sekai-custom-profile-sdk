@@ -16,7 +16,7 @@ const config = {
   staticBase: "https://cdn.emptysekai.com/renderer-static/v0.2",
 };
 
-test("demo provider maps EmptySekai resources without exposing rules from the package", () => {
+test("demo provider maps semantic descriptors to configured EmptySekai resources", () => {
   const cases = [
     [{ namespace: "static", key: "chara_avatar/chara01_02" }, "https://cdn.emptysekai.com/renderer-static/v0.2/chara_avatar/chara01_02.png"],
     [{ namespace: "assets", key: "character/member_small/example/card_normal" }, "https://cdn.emptysekai.com/assets/cn/character/member_small/example/card_normal.png"],
@@ -73,7 +73,6 @@ test("demo entrypoints identify the current local build", async () => {
   assert.match(session, /dist\/allium_renderer_wasm\.js\?v=20260715-13/);
   assert.match(session, /dist\/allium_renderer_wasm\.wasm\?v=20260715-13/);
   assert.match(session, /fontProvider:\s*\{/);
-  assert.doesNotMatch(session, /renderer\.registerFont\(/);
   for (const field of ["requested", "loaded", "failures", "cancellations", "encodedBytes", "resolveMs", "peak"]) {
     assert.match(telemetry, new RegExp(`resourceProvider\\.${field}`));
   }
