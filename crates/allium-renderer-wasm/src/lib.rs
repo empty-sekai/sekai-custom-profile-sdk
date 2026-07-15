@@ -1,528 +1,1283 @@
-//! 浏览器 wasm 导出层（emscripten C ABI）。
-//!
-//! wasm-bindgen 不支持 `wasm32-unknown-emscripten`，互操作走 `extern "C"`：
-//! JS 侧用 cwrap 包装，TS wrapper 负责类型与 Worker 调度。
-//!
-//! 导出函数约定：
-//! - 字符串入参为 UTF-8 指针 + 长度；
-//! - 二进制出参经 `alr_alloc`/`alr_free` 管理的线性内存传递；
-//! - 返回 0 表示成功，非 0 为错误码，错误文本经 `alr_last_error` 取回。
+mod atlas;
+mod edt;
+mod geometry;
+mod glyph_plan;
+mod layout;
+mod masterdata_runtime;
+mod scene;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::os::raw::{c_char, c_int};
-use std::sync::Arc;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+use std::rc::Rc;
+use std::slice;
+use std::sync::Once;
 
-use allium_renderer::assets::AssetStore;
-use allium_renderer::renderer::CustomProfileRenderer;
-use allium_renderer_host::JsonMasterDataProvider;
+use allium_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
+use base64::Engine;
+use freetype::{face::LoadFlag, Library, RenderMode};
+use serde::Serialize;
+use web_time::Instant;
 
-// wasm（emscripten）单线程运行，全局可变状态用 thread_local 管理。
-thread_local! {
-    static STATE: RefCell<WasmState> = RefCell::new(WasmState::default());
-}
+use self::geometry::extract_segments;
 
-#[derive(Default)]
-struct WasmState {
-    provider: Option<JsonMasterDataProvider>,
-    renderer: Option<CustomProfileRenderer>,
-    assets: Option<Arc<AssetStore>>,
-    last_error: String,
-    /// 待注入的表（renderer 构建前缓存）
-    pending_tables: HashMap<String, String>,
-}
+const TMP_POINT_SIZE: f32 = 75.0;
+const TMP_SPREAD: f32 = 6.0;
+const FONT_ENGINE_FINGERPRINT: &str = match option_env!("ALLIUM_FONT_ENGINE_FINGERPRINT") {
+    Some(value) => value,
+    None => "freetype-unknown:dev",
+};
+static PANIC_HOOK: Once = Once::new();
 
-fn set_error(message: impl Into<String>) -> c_int {
-    STATE.with(|state| state.borrow_mut().last_error = message.into());
-    1
-}
-
-/// 分配 wasm 线性内存（JS 侧写入入参用）。
 #[no_mangle]
-pub extern "C" fn alr_alloc(size: usize) -> *mut u8 {
-    let mut buf = Vec::<u8>::with_capacity(size);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
-    ptr
-}
-
-/// 释放 `alr_alloc` 或渲染输出的内存。
-///
-/// # Safety
-/// `ptr` 必须来自 `alr_alloc(size)` 或本库返回的输出缓冲。
-#[no_mangle]
-pub unsafe extern "C" fn alr_free(ptr: *mut u8, size: usize) {
-    if !ptr.is_null() {
-        drop(Vec::from_raw_parts(ptr, 0, size));
+pub extern "C" fn sdf_layout_freetype_probe() -> i32 {
+    install_panic_hook();
+    match Library::init() {
+        Ok(_) => 1,
+        Err(_) => -1,
     }
 }
-
-/// 取最近一次错误文本。返回指针 + 写出长度（*len）。
-///
-/// # Safety
-/// `len` 必须指向合法的 usize。返回的指针在下一次 API 调用前有效。
 #[no_mangle]
-pub unsafe extern "C" fn alr_last_error(len: *mut usize) -> *const c_char {
-    STATE.with(|state| {
-        let state = state.borrow();
-        *len = state.last_error.len();
-        state.last_error.as_ptr() as *const c_char
+pub extern "C" fn sdf_layout_freetype_contract_json() -> *mut c_char {
+    into_c_string(
+        serde_json::to_string(&FreeTypeContract {
+            font_engine_fingerprint: FONT_ENGINE_FINGERPRINT,
+            freetype_version: "2.13.2",
+            modules: &["truetype", "cff", "sfnt", "psaux", "psnames", "smooth"],
+            load_contract: "analytic:NO_BITMAP|NO_HINTING;edt:NO_HINTING;metrics:26d6-v1",
+        })
+        .unwrap_or_else(|_| "{\"error\":\"contract serialization failed\"}".to_string()),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = build_glyph_batch_json(
+        font_ptr,
+        font_len,
+        codepoints_ptr,
+        codepoints_len,
+        region_ptr,
+        family_ptr,
+        font_source_hash_ptr,
+        0,
+    );
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json_edt(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    supersample: usize,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = build_glyph_batch_json(
+        font_ptr,
+        font_len,
+        codepoints_ptr,
+        codepoints_len,
+        region_ptr,
+        family_ptr,
+        font_source_hash_ptr,
+        supersample.clamp(1, 4),
+    );
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_map_glyphs_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = map_glyphs_json(
+        font_ptr,
+        font_len,
+        codepoints_ptr,
+        codepoints_len,
+        region_ptr,
+        family_ptr,
+        font_source_hash_ptr,
+    );
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_plan_glyphs_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    backend_ptr: *const c_char,
+    supersample: usize,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = (|| {
+        if font_ptr.is_null() || codepoints_ptr.is_null() {
+            return Err("null font or codepoint pointer".to_string());
+        }
+        glyph_plan::plan(
+            slice::from_raw_parts(font_ptr, font_len).to_vec(),
+            slice::from_raw_parts(codepoints_ptr, codepoints_len),
+            read_c_string(region_ptr)?,
+            read_c_string(family_ptr)?,
+            read_c_string(font_source_hash_ptr)?,
+            glyph_plan::RasterBackend::parse(&read_c_string(backend_ptr)?)?,
+            supersample,
+        )
+        .and_then(|plan| serde_json::to_string(&plan).map_err(|error| error.to_string()))
+    })();
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_build_layout_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = std::panic::catch_unwind(|| {
+        read_utf8_slice(input_json_ptr, input_json_len).and_then(layout::build_layout_json)
     })
-}
-
-unsafe fn slice_arg<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], String> {
-    if ptr.is_null() {
-        return Err("空指针入参".into());
-    }
-    Ok(std::slice::from_raw_parts(ptr, len))
-}
-
-unsafe fn str_arg<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
-    std::str::from_utf8(slice_arg(ptr, len)?).map_err(|e| format!("入参不是合法 UTF-8: {e}"))
-}
-
-/// 注入一张 masterdata 表（JSON 字符串）。需在 `alr_init` 前调用。
-///
-/// # Safety
-/// 指针/长度必须描述合法的 UTF-8 缓冲。
-#[no_mangle]
-pub unsafe extern "C" fn alr_load_masterdata(
-    name_ptr: *const u8,
-    name_len: usize,
-    json_ptr: *const u8,
-    json_len: usize,
-) -> c_int {
-    let (name, json) = match (str_arg(name_ptr, name_len), str_arg(json_ptr, json_len)) {
-        (Ok(name), Ok(json)) => (name.to_string(), json.to_string()),
-        (Err(e), _) | (_, Err(e)) => return set_error(e),
-    };
-    STATE.with(|state| {
-        state.borrow_mut().pending_tables.insert(name, json);
+    .unwrap_or_else(|panic| {
+        Err(if let Some(message) = panic.downcast_ref::<&str>() {
+            format!("layout panic: {message}")
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            format!("layout panic: {message}")
+        } else {
+            "layout panic: unknown".to_string()
+        })
     });
-    0
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
 }
 
-/// 注册内存字体（family + 字体字节）。
-///
-/// # Safety
-/// 指针/长度必须描述合法缓冲；family 必须是 UTF-8。
 #[no_mangle]
-pub unsafe extern "C" fn alr_register_font(
-    family_ptr: *const u8,
-    family_len: usize,
-    bytes_ptr: *const u8,
-    bytes_len: usize,
-) -> c_int {
-    #[cfg(feature = "skia")]
-    {
-        let family = match str_arg(family_ptr, family_len) {
-            Ok(f) => f.to_string(),
-            Err(e) => return set_error(e),
-        };
-        let bytes = match slice_arg(bytes_ptr, bytes_len) {
-            Ok(b) => b.to_vec(),
-            Err(e) => return set_error(e),
-        };
-        allium_renderer::sdf::outline::register_font_bytes(&family, bytes);
-        0
+pub unsafe extern "C" fn sdf_layout_freetype_glyph_demand_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = std::panic::catch_unwind(|| {
+        read_utf8_slice(input_json_ptr, input_json_len).and_then(layout::build_glyph_demand_json)
+    })
+    .unwrap_or_else(|_| Err("glyph-demand panic".to_string()));
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_atlas_create_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let input = read_utf8_slice(input_json_ptr, input_json_len)?;
+        let config: atlas::AtlasConfig =
+            serde_json::from_str(input).map_err(|error| error.to_string())?;
+        let (handle, stats) = atlas::create(config)?;
+        serde_json::to_string(&serde_json::json!({ "handle": handle, "stats": stats }))
+            .map_err(|error| error.to_string())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_atlas_resolve_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let input = read_utf8_slice(input_json_ptr, input_json_len)?;
+        let request: atlas::AtlasResolveRequest =
+            serde_json::from_str(input).map_err(|error| error.to_string())?;
+        serde_json::to_string(&atlas::resolve(handle, request)?).map_err(|error| error.to_string())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_atlas_pages_since_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let input = read_utf8_slice(input_json_ptr, input_json_len)?;
+        let request: atlas::AtlasPagesRequest =
+            serde_json::from_str(input).map_err(|error| error.to_string())?;
+        serde_json::to_string(&atlas::pages_since(handle, request)?)
+            .map_err(|error| error.to_string())
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_atlas_page_pixels_ptr(handle: u32, page: usize) -> *const u8 {
+    atlas::page_pixels(handle, page)
+        .map(|(pointer, _)| pointer)
+        .unwrap_or(std::ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_atlas_page_pixels_len(handle: u32, page: usize) -> usize {
+    atlas::page_pixels(handle, page)
+        .map(|(_, length)| length)
+        .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_atlas_release(handle: u32, lease: u32) -> i32 {
+    match atlas::release(handle, lease) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(_) => -1,
     }
-    #[cfg(not(feature = "skia"))]
-    {
-        let _ = (family_ptr, family_len, bytes_ptr, bytes_len);
-        set_error("此构建未启用 skia")
-    }
 }
 
-/// 用已注入的表初始化渲染器。重复调用会重建（等效热替换 masterdata）。
 #[no_mangle]
-pub extern "C" fn alr_init() -> c_int {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let mut provider = JsonMasterDataProvider::empty();
-        let tables = std::mem::take(&mut state.pending_tables);
-        for (name, json) in &tables {
-            if let Err(e) = provider.insert_table(name, json) {
-                state.pending_tables = tables.clone();
-                state.last_error = e;
-                return 1;
-            }
-        }
-        let assets = state
-            .assets
-            .get_or_insert_with(|| Arc::new(AssetStore::new(128)))
-            .clone();
-        let missing = provider.missing_tables();
-        if !missing.is_empty() {
-            // 缺表不是致命错误：对应元素按缺映射渲染。记录供 JS 侧诊断。
-            state.last_error = format!("缺失表: {missing:?}");
-        }
-        let shared = Arc::new(provider);
-        match &state.renderer {
-            Some(renderer) => renderer.swap_masterdata(shared),
-            None => {
-                state.renderer = Some(CustomProfileRenderer::new(shared).with_assets(assets));
-            }
-        }
-        state.provider = None;
-        0
-    })
-}
-
-/// 收集名片所需素材 key，返回 JSON 数组字符串。
-///
-/// 出参：`out_ptr`/`out_len` 写出缓冲指针与长度，调用方用 `alr_free` 释放。
-///
-/// # Safety
-/// 所有指针必须合法；card JSON 必须是 UTF-8。
-#[no_mangle]
-pub unsafe extern "C" fn alr_collect_asset_keys(
-    card_ptr: *const u8,
-    card_len: usize,
-    out_ptr: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    let card_json = match str_arg(card_ptr, card_len) {
-        Ok(j) => j,
-        Err(e) => return set_error(e),
-    };
-    let card: allium_renderer::types::CustomProfileCard = match serde_json::from_str(card_json) {
-        Ok(card) => card,
-        Err(e) => return set_error(format!("解析名片失败: {e}")),
-    };
-    STATE.with(|state| {
-        let state = state.borrow();
-        let Some(renderer) = &state.renderer else {
-            drop(state);
-            return set_error("尚未调用 alr_init");
-        };
-        let md = renderer.snapshot_masterdata();
-        let keys = allium_renderer::asset_keys::collect_card_asset_keys(&card, &md);
-        let json = serde_json::to_vec(&keys).unwrap_or_else(|_| b"[]".to_vec());
-        write_out(json, out_ptr, out_len);
-        0
-    })
-}
-
-/// 注入素材（key + 编码图片字节）。
-///
-/// # Safety
-/// 指针/长度必须描述合法缓冲；key 必须是 UTF-8。
-#[no_mangle]
-pub unsafe extern "C" fn alr_put_asset(
-    key_ptr: *const u8,
-    key_len: usize,
-    bytes_ptr: *const u8,
-    bytes_len: usize,
-) -> c_int {
-    let key = match str_arg(key_ptr, key_len) {
-        Ok(k) => k.to_string(),
-        Err(e) => return set_error(e),
-    };
-    let bytes = match slice_arg(bytes_ptr, bytes_len) {
-        Ok(b) => b.to_vec(),
-        Err(e) => return set_error(e),
-    };
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-        let assets = state
-            .assets
-            .get_or_insert_with(|| Arc::new(AssetStore::new(128)))
-            .clone();
-        assets.put(key, bytes);
-        0
-    })
-}
-
-/// 渲染名片。format：0=JPEG 1=PNG 2=PNG透明底。
-///
-/// 出参：`out_ptr`/`out_len` 写出编码图片字节，调用方用 `alr_free` 释放。
-///
-/// # Safety
-/// 所有指针必须合法；card/profile JSON 必须是 UTF-8。profile 可传空指针。
-#[no_mangle]
-pub unsafe extern "C" fn alr_render(
-    card_ptr: *const u8,
-    card_len: usize,
-    profile_ptr: *const u8,
-    profile_len: usize,
-    format: c_int,
-    out_ptr: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    let card_json = match str_arg(card_ptr, card_len) {
-        Ok(j) => j,
-        Err(e) => return set_error(e),
-    };
-    let mut card: allium_renderer::types::CustomProfileCard = match serde_json::from_str(card_json)
-    {
-        Ok(card) => card,
-        Err(e) => return set_error(format!("解析名片失败: {e}")),
-    };
-    let profile_body: Option<serde_json::Value> = if profile_ptr.is_null() || profile_len == 0 {
-        None
+pub extern "C" fn sdf_atlas_destroy(handle: u32) -> i32 {
+    if atlas::destroy(handle) {
+        1
     } else {
-        match str_arg(profile_ptr, profile_len) {
-            Ok(json) => match serde_json::from_str(json) {
-                Ok(value) => Some(value),
-                Err(e) => return set_error(format!("解析 profile 失败: {e}")),
-            },
-            Err(e) => return set_error(e),
-        }
-    };
+        0
+    }
+}
 
-    STATE.with(|state| {
-        let state = state.borrow();
-        let Some(renderer) = &state.renderer else {
-            drop(state);
-            return set_error("尚未调用 alr_init");
-        };
-        let profile = profile_body.as_ref().map(|body| {
-            let profile = allium_renderer::profile::ProfileData::from_json(body);
-            let (honor_levels, bonds_levels, char_ranks) =
-                allium_renderer::profile::build_honor_maps(body);
-            renderer.enrich_honor_levels(&mut card, &honor_levels, &bonds_levels, &char_ranks);
-            profile
-        });
-        let result = match format {
-            0 => renderer.render_page_with_profile(&card, profile.as_ref()),
-            1 => renderer.render_page_png_with_profile(&card, profile.as_ref()),
-            2 => renderer.render_page_png_transparent_with_profile(&card, profile.as_ref()),
-            other => Err(format!("不支持的格式码: {other}")),
-        };
-        drop(state);
-        match result {
-            Ok(data) => {
-                write_out(data, out_ptr, out_len);
-                0
-            }
-            Err(e) => set_error(e),
-        }
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_create_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| read_utf8_slice(input_json_ptr, input_json_len).and_then(scene::create))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_profile_scene_create_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len).and_then(scene::create_resolved_profile)
     })
 }
 
-/// 分层裁剪渲染：所有可见元素绘到透明画布 → 裁剪不透明包围盒 → WebP 编码。
-///
-/// 出参：`out_ptr`/`out_len` 写出 WebP 字节（`alr_free` 释放）；`out_rect`
-/// 指向 4 个连续 u32，依次写入裁剪框 `x, y, width, height`（画布坐标系）。
-///
-/// # Safety
-/// 所有指针必须合法；card/profile JSON 必须是 UTF-8；profile 可传空指针。
-/// `out_rect` 必须指向至少 16 字节（4×u32）的可写缓冲。
 #[no_mangle]
-pub unsafe extern "C" fn alr_render_layer_cropped(
-    card_ptr: *const u8,
-    card_len: usize,
-    profile_ptr: *const u8,
-    profile_len: usize,
-    quality: c_int,
-    out_ptr: *mut *mut u8,
-    out_len: *mut usize,
-    out_rect: *mut u32,
-) -> c_int {
-    #[cfg(feature = "skia")]
-    {
-        let card_json = match str_arg(card_ptr, card_len) {
-            Ok(j) => j,
-            Err(e) => return set_error(e),
-        };
-        let mut card: allium_renderer::types::CustomProfileCard =
-            match serde_json::from_str(card_json) {
-                Ok(card) => card,
-                Err(e) => return set_error(format!("解析名片失败: {e}")),
-            };
-        let profile_body: Option<serde_json::Value> = if profile_ptr.is_null() || profile_len == 0 {
-            None
-        } else {
-            match str_arg(profile_ptr, profile_len) {
-                Ok(json) => match serde_json::from_str(json) {
-                    Ok(value) => Some(value),
-                    Err(e) => return set_error(format!("解析 profile 失败: {e}")),
-                },
-                Err(e) => return set_error(e),
-            }
-        };
+pub unsafe extern "C" fn sdf_renderer_core_masterdata_create_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len).and_then(masterdata_runtime::create)
+    })
+}
 
-        STATE.with(|state| {
-            let state = state.borrow();
-            let Some(renderer) = &state.renderer else {
-                drop(state);
-                return set_error("尚未调用 alr_init");
-            };
-            let profile = profile_body.as_ref().map(|body| {
-                let profile = allium_renderer::profile::ProfileData::from_json(body);
-                let (honor_levels, bonds_levels, char_ranks) =
-                    allium_renderer::profile::build_honor_maps(body);
-                renderer.enrich_honor_levels(&mut card, &honor_levels, &bonds_levels, &char_ranks);
-                profile
-            });
-            let result = renderer.render_element_layer_cropped(
-                &card,
-                profile.as_ref(),
-                quality.max(0) as u32,
-            );
-            drop(state);
-            match result {
-                Ok(layer) => {
-                    *out_rect.add(0) = layer.x;
-                    *out_rect.add(1) = layer.y;
-                    *out_rect.add(2) = layer.width;
-                    *out_rect.add(3) = layer.height;
-                    write_out(layer.data, out_ptr, out_len);
-                    0
-                }
-                Err(e) => set_error(e),
-            }
-        })
-    }
-    #[cfg(not(feature = "skia"))]
-    {
-        let _ = (
-            card_ptr,
-            card_len,
-            profile_ptr,
-            profile_len,
-            quality,
-            out_ptr,
-            out_len,
-            out_rect,
-        );
-        set_error("此构建未启用 skia")
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_masterdata_put_table_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| masterdata_runtime::put_table(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_core_masterdata_seal_json(handle: u32) -> *mut c_char {
+    core_json_call(|| masterdata_runtime::seal(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_profile_prepare_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| masterdata_runtime::prepare(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_profile_create_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| masterdata_runtime::create_scene(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_core_masterdata_stats_json(handle: u32) -> *mut c_char {
+    core_json_call(|| masterdata_runtime::stats(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_core_masterdata_destroy(handle: u32) -> i32 {
+    if masterdata_runtime::destroy(handle) {
+        1
+    } else {
+        0
     }
 }
 
-/// 批量分层裁剪渲染：所有元素按 layer 升序逐层渲染为裁剪 WebP。
-///
-/// 出参（一次 FFI 拿全部 N 层）：
-///   - `out_meta_ptr/len`：UTF-8 JSON 数组，每项 `{z, type, original_visible, x, y, w, h,
-///     byte_offset, byte_length, properties?}`。`properties` 仅 `include_properties=true`
-///     时填充；不可见层的 `byte_length=0`。
-///   - `out_blob_ptr/len`：所有可见层 WebP 字节首尾相接的一整块；按 meta 中
-///     `byte_offset`/`byte_length` 切片。
-///
-/// 两块缓冲都用 `alr_free` 释放。
-///
-/// # Safety
-/// 所有指针必须合法；card/profile JSON 必须是 UTF-8；profile 可传空指针。
 #[no_mangle]
-pub unsafe extern "C" fn alr_render_all_layers(
-    card_ptr: *const u8,
-    card_len: usize,
-    profile_ptr: *const u8,
-    profile_len: usize,
-    quality: c_int,
-    include_properties: c_int,
-    out_meta_ptr: *mut *mut u8,
-    out_meta_len: *mut usize,
-    out_blob_ptr: *mut *mut u8,
-    out_blob_len: *mut usize,
-) -> c_int {
-    #[cfg(feature = "skia")]
-    {
-        let card_json = match str_arg(card_ptr, card_len) {
-            Ok(j) => j,
-            Err(e) => return set_error(e),
-        };
-        let mut card: allium_renderer::types::CustomProfileCard =
-            match serde_json::from_str(card_json) {
-                Ok(card) => card,
-                Err(e) => return set_error(format!("解析名片失败: {e}")),
-            };
-        let profile_body: Option<serde_json::Value> = if profile_ptr.is_null() || profile_len == 0 {
-            None
-        } else {
-            match str_arg(profile_ptr, profile_len) {
-                Ok(json) => match serde_json::from_str(json) {
-                    Ok(value) => Some(value),
-                    Err(e) => return set_error(format!("解析 profile 失败: {e}")),
-                },
-                Err(e) => return set_error(e),
-            }
-        };
+pub extern "C" fn sdf_renderer_core_scene_advance_json(handle: u32, tick: u32) -> *mut c_char {
+    core_json_call(|| scene::advance(handle, tick as u64))
+}
 
-        STATE.with(|state| {
-            let state = state.borrow();
-            let Some(renderer) = &state.renderer else {
-                drop(state);
-                return set_error("尚未调用 alr_init");
-            };
-            let profile = profile_body.as_ref().map(|body| {
-                let profile = allium_renderer::profile::ProfileData::from_json(body);
-                let (honor_levels, bonds_levels, char_ranks) =
-                    allium_renderer::profile::build_honor_maps(body);
-                renderer.enrich_honor_levels(&mut card, &honor_levels, &bonds_levels, &char_ranks);
-                profile
-            });
-            let result = renderer.render_all_layers_cropped(
-                &card,
-                profile.as_ref(),
-                quality.max(0) as u32,
-                include_properties != 0,
-            );
-            drop(state);
-            match result {
-                Ok(layers) => {
-                    // 拼接 blob + 构造 meta
-                    let mut blob: Vec<u8> = Vec::new();
-                    let mut meta_arr: Vec<serde_json::Value> = Vec::with_capacity(layers.len());
-                    for layer in &layers {
-                        let byte_offset = blob.len();
-                        let byte_length = layer.data.len();
-                        blob.extend_from_slice(&layer.data);
-                        let mut entry = serde_json::json!({
-                            "z": layer.z,
-                            "type": layer.element_type,
-                            "original_visible": layer.original_visible,
-                            "x": layer.x,
-                            "y": layer.y,
-                            "width": layer.width,
-                            "height": layer.height,
-                            "byte_offset": byte_offset,
-                            "byte_length": byte_length,
-                        });
-                        if let Some(props) = &layer.properties {
-                            entry
-                                .as_object_mut()
-                                .unwrap()
-                                .insert("properties".into(), props.clone());
-                        }
-                        meta_arr.push(entry);
-                    }
-                    let meta_json = match serde_json::to_vec(&meta_arr) {
-                        Ok(j) => j,
-                        Err(e) => return set_error(format!("序列化 meta 失败: {e}")),
-                    };
-                    write_out(meta_json, out_meta_ptr, out_meta_len);
-                    write_out(blob, out_blob_ptr, out_blob_len);
-                    0
-                }
-                Err(e) => set_error(e),
-            }
-        })
-    }
-    #[cfg(not(feature = "skia"))]
-    {
-        let _ = (
-            card_ptr,
-            card_len,
-            profile_ptr,
-            profile_len,
-            quality,
-            include_properties,
-            out_meta_ptr,
-            out_meta_len,
-            out_blob_ptr,
-            out_blob_len,
-        );
-        set_error("此构建未启用 skia")
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_advance_binary(
+    handle: u32,
+    tick: u32,
+    output: *mut u8,
+    capacity: usize,
+) -> usize {
+    unsafe { scene::advance_binary(handle, tick as u64, output, capacity) }.unwrap_or_default()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_set_mask_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| scene::set_mask(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_set_masks_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| scene::set_masks(handle, input))
+    })
+}
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_set_tab_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| scene::set_tab(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_scene_scroll_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| scene::scroll(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_core_scene_dump_json(handle: u32) -> *mut c_char {
+    core_json_call(|| scene::dump(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_core_scene_destroy(handle: u32) -> i32 {
+    if scene::destroy(handle) {
+        1
+    } else {
+        0
     }
 }
 
-unsafe fn write_out(data: Vec<u8>, out_ptr: *mut *mut u8, out_len: *mut usize) {
-    let mut data = data;
-    data.shrink_to_fit();
-    let len = data.len();
-    let ptr = data.as_mut_ptr();
-    std::mem::forget(data);
-    *out_ptr = ptr;
-    *out_len = len;
+#[derive(serde::Deserialize)]
+struct LocaleResolveRequest {
+    region: String,
+    key: String,
+}
+
+#[derive(serde::Serialize)]
+struct LocaleResolveResponse {
+    region: String,
+    key: String,
+    value: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileResolveRequest {
+    document_key: String,
+    card: allium_renderer_core::profile_source::CustomProfileCard,
+    snapshot: allium_renderer_core::profile_scene::ProfileResolveSnapshot,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_resolve_locale_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let input = read_utf8_slice(input_json_ptr, input_json_len)?;
+        let request: LocaleResolveRequest =
+            serde_json::from_str(input).map_err(|error| error.to_string())?;
+        serde_json::to_string(&LocaleResolveResponse {
+            value: allium_renderer_core::locale::resolve(&request.region, &request.key),
+            region: request.region,
+            key: request.key,
+        })
+        .map_err(|error| error.to_string())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_core_resolve_profile_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let input = read_utf8_slice(input_json_ptr, input_json_len)?;
+        let request: ProfileResolveRequest =
+            serde_json::from_str(input).map_err(|error| error.to_string())?;
+        let resolved = allium_renderer_core::profile_scene::resolve_profile_scene(
+            &request.card,
+            &request.document_key,
+            &request.snapshot,
+        )
+        .map_err(|error| error.to_string())?;
+        serde_json::to_string(&resolved).map_err(|error| error.to_string())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_free_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
+    }
+}
+
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            eprintln!("[sdf-freetype panic] {info}");
+        }));
+    });
+}
+
+fn core_json_call<F>(call: F) -> *mut c_char
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    install_panic_hook();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+        .unwrap_or_else(|_| Err("renderer core panic".to_string()));
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+unsafe fn build_glyph_batch_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    supersample: usize,
+) -> Result<String, String> {
+    if font_ptr.is_null() || codepoints_ptr.is_null() {
+        return Err("null font or codepoint pointer".to_string());
+    }
+    let t0 = Instant::now();
+    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
+    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
+    let region = read_c_string(region_ptr)?;
+    let family = read_c_string(family_ptr)?;
+    let font_source_hash = read_c_string(font_source_hash_ptr)?;
+
+    let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
+    let t1 = Instant::now();
+    let face = library
+        .new_memory_face(Rc::new(font_bytes), 0)
+        .map_err(|err| format!("load memory face failed: {err:?}"))?;
+    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+        .map_err(|err| format!("set char size failed: {err:?}"))?;
+    let t2 = Instant::now();
+
+    let mut glyphs = Vec::new();
+    let mut missing = Vec::new();
+    let mut glyph_total_ms = 0.0f64;
+    let mut total_pixel_count: usize = 0;
+    for codepoint in codepoints {
+        let Some(ch) = char::from_u32(*codepoint) else {
+            missing.push(format!("U+{codepoint:04X}"));
+            continue;
+        };
+        if ch == '\n' || ch == '\r' {
+            continue;
+        }
+        let g0 = Instant::now();
+        let glyph_result = if supersample > 0 {
+            build_glyph_edt(&face, &region, &family, &font_source_hash, ch, supersample)
+                .or_else(|_| build_glyph(&face, &region, &family, &font_source_hash, ch))
+        } else {
+            build_glyph(&face, &region, &family, &font_source_hash, ch)
+        };
+        match glyph_result {
+            Ok(glyph) => {
+                total_pixel_count += glyph.width * glyph.height;
+                glyphs.push(glyph);
+            }
+            Err(message) => missing.push(format!("{family}:{ch}:{message}")),
+        }
+        glyph_total_ms += g0.elapsed().as_secs_f64() * 1000.0;
+    }
+    let t3 = Instant::now();
+
+    let glyph_count = glyphs.len();
+    serde_json::to_string(&GlyphBatch {
+        region,
+        family,
+        font_source_hash,
+        base_size: TMP_POINT_SIZE,
+        spread: TMP_SPREAD,
+        glyphs,
+        missing,
+        perf: GlyphBatchPerf {
+            total_ms: duration_ms(t0, t3),
+            face_load_ms: duration_ms(t1, t2),
+            glyph_total_ms,
+            glyph_count,
+            per_glyph_avg_ms: if glyph_count > 0 {
+                glyph_total_ms / glyph_count as f64
+            } else {
+                0.0
+            },
+            total_pixel_count,
+            avg_pixels_per_glyph: if glyph_count > 0 {
+                total_pixel_count as f64 / glyph_count as f64
+            } else {
+                0.0
+            },
+        },
+    })
+    .map_err(|err| format!("serialize glyph batch failed: {err}"))
+}
+
+unsafe fn map_glyphs_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+) -> Result<String, String> {
+    if font_ptr.is_null() || codepoints_ptr.is_null() {
+        return Err("null font or codepoint pointer".to_string());
+    }
+    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
+    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
+    let region = read_c_string(region_ptr)?;
+    let family = read_c_string(family_ptr)?;
+    let font_source_hash = read_c_string(font_source_hash_ptr)?;
+    let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
+    let face = library
+        .new_memory_face(Rc::new(font_bytes), 0)
+        .map_err(|err| format!("load memory face failed: {err:?}"))?;
+    let mut glyphs = Vec::with_capacity(codepoints.len());
+    let mut missing = Vec::new();
+    for codepoint in codepoints {
+        let Some(ch) = char::from_u32(*codepoint) else {
+            missing.push(format!("U+{codepoint:04X}"));
+            continue;
+        };
+        match face.get_char_index(ch as usize) {
+            Some(glyph_index) => glyphs.push(GlyphMapEntry {
+                ch: ch.to_string(),
+                glyph_index,
+            }),
+            None => missing.push(format!("U+{codepoint:04X}")),
+        }
+    }
+    serde_json::to_string(&GlyphMapBatch {
+        region,
+        family,
+        font_source_hash,
+        glyphs,
+        missing,
+    })
+    .map_err(|err| format!("serialize glyph map failed: {err}"))
+}
+
+fn duration_ms(start: Instant, end: Instant) -> f64 {
+    (end - start).as_secs_f64() * 1000.0
+}
+
+unsafe fn read_c_string(ptr: *const c_char) -> Result<String, String> {
+    if ptr.is_null() {
+        return Ok(String::new());
+    }
+    CStr::from_ptr(ptr)
+        .to_str()
+        .map(str::to_string)
+        .map_err(|err| format!("invalid utf8 string: {err}"))
+}
+
+unsafe fn read_utf8_slice<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
+    if ptr.is_null() {
+        return Err("null utf8 pointer".to_string());
+    }
+    let bytes = slice::from_raw_parts(ptr, len);
+    std::str::from_utf8(bytes).map_err(|err| format!("invalid utf8 slice: {err}"))
+}
+
+fn into_c_string(value: String) -> *mut c_char {
+    CString::new(value)
+        .unwrap_or_else(|_| CString::new("{\"error\":\"interior nul byte\"}").unwrap())
+        .into_raw()
+}
+
+fn build_glyph(
+    face: &freetype::Face,
+    region: &str,
+    family: &str,
+    font_source_hash: &str,
+    ch: char,
+) -> Result<GlyphSdf, String> {
+    let glyph_id = face
+        .get_char_index(ch as usize)
+        .ok_or_else(|| "missing cmap entry".to_string())?;
+    face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
+        .map_err(|err| format!("load glyph failed: {err:?}"))?;
+
+    let glyph = face.glyph();
+    let metrics = glyph.metrics();
+    let bear_x = metrics.horiBearingX as f32 / 64.0;
+    let bear_y = metrics.horiBearingY as f32 / 64.0;
+    let met_w = metrics.width as f32 / 64.0;
+    let met_h = metrics.height as f32 / 64.0;
+    let advance = metrics.horiAdvance as f32 / 64.0;
+
+    let outline = &glyph.raw().outline;
+    if outline.n_contours <= 0 || outline.n_points <= 0 {
+        return Ok(empty_metric_glyph(
+            region,
+            family,
+            font_source_hash,
+            ch,
+            glyph_id,
+            advance,
+        ));
+    }
+
+    let contours = unsafe { extract_segments(outline) };
+    if contours.is_empty() {
+        return Ok(empty_metric_glyph(
+            region,
+            family,
+            font_source_hash,
+            ch,
+            glyph_id,
+            advance,
+        ));
+    }
+
+    let rect_left_px = bear_x.floor();
+    let rect_top_px = bear_y.ceil();
+    let rect_right_px = (bear_x + met_w).ceil();
+    let rect_bottom_px = (bear_y - met_h).floor();
+    let spread_px = TMP_SPREAD.ceil();
+    let sample_left_px = rect_left_px - spread_px;
+    let sample_top_px = rect_top_px + spread_px;
+    let sample_right_px = rect_right_px + spread_px;
+    let sample_bottom_px = rect_bottom_px - spread_px;
+
+    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
+    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
+    let rect_left_26_6 = sample_left_px * 64.0;
+    let rect_top_26_6 = sample_top_px * 64.0;
+
+    let distance_field = AnalyticDistanceField::new(&contours);
+    let mut pixels = vec![0u8; width * height];
+    for py in 0..height {
+        for px in 0..width {
+            let point = Vec2::new(
+                rect_left_26_6 + (px as f32 + 0.5) * 64.0,
+                rect_top_26_6 - (py as f32 + 0.5) * 64.0,
+            );
+            let signed_distance_px = distance_field.signed_distance(point) / 64.0;
+            let gray = (0.5 - signed_distance_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
+            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    Ok(GlyphSdf {
+        key: glyph_key(region, family, font_source_hash, ch),
+        region: region.to_string(),
+        family: family.to_string(),
+        font_source_hash: font_source_hash.to_string(),
+        ch: ch.to_string(),
+        glyph_index: glyph_id,
+        width,
+        height,
+        bearing_x: sample_left_px,
+        bearing_y: sample_top_px,
+        x_offset: sample_left_px,
+        y_offset: -sample_top_px,
+        advance,
+        plane_bearing_x: bear_x,
+        plane_bearing_y: bear_y,
+        plane_width: met_w.max(1.0 / 64.0),
+        plane_height: met_h.max(1.0 / 64.0),
+        drawable: true,
+        pixels_base64: encode_pixels(&pixels),
+    })
+}
+
+fn build_glyph_edt(
+    face: &freetype::Face,
+    region: &str,
+    family: &str,
+    font_source_hash: &str,
+    ch: char,
+    supersample: usize,
+) -> Result<GlyphSdf, String> {
+    let glyph_id = face
+        .get_char_index(ch as usize)
+        .ok_or_else(|| "missing cmap entry".to_string())?;
+    face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
+        .map_err(|err| format!("load glyph failed: {err:?}"))?;
+
+    let glyph = face.glyph();
+    let metrics = glyph.metrics();
+    let bear_x = metrics.horiBearingX as f32 / 64.0;
+    let bear_y = metrics.horiBearingY as f32 / 64.0;
+    let met_w = metrics.width as f32 / 64.0;
+    let met_h = metrics.height as f32 / 64.0;
+    let advance = metrics.horiAdvance as f32 / 64.0;
+
+    let outline = &glyph.raw().outline;
+    if outline.n_contours <= 0 || outline.n_points <= 0 {
+        return Ok(empty_metric_glyph(
+            region,
+            family,
+            font_source_hash,
+            ch,
+            glyph_id,
+            advance,
+        ));
+    }
+
+    let rect_left_px = bear_x.floor();
+    let rect_top_px = bear_y.ceil();
+    let rect_right_px = (bear_x + met_w).ceil();
+    let rect_bottom_px = (bear_y - met_h).floor();
+    let spread_px = TMP_SPREAD.ceil();
+    let sample_left_px = rect_left_px - spread_px;
+    let sample_top_px = rect_top_px + spread_px;
+    let sample_right_px = rect_right_px + spread_px;
+    let sample_bottom_px = rect_bottom_px - spread_px;
+
+    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
+    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
+
+    let ss = supersample.max(1);
+    let raster_w = width * ss;
+    let raster_h = height * ss;
+    glyph
+        .render_glyph(RenderMode::Normal)
+        .map_err(|err| format!("render glyph failed: {err:?}"))?;
+    let bitmap = glyph.bitmap();
+    let bm_w = bitmap.width() as usize;
+    let bm_h = bitmap.rows() as usize;
+    let bm_left = glyph.bitmap_left();
+    let bm_top = glyph.bitmap_top();
+
+    let mut inside = vec![false; raster_w * raster_h];
+    if bm_w > 0 && bm_h > 0 {
+        let buffer = bitmap.buffer();
+        let pitch = bitmap.pitch().unsigned_abs() as usize;
+        for ry in 0..raster_h {
+            for rx in 0..raster_w {
+                let px_26_6 = (sample_left_px + (rx as f32 + 0.5) / ss as f32) * 64.0;
+                let py_26_6 = (sample_top_px - (ry as f32 + 0.5) / ss as f32) * 64.0;
+                let bx = ((px_26_6 / 64.0) - bm_left as f32).floor() as isize;
+                let by = (bm_top as f32 - (py_26_6 / 64.0)).floor() as isize;
+                if bx >= 0 && by >= 0 && (bx as usize) < bm_w && (by as usize) < bm_h {
+                    let coverage = buffer[by as usize * pitch + bx as usize];
+                    inside[ry * raster_w + rx] = coverage >= 128;
+                }
+            }
+        }
+    }
+
+    let sd_ss = edt::signed_distance_from_mask(&inside, raster_w, raster_h);
+
+    let mut pixels = vec![0u8; width * height];
+    for py in 0..height {
+        for px in 0..width {
+            let mut sum = 0.0f32;
+            for sy in 0..ss {
+                for sx in 0..ss {
+                    let idx = (py * ss + sy) * raster_w + (px * ss + sx);
+                    sum += sd_ss[idx];
+                }
+            }
+            let dist_px = sum / (ss * ss) as f32 / ss as f32;
+            let gray = (0.5 - dist_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
+            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    Ok(GlyphSdf {
+        key: glyph_key(region, family, font_source_hash, ch),
+        region: region.to_string(),
+        family: family.to_string(),
+        font_source_hash: font_source_hash.to_string(),
+        ch: ch.to_string(),
+        glyph_index: glyph_id,
+        width,
+        height,
+        bearing_x: sample_left_px,
+        bearing_y: sample_top_px,
+        x_offset: sample_left_px,
+        y_offset: -sample_top_px,
+        advance,
+        plane_bearing_x: bear_x,
+        plane_bearing_y: bear_y,
+        plane_width: met_w.max(1.0 / 64.0),
+        plane_height: met_h.max(1.0 / 64.0),
+        drawable: true,
+        pixels_base64: encode_pixels(&pixels),
+    })
+}
+fn empty_metric_glyph(
+    region: &str,
+    family: &str,
+    font_source_hash: &str,
+    ch: char,
+    glyph_index: u32,
+    advance: f32,
+) -> GlyphSdf {
+    GlyphSdf {
+        key: glyph_key(region, family, font_source_hash, ch),
+        region: region.to_string(),
+        family: family.to_string(),
+        font_source_hash: font_source_hash.to_string(),
+        ch: ch.to_string(),
+        glyph_index,
+        width: 1,
+        height: 1,
+        bearing_x: 0.0,
+        bearing_y: 0.0,
+        x_offset: 0.0,
+        y_offset: 0.0,
+        advance,
+        plane_bearing_x: 0.0,
+        plane_bearing_y: 0.0,
+        plane_width: advance.max(1.0 / 64.0),
+        plane_height: 0.0,
+        drawable: false,
+        pixels_base64: encode_pixels(&[0]),
+    }
+}
+
+fn encode_pixels(pixels: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(pixels)
+}
+
+fn glyph_key(region: &str, family: &str, font_source_hash: &str, ch: char) -> String {
+    format!("{region}\u{0}{font_source_hash}\u{0}{family}\u{0}{ch}")
+}
+
+#[derive(Serialize)]
+struct GlyphBatch {
+    region: String,
+    family: String,
+    font_source_hash: String,
+    base_size: f32,
+    spread: f32,
+    glyphs: Vec<GlyphSdf>,
+    missing: Vec<String>,
+    perf: GlyphBatchPerf,
+}
+
+#[derive(Serialize)]
+struct GlyphBatchPerf {
+    total_ms: f64,
+    face_load_ms: f64,
+    glyph_total_ms: f64,
+    glyph_count: usize,
+    per_glyph_avg_ms: f64,
+    total_pixel_count: usize,
+    avg_pixels_per_glyph: f64,
+}
+
+#[derive(Serialize)]
+struct GlyphBatchError {
+    error: String,
+}
+
+#[derive(Serialize)]
+struct FreeTypeContract<'a> {
+    font_engine_fingerprint: &'a str,
+    freetype_version: &'a str,
+    modules: &'a [&'a str],
+    load_contract: &'a str,
+}
+
+#[derive(Serialize)]
+struct GlyphMapBatch {
+    region: String,
+    family: String,
+    font_source_hash: String,
+    glyphs: Vec<GlyphMapEntry>,
+    missing: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GlyphMapEntry {
+    ch: String,
+    glyph_index: u32,
+}
+
+#[derive(Serialize)]
+struct GlyphSdf {
+    key: String,
+    region: String,
+    family: String,
+    font_source_hash: String,
+    ch: String,
+    glyph_index: u32,
+    width: usize,
+    height: usize,
+    bearing_x: f32,
+    bearing_y: f32,
+    x_offset: f32,
+    y_offset: f32,
+    advance: f32,
+    plane_bearing_x: f32,
+    plane_bearing_y: f32,
+    plane_width: f32,
+    plane_height: f32,
+    drawable: bool,
+    pixels_base64: String,
+}
+
+// ===== Mask batch (for WebGPU SDF path) =====
+
+#[derive(Serialize)]
+struct GlyphMaskBatch {
+    region: String,
+    family: String,
+    font_source_hash: String,
+    base_size: f32,
+    spread: f32,
+    glyphs: Vec<GlyphMask>,
+    missing: Vec<String>,
+    perf: GlyphBatchPerf,
+}
+
+#[derive(Serialize)]
+struct GlyphMask {
+    key: String,
+    region: String,
+    family: String,
+    font_source_hash: String,
+    ch: String,
+    width: usize,
+    height: usize,
+    raster_width: usize,
+    raster_height: usize,
+    supersample: usize,
+    bearing_x: f32,
+    bearing_y: f32,
+    x_offset: f32,
+    y_offset: f32,
+    advance: f32,
+    plane_bearing_x: f32,
+    plane_bearing_y: f32,
+    plane_width: f32,
+    plane_height: f32,
+    drawable: bool,
+    mask_base64: String,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_freetype_build_mask_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    supersample: usize,
+) -> *mut c_char {
+    install_panic_hook();
+    let result = build_glyph_batch_mask_json(
+        font_ptr,
+        font_len,
+        codepoints_ptr,
+        codepoints_len,
+        region_ptr,
+        family_ptr,
+        font_source_hash_ptr,
+        supersample.clamp(1, 4),
+    );
+    into_c_string(result.unwrap_or_else(|message| {
+        serde_json::to_string(&GlyphBatchError { error: message })
+            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+    }))
+}
+
+unsafe fn build_glyph_batch_mask_json(
+    font_ptr: *const u8,
+    font_len: usize,
+    codepoints_ptr: *const u32,
+    codepoints_len: usize,
+    region_ptr: *const c_char,
+    family_ptr: *const c_char,
+    font_source_hash_ptr: *const c_char,
+    supersample: usize,
+) -> Result<String, String> {
+    if font_ptr.is_null() || codepoints_ptr.is_null() {
+        return Err("null font or codepoint pointer".to_string());
+    }
+    let t0 = Instant::now();
+    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
+    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
+    let region = read_c_string(region_ptr)?;
+    let family = read_c_string(family_ptr)?;
+    let font_source_hash = read_c_string(font_source_hash_ptr)?;
+
+    let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
+    let t1 = Instant::now();
+    let face = library
+        .new_memory_face(Rc::new(font_bytes), 0)
+        .map_err(|err| format!("load memory face failed: {err:?}"))?;
+    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+        .map_err(|err| format!("set char size failed: {err:?}"))?;
+    let t2 = Instant::now();
+
+    let mut glyphs = Vec::new();
+    let mut missing = Vec::new();
+    let mut glyph_total_ms = 0.0f64;
+    let mut total_pixel_count: usize = 0;
+    for codepoint in codepoints {
+        let Some(ch) = char::from_u32(*codepoint) else {
+            missing.push(format!("U+{codepoint:04X}"));
+            continue;
+        };
+        if ch == '\n' || ch == '\r' {
+            continue;
+        }
+        let g0 = Instant::now();
+        match build_glyph_mask(&face, &region, &family, &font_source_hash, ch, supersample) {
+            Ok(glyph) => {
+                total_pixel_count += glyph.raster_width * glyph.raster_height;
+                glyphs.push(glyph);
+            }
+            Err(message) => missing.push(format!("{family}:{ch}:{message}")),
+        }
+        glyph_total_ms += g0.elapsed().as_secs_f64() * 1000.0;
+    }
+    let t3 = Instant::now();
+
+    let glyph_count = glyphs.len();
+    serde_json::to_string(&GlyphMaskBatch {
+        region,
+        family,
+        font_source_hash,
+        base_size: TMP_POINT_SIZE,
+        spread: TMP_SPREAD,
+        glyphs,
+        missing,
+        perf: GlyphBatchPerf {
+            total_ms: duration_ms(t0, t3),
+            face_load_ms: duration_ms(t1, t2),
+            glyph_total_ms,
+            glyph_count,
+            per_glyph_avg_ms: if glyph_count > 0 {
+                glyph_total_ms / glyph_count as f64
+            } else {
+                0.0
+            },
+            total_pixel_count,
+            avg_pixels_per_glyph: if glyph_count > 0 {
+                total_pixel_count as f64 / glyph_count as f64
+            } else {
+                0.0
+            },
+        },
+    })
+    .map_err(|err| format!("serialize mask batch failed: {err}"))
+}
+
+fn build_glyph_mask(
+    face: &freetype::Face,
+    region: &str,
+    family: &str,
+    font_source_hash: &str,
+    ch: char,
+    supersample: usize,
+) -> Result<GlyphMask, String> {
+    let glyph_id = face
+        .get_char_index(ch as usize)
+        .ok_or_else(|| "missing cmap entry".to_string())?;
+    face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
+        .map_err(|err| format!("load glyph failed: {err:?}"))?;
+
+    let glyph = face.glyph();
+    let metrics = glyph.metrics();
+    let bear_x = metrics.horiBearingX as f32 / 64.0;
+    let bear_y = metrics.horiBearingY as f32 / 64.0;
+    let met_w = metrics.width as f32 / 64.0;
+    let met_h = metrics.height as f32 / 64.0;
+    let advance = metrics.horiAdvance as f32 / 64.0;
+
+    let outline = &glyph.raw().outline;
+    if outline.n_contours <= 0 || outline.n_points <= 0 {
+        return Ok(GlyphMask {
+            key: glyph_key(region, family, font_source_hash, ch),
+            region: region.to_string(),
+            family: family.to_string(),
+            font_source_hash: font_source_hash.to_string(),
+            ch: ch.to_string(),
+            width: 1,
+            height: 1,
+            raster_width: 1,
+            raster_height: 1,
+            supersample,
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+            x_offset: 0.0,
+            y_offset: 0.0,
+            advance,
+            plane_bearing_x: 0.0,
+            plane_bearing_y: 0.0,
+            plane_width: advance.max(1.0 / 64.0),
+            plane_height: 0.0,
+            drawable: false,
+            mask_base64: encode_pixels(&[0]),
+        });
+    }
+
+    let rect_left_px = bear_x.floor();
+    let rect_top_px = bear_y.ceil();
+    let rect_right_px = (bear_x + met_w).ceil();
+    let rect_bottom_px = (bear_y - met_h).floor();
+    let spread_px = TMP_SPREAD.ceil();
+    let sample_left_px = rect_left_px - spread_px;
+    let sample_top_px = rect_top_px + spread_px;
+    let sample_right_px = rect_right_px + spread_px;
+    let sample_bottom_px = rect_bottom_px - spread_px;
+
+    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
+    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
+
+    let ss = supersample.max(1);
+    let raster_w = width * ss;
+    let raster_h = height * ss;
+    glyph
+        .render_glyph(RenderMode::Normal)
+        .map_err(|err| format!("render glyph failed: {err:?}"))?;
+    let bitmap = glyph.bitmap();
+    let bm_w = bitmap.width() as usize;
+    let bm_h = bitmap.rows() as usize;
+    let bm_left = glyph.bitmap_left();
+    let bm_top = glyph.bitmap_top();
+
+    let mut mask = vec![0u8; raster_w * raster_h];
+    if bm_w > 0 && bm_h > 0 {
+        let buffer = bitmap.buffer();
+        let pitch = bitmap.pitch().unsigned_abs() as usize;
+        for ry in 0..raster_h {
+            for rx in 0..raster_w {
+                let px_26_6 = (sample_left_px + (rx as f32 + 0.5) / ss as f32) * 64.0;
+                let py_26_6 = (sample_top_px - (ry as f32 + 0.5) / ss as f32) * 64.0;
+                let bx = ((px_26_6 / 64.0) - bm_left as f32).floor() as isize;
+                let by = (bm_top as f32 - (py_26_6 / 64.0)).floor() as isize;
+                if bx >= 0 && by >= 0 && (bx as usize) < bm_w && (by as usize) < bm_h {
+                    let coverage = buffer[by as usize * pitch + bx as usize];
+                    mask[ry * raster_w + rx] = if coverage >= 128 { 1 } else { 0 };
+                }
+            }
+        }
+    }
+
+    Ok(GlyphMask {
+        key: glyph_key(region, family, font_source_hash, ch),
+        region: region.to_string(),
+        family: family.to_string(),
+        font_source_hash: font_source_hash.to_string(),
+        ch: ch.to_string(),
+        width,
+        height,
+        raster_width: raster_w,
+        raster_height: raster_h,
+        supersample: ss,
+        bearing_x: sample_left_px,
+        bearing_y: sample_top_px,
+        x_offset: sample_left_px,
+        y_offset: -sample_top_px,
+        advance,
+        plane_bearing_x: bear_x,
+        plane_bearing_y: bear_y,
+        plane_width: met_w.max(1.0 / 64.0),
+        plane_height: met_h.max(1.0 / 64.0),
+        drawable: true,
+        mask_base64: encode_pixels(&mask),
+    })
 }

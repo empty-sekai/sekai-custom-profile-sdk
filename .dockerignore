@@ -1,5 +1,6 @@
 # wasm 构建上下文 = 仓库根；排除重产物，只保留 manifest + src。
 /target
+**/target
 **/*.rs.bk
 *.pdb
 .git

@@ -1,35 +1,52 @@
-//! emscripten 链接驱动壳。
+//! Emscripten link driver for the browser renderer runtime.
 //!
-//! C ABI 导出定义在 `lib.rs`。此处用 `#[path]` 把同一份源**直接编进 bin**
-//! （而非作为 rlib 依赖链接）——否则 thin-LTO 跨 rlib→bin 边界会把
-//! `#[no_mangle]` 符号内部化，导致 wasm-ld 的 `--export=alr_*` 找不到符号。
-//! lib 目标仍保留，供 native `cargo check` 复用。
-//!
-//! emscripten 以 `MODULARIZE` 工厂导出运行时，Module 初始化后不调用 main，
-//! 故 main 仅强引用导出符号防止链接前死代码消除。
+//! The C ABI is compiled directly into this binary so link-time optimization
+//! cannot internalize the exported symbols across an rlib boundary.
 
 #[path = "lib.rs"]
 mod exports;
 
-/// 强引用导出符号，阻止链接前的死代码消除。
 fn keep_exports() {
     let anchors: &[*const ()] = &[
-        exports::alr_alloc as *const (),
-        exports::alr_free as *const (),
-        exports::alr_last_error as *const (),
-        exports::alr_load_masterdata as *const (),
-        exports::alr_register_font as *const (),
-        exports::alr_init as *const (),
-        exports::alr_collect_asset_keys as *const (),
-        exports::alr_put_asset as *const (),
-        exports::alr_render as *const (),
-        exports::alr_render_layer_cropped as *const (),
-        exports::alr_render_all_layers as *const (),
+        exports::sdf_layout_freetype_probe as *const (),
+        exports::sdf_layout_freetype_contract_json as *const (),
+        exports::sdf_layout_freetype_map_glyphs_json as *const (),
+        exports::sdf_layout_freetype_plan_glyphs_json as *const (),
+        exports::sdf_layout_freetype_build_glyph_json as *const (),
+        exports::sdf_layout_freetype_build_glyph_json_edt as *const (),
+        exports::sdf_layout_freetype_build_mask_json as *const (),
+        exports::sdf_layout_freetype_build_layout_json as *const (),
+        exports::sdf_layout_freetype_glyph_demand_json as *const (),
+        exports::sdf_atlas_create_json as *const (),
+        exports::sdf_atlas_resolve_json as *const (),
+        exports::sdf_atlas_pages_since_json as *const (),
+        exports::sdf_atlas_page_pixels_ptr as *const (),
+        exports::sdf_atlas_page_pixels_len as *const (),
+        exports::sdf_atlas_release as *const (),
+        exports::sdf_atlas_destroy as *const (),
+        exports::sdf_renderer_core_scene_create_json as *const (),
+        exports::sdf_renderer_core_profile_scene_create_json as *const (),
+        exports::sdf_renderer_core_masterdata_create_json as *const (),
+        exports::sdf_renderer_core_masterdata_put_table_json as *const (),
+        exports::sdf_renderer_core_masterdata_seal_json as *const (),
+        exports::sdf_renderer_core_profile_prepare_json as *const (),
+        exports::sdf_renderer_core_profile_create_json as *const (),
+        exports::sdf_renderer_core_masterdata_stats_json as *const (),
+        exports::sdf_renderer_core_masterdata_destroy as *const (),
+        exports::sdf_renderer_core_scene_advance_json as *const (),
+        exports::sdf_renderer_core_scene_advance_binary as *const (),
+        exports::sdf_renderer_core_scene_set_mask_json as *const (),
+        exports::sdf_renderer_core_scene_set_masks_json as *const (),
+        exports::sdf_renderer_core_scene_set_tab_json as *const (),
+        exports::sdf_renderer_core_scene_scroll_json as *const (),
+        exports::sdf_renderer_core_scene_dump_json as *const (),
+        exports::sdf_renderer_core_scene_destroy as *const (),
+        exports::sdf_renderer_core_resolve_locale_json as *const (),
+        exports::sdf_renderer_core_resolve_profile_json as *const (),
+        exports::sdf_layout_freetype_free_string as *const (),
     ];
-    for &f in anchors {
-        unsafe {
-            core::ptr::read_volatile(&f);
-        }
+    for &function in anchors {
+        unsafe { core::ptr::read_volatile(&function) };
     }
 }
 

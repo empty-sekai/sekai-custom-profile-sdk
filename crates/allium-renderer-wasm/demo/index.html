@@ -1,144 +1,204 @@
 <!doctype html>
-<!--
-  allium-renderer-wasm browser layer viewer demo.
-
-  Loads the wasm package in a Web Worker, renders all layers of a custom
-  profile card, and presents them as a stack of absolutely-positioned
-  <img> elements with per-layer visibility toggles. The layout and
-  interaction model follow the original viewer layout
-  (vanilla TS/CSS reimplementation, no React/Tailwind).
-
-  All resources (card JSON, masterdata tables, fonts, images) are loaded
-  from a resource base URL supplied by the user at runtime — nothing
-  is bundled.
--->
-<html lang="zh">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>allium-renderer-wasm — layer viewer</title>
-    <link rel="stylesheet" href="./demo.css" />
+    <meta name="color-scheme" content="dark" />
+    <title>Allium Scene Workbench</title>
+    <link rel="stylesheet" href="./demo.css?v=20260715-13" />
   </head>
   <body>
-    <header class="topbar">
-      <div class="topbar-title">
-        <span class="topbar-logo" aria-hidden="true"></span>
-        <span class="topbar-brand">allium-renderer-wasm</span>
-        <span class="topbar-sep">·</span>
-        <span class="topbar-sub">layer viewer demo</span>
+    <header class="app-bar">
+      <a class="brand" href="https://github.com/empty-sekai/allium-renderer" target="_blank" rel="noreferrer">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span><strong>Allium</strong><small>Scene Workbench</small></span>
+      </a>
+      <div class="app-bar-center" aria-label="Runtime status">
+        <span class="status-dot" id="runtime-dot"></span>
+        <span id="runtime-status">No active scene</span>
+        <span class="schema-pill" id="schema-pill">schema --</span>
       </div>
-      <div class="topbar-right">
-        <a class="topbar-link" href="https://github.com/empty-sekai/allium-renderer" target="_blank" rel="noopener">GitHub</a>
-      </div>
+      <nav class="app-actions" aria-label="Workbench actions">
+        <button class="button ghost" id="toggle-overlays" type="button" aria-pressed="false">Overlays off</button>
+        <button class="button ghost" id="export-dump" type="button" disabled>Export dump</button>
+        <button class="button ghost diagnostic" id="lose-context" type="button" disabled>Test context loss</button>
+      </nav>
     </header>
 
-    <main class="layout">
-      <!-- Left: canvas + page navigator + loading HUD -->
-      <section class="canvas-pane">
-        <div class="canvas-wrap" id="canvas-wrap">
-          <div class="canvas-frame" id="canvas-frame">
-            <!-- Layered <img> stack injected by demo.ts -->
-            <div class="hud" id="hud" hidden>
-              <div class="hud-spinner"></div>
-              <div class="hud-text" id="hud-text">加载中…</div>
-              <div class="hud-progress" id="hud-progress" hidden>
-                <div class="hud-progress-bar" id="hud-progress-bar"></div>
-              </div>
-            </div>
-            <div class="empty" id="empty">
-              <svg class="empty-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M3 16l4.5-4.5 3 3L15 10l6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                <circle cx="9" cy="9.5" r="1.5" fill="currentColor"/>
-              </svg>
-              <p class="empty-title">还没有加载名片。</p>
-              <p class="empty-hint">
-                把 <code>userCustomProfileCards</code> JSON 拖到这里，或在右侧选择文件。
-              </p>
-            </div>
-          </div>
-          <button class="page-arrow page-arrow-left" id="page-prev" hidden aria-label="上一页">‹</button>
-          <button class="page-arrow page-arrow-right" id="page-next" hidden aria-label="下一页">›</button>
-          <div class="page-dots" id="page-dots" hidden></div>
+    <main class="workbench">
+      <aside class="rail" aria-label="Session resources">
+        <div class="pane-heading">
+          <div><span class="eyebrow">Input</span><h1>Session</h1></div>
+          <button class="icon-button" id="reset-session" type="button" title="Reset session" aria-label="Reset session">↻</button>
         </div>
-      </section>
 
-      <!-- Right: control panel -->
-      <aside class="panel">
-        <section class="panel-section">
-          <h2 class="panel-h">输入</h2>
-
-          <label class="field">
-            <span class="field-label">名片 JSON</span>
-            <input type="file" id="card-file" accept=".json" />
-            <span class="field-hint">
-              <code>CustomProfileCard</code> 单页或 <code>userCustomProfileCards</code> 数组。
-              支持拖拽到画布。
-            </span>
+        <section class="rail-section">
+          <h2>Profile data</h2>
+          <label class="drop-field" id="profile-drop">
+            <input id="profile-file" type="file" accept=".json,application/json" />
+            <span class="drop-icon" aria-hidden="true">{ }</span>
+            <span><strong>Profile JSON</strong><small id="profile-file-name">Drop or choose a profile response</small></span>
           </label>
+          <p class="privacy-note"><span aria-hidden="true">◈</span> Profile JSON is stored only in this browser origin so it survives refresh.</p>
+        </section>
 
-          <label class="field">
-            <span class="field-label">字体（多选 .ttf / .otf）</span>
-            <input type="file" id="font-files" accept=".ttf,.otf" multiple />
-            <span class="field-hint">
-              文件名即 family（如 <code>FZLanTingHei-DB-GBK.ttf</code>）。
-              缺字体的文本元素不会渲染。
-            </span>
+        <section class="rail-section">
+          <div class="section-title-row"><h2>Fonts</h2><span id="font-count" class="count">0</span></div>
+          <label class="button file-button">
+            Add font files
+            <input id="font-files" type="file" accept=".ttf,.otf,font/ttf,font/otf" multiple />
           </label>
+          <div id="font-list" class="font-list" aria-live="polite">
+            <p class="empty-copy">Register every family referenced by the selected region.</p>
+          </div>
+          <p class="privacy-note"><span aria-hidden="true">◈</span> Font source bytes are stored only in this browser origin so they survive refresh.</p>
+        </section>
 
-          <details class="field-advanced" open>
-            <summary>资源地址</summary>
-            <label class="field">
-              <span class="field-label">masterdata URL</span>
-              <input type="text" id="masterdata-url" value="" placeholder="https://your-mirror.example.com/masterdata" />
-              <span class="field-hint">
-                程序在后面接 <code>/&lt;table&gt;.json</code>。留空则需自行注入。
-              </span>
+        <section class="rail-section providers">
+          <button class="disclosure" id="provider-toggle" type="button" aria-expanded="false" aria-controls="provider-fields">
+            <span>Providers</span><span aria-hidden="true">⌄</span>
+          </button>
+          <div id="provider-fields" hidden>
+            <label class="field"><span>Region</span>
+              <select id="region"><option value="cn">CN</option><option value="jp">JP</option><option value="tw">TW</option><option value="en">EN</option><option value="kr">KR</option></select>
             </label>
-            <label class="field">
-              <span class="field-label">动态素材 URL</span>
-              <input type="text" id="dynamic-asset-url" value="" placeholder="https://your-mirror.example.com/assets" />
-              <span class="field-hint">
-                卡面、图章、缩略图等。程序在后面接 <code>/&lt;key&gt;.png</code>。
-              </span>
-            </label>
-            <label class="field">
-              <span class="field-label">静态素材 URL</span>
-              <input type="text" id="static-asset-url" value="" placeholder="https://your-mirror.example.com/assets/static" />
-              <span class="field-hint">
-                边框、图标、徽章等引擎附带素材。可与动态填同一地址。
-              </span>
-            </label>
-            <label class="field">
-              <span class="field-label">profile JSON（可选）</span>
-              <input type="file" id="profile-file" accept=".json" />
-              <span class="field-hint">
-                注入 <code>generals</code> / 称号等级等 profile-side 字段，可省略。
-              </span>
-            </label>
-          </details>
-
-          <div class="actions">
-            <button id="render-btn" class="btn btn-primary" disabled>渲染</button>
-            <span id="status" class="status">未加载</span>
+            <label class="field"><span>Revision</span><input id="revision" value="latest" spellcheck="false" /></label>
+            <label class="field"><span>Masterdata base</span><input id="masterdata-base" value="https://cdn.emptysekai.com/masterdata/cn/latest" spellcheck="false" /></label>
+            <label class="field"><span>Asset base</span><input id="asset-base" value="https://cdn.emptysekai.com/assets/cn" spellcheck="false" /></label>
+            <p class="provider-preview" id="provider-preview"></p>
           </div>
         </section>
 
-        <section class="panel-section panel-section-grow">
-          <div class="panel-h-row">
-            <h2 class="panel-h">图层 <span id="layer-count" class="layer-count">0</span></h2>
-            <div class="layer-controls">
-              <button id="show-all" class="btn-mini" disabled>全显</button>
-              <button id="hide-all" class="btn-mini" disabled>全隐</button>
-              <button id="reset-vis" class="btn-mini" disabled>重置</button>
-            </div>
+        <section class="rail-section settings">
+          <label class="field"><span>SDF backend</span>
+            <select id="sdf-backend"><option value="edt">CPU EDT</option><option value="analytic">Analytic debug</option></select>
+          </label>
+          <label class="field"><span>Glyph persistence</span>
+            <select id="persistence"><option value="origin">Origin / IndexedDB</option><option value="memory-only">Memory only</option></select>
+          </label>
+          <label class="field"><span>Debug level</span>
+            <select id="debug-level"><option value="summary">Summary</option><option value="trace">Trace (240 samples)</option><option value="off">Off</option></select>
+          </label>
+        </section>
+
+        <div class="rail-footer">
+          <button class="button primary wide" id="create-scene" type="button" disabled>Build scene</button>
+          <div class="progress" id="session-progress" hidden><span id="session-progress-bar"></span></div>
+          <p class="session-message" id="session-message" role="status">Choose a card and at least one font.</p>
+        </div>
+      </aside>
+
+      <section class="stage-pane" aria-label="WebGL scene stage">
+        <div class="stage-toolbar">
+          <div class="page-controls">
+            <button class="icon-button" id="previous-page" type="button" disabled aria-label="Previous page">←</button>
+            <div id="page-tabs" class="page-tabs" role="tablist" aria-label="Profile pages"></div>
+            <button class="icon-button" id="next-page" type="button" disabled aria-label="Next page">→</button>
           </div>
-          <div class="page-tabs" id="page-tabs" hidden></div>
-          <ul class="layer-list" id="layer-list">
+          <div class="stage-meta">
+            <span><b id="stage-resolution">1830 × 812</b> card-device-v1</span>
+            <span id="stage-fps">Idle</span>
+            <button class="icon-button" id="fit-stage" type="button" title="Fit stage" aria-label="Fit stage">⛶</button>
+          </div>
+        </div>
+
+        <div class="stage-viewport" id="stage-viewport">
+          <div class="stage-shell" id="stage-shell">
+            <canvas id="scene-canvas" width="1830" height="812" aria-label="Rendered profile scene"></canvas>
+            <svg id="interaction-overlay" class="interaction-overlay" viewBox="0 0 1830 812" preserveAspectRatio="none" aria-label="Interaction regions"></svg>
+            <div id="stage-empty" class="stage-empty">
+              <div class="empty-orbit" aria-hidden="true"><span></span></div>
+              <p class="eyebrow">WebGL2 semantic renderer</p>
+              <h2>Load a profile scene</h2>
+            <p>Provide one profile JSON and its font files, then build a scene. Masterdata and assets use the configured CDN providers.</p>
+            </div>
+            <div id="stage-busy" class="stage-busy" hidden><span class="spinner"></span><strong id="stage-busy-label">Preparing scene</strong><small id="stage-busy-detail">Starting worker</small></div>
+            <div id="context-banner" class="context-banner" hidden><span class="status-dot warning"></span><span id="context-message">WebGL context is unavailable.</span></div>
+            <div id="hover-card" class="hover-card" hidden></div>
+          </div>
+        </div>
+
+        <div class="timeline-panel">
+          <div class="transport">
+            <button class="icon-button large" id="timeline-play" type="button" disabled aria-label="Play timeline">▶</button>
+            <button class="icon-button" id="timeline-step-back" type="button" disabled aria-label="Step backward">−1</button>
+            <button class="icon-button" id="timeline-step-forward" type="button" disabled aria-label="Step forward">+1</button>
+          </div>
+          <div class="timeline-track">
+            <label for="timeline-range"><span>Dynamic tick</span><output id="timeline-output">0 / 600</output></label>
+            <input id="timeline-range" type="range" min="0" max="600" value="0" step="1" disabled />
+            <div class="timeline-ruler" aria-hidden="true"><span>0s</span><span>2s</span><span>4s</span><span>6s</span><span>8s</span><span>10s</span></div>
+          </div>
+          <div class="timeline-options">
+            <label class="check"><input id="timeline-loop" type="checkbox" checked /><span>Loop</span></label>
+            <button class="button ghost" id="timeline-final" type="button" disabled>Final state</button>
+          </div>
+        </div>
+
+        <div class="event-console" aria-label="Caller-owned interaction event log">
+          <span class="console-label">Events</span>
+          <div id="event-log" class="event-log" aria-live="polite"><span class="muted">Interaction events will appear here.</span></div>
+          <button id="clear-events" class="button ghost small" type="button">Clear</button>
+        </div>
+      </section>
+
+      <aside class="inspector" aria-label="Scene inspector">
+        <div class="inspector-tabs" role="tablist" aria-label="Inspector views">
+          <button class="inspector-tab active" data-panel="layers" role="tab" aria-selected="true">Layers</button>
+          <button class="inspector-tab" data-panel="controls" role="tab" aria-selected="false">Controls</button>
+          <button class="inspector-tab" data-panel="telemetry" role="tab" aria-selected="false">Telemetry</button>
+          <button class="inspector-tab" data-panel="dump" role="tab" aria-selected="false">Dump</button>
+        </div>
+
+        <section id="panel-layers" class="inspector-panel active" role="tabpanel">
+          <div class="inspector-toolbar">
+            <label class="search"><span aria-hidden="true">⌕</span><input id="layer-search" type="search" placeholder="Filter authored layers" /></label>
+            <select id="layer-type" class="compact-select" aria-label="Filter layers by authored type"><option value="all">All types</option></select>
+            <button class="icon-button" id="show-all-layers" type="button" disabled title="Show all layers" aria-label="Show all layers">◉</button>
+            <button class="icon-button" id="hide-all-layers" type="button" disabled title="Hide all layers" aria-label="Hide all layers">○</button>
+          </div>
+          <label class="view-option"><input id="group-layers" type="checkbox" /><span>Group inspector rows by authored type</span></label>
+          <div id="layer-tree" class="layer-tree"><p class="empty-copy padded">No scene data.</p></div>
+          <div class="detail-panel">
+            <div class="detail-tabs" role="tablist" aria-label="Selected layer details">
+              <button class="detail-tab active" data-detail="source">Source</button>
+              <button class="detail-tab" data-detail="parameters">Parameters</button>
+              <button class="detail-tab" data-detail="geometry">Geometry</button>
+              <button class="detail-tab" data-detail="commands">Commands</button>
+            </div>
+            <div id="layer-detail" class="layer-detail"><p class="empty-copy">Select a game-authored layer to inspect it.</p></div>
+          </div>
+        </section>
+
+        <section id="panel-controls" class="inspector-panel" role="tabpanel">
+          <div class="panel-intro"><span class="eyebrow">Host policy</span><h2>Component controls</h2><p>WASM emits semantic controls and glyph demand. The external host owns behavior; package-internal TypeScript only orchestrates worker, cache I/O, and WebGL resources.</p></div>
+          <div class="control-toolbar">
+            <label class="search"><span aria-hidden="true">⌕</span><input id="control-search" type="search" placeholder="Search controls and regions" /></label>
+            <button id="clear-interaction-focus" class="button ghost small" type="button" disabled>Clear focus</button>
+          </div>
+          <div id="component-controls" class="control-list"><p class="empty-copy padded">No controls in the active scene.</p></div>
+          <div class="panel-intro compact"><span class="eyebrow">Hit geometry</span><h2>Interactive regions</h2></div>
+          <div id="interaction-list" class="interaction-list"><p class="empty-copy padded">No visible interaction regions.</p></div>
+        </section>
+
+        <section id="panel-telemetry" class="inspector-panel" role="tabpanel">
+          <div class="panel-intro"><span class="eyebrow">Live diagnostics</span><h2>Runtime telemetry</h2><p>Unsupported timers remain unavailable; the workbench never substitutes zero.</p></div>
+          <div id="telemetry-dashboard" class="telemetry-dashboard"></div>
+        </section>
+
+        <section id="panel-dump" class="inspector-panel" role="tabpanel">
+          <div class="dump-toolbar"><span id="dump-size">No dump</span><div><button id="dump-view-mode" class="button ghost small" type="button" aria-pressed="false">Raw JSON</button><button id="copy-dump" class="button ghost small" type="button" disabled>Copy JSON</button></div></div>
+          <div class="dump-navigator">
+            <button id="dump-up" class="icon-button" type="button" disabled title="Open parent path" aria-label="Open parent path">↑</button>
+            <input id="dump-path" type="text" value="/" spellcheck="false" aria-label="JSON pointer path" />
+            <label class="search"><span aria-hidden="true">⌕</span><input id="dump-search" type="search" placeholder="Search paths and values" /></label>
+          </div>
+          <div id="dump-preview" class="dump-preview">Build a scene to inspect its privacy-safe semantic dump.</div>
         </section>
       </aside>
     </main>
 
-    <script type="module" src="./demo.js"></script>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    <script type="module" src="./demo.js?v=20260715-13"></script>
   </body>
 </html>

@@ -4,7 +4,7 @@ Copyright (C) the allium-renderer contributors
 
 The npm-distributed WebAssembly artifact of allium-renderer-wasm (the files
 `allium_renderer_wasm.wasm`, `allium_renderer_wasm.js`, and the TypeScript/
-JavaScript wrapper published under the package `@allium/renderer-wasm`,
+JavaScript wrapper published under the package `@empty-sekai/renderer-wasm`,
 collectively "the Artifact") is licensed under the GNU Affero General Public
 License version 3 (AGPL-3.0-only), as found in the accompanying LICENSE file,
 with the following additional permission granted under section 7 of that

@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "lib": ["ES2022", "DOM", "WebWorker"],
     "declaration": true,
+    "stripInternal": true,
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
