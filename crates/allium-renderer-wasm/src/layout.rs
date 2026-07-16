@@ -255,8 +255,12 @@ fn layout_layer(
                         * TEXT_SCALE;
                     measured += (glyph_advance_tmp * seg_scale) / TEXT_SCALE;
                     rendered_count += 1;
-                    max_cpv_width_tmp =
-                        update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, glyph_advance_tmp);
+                    max_cpv_width_tmp = update_cpv_width_for_char(
+                        max_cpv_width_tmp,
+                        cpv_xadv_tmp,
+                        glyph_advance_tmp,
+                        raw_ch,
+                    );
                     let glyph_advance_caret = glyph_advance_tmp * seg_scale;
                     current_line_advances_tmp.push(glyph_advance_caret + cspace_raw_tmp);
                     let glyph_asc_tmp = measure_size * (66.0 / 75.0) * TEXT_SCALE;
@@ -289,8 +293,12 @@ fn layout_layer(
                     &layer.font_family,
                 ) * TEXT_SCALE;
                 w_scaled += glyph_advance_tmp / TEXT_SCALE;
-                max_cpv_width_tmp =
-                    update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, glyph_advance_tmp);
+                max_cpv_width_tmp = update_cpv_width_for_char(
+                    max_cpv_width_tmp,
+                    cpv_xadv_tmp,
+                    glyph_advance_tmp,
+                    raw_ch,
+                );
                 cpv_xadv_tmp += glyph_advance_tmp;
                 caret_xadv_tmp += glyph_advance_tmp;
                 current_line_advances_tmp.push(glyph_advance_tmp);
@@ -1193,6 +1201,14 @@ fn update_cpv_width(current: f32, before: f32, glyph_advance: f32) -> f32 {
     current.max(before.abs() + glyph_advance)
 }
 
+fn update_cpv_width_for_char(current: f32, before: f32, glyph_advance: f32, ch: char) -> f32 {
+    if ch.is_whitespace() {
+        current
+    } else {
+        update_cpv_width(current, before, glyph_advance)
+    }
+}
+
 fn transform_char(ch: char, seg: &TextSegment) -> (String, f32) {
     if seg.smallcaps
         && ch.to_lowercase().to_string() == ch.to_string()
@@ -1551,8 +1567,26 @@ fn one() -> f32 {
 mod tests {
     use super::{
         build_glyph_demand_json, build_layout_json, glyph_demand_chars, parse_rich_segments,
-        transformed_glyphs,
+        transformed_glyphs, update_cpv_width_for_char,
     };
+
+    #[test]
+    fn cpv_width_excludes_trailing_spaces_but_caret_keeps_advancing() {
+        let mut width = 0.0;
+        let mut xadv = 0.0;
+
+        width = update_cpv_width_for_char(width, xadv, 24.0, ' ');
+        xadv += 24.0;
+        width = update_cpv_width_for_char(width, xadv, 110.0, '●');
+        xadv += 110.0;
+        for _ in 0..5 {
+            width = update_cpv_width_for_char(width, xadv, 24.0, ' ');
+            xadv += 24.0;
+        }
+
+        assert!((width - 134.0).abs() < 1e-6);
+        assert!((xadv - 254.0).abs() < 1e-6);
+    }
 
     #[test]
     fn glyph_demand_uses_tmp_visible_transformed_scalars() {

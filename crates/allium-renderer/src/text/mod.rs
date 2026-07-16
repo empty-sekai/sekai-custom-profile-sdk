@@ -71,6 +71,21 @@ fn update_cpv_width(max_width_tmp: &mut f32, cpv_xadv_tmp: f32, glyph_hadv_tmp: 
 }
 
 #[cfg(feature = "skia-core")]
+fn update_cpv_width_for_char(
+    max_width_tmp: &mut f32,
+    cpv_xadv_tmp: f32,
+    glyph_hadv_tmp: f32,
+    ch: char,
+) {
+    // TMP advances the caret through whitespace, but preferredWidth stops at
+    // the last visible glyph. Internal whitespace is captured when the next
+    // visible glyph updates the extent from its post-whitespace xAdvance.
+    if !ch.is_whitespace() {
+        update_cpv_width(max_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp);
+    }
+}
+
+#[cfg(feature = "skia-core")]
 #[allow(dead_code)]
 #[derive(Debug)]
 struct TmpDebugCharProbe {
@@ -413,7 +428,12 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
                     * char_scale
                     * TEXT_SCALE;
                 measured += glyph_hadv_tmp_layout * seg_scale / TEXT_SCALE;
-                update_cpv_width(&mut max_cpv_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp_layout);
+                update_cpv_width_for_char(
+                    &mut max_cpv_width_tmp,
+                    cpv_xadv_tmp,
+                    glyph_hadv_tmp_layout,
+                    *ch,
+                );
                 // caret 链：字符前进乘以 scale。
                 let glyph_hadv_tmp_caret = glyph_hadv_tmp_layout * seg_scale;
                 // vertical bounds：字形在 voffset 偏移后的上下极值。
@@ -472,7 +492,7 @@ pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
                 let ch_text = ch.to_string();
                 let glyph_hadv_tmp =
                     tmp_measure_advance(&ch_text, &base_font, base_size) * TEXT_SCALE;
-                update_cpv_width(&mut max_cpv_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp);
+                update_cpv_width_for_char(&mut max_cpv_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp, ch);
                 cpv_xadv_tmp += glyph_hadv_tmp;
                 caret_xadv_tmp += glyph_hadv_tmp;
                 // vertical bounds：无 voffset 的 fallback 字符。
@@ -1200,5 +1220,24 @@ mod tests {
         super::update_cpv_width(&mut width, -221.0, 31.0);
 
         assert!((width - 252.0).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "skia-core")]
+    #[test]
+    fn cpv_width_excludes_trailing_spaces_but_caret_keeps_advancing() {
+        let mut width = 0.0;
+        let mut xadv = 0.0;
+
+        super::update_cpv_width_for_char(&mut width, xadv, 24.0, ' ');
+        xadv += 24.0;
+        super::update_cpv_width_for_char(&mut width, xadv, 110.0, '●');
+        xadv += 110.0;
+        for _ in 0..5 {
+            super::update_cpv_width_for_char(&mut width, xadv, 24.0, ' ');
+            xadv += 24.0;
+        }
+
+        assert!((width - 134.0).abs() < 1e-6);
+        assert!((xadv - 254.0).abs() < 1e-6);
     }
 }
