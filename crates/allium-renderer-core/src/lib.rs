@@ -1,5 +1,6 @@
 //! Backend-neutral renderer state and command contract shared by native and WASM.
 
+pub mod authoring_document;
 pub mod general_recipe;
 pub mod locale;
 pub mod masterdata;
