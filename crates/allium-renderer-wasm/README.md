@@ -75,7 +75,39 @@ const scene = await renderer.createProfileScene({
 });
 
 scene.draw();
+
+// 始终导出游戏名片原始尺寸 1830×812；内部会先绘制并同步复制当前帧。
+const png = await scene.exportPng();
 ```
+
+## 自定义名片编辑文档
+
+`BrowserAuthoringClient` 在 dedicated worker 中持有游戏兼容的编辑文档。导入完整公开 Profile 时只提取 `userCustomProfileCards`；导出不包含 worker handle、稳定元素 ID、选中状态或其他浏览器元数据。
+
+```ts
+import { BrowserAuthoringClient, type AuthoringCommand } from "@empty-sekai/renderer-wasm";
+
+const authoring = await BrowserAuthoringClient.create();
+const document = profile
+  ? await authoring.importProfile(profile)
+  : await authoring.createBlank();
+
+const command: AuthoringCommand = {
+  kind: "set_transform",
+  id: selectedElementId,
+  position: [120, -40, 0],
+};
+const delta = await document.apply(command);
+
+await document.undo();
+await document.redo();
+const gameDocument = await document.export();
+
+await document.destroy();
+authoring.destroy();
+```
+
+编辑核心最多保留 150 个历史事务，并校验每页 150 个元素的上限、12 个游戏数组、有限数值、图层顺序以及 `objectData` 边界。创建、复制、删除、变换、锁定、可见性、参数和图层命令都返回增量变化；调用方应把这些变化用于现有 scene 和界面状态，而不是在 TypeScript 中维护第二套命令历史。
 
 ## 完整执行流程
 
@@ -251,6 +283,49 @@ await renderer.registerFont({ family: "Application Alias", bytes });
 同一字体文件可以注册多个逻辑 alias。renderer 会对 source bytes 计算 hash，并把 region、family、source hash 和字符共同纳入 glyph identity。
 
 同一 renderer 生命周期内，首次成功注册会锁定一个 family 对应的 source hash。用相同 bytes 重复注册是幂等操作；用不同 bytes 覆盖同一 family 会返回 `FONT_IDENTITY_CONFLICT`。需要切换字体版本时应创建新的 renderer，使 font snapshot、glyph identity、atlas 和持久缓存边界保持明确。
+
+## 可选预生成 Atlas 包（0.2.1）
+
+默认仍按 scene 的实际 glyph demand 生成 SDF，并使用同源 IndexedDB glyph cache。预生成 atlas 不会自动下载。调用方可以直接使用本地/HTTP provider，也可以通过显式用户操作把完整 atlas 安装到同源 IndexedDB，随后让多个 renderer、编辑器和查看页共享同一份安装结果。
+
+```ts
+import {
+  BrowserRenderer,
+  createHttpPrebuiltSdfAtlasProvider,
+  createOriginPrebuiltSdfAtlasPackage,
+} from "@empty-sekai/renderer-wasm";
+
+const source = createHttpPrebuiltSdfAtlasProvider("/font-atlases");
+const atlasPackage = createOriginPrebuiltSdfAtlasPackage({
+  namespace: "cn-6.0.0-font-atlas-v1",
+  source,
+});
+
+// 只应从明确的用户操作调用。manifest 在全部页写入成功后才可见。
+await atlasPackage.install([
+  "FZLanTingHei-DB-GBK",
+  "FZZhengHei-EB-GBK",
+  "FZShaoEr-M11-JF",
+], {
+  concurrency: 4,
+  requestPersistence: true,
+  onProgress(progress) {
+    updateDownloadProgress(progress.completedPages / progress.totalPages);
+  },
+});
+
+const renderer = await BrowserRenderer.create({
+  canvas,
+  region: "cn",
+  resourceProvider,
+  fontProvider,
+  prebuiltSdfAtlasProvider: atlasPackage.provider,
+});
+```
+
+`atlasPackage.provider` 只读取已经完整安装的 family；未安装、安装中、IndexedDB 不可用或已移除时，manifest 返回 `null`，scene 自动回到按需 glyph 生成。安装前会检查浏览器报告的剩余 quota，每个页校验 SHA-256，失败时清理本次未完成 family。`requestPersistence` 默认关闭；renderer 不会在没有用户操作时请求持久存储权限。atlas package 不保存 profile、文本、用户 ID、layout 或 scene dump。
+
+不需要浏览器持久化时，可以把 `createHttpPrebuiltSdfAtlasProvider()` 的结果直接传给 `BrowserRenderer.create()`，由应用自己的本地文件、Service Worker 或 HTTP cache 管理生命周期。
 
 ## Scene 状态
 

@@ -2,8 +2,12 @@ import { SEMANTIC_FLOATS_PER_VERTEX, semanticTextBatchKey, type SemanticBlendMod
 import type { SemanticCommandPlan, SemanticCommandStatePatch, SemanticLayerPatch } from "./semanticCommandPlanner.js";
 import { WebglSdfGlyphPipeline } from "./webglSdfGlyphPipeline.js";
 import { WebglSdfAtlasTexture } from "./webglSdfAtlasTexture.js";
+import { packPreviewTransformsForTexture } from "./previewTransformTextureLayout.js";
 import type { SdfAtlas } from "../fontSdfAtlas.js";
 import type { BrowserImageSource } from "./browserSemanticResources.js";
+
+const PREVIEW_TRANSFORM_TEXTURE_UNIT = 5;
+const ALPHA_MASK_TEXTURE_UNIT = 6;
 
 const CARD_W = 1830;
 const CARD_H = 812;
@@ -46,6 +50,7 @@ export class WebglSemanticCommandExecutor {
   private maskTexture: WebGLTexture;
   private commandMaskTexture: WebGLTexture;
   private commandStateTexture: WebGLTexture;
+  private previewTransformTexture: WebGLTexture;
   private batches: GpuBatch[] = [];
   private textures = new Map<string, { texture: WebGLTexture; source: BrowserImageSource; bytes: number }>();
   private state = new Float32Array(2);
@@ -53,8 +58,10 @@ export class WebglSemanticCommandExecutor {
   private stateWidth = 1;
   private commandMask = new Uint8Array(1);
   private commandState = new Float32Array(2);
+  private previewTransforms = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0]);
   private commandWidth = 1;
   private plan: SemanticCommandPlan | null = null;
+  private layerSlotById = new Map<string, number>();
   private readonly glyphPipeline: WebglSdfGlyphPipeline;
   private sdfAtlasTexture: WebglSdfAtlasTexture | null = null;
   private geometryBuilds = 0;
@@ -72,11 +79,13 @@ export class WebglSemanticCommandExecutor {
     const maskTexture = gl.createTexture();
     const commandMaskTexture = gl.createTexture();
     const commandStateTexture = gl.createTexture();
-    if (!stateTexture || !maskTexture || !commandMaskTexture || !commandStateTexture || !compositeVao) throw new Error("semantic WebGL state texture creation failed");
+    const previewTransformTexture = gl.createTexture();
+    if (!stateTexture || !maskTexture || !commandMaskTexture || !commandStateTexture || !previewTransformTexture || !compositeVao) throw new Error("semantic WebGL state texture creation failed");
     this.stateTexture = stateTexture;
     this.maskTexture = maskTexture;
     this.commandMaskTexture = commandMaskTexture;
     this.commandStateTexture = commandStateTexture;
+    this.previewTransformTexture = previewTransformTexture;
     this.compositeVao = compositeVao;
     this.glyphPipeline = new WebglSdfGlyphPipeline(gl);
     gl.enable(gl.BLEND);
@@ -99,12 +108,17 @@ export class WebglSemanticCommandExecutor {
     this.glyphPipeline.clearBatches();
     this.plan = plan;
     const operations = plan.operations();
+    this.layerSlotById = new Map(operations.map((operation) => [operation.layerId, operation.layerSlot] as const));
     this.stateWidth = Math.max(1, ...operations.map((operation) => operation.layerSlot + 1));
     this.state = new Float32Array(this.stateWidth * 2);
     this.mask = new Uint8Array(this.stateWidth);
     this.commandWidth = Math.max(1, ...operations.map((operation) => operation.commandSlot + 1));
     this.commandMask = new Uint8Array(this.commandWidth);
     this.commandState = new Float32Array(this.commandWidth * 2);
+    this.previewTransforms = new Float32Array(this.stateWidth * 8);
+    for (let slot = 0; slot < this.stateWidth; slot += 1) {
+      this.previewTransforms.set([1, 0, 0, 0, 0, 1, 0, 0], slot * 8);
+    }
     const initialized = new Set<number>();
     for (const operation of operations) {
       this.commandMask[operation.commandSlot] = operation.commandVisible ? 1 : 0;
@@ -175,6 +189,28 @@ export class WebglSemanticCommandExecutor {
     return { stateUploadBytes, maskUploadBytes };
   }
 
+  setLayerPreviewTransform(layerId: string, matrix: [number, number, number, number, number, number] | null): { previewUploadBytes: number } {
+    if (!this.plan) throw new Error("semantic GPU scene is not initialized");
+    const slot = this.layerSlotById.get(layerId);
+    if (slot == null) throw new Error(`unknown preview layer ${layerId}`);
+    const value = matrix ?? [1, 0, 0, 1, 0, 0];
+    const offset = slot * 8;
+    this.previewTransforms.set([value[0], value[2], value[4], 0, value[1], value[3], value[5], 0], offset);
+    this.gl.bindTexture(this.gl.TEXTURE_2D, this.previewTransformTexture);
+    this.gl.texSubImage2D(
+      this.gl.TEXTURE_2D,
+      0,
+      slot,
+      0,
+      1,
+      2,
+      this.gl.RGBA,
+      this.gl.FLOAT,
+      this.previewTransforms.subarray(offset, offset + 8),
+    );
+    return { previewUploadBytes: 32 };
+  }
+
   draw(): SemanticGpuMetrics {
     const gl = this.gl;
     const rootFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
@@ -216,7 +252,16 @@ export class WebglSemanticCommandExecutor {
         }
         this.setBlendMode(batch.source.blendMode);
         if (batch.source.kind === "text") {
-          const glyph = this.glyphPipeline.draw(semanticTextBatchKey(batch.source.commandIds), this.stateTexture, this.maskTexture, this.stateWidth, this.commandMaskTexture, this.commandStateTexture, this.commandWidth);
+          const glyph = this.glyphPipeline.draw(
+            semanticTextBatchKey(batch.source.commandIds),
+            this.stateTexture,
+            this.maskTexture,
+            this.stateWidth,
+            this.commandMaskTexture,
+            this.commandStateTexture,
+            this.commandWidth,
+            this.previewTransformTexture,
+          );
           drawCalls += glyph.drawCalls;
           vertexBytes += glyph.bytes;
           continue;
@@ -240,9 +285,9 @@ export class WebglSemanticCommandExecutor {
           const alphaMask = batch.source.maskResource
             ? this.textures.get(resourceIdentity(batch.source.maskResource.namespace, batch.source.maskResource.key))?.texture ?? null
             : null;
-          gl.activeTexture(gl.TEXTURE5);
+          gl.activeTexture(gl.TEXTURE0 + ALPHA_MASK_TEXTURE_UNIT);
           gl.bindTexture(gl.TEXTURE_2D, alphaMask);
-          gl.uniform1i(gl.getUniformLocation(program, "u_alphaMask"), 5);
+          gl.uniform1i(gl.getUniformLocation(program, "u_alphaMask"), ALPHA_MASK_TEXTURE_UNIT);
           gl.uniform1i(gl.getUniformLocation(program, "u_hasAlphaMask"), alphaMask ? 1 : 0);
         }
         gl.bindVertexArray(batch.vao);
@@ -281,6 +326,7 @@ export class WebglSemanticCommandExecutor {
     this.gl.deleteTexture(this.maskTexture);
     this.gl.deleteTexture(this.commandMaskTexture);
     this.gl.deleteTexture(this.commandStateTexture);
+    this.gl.deleteTexture(this.previewTransformTexture);
     this.gl.deleteProgram(this.shapeProgram);
     this.gl.deleteProgram(this.textureProgram);
     this.gl.deleteProgram(this.compositeProgram);
@@ -292,6 +338,7 @@ export class WebglSemanticCommandExecutor {
     this.isolationTargets.length = 0;
     this.glyphPipeline.destroy();
     this.sdfAtlasTexture?.destroy();
+    this.layerSlotById.clear();
   }
 
   private bindCommon(program: WebGLProgram): void {
@@ -311,6 +358,9 @@ export class WebglSemanticCommandExecutor {
     gl.bindTexture(gl.TEXTURE_2D, this.commandStateTexture);
     gl.uniform1i(gl.getUniformLocation(program, "u_commandState"), 4);
     gl.uniform1f(gl.getUniformLocation(program, "u_commandWidth"), this.commandWidth);
+    gl.activeTexture(gl.TEXTURE0 + PREVIEW_TRANSFORM_TEXTURE_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, this.previewTransformTexture);
+    gl.uniform1i(gl.getUniformLocation(program, "u_previewTransform"), PREVIEW_TRANSFORM_TEXTURE_UNIT);
   }
 
   private setBlendMode(mode: SemanticBlendMode): void {
@@ -374,6 +424,19 @@ export class WebglSemanticCommandExecutor {
     gl.bindTexture(gl.TEXTURE_2D, this.commandStateTexture);
     setStateTextureParameters(gl);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, this.commandWidth, 1, 0, gl.RG, gl.FLOAT, this.commandState);
+    gl.bindTexture(gl.TEXTURE_2D, this.previewTransformTexture);
+    setStateTextureParameters(gl);
+    gl.texImage2D(
+      gl.TEXTURE_2D,
+      0,
+      gl.RGBA32F,
+      this.stateWidth,
+      2,
+      0,
+      gl.RGBA,
+      gl.FLOAT,
+      packPreviewTransformsForTexture(this.previewTransforms, this.stateWidth),
+    );
   }
 
   private uploadBatch(source: SemanticDrawBatch): GpuBatch {
@@ -496,6 +559,7 @@ uniform float u_stateWidth;
 uniform highp usampler2D u_commandMask;
 uniform sampler2D u_commandState;
 uniform float u_commandWidth;
+uniform sampler2D u_previewTransform;
 out vec2 v_uv;
 out vec2 v_shapeUv;
 out vec4 v_fill;
@@ -512,7 +576,13 @@ void main() {
   float commandU = (float(a_commandSlot) + 0.5) / u_commandWidth;
   vec2 commandOffset = texture(u_commandState, vec2(commandU, 0.5)).rg;
   vec2 totalOffset = dynamicOffset + commandOffset;
-  vec2 point = a_position + totalOffset;
+  vec4 preview0 = texelFetch(u_previewTransform, ivec2(int(a_layerSlot), 0), 0);
+  vec4 preview1 = texelFetch(u_previewTransform, ivec2(int(a_layerSlot), 1), 0);
+  vec2 basePoint = a_position + totalOffset;
+  vec2 point = vec2(
+    dot(preview0.xy, basePoint) + preview0.z,
+    dot(preview1.xy, basePoint) + preview1.z
+  );
   gl_Position = vec4(point.x / u_canvas.x * 2.0 - 1.0, 1.0 - point.y / u_canvas.y * 2.0, 0.0, 1.0);
   v_uv = a_uv;
   v_shapeUv = a_shapeUv;
@@ -520,8 +590,12 @@ void main() {
   v_stroke = a_stroke;
   v_params = a_params;
   v_point = point;
-  v_clip01 = a_clip01 + dynamicOffset.xyxy;
-  v_clip23 = a_clip23 + dynamicOffset.xyxy;
+  vec2 clip0 = vec2(dot(preview0.xy, a_clip01.xy + dynamicOffset), dot(preview1.xy, a_clip01.xy + dynamicOffset)) + vec2(preview0.z, preview1.z);
+  vec2 clip1 = vec2(dot(preview0.xy, a_clip01.zw + dynamicOffset), dot(preview1.xy, a_clip01.zw + dynamicOffset)) + vec2(preview0.z, preview1.z);
+  vec2 clip2 = vec2(dot(preview0.xy, a_clip23.xy + dynamicOffset), dot(preview1.xy, a_clip23.xy + dynamicOffset)) + vec2(preview0.z, preview1.z);
+  vec2 clip3 = vec2(dot(preview0.xy, a_clip23.zw + dynamicOffset), dot(preview1.xy, a_clip23.zw + dynamicOffset)) + vec2(preview0.z, preview1.z);
+  v_clip01 = vec4(clip0, clip1);
+  v_clip23 = vec4(clip2, clip3);
   v_shapeSize = a_shapeSize;
   v_visible = texture(u_mask, vec2(stateU, 0.5)).r * texture(u_commandMask, vec2(commandU, 0.5)).r;
 }`;

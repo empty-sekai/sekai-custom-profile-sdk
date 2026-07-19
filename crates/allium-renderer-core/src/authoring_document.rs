@@ -125,7 +125,19 @@ impl GameProfileDocument {
         }
     }
 
-    fn validate(&self) -> Result<(), GameProfileDocumentError> {
+    pub(crate) fn pages(&self) -> &[Value] {
+        self.export[CUSTOM_PROFILE_CARDS_KEY]
+            .as_array()
+            .expect("validated document")
+    }
+
+    pub(crate) fn pages_mut(&mut self) -> &mut Vec<Value> {
+        self.export[CUSTOM_PROFILE_CARDS_KEY]
+            .as_array_mut()
+            .expect("validated document")
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), GameProfileDocumentError> {
         let pages = self.export[CUSTOM_PROFILE_CARDS_KEY]
             .as_array()
             .ok_or(GameProfileDocumentError::CustomProfileCardsMustBeArray)?;

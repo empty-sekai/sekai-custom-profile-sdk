@@ -14,6 +14,7 @@ import type {
   AtlasResolveResult,
   AtlasStats,
 } from "./types/atlas.js";
+import type { AuthoringCheckpoint, AuthoringCommand, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
 
 export const RENDERER_WORKER_PROTOCOL = "allium.renderer-worker/2" as const;
 
@@ -56,6 +57,7 @@ export type RendererWorkerStats = {
   scenes: number;
   masterDataSessions: number;
   atlasSessions: number;
+  authoringSessions: number;
   fonts: number;
   requests: number;
   failures: number;
@@ -75,6 +77,25 @@ export type RendererWorkerRequest =
   | { id: number; kind: "atlasPages"; payload: { atlasId: string; revisions: Array<{ page: number; revision: number }> } }
   | { id: number; kind: "releaseAtlas"; payload: { atlasId: string; lease: number } }
   | { id: number; kind: "destroyAtlas"; payload: { atlasId: string } }
+  | { id: number; kind: "createAuthoringBlank"; payload: Record<string, never> }
+  | { id: number; kind: "importAuthoringProfile"; payload: { profile: unknown } }
+  | { id: number; kind: "restoreAuthoringCheckpoint"; payload: { checkpoint: AuthoringCheckpoint } }
+  | { id: number; kind: "applyAuthoring"; payload: { authoringId: string; command: AuthoringCommand } }
+  | { id: number; kind: "selectAuthoring"; payload: { authoringId: string; id: number | null } }
+  | { id: number; kind: "elementsAuthoring"; payload: { authoringId: string } }
+  | { id: number; kind: "beginAuthoringGesture"; payload: { authoringId: string; id: number } }
+  | { id: number; kind: "previewAuthoringGesture"; payload: { authoringId: string; command: AuthoringCommand } }
+  | { id: number; kind: "commitAuthoringGesture"; payload: { authoringId: string } }
+  | { id: number; kind: "cancelAuthoringGesture"; payload: { authoringId: string } }
+  | { id: number; kind: "appendAuthoringPage"; payload: { authoringId: string } }
+  | { id: number; kind: "duplicateAuthoringPage"; payload: { authoringId: string; page: number } }
+  | { id: number; kind: "deleteAuthoringPage"; payload: { authoringId: string; page: number } }
+  | { id: number; kind: "moveAuthoringPage"; payload: { authoringId: string; fromPage: number; page: number } }
+  | { id: number; kind: "undoAuthoring"; payload: { authoringId: string } }
+  | { id: number; kind: "redoAuthoring"; payload: { authoringId: string } }
+  | { id: number; kind: "exportAuthoring"; payload: { authoringId: string } }
+  | { id: number; kind: "checkpointAuthoring"; payload: { authoringId: string } }
+  | { id: number; kind: "destroyAuthoring"; payload: { authoringId: string } }
   | { id: number; kind: "layoutText"; payload: { request: unknown } }
   | { id: number; kind: "glyphDemand"; payload: { request: unknown } }
   | { id: number; kind: "createMasterData"; payload: { region: string; revision: string } }
@@ -105,6 +126,12 @@ export type RendererWorkerResult =
   | { kind: "atlasPages"; updates: AtlasPageUpdate[] }
   | { kind: "releaseAtlas"; released: boolean }
   | { kind: "destroyAtlas"; destroyed: boolean }
+  | { kind: "createAuthoring"; authoringId: string; document: GameProfileDocument; revision: number }
+  | { kind: "authoringDelta"; delta: AuthoringDelta | null }
+  | { kind: "elementsAuthoring"; elements: AuthoringSelection[] }
+  | { kind: "exportAuthoring"; document: GameProfileDocument }
+  | { kind: "checkpointAuthoring"; checkpoint: AuthoringCheckpoint }
+  | { kind: "destroyAuthoring"; destroyed: boolean }
   | { kind: "layoutText"; batch: WasmLayoutBatch }
   | { kind: "glyphDemand"; batch: WasmGlyphDemandBatch }
   | { kind: "createMasterData"; masterDataId: string; report: Record<string, unknown> }

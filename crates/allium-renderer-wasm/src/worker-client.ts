@@ -24,6 +24,7 @@ import type {
   AtlasStats,
   GlyphRasterPlan,
 } from "./types/atlas.js";
+import type { AuthoringCheckpoint, AuthoringCommand, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
 
 export type RendererWorkerClientOptions = {
   workerUrl?: string | URL;
@@ -111,6 +112,24 @@ export class RendererWorkerClient {
     return new RendererAtlas(this, result.atlasId, result.stats);
   }
 
+  async createAuthoringDocument(profile?: unknown): Promise<RendererAuthoringDocument> {
+    const result = profile === undefined
+      ? await this.request("createAuthoringBlank", {})
+      : await this.request("importAuthoringProfile", { profile });
+    if (result.kind !== "createAuthoring") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring response");
+    }
+    return new RendererAuthoringDocument(this, result.authoringId, result.document, result.revision);
+  }
+
+  async restoreAuthoringDocument(checkpoint: AuthoringCheckpoint): Promise<RendererAuthoringDocument> {
+    const result = await this.request("restoreAuthoringCheckpoint", { checkpoint });
+    if (result.kind !== "createAuthoring") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid restored authoring response");
+    }
+    return new RendererAuthoringDocument(this, result.authoringId, result.document, result.revision);
+  }
+
   async createMasterData(region: string, revision: string): Promise<RendererMasterData> {
     const result = await this.request("createMasterData", { region, revision });
     if (result.kind !== "createMasterData") throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid master-data response");
@@ -164,6 +183,131 @@ export class RendererWorkerClient {
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+  }
+}
+
+export class RendererAuthoringDocument {
+  private destroyed = false;
+
+  constructor(
+    private readonly client: RendererWorkerClient,
+    readonly id: string,
+    readonly initialDocument: GameProfileDocument,
+    readonly initialRevision: number,
+  ) {}
+
+  async apply(command: AuthoringCommand): Promise<AuthoringDelta> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest("applyAuthoring", { authoringId: this.id, command });
+    if (result.kind !== "authoringDelta" || result.delta == null) {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring delta");
+    }
+    return result.delta;
+  }
+
+  async select(id: number | null): Promise<AuthoringDelta> {
+    return this.delta("selectAuthoring", { authoringId: this.id, id });
+  }
+
+  async elements(): Promise<AuthoringSelection[]> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest("elementsAuthoring", { authoringId: this.id });
+    if (result.kind !== "elementsAuthoring") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned invalid authoring elements");
+    }
+    return result.elements;
+  }
+
+  async beginGesture(id: number): Promise<AuthoringDelta> {
+    return this.delta("beginAuthoringGesture", { authoringId: this.id, id });
+  }
+
+  async previewGesture(command: Extract<AuthoringCommand, { kind: "set_transform" | "set_parameters" }>): Promise<AuthoringDelta> {
+    return this.delta("previewAuthoringGesture", { authoringId: this.id, command });
+  }
+
+  async commitGesture(): Promise<AuthoringDelta> {
+    return this.delta("commitAuthoringGesture", { authoringId: this.id });
+  }
+
+  async cancelGesture(): Promise<AuthoringDelta> {
+    return this.delta("cancelAuthoringGesture", { authoringId: this.id });
+  }
+
+  async appendPage(): Promise<AuthoringDelta> {
+    return this.delta("appendAuthoringPage", { authoringId: this.id });
+  }
+
+  async duplicatePage(page: number): Promise<AuthoringDelta> {
+    return this.delta("duplicateAuthoringPage", { authoringId: this.id, page });
+  }
+
+  async deletePage(page: number): Promise<AuthoringDelta> {
+    return this.delta("deleteAuthoringPage", { authoringId: this.id, page });
+  }
+
+  async movePage(fromPage: number, page: number): Promise<AuthoringDelta> {
+    return this.delta("moveAuthoringPage", { authoringId: this.id, fromPage, page });
+  }
+
+  async undo(): Promise<AuthoringDelta | null> {
+    return this.history("undoAuthoring");
+  }
+
+  async redo(): Promise<AuthoringDelta | null> {
+    return this.history("redoAuthoring");
+  }
+
+  async export(): Promise<GameProfileDocument> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest("exportAuthoring", { authoringId: this.id });
+    if (result.kind !== "exportAuthoring") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring export");
+    }
+    return result.document;
+  }
+
+  async checkpoint(): Promise<AuthoringCheckpoint> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest("checkpointAuthoring", { authoringId: this.id });
+    if (result.kind !== "checkpointAuthoring") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring checkpoint");
+    }
+    return result.checkpoint;
+  }
+
+  async destroy(): Promise<void> {
+    if (this.destroyed) return;
+    const result = await this.client.sceneRequest("destroyAuthoring", { authoringId: this.id });
+    if (result.kind !== "destroyAuthoring" || !result.destroyed) {
+      throw new RendererWorkerError("AUTHORING_DESTROY_FAILED", "Renderer worker did not destroy the authoring session");
+    }
+    this.destroyed = true;
+  }
+
+  private async history(kind: "undoAuthoring" | "redoAuthoring"): Promise<AuthoringDelta | null> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest(kind, { authoringId: this.id });
+    if (result.kind !== "authoringDelta") {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring history response");
+    }
+    return result.delta;
+  }
+
+  private async delta(
+    kind: "selectAuthoring" | "beginAuthoringGesture" | "previewAuthoringGesture" | "commitAuthoringGesture" | "cancelAuthoringGesture" | "appendAuthoringPage" | "duplicateAuthoringPage" | "deleteAuthoringPage" | "moveAuthoringPage",
+    payload: unknown,
+  ): Promise<AuthoringDelta> {
+    this.assertAlive();
+    const result = await this.client.sceneRequest(kind, payload);
+    if (result.kind !== "authoringDelta" || result.delta == null) {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid authoring delta");
+    }
+    return result.delta;
+  }
+
+  private assertAlive(): void {
+    if (this.destroyed) throw new RendererWorkerError("AUTHORING_DESTROYED", "Renderer authoring session is destroyed");
   }
 }
 

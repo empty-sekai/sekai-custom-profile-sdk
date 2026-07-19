@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer-wasm"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Project SEKAI profile scene and minimal FreeType runtime for the Allium WebGL2 renderer"
 license = "AGPL-3.0-only"

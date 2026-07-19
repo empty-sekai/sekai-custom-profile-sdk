@@ -3,6 +3,7 @@ export {
   BrowserRendererError,
   BrowserScene,
 } from "./renderer.js";
+export { BrowserAuthoringClient } from "./authoring.js";
 export type {
   BrowserRendererOptions,
   MasterDataTableLoader,
@@ -31,6 +32,27 @@ export type {
   FontRequest,
   ProvidedFont,
 } from "./fontProvider.js";
+export {
+  createHttpPrebuiltSdfAtlasProvider,
+  isValidPrebuiltSdfAtlasManifest,
+} from "./prebuiltSdfAtlas.js";
+export type {
+  PrebuiltSdfAtlasGlyph,
+  PrebuiltSdfAtlasManifest,
+  PrebuiltSdfAtlasPage,
+  PrebuiltSdfAtlasProvider,
+} from "./prebuiltSdfAtlas.js";
+export {
+  createOriginPrebuiltSdfAtlasPackage,
+  PrebuiltSdfAtlasStorageError,
+} from "./originPrebuiltSdfAtlasPackage.js";
+export type {
+  OriginPrebuiltSdfAtlasPackage,
+  PrebuiltSdfAtlasInstallOptions,
+  PrebuiltSdfAtlasInstallProgress,
+  PrebuiltSdfAtlasPackageStatus,
+  PrebuiltSdfAtlasStorageErrorCode,
+} from "./originPrebuiltSdfAtlasPackage.js";
 export type {
   CoreControlBinding,
   CoreInteractionRegion,
@@ -45,3 +67,18 @@ export type {
 export type {
   RendererMasterData,
 } from "./worker-client.js";
+export { RendererAuthoringDocument } from "./worker-client.js";
+export { AUTHORING_CHECKPOINT_SCHEMA } from "./types/authoring.js";
+export type {
+  AuthoringCheckpoint,
+  AuthoringCategory,
+  AuthoringChangeKind,
+  AuthoringCommand,
+  AuthoringDelta,
+  AuthoringElementChange,
+  AuthoringSelection,
+  AuthoringElementId,
+  AuthoringPageChange,
+  AuthoringPageChangeKind,
+  GameProfileDocument,
+} from "./types/authoring.js";

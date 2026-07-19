@@ -60,6 +60,60 @@ const stats = callJson("sdf_renderer_core_masterdata_stats_json", ["number"], [m
 assert.equal(stats.region, "en");
 assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [masterData.handle]), 1);
 
+const authoring = callJson("sdf_renderer_authoring_create_blank_json", [], []);
+assert.ok(Number.isInteger(authoring.handle) && authoring.handle > 0);
+assert.equal(authoring.document.userCustomProfileCards.length, 1);
+const authored = callJsonInput("sdf_renderer_authoring_apply_json", {
+  kind: "create",
+  page: 0,
+  category: "texts",
+  element: {
+    objectData: {
+      position: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+      layer: 0,
+      lock: false,
+      visible: true,
+    },
+    text: "请多关照!",
+    fontId: 1,
+    type: 513,
+    colorId: 1,
+    size: 24,
+    outlineColorId: 1,
+    outlineSize: 0,
+    lineSpacing: 0,
+  },
+}, [authoring.handle]);
+assert.equal(authored.revision, 1);
+assert.equal(authored.selectedId, authored.changes[0].id);
+assert.equal(authored.selected.id, authored.changes[0].id);
+assert.equal(authored.selected.page, 0);
+assert.equal(authored.selected.category, "texts");
+assert.equal(authored.selected.index, 0);
+assert.equal(authored.selected.element.text, "请多关照!");
+const gestureStarted = callJsonInput("sdf_renderer_authoring_begin_gesture_json", {
+  id: authored.selectedId,
+}, [authoring.handle]);
+assert.equal(gestureStarted.revision, 1);
+const gesturePreview = callJsonInput("sdf_renderer_authoring_preview_gesture_json", {
+  kind: "set_parameters",
+  id: authored.selectedId,
+  values: { size: 48 },
+}, [authoring.handle]);
+assert.equal(gesturePreview.revision, 1);
+assert.equal(gesturePreview.selected.element.size, 48);
+const gestureCommitted = callJson("sdf_renderer_authoring_commit_gesture_json", ["number"], [authoring.handle]);
+assert.equal(gestureCommitted.revision, 2);
+const authoredExport = callJson("sdf_renderer_authoring_export_json", ["number"], [authoring.handle]);
+assert.equal(authoredExport.userCustomProfileCards[0].customProfileCard.texts.length, 1);
+assert.equal(authoredExport.userCustomProfileCards[0].customProfileCard.texts[0].size, 48);
+const undone = callJson("sdf_renderer_authoring_undo_json", ["number"], [authoring.handle]);
+assert.equal(undone.revision, 3);
+assert.equal(undone.selected.element.size, 24);
+assert.equal(module.ccall("sdf_renderer_authoring_destroy", "number", ["number"], [authoring.handle]), 1);
+
 const atlas = callJsonInput("sdf_atlas_create_json", {
   pageWidth: 2048,
   pageHeight: 2048,
@@ -84,5 +138,6 @@ console.log(JSON.stringify({
   contract: contract.font_engine_fingerprint,
   glyphDemand: demand.requests.length,
   masterDataLifecycle: "pass",
+  authoringLifecycle: "pass",
   atlasLifecycle: "pass",
 }));

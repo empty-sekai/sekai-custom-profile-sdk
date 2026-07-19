@@ -55,6 +55,21 @@ pub struct ResolvedHonor {
     pub honor_mission_type: Option<String>,
 }
 
+impl ResolvedHonor {
+    pub fn has_rank_overlay(&self) -> bool {
+        self.is_live_master
+            || matches!(self.honor_type.as_str(), "rank_match" | "sekai_echo")
+            || [
+                "honor_top_",
+                "honor_shining",
+                "honor_memorial",
+                "honor_memory",
+            ]
+            .iter()
+            .any(|prefix| self.asset_bundle_name.starts_with(prefix))
+    }
+}
+
 /// 渲染引擎所需的最小 MasterData 查询契约。
 pub trait MasterDataProvider: Send + Sync {
     fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String>;

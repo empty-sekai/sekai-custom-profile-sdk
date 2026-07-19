@@ -1250,14 +1250,30 @@ fn standard_honor_visual(
             metadata,
         ),
     ];
-    let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-        ("rank_live/honor", suffix.into())
-    } else if resolved.is_live_master {
-        ("honor", "scroll".into())
-    } else if resolved.honor_type == "character" {
-        ("honor", format!("rank_{suffix}_{}", level / 10 + 1))
+    let overlay = if resolved.has_rank_overlay() {
+        let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
+            ("rank_live/honor", suffix.into())
+        } else if resolved.is_live_master {
+            ("honor", "scroll".into())
+        } else {
+            ("honor", format!("rank_{suffix}"))
+        };
+        optional_descriptor(
+            "assets",
+            format!(
+                "{overlay_dir}/{}/{overlay_name}",
+                resolved.asset_bundle_name
+            ),
+            size,
+            "honor_overlay",
+            id,
+            metadata,
+        )
     } else {
-        ("honor", format!("rank_{suffix}"))
+        // Standard character, achievement, event and limited-event bundles
+        // contain only degree_main/degree_sub; requesting rank_* creates a
+        // transparent placeholder that does not exist in the game bundle.
+        None
     };
     let progress = profile
         .and_then(|profile| {
@@ -1288,17 +1304,7 @@ fn standard_honor_visual(
                 metadata,
             ),
             frame_candidates,
-            overlay: optional_descriptor(
-                "assets",
-                format!(
-                    "{overlay_dir}/{}/{overlay_name}",
-                    resolved.asset_bundle_name
-                ),
-                size,
-                "honor_overlay",
-                id,
-                metadata,
-            ),
+            overlay,
             star: optional_descriptor(
                 "static",
                 "honor/icon_degreeLv".into(),
@@ -2132,5 +2138,68 @@ mod tests {
             .challenge_avatar
             .as_ref()
             .is_some_and(|image| image.descriptor.is_none()));
+    }
+
+    fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Vec<String> {
+        let object = serde_json::json!({
+            "layer": 1, "lock": false,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+            "scale": {"x": 1.0, "y": 1.0, "z": 1.0}, "visible": true
+        });
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "honors": [{ "objectData": object, "id": 42, "fullSize": false, "honorLevel": 1 }]
+        }))
+        .unwrap();
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value("honors", serde_json::json!([{
+            "id": 42, "assetbundleName": asset_bundle_name, "honorRarity": "middle",
+            "groupId": 1, "levels": [{"level": 1, "assetbundleName": null, "honorRarity": null}],
+            "honorMissionType": null
+        }])).unwrap();
+        data.insert_value(
+            "honorGroups",
+            serde_json::json!([{
+                "id": 1, "honorType": honor_type, "hasStar": false, "isLiveMaster": false
+            }]),
+        )
+        .unwrap();
+        let prepared = prepare_profile(&card, None, &data, "character-honor", "cn").unwrap();
+        prepared
+            .resources
+            .into_iter()
+            .map(|request| request.resource.key)
+            .collect()
+    }
+
+    #[test]
+    fn standard_honor_bundles_do_not_request_absent_rank_overlays() {
+        for (honor_type, asset_bundle_name) in [
+            ("character", "honor_0042"),
+            ("achievement", "honor_0105"),
+            ("event", "honor_0245"),
+            ("limitevent", "honor_se_ln_1"),
+        ] {
+            let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
+            assert!(keys.iter().any(|key| key.ends_with("/degree_sub")));
+            assert!(
+                !keys.iter().any(|key| key.ends_with("/rank_sub")),
+                "{honor_type} {asset_bundle_name} unexpectedly requested rank_sub: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_bearing_honor_bundles_request_rank_assets() {
+        for (honor_type, asset_bundle_name) in
+            [("sekai_echo", "honor_0182"), ("event", "honor_memorial")]
+        {
+            let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
+            assert!(
+                keys.iter()
+                    .any(|key| key == &format!("honor/{asset_bundle_name}/rank_sub")),
+                "{honor_type} {asset_bundle_name} did not request rank_sub: {keys:?}"
+            );
+        }
     }
 }

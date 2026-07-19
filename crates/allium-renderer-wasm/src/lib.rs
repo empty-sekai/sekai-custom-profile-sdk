@@ -1,4 +1,5 @@
 mod atlas;
+mod authoring_runtime;
 mod edt;
 mod geometry;
 mod glyph_plan;
@@ -286,6 +287,165 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_create_json(
     input_json_len: usize,
 ) -> *mut c_char {
     core_json_call(|| read_utf8_slice(input_json_ptr, input_json_len).and_then(scene::create))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_create_blank_json() -> *mut c_char {
+    core_json_call(authoring_runtime::create_blank)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_import_profile_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len).and_then(authoring_runtime::import_profile)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_restore_checkpoint_json(
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(authoring_runtime::restore_checkpoint)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_apply_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::apply(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_select_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::select(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_elements_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::elements(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_begin_gesture_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::begin_gesture(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_preview_gesture_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::preview_gesture(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_commit_gesture_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::commit_gesture(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_cancel_gesture_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::cancel_gesture(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_append_page_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::append_page(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_duplicate_page_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::duplicate_page(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_delete_page_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::delete_page(handle, input))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sdf_renderer_authoring_move_page_json(
+    handle: u32,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| authoring_runtime::move_page(handle, input))
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_undo_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::undo(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_redo_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::redo(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_export_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::export(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_checkpoint_json(handle: u32) -> *mut c_char {
+    core_json_call(|| authoring_runtime::checkpoint(handle))
+}
+
+#[no_mangle]
+pub extern "C" fn sdf_renderer_authoring_destroy(handle: u32) -> i32 {
+    if authoring_runtime::destroy(handle) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

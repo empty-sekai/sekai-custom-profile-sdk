@@ -107,51 +107,54 @@ pub fn render_honor(
         );
     }
 
-    let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-        ("rank_live/honor", suffix.to_string())
-    } else if resolved.is_live_master {
-        ("honor", "scroll".to_string())
-    } else if resolved.honor_type == "character" {
-        let tier = (resolved.honor_level / 10) + 1;
-        ("honor", format!("rank_{}_{tier}", suffix))
+    let overlay_key = if resolved.has_rank_overlay() {
+        let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
+            ("rank_live/honor", suffix.to_string())
+        } else if resolved.is_live_master {
+            ("honor", "scroll".to_string())
+        } else {
+            ("honor", format!("rank_{}", suffix))
+        };
+        Some(format!(
+            "{}/{}/{}",
+            overlay_dir, resolved.asset_bundle_name, overlay_name
+        ))
     } else {
-        ("honor", format!("rank_{}", suffix))
+        None
     };
-    let overlay_key = format!(
-        "{}/{}/{}",
-        overlay_dir, resolved.asset_bundle_name, overlay_name
-    );
-    if let Some(img) = assets.get_image(&overlay_key) {
-        let iw = img.width() as f32;
-        let ih = img.height() as f32;
-        let (dx, dy) = if resolved.is_live_master {
-            if full_size {
-                (218.0, 3.0)
-            } else {
-                (40.0, 3.0)
-            }
-        } else if resolved.honor_type == "rank_match" {
-            if full_size {
+    if let Some(overlay_key) = overlay_key {
+        if let Some(img) = assets.get_image(&overlay_key) {
+            let iw = img.width() as f32;
+            let ih = img.height() as f32;
+            let (dx, dy) = if resolved.is_live_master {
+                if full_size {
+                    (218.0, 3.0)
+                } else {
+                    (40.0, 3.0)
+                }
+            } else if resolved.honor_type == "rank_match" {
+                if full_size {
+                    (190.0, 0.0)
+                } else {
+                    (17.0, 42.0)
+                }
+            } else if (full_size && iw == 380.0) || (!full_size && ih == 80.0) {
+                (0.0, 0.0)
+            } else if full_size {
                 (190.0, 0.0)
             } else {
-                (17.0, 42.0)
-            }
-        } else if (full_size && iw == 380.0) || (!full_size && ih == 80.0) {
-            (0.0, 0.0)
-        } else if full_size {
-            (190.0, 0.0)
-        } else {
-            (34.0, 42.0)
-        };
-        canvas.draw_image_rect(
-            img,
-            Some((
-                &Rect::from_xywh(0.0, 0.0, iw, ih),
-                skia_safe::canvas::SrcRectConstraint::Fast,
-            )),
-            Rect::from_xywh(-w / 2.0 + dx, -h / 2.0 + dy, iw, ih),
-            &paint,
-        );
+                (34.0, 42.0)
+            };
+            canvas.draw_image_rect(
+                img,
+                Some((
+                    &Rect::from_xywh(0.0, 0.0, iw, ih),
+                    skia_safe::canvas::SrcRectConstraint::Fast,
+                )),
+                Rect::from_xywh(-w / 2.0 + dx, -h / 2.0 + dy, iw, ih),
+                &paint,
+            );
+        }
     }
 
     if resolved.is_live_master {

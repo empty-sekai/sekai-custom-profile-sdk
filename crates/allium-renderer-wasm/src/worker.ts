@@ -21,12 +21,14 @@ import type {
   AtlasStats,
   GlyphRasterPlan,
 } from "./types/atlas.js";
+import type { AuthoringCheckpoint, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
 
 const scope = globalThis as unknown as DedicatedWorkerGlobalScope;
 const ATLAS_TRANSIENT_HARD_BYTES = 48 * 1024 * 1024;
 const scenes = new Map<string, number>();
 const masterDataSessions = new Map<string, number>();
 const atlasSessions = new Map<string, number>();
+const authoringSessions = new Map<string, number>();
 const fonts = new Map<string, ArrayBuffer>();
 const fontSources = new Map<string, { region: string; family: string; sourceHash: string }>();
 let modulePromise: Promise<EmscriptenModule> | null = null;
@@ -37,6 +39,7 @@ const counters: RendererWorkerStats = {
   scenes: 0,
   masterDataSessions: 0,
   atlasSessions: 0,
+  authoringSessions: 0,
   fonts: 0,
   requests: 0,
   failures: 0,
@@ -173,6 +176,165 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
       atlasSessions.delete(request.payload.atlasId);
       counters.atlasSessions = atlasSessions.size;
       result = { kind: "destroyAtlas", destroyed: status === 1 };
+      break;
+    }
+    case "createAuthoringBlank": {
+      const response = callJson<{ handle: number; revision: number; document: GameProfileDocument }>(
+        await loadedModule(),
+        "sdf_renderer_authoring_create_blank_json",
+        [],
+        [],
+      );
+      const authoringId = registerAuthoring(response.handle);
+      result = { kind: "createAuthoring", authoringId, revision: response.revision, document: response.document };
+      break;
+    }
+    case "importAuthoringProfile": {
+      const response = callJsonWithInput<{ handle: number; revision: number; document: GameProfileDocument }>(
+        await loadedModule(),
+        "sdf_renderer_authoring_import_profile_json",
+        request.payload.profile,
+      );
+      const authoringId = registerAuthoring(response.handle);
+      result = { kind: "createAuthoring", authoringId, revision: response.revision, document: response.document };
+      break;
+    }
+    case "restoreAuthoringCheckpoint": {
+      const response = callJsonWithInput<{ handle: number; revision: number; document: GameProfileDocument }>(
+        await loadedModule(),
+        "sdf_renderer_authoring_restore_checkpoint_json",
+        request.payload.checkpoint,
+      );
+      const authoringId = registerAuthoring(response.handle);
+      result = { kind: "createAuthoring", authoringId, revision: response.revision, document: response.document };
+      break;
+    }
+    case "applyAuthoring":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_apply_json",
+        request.payload.command,
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "selectAuthoring":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_select_json",
+        { id: request.payload.id },
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "elementsAuthoring":
+      result = { kind: "elementsAuthoring", elements: callJson<AuthoringSelection[]>(
+        await loadedModule(),
+        "sdf_renderer_authoring_elements_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "beginAuthoringGesture":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_begin_gesture_json",
+        { id: request.payload.id },
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "previewAuthoringGesture":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_preview_gesture_json",
+        request.payload.command,
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "commitAuthoringGesture":
+      result = { kind: "authoringDelta", delta: callJson<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_commit_gesture_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "cancelAuthoringGesture":
+      result = { kind: "authoringDelta", delta: callJson<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_cancel_gesture_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "appendAuthoringPage":
+      result = { kind: "authoringDelta", delta: callJson<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_append_page_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "duplicateAuthoringPage":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_duplicate_page_json",
+        { page: request.payload.page },
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "deleteAuthoringPage":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_delete_page_json",
+        { page: request.payload.page },
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "moveAuthoringPage":
+      result = { kind: "authoringDelta", delta: callJsonWithInput<AuthoringDelta>(
+        await loadedModule(),
+        "sdf_renderer_authoring_move_page_json",
+        { fromPage: request.payload.fromPage, page: request.payload.page },
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "undoAuthoring":
+      result = { kind: "authoringDelta", delta: callJson<AuthoringDelta | null>(
+        await loadedModule(),
+        "sdf_renderer_authoring_undo_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "redoAuthoring":
+      result = { kind: "authoringDelta", delta: callJson<AuthoringDelta | null>(
+        await loadedModule(),
+        "sdf_renderer_authoring_redo_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "exportAuthoring":
+      result = { kind: "exportAuthoring", document: callJson<GameProfileDocument>(
+        await loadedModule(),
+        "sdf_renderer_authoring_export_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "checkpointAuthoring":
+      result = { kind: "checkpointAuthoring", checkpoint: callJson<AuthoringCheckpoint>(
+        await loadedModule(),
+        "sdf_renderer_authoring_checkpoint_json",
+        ["number"],
+        [authoringHandle(request.payload.authoringId)],
+      ) };
+      break;
+    case "destroyAuthoring": {
+      const handle = authoringHandle(request.payload.authoringId);
+      const status = (await loadedModule()).ccall("sdf_renderer_authoring_destroy", "number", ["number"], [handle]);
+      authoringSessions.delete(request.payload.authoringId);
+      counters.authoringSessions = authoringSessions.size;
+      result = { kind: "destroyAuthoring", destroyed: status === 1 };
       break;
     }
     case "layoutText": {
@@ -685,6 +847,22 @@ function masterDataHandle(masterDataId: string): number {
 function atlasHandle(atlasId: string): number {
   const handle = atlasSessions.get(atlasId);
   if (handle == null) throw new WorkerError("ATLAS_NOT_FOUND", `Unknown atlas session: ${atlasId}`);
+  return handle;
+}
+
+function registerAuthoring(handle: number): string {
+  if (!Number.isInteger(handle) || handle <= 0) {
+    throw new WorkerError("AUTHORING_CREATE_FAILED", "WASM returned an invalid authoring handle");
+  }
+  const authoringId = `authoring:${handle}`;
+  authoringSessions.set(authoringId, handle);
+  counters.authoringSessions = authoringSessions.size;
+  return authoringId;
+}
+
+function authoringHandle(authoringId: string): number {
+  const handle = authoringSessions.get(authoringId);
+  if (handle == null) throw new WorkerError("AUTHORING_NOT_FOUND", `Unknown authoring session: ${authoringId}`);
   return handle;
 }
 

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "allium-renderer-core",
  "allium-renderer-host",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "allium-renderer",
  "allium-renderer-host",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "serde",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer-host"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "allium-renderer",
  "serde",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "allium-renderer-core",
  "base64",

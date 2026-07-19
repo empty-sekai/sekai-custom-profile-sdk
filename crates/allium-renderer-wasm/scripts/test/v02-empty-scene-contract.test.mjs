@@ -8,7 +8,8 @@ test("textless profile scenes skip glyph atlas creation and upload", async () =>
   const renderer = await source("src/renderer.ts");
   const scene = await source("src/gpu/semanticWebglSceneRenderer.ts");
 
-  assert.match(renderer, /glyphRequests\.length === 0\s*\? null\s*:\s*await buildSdfAtlas/);
+  assert.match(renderer, /if \(glyphRequests\.length === 0\) \{[\s\S]*?atlas = null;[\s\S]*?\} else \{/);
+  assert.match(renderer, /atlas \?\?= await buildSdfAtlas\(/);
   assert.match(renderer, /atlas\?\.release\(\)/);
   assert.match(scene, /input\.atlas\s*\? await this\.executor\.setSdfAtlas\(input\.atlas\)/);
 });

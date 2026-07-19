@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer-core"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 description = "Shared deterministic scene, dynamic state, command, dump, and cache core for allium renderer"
 license.workspace = true

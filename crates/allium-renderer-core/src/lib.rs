@@ -1,6 +1,7 @@
 //! Backend-neutral renderer state and command contract shared by native and WASM.
 
 pub mod authoring_document;
+pub mod authoring_session;
 pub mod general_recipe;
 pub mod locale;
 pub mod masterdata;
@@ -2441,6 +2442,76 @@ mod tests {
                 period_ticks: 2,
             })
         );
+    }
+
+    #[test]
+    fn negative_full_percent_keeps_emitting_the_two_cycle_after_long_runtime() {
+        let mut source = scene().source.clone();
+        let dynamic = source.layers[0].line_indent.as_mut().unwrap();
+        dynamic.percent = -100.0;
+        dynamic.line_advances_tmp = vec![vec![48.0; 6]];
+        let mut scene = Scene::new(source).unwrap();
+
+        scene.advance_to_tick(1_000);
+        let first = scene
+            .state(StableId(1))
+            .unwrap()
+            .dynamic
+            .as_ref()
+            .unwrap()
+            .clone();
+        let next = scene.advance_to_tick(1_001);
+        let second = scene
+            .state(StableId(1))
+            .unwrap()
+            .dynamic
+            .as_ref()
+            .unwrap()
+            .clone();
+        let repeated = scene.advance_to_tick(1_002);
+        let third = scene.state(StableId(1)).unwrap().dynamic.as_ref().unwrap();
+
+        assert_eq!(first.status, DynamicStatus::Periodic);
+        assert_eq!(second.status, DynamicStatus::Periodic);
+        assert_ne!(first.transform, second.transform);
+        assert_eq!(first.transform, third.transform);
+        assert_eq!(next.patches.len(), 1);
+        assert_eq!(repeated.patches.len(), 1);
+    }
+
+    #[test]
+    fn positive_percent_emits_initial_patches_then_settles() {
+        let mut source = scene().source.clone();
+        let dynamic = source.layers[0].line_indent.as_mut().unwrap();
+        dynamic.percent = 97.0;
+        dynamic.line_advances_tmp = vec![vec![24.0; 6]];
+        let mut scene = Scene::new(source).unwrap();
+
+        let initial = scene.advance_to_tick(1);
+        assert_eq!(initial.patches.len(), 1);
+        assert_eq!(
+            scene
+                .state(StableId(1))
+                .unwrap()
+                .dynamic
+                .as_ref()
+                .unwrap()
+                .status,
+            DynamicStatus::Running
+        );
+
+        scene.advance_to_tick(2_000);
+        assert_eq!(
+            scene
+                .state(StableId(1))
+                .unwrap()
+                .dynamic
+                .as_ref()
+                .unwrap()
+                .status,
+            DynamicStatus::Settled
+        );
+        assert!(scene.advance_to_tick(2_001).patches.is_empty());
     }
 
     #[test]

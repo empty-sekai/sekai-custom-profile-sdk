@@ -7,11 +7,19 @@ import { WebglSemanticCommandExecutor, type SemanticGpuMetrics } from "./webglSe
 import { applyNumericRegionRuntimeState, buildNumericTextRegions, type NumericTextRegion } from "../interaction/numericTextRegions.js";
 import type { BrowserImageSource } from "./browserSemanticResources.js";
 import { placeGeneralTextInstances } from "./generalTextRenderPlacement.js";
+import type { GlyphInstance } from "../types/glyph.js";
+import type { SemanticDrawOperation } from "./semanticCommandPlanner.js";
+
+export type AuthoredTextHitGeometry = {
+  bounds: { x: number; y: number; width: number; height: number };
+  quad: [[number, number], [number, number], [number, number], [number, number]];
+};
 
 export class SemanticWebglSceneRenderer {
   private executor: WebglSemanticCommandExecutor;
   private plan: SemanticCommandPlan | null = null;
   private numericRegions: NumericTextRegion[] = [];
+  private textHitGeometry = new Map<string, AuthoredTextHitGeometry>();
   private contextLost = false;
   private retainedScene: {
     plan: SemanticCommandPlan;
@@ -45,6 +53,7 @@ export class SemanticWebglSceneRenderer {
       : { bytes: 0, rects: 0 };
     const textOperations = operations.filter((operation) => operation.command.payload.kind === "text");
     const placedInstances = placeGeneralTextInstances(input.layout.instances, textOperations);
+    this.textHitGeometry = buildAuthoredTextHitGeometry(textOperations, placedInstances);
     this.numericRegions = textOperations.flatMap((operation) => buildNumericTextRegions(
       operation.command as Parameters<typeof buildNumericTextRegions>[0],
       placedInstances,
@@ -89,6 +98,11 @@ export class SemanticWebglSceneRenderer {
     const layer = this.executor.applyLayerPatches(delta.patches);
     const command = this.executor.applyCommandPatches(delta.command_patches);
     return { ...layer, ...command };
+  }
+
+  setLayerPreviewTransform(layerId: string, matrix: [number, number, number, number, number, number] | null) {
+    this.assertContextReady();
+    return this.executor.setLayerPreviewTransform(layerId, matrix);
   }
 
   draw(): SemanticGpuMetrics {
@@ -147,10 +161,26 @@ export class SemanticWebglSceneRenderer {
     });
   }
 
+  authoredTextHitGeometry(): Map<string, AuthoredTextHitGeometry> {
+    const operations = this.plan?.operations() ?? [];
+    const runtimeByLayer = new Map(operations.map((operation) => [operation.layerId, operation]));
+    return new Map([...this.textHitGeometry].map(([layerId, geometry]) => {
+      const operation = runtimeByLayer.get(layerId);
+      const dx = (operation?.transform.dx ?? 0) + (operation?.commandTransform.dx ?? 0);
+      const dy = (operation?.transform.dy ?? 0) + (operation?.commandTransform.dy ?? 0);
+      const quad = geometry.quad.map(([x, y]) => [x + dx, y + dy]) as AuthoredTextHitGeometry["quad"];
+      return [layerId, {
+        bounds: { ...geometry.bounds, x: geometry.bounds.x + dx, y: geometry.bounds.y + dy },
+        quad,
+      }];
+    }));
+  }
+
   destroy(): void {
     this.executor.destroy();
     this.plan = null;
     this.numericRegions = [];
+    this.textHitGeometry.clear();
     this.retainedScene = null;
     this.contextLost = false;
   }
@@ -158,6 +188,60 @@ export class SemanticWebglSceneRenderer {
   private assertContextReady(): void {
     if (this.contextLost) throw new Error("WebGL context is lost");
   }
+}
+
+export function buildAuthoredTextHitGeometry(
+  operations: SemanticDrawOperation[],
+  instances: GlyphInstance[],
+): Map<string, AuthoredTextHitGeometry> {
+  const output = new Map<string, AuthoredTextHitGeometry>();
+  for (const operation of operations) {
+    const quads = instances
+      .filter((instance) => instance.layerId === operation.command.id)
+      .map((instance) => instance.deviceCharQuad[1])
+      .filter((quad) => quad.length >= 4);
+    const points = quads.flat();
+    if (points.length === 0) continue;
+    const basis = quads.find((quad) => (
+      Math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1]) > 1e-4
+      && Math.hypot(quad[3][0] - quad[0][0], quad[3][1] - quad[0][1]) > 1e-4
+    ));
+    if (!basis) continue;
+    const ux0 = basis[1][0] - basis[0][0];
+    const uy0 = basis[1][1] - basis[0][1];
+    const vx0 = basis[3][0] - basis[0][0];
+    const vy0 = basis[3][1] - basis[0][1];
+    const ul = Math.hypot(ux0, uy0);
+    const vl = Math.hypot(vx0, vy0);
+    const ux = ux0 / ul;
+    const uy = uy0 / ul;
+    const vx = vx0 / vl;
+    const vy = vy0 / vl;
+    const uValues = points.map(([x, y]) => x * ux + y * uy);
+    const vValues = points.map(([x, y]) => x * vx + y * vy);
+    const minU = Math.min(...uValues);
+    const maxU = Math.max(...uValues);
+    const minV = Math.min(...vValues);
+    const maxV = Math.max(...vValues);
+    const point = (u: number, v: number): [number, number] => [ux * u + vx * v, uy * u + vy * v];
+    const quad: AuthoredTextHitGeometry["quad"] = [
+      point(minU, minV),
+      point(maxU, minV),
+      point(maxU, maxV),
+      point(minU, maxV),
+    ];
+    const xs = quad.map(([x]) => x);
+    const ys = quad.map(([, y]) => y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    output.set(operation.layerId, {
+      bounds: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
+      quad,
+    });
+  }
+  return output;
 }
 
 function concatenateFloat32(values: Float32Array[]): Float32Array {

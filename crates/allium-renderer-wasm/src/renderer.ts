@@ -32,6 +32,10 @@ import {
   type SdfBackend,
 } from "./fontSdfAtlas.js";
 import {
+  buildPrebuiltSdfAtlas,
+  type PrebuiltSdfAtlasProvider,
+} from "./prebuiltSdfAtlas.js";
+import {
   RendererMasterData,
   RendererScene,
   RendererWorkerClient,
@@ -61,6 +65,7 @@ export type BrowserRendererOptions = RendererWorkerClientOptions & {
   localizationConcurrency?: number;
   fontProvider?: FontProvider;
   fontConcurrency?: number;
+  prebuiltSdfAtlasProvider?: PrebuiltSdfAtlasProvider;
   telemetry?: RendererTelemetryOptions;
 };
 
@@ -119,6 +124,7 @@ export class BrowserRenderer {
     localizationConcurrency?: number,
     fontProvider?: FontProvider,
     fontConcurrency?: number,
+    private readonly prebuiltSdfAtlasProvider?: PrebuiltSdfAtlasProvider,
     telemetryOptions: RendererTelemetryOptions = {},
   ) {
     this.canvas = canvas;
@@ -168,6 +174,7 @@ export class BrowserRenderer {
       options.localizationConcurrency,
       options.fontProvider,
       options.fontConcurrency,
+      options.prebuiltSdfAtlasProvider,
       options.telemetry,
     );
   }
@@ -216,15 +223,20 @@ export class BrowserRenderer {
         localizedText,
       });
       const glyphRequests = preparedGlyphRequests(preparation);
-      atlas = glyphRequests.length === 0
-        ? null
-        : await buildSdfAtlas(
+      if (glyphRequests.length === 0) {
+        atlas = null;
+      } else {
+        atlas = this.prebuiltSdfAtlasProvider
+          ? await buildPrebuiltSdfAtlas(this.prebuiltSdfAtlasProvider, glyphRequests, abort.signal)
+          : null;
+        atlas ??= await buildSdfAtlas(
           requiredFontSources(glyphRequests, this.fonts),
           glyphRequests,
           { worker: this.worker, persistence: options.sdf?.persistence ?? "origin" },
           options.sdf?.supersample,
           options.sdf?.backend,
         );
+      }
       const requestedResources = profileResourceDescriptors(preparation);
       let acquired: BrowserSemanticResourceSet;
       acquired = await this.resources.acquire(requestedResources, abort.signal);
@@ -260,6 +272,8 @@ export class BrowserRenderer {
         imageSources: acquired.sources,
       });
       const scene = new BrowserScene(core, renderer, acquired, atlas, {
+        dynamicProgramCount: compiled.layout.dynamicPrograms.length,
+        canvas: this.canvas,
         telemetry: this.telemetryOptions,
         bootstrap,
         onDestroy: (destroyed) => this.scenes.delete(destroyed),
@@ -569,14 +583,27 @@ export class BrowserScene {
     private readonly resources: BrowserSemanticResourceSet,
     private readonly atlas: SdfAtlas | null,
     options: {
+      dynamicProgramCount: number;
+      canvas: HTMLCanvasElement | OffscreenCanvas;
       telemetry?: RendererTelemetryOptions;
       bootstrap: RendererRuntimeSnapshot["bootstrap"];
       onDestroy?: (scene: BrowserScene) => void;
     },
   ) {
+    this.dynamicProgramCount = options.dynamicProgramCount;
+    this.animated = this.dynamicProgramCount > 0;
+    this.canvas = options.canvas;
     this.runtime = new RendererRuntimeTelemetry(options.telemetry ?? {}, atlasSummary(atlas), options.bootstrap);
     this.onDestroy = options.onDestroy;
   }
+
+  /** Whether this scene owns renderer-driven programs that require timeline advancement. */
+  readonly animated: boolean;
+
+  /** Number of renderer-compiled dynamic programs retained by this scene. */
+  readonly dynamicProgramCount: number;
+
+  private readonly canvas: HTMLCanvasElement | OffscreenCanvas;
 
   draw() {
     this.assertAlive();
@@ -585,6 +612,33 @@ export class BrowserScene {
     const metrics = this.renderer.draw();
     this.runtime.recordDraw(metrics, monotonicNow() - started);
     return metrics;
+  }
+
+  /** Draws the current frame and encodes an exact 1830×812 PNG snapshot. */
+  async exportPng(): Promise<Blob> {
+    this.assertAlive();
+    this.draw();
+    if (typeof document !== "undefined") {
+      const snapshot = document.createElement("canvas");
+      snapshot.width = CARD_WIDTH;
+      snapshot.height = CARD_HEIGHT;
+      const context = snapshot.getContext("2d");
+      if (!context) throw new BrowserRendererError("PNG_EXPORT_UNAVAILABLE", "Canvas 2D is required for PNG export");
+      context.drawImage(this.canvas, 0, 0, CARD_WIDTH, CARD_HEIGHT);
+      return new Promise<Blob>((resolve, reject) => {
+        snapshot.toBlob((blob: Blob | null) => blob
+          ? resolve(blob)
+          : reject(new BrowserRendererError("PNG_EXPORT_FAILED", "Canvas PNG encoding returned no data")), "image/png");
+      });
+    }
+    if (typeof OffscreenCanvas === "undefined") {
+      throw new BrowserRendererError("PNG_EXPORT_UNAVAILABLE", "OffscreenCanvas is required outside a document");
+    }
+    const snapshot = new OffscreenCanvas(CARD_WIDTH, CARD_HEIGHT);
+    const context = snapshot.getContext("2d");
+    if (!context) throw new BrowserRendererError("PNG_EXPORT_UNAVAILABLE", "Canvas 2D is required for PNG export");
+    context.drawImage(this.canvas, 0, 0, CARD_WIDTH, CARD_HEIGHT);
+    return snapshot.convertToBlob({ type: "image/png" });
   }
 
   async advance(tick: number) { this.assertGpuReady(); return this.apply(await this.core.advance(tick)); }
@@ -597,10 +651,29 @@ export class BrowserScene {
   async setScrollOffset(controlId: StableId, offset: number) { this.assertGpuReady(); return this.apply(await this.core.setScrollOffset(controlId, offset)); }
   async scrollBy(controlId: StableId, delta: number) { this.assertGpuReady(); return this.apply(await this.core.scrollBy(controlId, delta)); }
 
+  setLayerPreviewTransform(layerId: StableId, matrix: [number, number, number, number, number, number] | null) {
+    this.assertGpuReady();
+    const gpu = this.renderer.setLayerPreviewTransform(layerId, matrix);
+    const draw = this.draw();
+    return { gpu, draw };
+  }
+
   async dump(): Promise<CoreSceneDump & { numeric_text_regions: NumericTextRegion[] }> {
     this.assertAlive();
     const dump = await this.core.dump();
-    return { ...dump, numeric_text_regions: this.renderer.interactionRegions() };
+    const textGeometry = this.renderer.authoredTextHitGeometry();
+    const interactionRegions = dump.interaction_regions.map((region) => {
+      const geometry = region.role === "primary" ? textGeometry.get(region.layer_id) : undefined;
+      return geometry ? {
+        ...region,
+        hit_geometry: geometry.quad,
+      } : region;
+    });
+    return {
+      ...dump,
+      interaction_regions: interactionRegions,
+      numeric_text_regions: this.renderer.interactionRegions(),
+    };
   }
 
   async destroy(): Promise<void> {

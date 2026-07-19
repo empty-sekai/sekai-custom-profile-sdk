@@ -1,6 +1,6 @@
 {
   "name": "@empty-sekai/renderer-wasm",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "WebGL2 and WASM runtime for Project SEKAI custom profile cards with FreeType and TMP-compatible layout.",
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -31,7 +31,7 @@
     "build:ts": "tsc -p tsconfig.json && node ./scripts/copy-artifacts.mjs",
     "build": "npm run build:wasm && npm run build:ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:gates": "node --test scripts/test/*.test.mjs",
+    "test:gates": "node --experimental-strip-types --test scripts/test/*.test.mjs",
     "audit:public": "node scripts/audit-public-package.mjs",
     "verify:wasm:runtime": "node scripts/verify-wasm-runtime.mjs",
     "measure:wasm:size": "node scripts/measure-wasm-size.mjs",

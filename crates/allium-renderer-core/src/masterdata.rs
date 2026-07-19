@@ -104,6 +104,21 @@ pub struct ResolvedHonor {
     pub honor_mission_type: Option<String>,
 }
 
+impl ResolvedHonor {
+    pub fn has_rank_overlay(&self) -> bool {
+        self.is_live_master
+            || matches!(self.honor_type.as_str(), "rank_match" | "sekai_echo")
+            || [
+                "honor_top_",
+                "honor_shining",
+                "honor_memorial",
+                "honor_memory",
+            ]
+            .iter()
+            .any(|prefix| self.asset_bundle_name.starts_with(prefix))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BondsHonorEntry {

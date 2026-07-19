@@ -75,7 +75,39 @@ const scene = await renderer.createProfileScene({
 });
 
 scene.draw();
+
+// Always exports the native 1830×812 card size after drawing and copying the frame.
+const png = await scene.exportPng();
 ```
+
+## Custom-profile authoring documents
+
+`BrowserAuthoringClient` owns a game-compatible editable document inside the dedicated worker. Importing a complete public Profile extracts only `userCustomProfileCards`; exports contain no worker handles, stable element IDs, selection state, or other browser metadata.
+
+```ts
+import { BrowserAuthoringClient, type AuthoringCommand } from "@empty-sekai/renderer-wasm";
+
+const authoring = await BrowserAuthoringClient.create();
+const document = profile
+  ? await authoring.importProfile(profile)
+  : await authoring.createBlank();
+
+const command: AuthoringCommand = {
+  kind: "set_transform",
+  id: selectedElementId,
+  position: [120, -40, 0],
+};
+const delta = await document.apply(command);
+
+await document.undo();
+await document.redo();
+const gameDocument = await document.export();
+
+await document.destroy();
+authoring.destroy();
+```
+
+The authoring core retains at most 150 history transactions and validates the 150-element page limit, all 12 game arrays, finite numbers, layer order, and the `objectData` boundary. Create, duplicate, delete, transform, lock, visibility, parameter, and layer commands return incremental changes; callers apply those changes to their existing scene and UI instead of maintaining a second TypeScript command history.
 
 ## Complete scene flow
 
@@ -249,6 +281,49 @@ await renderer.registerFont({ family: "Application Alias", bytes });
 One file may be registered under multiple logical aliases. Glyph identity includes region, family, source hash, and character.
 
 The first successful registration fixes a family to one source hash for the renderer lifetime. Re-registering identical bytes is idempotent; replacing the same family with different bytes returns `FONT_IDENTITY_CONFLICT`. Create a new renderer when switching font versions so font snapshots, glyph identities, atlases, and persistent-cache boundaries remain explicit.
+
+## Optional prebuilt atlas packages (0.2.1)
+
+Scenes still generate SDF glyphs from their actual demand by default and reuse the origin IndexedDB glyph cache. Prebuilt atlases are never downloaded automatically. A host can use a local/HTTP provider directly, or install a complete atlas package into origin IndexedDB from an explicit user action so multiple renderers, editors, and viewers share one installation.
+
+```ts
+import {
+  BrowserRenderer,
+  createHttpPrebuiltSdfAtlasProvider,
+  createOriginPrebuiltSdfAtlasPackage,
+} from "@empty-sekai/renderer-wasm";
+
+const source = createHttpPrebuiltSdfAtlasProvider("/font-atlases");
+const atlasPackage = createOriginPrebuiltSdfAtlasPackage({
+  namespace: "cn-6.0.0-font-atlas-v1",
+  source,
+});
+
+// Call only from an explicit user action. Manifests become visible after every page is stored.
+await atlasPackage.install([
+  "FZLanTingHei-DB-GBK",
+  "FZZhengHei-EB-GBK",
+  "FZShaoEr-M11-JF",
+], {
+  concurrency: 4,
+  requestPersistence: true,
+  onProgress(progress) {
+    updateDownloadProgress(progress.completedPages / progress.totalPages);
+  },
+});
+
+const renderer = await BrowserRenderer.create({
+  canvas,
+  region: "cn",
+  resourceProvider,
+  fontProvider,
+  prebuiltSdfAtlasProvider: atlasPackage.provider,
+});
+```
+
+`atlasPackage.provider` reads only fully installed families. Missing, in-progress, removed, or unavailable IndexedDB state returns a `null` manifest, so scene creation falls back to demand-driven glyph generation. Installation checks the browser-reported quota, verifies every page SHA-256, and removes incomplete target families after failure. `requestPersistence` defaults to false; the renderer never requests persistent storage without a user action. Atlas packages store no profile, text, user ID, layout, or scene dump.
+
+When browser persistence is unnecessary, pass `createHttpPrebuiltSdfAtlasProvider()` directly to `BrowserRenderer.create()` and let the host's local files, Service Worker, or HTTP cache own the lifecycle.
 
 ## Scene state
 

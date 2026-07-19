@@ -159,13 +159,12 @@ fn collect_honor_keys(
     };
     keys.push(format!("{}/{}/degree_{}", bg_dir, bg_abn, suffix));
 
-    let overlay_name = if resolved.honor_type == "rank_match" {
+    let overlay_name = if !resolved.has_rank_overlay() {
+        None
+    } else if resolved.honor_type == "rank_match" {
         Some(suffix.to_string())
     } else if resolved.is_live_master {
         Some("scroll".to_string())
-    } else if resolved.honor_type == "character" {
-        let tier = (resolved.honor_level / 10) + 1;
-        Some(format!("rank_{}_{tier}", suffix))
     } else {
         Some(format!("rank_{}", suffix))
     };

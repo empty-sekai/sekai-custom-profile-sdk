@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer-host"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Shared host layer: JSON-backed MasterDataProvider for CLI and wasm frontends"
 license = "AGPL-3.0-only"

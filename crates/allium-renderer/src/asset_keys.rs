@@ -189,14 +189,7 @@ fn collect_honor_keys(
     };
     keys.push(format!("{}/{}/degree_{}", bg_dir, bg_abn, suffix));
 
-    let abn = &resolved.asset_bundle_name;
-    let has_overlay = resolved.honor_type == "rank_match"
-        || resolved.is_live_master
-        || abn.starts_with("honor_top_")
-        || abn.starts_with("honor_shining")
-        || abn.starts_with("honor_memorial")
-        || abn.starts_with("honor_memory");
-    if has_overlay && resolved.honor_type != "character" {
+    if resolved.has_rank_overlay() {
         let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
             ("rank_live/honor", suffix.to_string())
         } else if resolved.is_live_master {

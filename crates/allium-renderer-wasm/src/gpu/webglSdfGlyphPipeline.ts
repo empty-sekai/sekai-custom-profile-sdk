@@ -71,7 +71,8 @@ export class WebglSdfGlyphPipeline {
     stateWidth: number,
     commandMaskTexture: WebGLTexture = maskTexture,
     commandStateTexture: WebGLTexture = stateTexture,
-    commandWidth: number = stateWidth
+    commandWidth: number = stateWidth,
+    previewTransformTexture: WebGLTexture = stateTexture,
   ): { drawCalls: number; instances: number; bytes: number } {
     const batch = this.batches.get(key);
     if (!batch || batch.instances === 0) return { drawCalls: 0, instances: 0, bytes: batch?.bytes ?? 0 };
@@ -94,6 +95,9 @@ export class WebglSdfGlyphPipeline {
     gl.bindTexture(gl.TEXTURE_2D, commandStateTexture);
     gl.uniform1i(gl.getUniformLocation(this.program, "u_commandState"), 4);
     gl.uniform1f(gl.getUniformLocation(this.program, "u_commandWidth"), commandWidth);
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, previewTransformTexture);
+    gl.uniform1i(gl.getUniformLocation(this.program, "u_previewTransform"), 5);
     gl.bindVertexArray(batch.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, batch.instances);
     gl.bindVertexArray(null);
@@ -197,6 +201,7 @@ uniform float u_layerStateWidth;
 uniform highp usampler2D u_commandMask;
 uniform sampler2D u_commandState;
 uniform float u_commandWidth;
+uniform sampler2D u_previewTransform;
 out vec2 v_uv;
 out vec4 v_color;
 out vec4 v_outline;
@@ -221,8 +226,26 @@ void main() {
   uint commandMask = texelFetch(u_commandMask, ivec2(int(a_instanceMeta.w), 0), 0).r;
   vec2 commandState = texelFetch(u_commandState, ivec2(int(a_instanceMeta.w), 0), 0).rg;
   vec2 totalState = state + commandState;
-  vec2 position = positions[corner] + vec2(totalState.x * ${2 / CARD_W}, -totalState.y * ${2 / CARD_H});
-  vec4 clipOffset = vec4(state.x * ${2 / CARD_W}, -state.y * ${2 / CARD_H}, state.x * ${2 / CARD_W}, -state.y * ${2 / CARD_H});
+  vec4 preview0 = texelFetch(u_previewTransform, ivec2(int(layerSlot), 0), 0);
+  vec4 preview1 = texelFetch(u_previewTransform, ivec2(int(layerSlot), 1), 0);
+  vec2 pixelPosition = vec2(
+    (positions[corner].x + 1.0) * ${CARD_W / 2}.0,
+    (1.0 - positions[corner].y) * ${CARD_H / 2}.0
+  ) + totalState;
+  vec2 previewedPosition = vec2(
+    dot(preview0.xy, pixelPosition) + preview0.z,
+    dot(preview1.xy, pixelPosition) + preview1.z
+  );
+  vec2 position = vec2(
+    previewedPosition.x * ${2 / CARD_W} - 1.0,
+    1.0 - previewedPosition.y * ${2 / CARD_H}
+  );
+  vec2 clipPoints[4] = vec2[4](a_clip01.xy, a_clip01.zw, a_clip23.xy, a_clip23.zw);
+  for (int index = 0; index < 4; index += 1) {
+    vec2 clipPixel = vec2((clipPoints[index].x + 1.0) * ${CARD_W / 2}.0, (1.0 - clipPoints[index].y) * ${CARD_H / 2}.0) + state;
+    vec2 transformed = vec2(dot(preview0.xy, clipPixel) + preview0.z, dot(preview1.xy, clipPixel) + preview1.z);
+    clipPoints[index] = vec2(transformed.x * ${2 / CARD_W} - 1.0, 1.0 - transformed.y * ${2 / CARD_H});
+  }
   if (mask == 0u || commandMask == 0u) position = vec2(2.0);
   gl_Position = vec4(position, 0.0, 1.0);
   v_uv = uvs[corner];
@@ -235,8 +258,8 @@ void main() {
   v_vertexAlpha = clamp(a_instanceMeta.x, 0.0, 1.0);
   v_atlasPage = a_instanceMeta.z;
   v_point = position;
-  v_clip01 = a_clip01 + clipOffset;
-  v_clip23 = a_clip23 + clipOffset;
+  v_clip01 = vec4(clipPoints[0], clipPoints[1]);
+  v_clip23 = vec4(clipPoints[2], clipPoints[3]);
 }`;
 
 const FRAGMENT_SHADER = `#version 300 es
