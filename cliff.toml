@@ -5,7 +5,7 @@
 header = "# Changelog\n"
 body = """
 {% if version %}\
-## [{{ version | trim_start_matches(pat="v") }}](https://github.com/empty-sekai/allium-renderer/compare/{{ previous.version }}..{{ version }}) — {{ timestamp | date(format="%Y-%m-%d") }}
+## [{{ version | trim_start_matches(pat="v") }}](https://github.com/empty-sekai/sekai-custom-profile-sdk/compare/{{ previous.version }}..{{ version }}) — {{ timestamp | date(format="%Y-%m-%d") }}
 {% else %}\
 ## [unreleased]
 {% endif %}\

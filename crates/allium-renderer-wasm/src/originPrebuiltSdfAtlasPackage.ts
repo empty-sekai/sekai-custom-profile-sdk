@@ -4,7 +4,7 @@ import {
   type PrebuiltSdfAtlasProvider,
 } from "./prebuiltSdfAtlas.js";
 
-const DATABASE_NAME = "allium-renderer-prebuilt-atlas-v1";
+const DATABASE_NAME = "sekai-custom-profile-sdk-prebuilt-atlas-v1";
 const DATABASE_VERSION = 1;
 const ENTRY_STORE = "entries";
 

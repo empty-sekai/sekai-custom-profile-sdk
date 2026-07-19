@@ -1,12 +1,12 @@
-# Allium Renderer
+# Sekai Custom Profile SDK
 
 [简体中文](README.md) | [English](README.en.md)
 
-Allium Renderer renders Project SEKAI (PJSK) custom profile cards. It resolves application-provided player profiles, card data, masterdata, fonts, and image assets into renderable scenes.
+Sekai Custom Profile SDK is an unofficial development kit for Project SEKAI (PJSK) custom profiles. It provides game-structure-compatible authoring documents, transactions, and exports together with native/browser rendering, dynamic scenes, interaction geometry, font atlases, and resource providers.
 
 Rich text and layout follow a compatibility model for the Unity TextMesh Pro data, tags, and runtime behavior used by PJSK. It covers the tags, layout, material, and dynamic semantics modeled and verified by this repository. Unmodeled game behavior and later game updates may differ from the client, so complete reproduction of the game's rendering logic or final pixels is not guaranteed.
 
-The repository contains two adapters for different environments:
+Rendering is one capability of the SDK. The repository contains two rendering adapters for different environments:
 
 - a native CPU/Skia renderer for servers, CLI tools, and offline jobs;
 - a browser WebGL2 renderer backed by Rust/WASM, FreeType, and glyph SDF atlases.
@@ -17,6 +17,7 @@ Both adapters share a backend-independent Rust semantic core. The browser packag
 
 Rust/WASM owns:
 
+- game-structure-compatible authoring documents, transactions, gestures, undo/redo, checkpoints, and exports;
 - profile-card and masterdata resolution;
 - TMP rich-text parsing and layout;
 - dynamic formulas and mutable scene state;
@@ -51,14 +52,14 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 
 ## Browser quick start
 
-The 0.2 browser API starts with `BrowserRenderer`. A required `ResourceProvider` interprets renderer-provided semantic descriptors with arbitrary asynchronous host logic and fully defines resource locations, request protocols, and storage forms.
+The 0.3 browser SDK starts with `BrowserAuthoringClient` and `BrowserRenderer`. Authoring APIs edit game-compatible documents, while a required `ResourceProvider` interprets SDK-provided semantic descriptors with arbitrary asynchronous host logic.
 
 ```ts
 import {
   BrowserRenderer,
   type FontProvider,
   type ResourceProvider,
-} from "@empty-sekai/renderer-wasm";
+} from "@empty-sekai/sekai-custom-profile-sdk";
 
 const fontProvider: FontProvider = {
   async provide({ region, family }, { signal }) {
@@ -187,4 +188,4 @@ Release gates cover ABI/schema compatibility, shared-core source consistency, TM
 
 ## License
 
-The repository is AGPL-3.0-only. The browser npm package also includes the limited browser linking exception in `crates/allium-renderer-wasm/LICENSE-EXCEPTION`. Modified renderer builds, server use, and non-browser use remain subject to the full AGPL, including its network-use source requirement.
+The repository is AGPL-3.0-only. The browser npm package also includes the limited browser linking exception in `crates/allium-renderer-wasm/LICENSE-EXCEPTION`. Modified SDK builds, server use, and non-browser use remain subject to the full AGPL, including its network-use source requirement.

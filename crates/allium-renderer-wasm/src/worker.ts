@@ -589,7 +589,7 @@ async function initialize(moduleUrl: string, wasmUrl?: string): Promise<Emscript
     if (typeof factory !== "function") throw new WorkerError("WASM_FACTORY_MISSING", "The renderer module does not export an Emscripten factory");
     const mod = await factory({
       locateFile: (path) => path.endsWith(".wasm") && wasmUrl ? wasmUrl : new URL(path, moduleUrl).toString(),
-      printErr: (...values) => console.warn("[allium-renderer]", ...values),
+      printErr: (...values) => console.warn("[sekai-custom-profile-sdk]", ...values),
     });
     moduleInstance = mod;
     counters.initialized = true;

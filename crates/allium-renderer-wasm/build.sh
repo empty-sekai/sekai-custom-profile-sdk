@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 dist_dir="$script_dir/dist"
-image="allium-renderer-wasm:0.2.1"
+image="sekai-custom-profile-sdk-wasm:0.3.0"
 cargo_registry_root="${CARGO_HOME:-$HOME/.cargo}/registry/src"
 
 fetch_freetype_source() {

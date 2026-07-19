@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer-cli"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "render-card: custom profile card rendering CLI"
 license = "AGPL-3.0-only"

@@ -1,6 +1,6 @@
 [package]
 name = "allium-renderer"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Skia CPU rendering engine: scene-graph interpreter for game cards and WidgetDocument info-graphics"
 license = "AGPL-3.0-only"

@@ -1,5 +1,5 @@
 const DEFAULT_STATIC_BASE = "https://cdn.emptysekai.com/renderer-static/v0.2";
-const STATIC_CACHE = "allium-renderer-demo-static-v0.2";
+const STATIC_CACHE = "sekai-custom-profile-sdk-demo-static-v0.3";
 const ROOT_ASSET_PREFIXES = [
   "ugc/editor_image/",
   "ugc/avatar/",

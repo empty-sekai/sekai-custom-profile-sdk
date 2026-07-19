@@ -1,4 +1,4 @@
-const DATABASE_NAME = "allium-renderer-workbench-inputs";
+const DATABASE_NAME = "sekai-custom-profile-sdk-workbench-inputs";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "inputs";
 

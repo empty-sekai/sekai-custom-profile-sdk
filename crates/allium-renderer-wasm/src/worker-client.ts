@@ -54,7 +54,7 @@ export class RendererWorkerClient {
     const workerUrl = options.workerUrl ?? new URL("./worker.js", import.meta.url);
     const moduleUrl = options.moduleUrl ?? new URL("./allium_renderer_wasm.js", import.meta.url);
     const wasmUrl = options.wasmUrl ?? new URL("./allium_renderer_wasm.wasm", import.meta.url);
-    const worker = options.workerFactory?.(workerUrl) ?? new Worker(workerUrl, { type: "module", name: "allium-renderer" });
+    const worker = options.workerFactory?.(workerUrl) ?? new Worker(workerUrl, { type: "module", name: "sekai-custom-profile-sdk" });
     const client = new RendererWorkerClient(worker);
     const result = await client.request("init", {
       moduleUrl: moduleUrl.toString(),

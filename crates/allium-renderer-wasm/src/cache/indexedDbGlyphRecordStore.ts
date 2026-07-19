@@ -8,7 +8,7 @@ import {
   type PersistentWriteToken,
 } from "./glyphPersistentCache.js";
 
-const DATABASE_NAME = "allium-renderer-glyph-cache-v1";
+const DATABASE_NAME = "sekai-custom-profile-sdk-glyph-cache-v1";
 const DATABASE_VERSION = 1;
 const GLYPH_STORE = "glyphs";
 const META_STORE = "meta";

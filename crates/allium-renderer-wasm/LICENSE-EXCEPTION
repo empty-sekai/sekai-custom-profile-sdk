@@ -1,10 +1,10 @@
-allium-renderer-wasm — Additional permission under GNU AGPL version 3 section 7
+Sekai Custom Profile SDK — Additional permission under GNU AGPL version 3 section 7
 
-Copyright (C) the allium-renderer contributors
+Copyright (C) the Sekai Custom Profile SDK contributors
 
-The npm-distributed WebAssembly artifact of allium-renderer-wasm (the files
+The npm-distributed WebAssembly artifact of Sekai Custom Profile SDK (the files
 `allium_renderer_wasm.wasm`, `allium_renderer_wasm.js`, and the TypeScript/
-JavaScript wrapper published under the package `@empty-sekai/renderer-wasm`,
+JavaScript wrapper published under the package `@empty-sekai/sekai-custom-profile-sdk`,
 collectively "the Artifact") is licensed under the GNU Affero General Public
 License version 3 (AGPL-3.0-only), as found in the accompanying LICENSE file,
 with the following additional permission granted under section 7 of that

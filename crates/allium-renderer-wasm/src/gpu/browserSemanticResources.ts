@@ -290,5 +290,5 @@ function transparentPngBlob(): Blob {
 
 function warnMissingResource(resource: ResourceDescriptor, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
-  console.warn(`[allium-renderer] semantic resource unavailable ${resource.namespace}/${resource.key} role=${resource.role}: ${reason}; using transparent placeholder`);
+  console.warn(`[sekai-custom-profile-sdk] semantic resource unavailable ${resource.namespace}/${resource.key} role=${resource.role}: ${reason}; using transparent placeholder`);
 }

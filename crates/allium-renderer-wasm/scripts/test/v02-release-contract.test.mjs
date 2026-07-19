@@ -62,7 +62,7 @@ test("GitHub Release zip retains the FreeType license under dist", async () => {
   const workflow = await workflowSource();
 
   assert.match(workflow, /cp -a artifacts\/wasm-dist\/. artifacts\/wasm-package\/dist\//);
-  assert.match(workflow, /zip -r .*allium-renderer-wasm-\$\{VERSION\}\.zip.*dist/);
+  assert.match(workflow, /zip -r .*sekai-custom-profile-sdk-browser-\$\{VERSION\}\.zip.*dist/);
   assert.match(workflow, /dist\/third-party\/freetype\/FTL\.txt/);
 });
 
@@ -79,10 +79,10 @@ test("native release matrix covers every supported platform with checksums", asy
   }
 
   for (const archive of [
-    "allium-renderer-linux-x86_64-gnu.tar.xz",
-    "allium-renderer-linux-aarch64-gnu.tar.xz",
-    "allium-renderer-windows-x86_64.zip",
-    "allium-renderer-macos-aarch64.tar.xz",
+    "sekai-custom-profile-sdk-linux-x86_64-gnu.tar.xz",
+    "sekai-custom-profile-sdk-linux-aarch64-gnu.tar.xz",
+    "sekai-custom-profile-sdk-windows-x86_64.zip",
+    "sekai-custom-profile-sdk-macos-aarch64.tar.xz",
   ]) {
     assert.match(workflow, new RegExp(archive.replaceAll(".", "\\.")));
   }

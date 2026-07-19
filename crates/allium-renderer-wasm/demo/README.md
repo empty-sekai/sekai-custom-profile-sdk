@@ -1,6 +1,6 @@
 # Allium Scene Workbench
 
-Scene Workbench is the browser reference application for `@empty-sekai/renderer-wasm` 0.2. It draws the semantic scene directly through WebGL2 and demonstrates how a profile site can build navigation, selection, copying, component controls, diagnostics, and accessibility overlays around the renderer.
+Scene Workbench is the browser reference application for `@empty-sekai/sekai-custom-profile-sdk` 0.3. It draws semantic scenes directly through WebGL2 and demonstrates authoring, navigation, selection, copying, component controls, diagnostics, and accessibility overlays.
 
 The workbench accepts one profile JSON response and the referenced font files. Card pages are read from `userCustomProfileCards`, while application adapters provide masterdata and image resources.
 

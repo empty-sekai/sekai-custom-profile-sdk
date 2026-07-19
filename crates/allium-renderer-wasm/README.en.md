@@ -1,8 +1,8 @@
-# @empty-sekai/renderer-wasm
+# @empty-sekai/sekai-custom-profile-sdk
 
 [简体中文](README.md) | [English](README.en.md)
 
-`@empty-sekai/renderer-wasm` is the WebGL2 browser runtime for Project SEKAI (PJSK) custom profile-card scenes.
+`@empty-sekai/sekai-custom-profile-sdk` is an unofficial browser SDK for Project SEKAI (PJSK) custom profiles, combining authoring, scene resolution, WebGL2 rendering, interaction, export, and font-atlas support.
 
 TMP rich text and layout implement a compatibility model for the Unity TextMesh Pro data and behavior used by PJSK. It covers the tags, layout, material, and dynamic semantics currently modeled and verified by the runtime. Unmodeled game behavior and later game updates may differ from the client, so complete reproduction of the game's rendering logic or final pixels is not guaranteed.
 
@@ -22,7 +22,7 @@ The host supplies fonts, player data, masterdata, and image assets. Host-provide
 ## Installation
 
 ```sh
-npm install @empty-sekai/renderer-wasm
+npm install @empty-sekai/sekai-custom-profile-sdk
 ```
 
 By default, the worker, Emscripten glue, and WASM files load from the `dist/` directory adjacent to the package entry. Supply `workerUrl`, `moduleUrl`, and `wasmUrl` when a bundler or deployment uses another layout.
@@ -34,7 +34,7 @@ import {
   BrowserRenderer,
   type FontProvider,
   type ResourceProvider,
-} from "@empty-sekai/renderer-wasm";
+} from "@empty-sekai/sekai-custom-profile-sdk";
 
 const fontProvider: FontProvider = {
   async provide({ region, family }, { signal }) {
@@ -85,7 +85,7 @@ const png = await scene.exportPng();
 `BrowserAuthoringClient` owns a game-compatible editable document inside the dedicated worker. Importing a complete public Profile extracts only `userCustomProfileCards`; exports contain no worker handles, stable element IDs, selection state, or other browser metadata.
 
 ```ts
-import { BrowserAuthoringClient, type AuthoringCommand } from "@empty-sekai/renderer-wasm";
+import { BrowserAuthoringClient, type AuthoringCommand } from "@empty-sekai/sekai-custom-profile-sdk";
 
 const authoring = await BrowserAuthoringClient.create();
 const document = profile
@@ -282,7 +282,7 @@ One file may be registered under multiple logical aliases. Glyph identity includ
 
 The first successful registration fixes a family to one source hash for the renderer lifetime. Re-registering identical bytes is idempotent; replacing the same family with different bytes returns `FONT_IDENTITY_CONFLICT`. Create a new renderer when switching font versions so font snapshots, glyph identities, atlases, and persistent-cache boundaries remain explicit.
 
-## Optional prebuilt atlas packages (0.2.1)
+## Optional prebuilt atlas packages (0.3)
 
 Scenes still generate SDF glyphs from their actual demand by default and reuse the origin IndexedDB glyph cache. Prebuilt atlases are never downloaded automatically. A host can use a local/HTTP provider directly, or install a complete atlas package into origin IndexedDB from an explicit user action so multiple renderers, editors, and viewers share one installation.
 
@@ -291,7 +291,7 @@ import {
   BrowserRenderer,
   createHttpPrebuiltSdfAtlasProvider,
   createOriginPrebuiltSdfAtlasPackage,
-} from "@empty-sekai/renderer-wasm";
+} from "@empty-sekai/sekai-custom-profile-sdk";
 
 const source = createHttpPrebuiltSdfAtlasProvider("/font-atlases");
 const atlasPackage = createOriginPrebuiltSdfAtlasPackage({
