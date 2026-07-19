@@ -8,14 +8,20 @@ async function workflowSource() {
   return readFile(workflowUrl, "utf8");
 }
 
-test("npm publishing accepts a tag that already matches package.json", async () => {
+test("npm publishing is version-strict, idempotent, and uses trusted publishing", async () => {
   const workflow = await workflowSource();
 
   assert.match(workflow, /CURRENT_VERSION=.*package\.json/);
   assert.match(
     workflow,
-    /if \[\[ "\$\{CURRENT_VERSION\}" != "\$\{VERSION\}" \]\]; then\s+npm version --no-git-tag-version "\$VERSION"\s+fi/,
+    /if \[\[ "\$\{CURRENT_VERSION\}" != "\$\{VERSION\}" \]\]; then[\s\S]*?exit 1\s+fi/,
   );
+  assert.match(workflow, /PACKAGE_NAME=.*package\.json/);
+  assert.match(workflow, /PUBLISHED_VERSION=.*npm view/);
+  assert.match(workflow, /is already published; skipping npm publish/);
+  assert.match(workflow, /id-token: write\s+# npm Trusted Publishing \(OIDC\)/);
+  assert.doesNotMatch(workflow, /npm version --no-git-tag-version/);
+  assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN/);
 });
 
 test("wasm release job runs every browser release gate", async () => {
