@@ -17,6 +17,32 @@ use allium_renderer_host::REQUIRED_TABLES;
 
 use crate::static_manifest::is_static_key;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssetUrlLayout {
+    #[default]
+    Flat,
+    GameAssets,
+}
+
+impl AssetUrlLayout {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "flat" => Ok(Self::Flat),
+            "game-assets" => Ok(Self::GameAssets),
+            other => Err(format!(
+                "unknown --asset-url-layout {other}; expected flat or game-assets"
+            )),
+        }
+    }
+
+    fn relative_path(self, key: &str) -> String {
+        match self {
+            Self::Flat => format!("{key}.png"),
+            Self::GameAssets => allium_renderer::asset_keys::key_to_s3_path(key, ""),
+        }
+    }
+}
+
 /// 单个请求的重试次数（首次 + 重试），指数退避。
 const MAX_ATTEMPTS: u32 = 4;
 /// 并发拉取素材的线程数。
@@ -101,6 +127,7 @@ pub fn load_assets_url(
     keys: &[String],
     dynamic_url: &str,
     static_url: Option<&str>,
+    layout: AssetUrlLayout,
 ) -> (usize, usize) {
     if keys.is_empty() {
         return (0, 0);
@@ -127,7 +154,7 @@ pub fn load_assets_url(
         } else {
             &dynamic_base
         };
-        let url = format!("{base}/{key}.png");
+        let url = format!("{base}/{}", layout.relative_path(key));
         match get_bytes(&agent, &url) {
             Ok(bytes) => {
                 store.put(key.clone(), bytes);
@@ -148,4 +175,29 @@ pub fn load_assets_url(
     });
 
     (ok.load(Ordering::Relaxed), fail.load(Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssetUrlLayout;
+
+    #[test]
+    fn flat_layout_keeps_generic_prefix_contract() {
+        assert_eq!(
+            AssetUrlLayout::Flat.relative_path("honor/example/degree_main"),
+            "honor/example/degree_main.png"
+        );
+    }
+
+    #[test]
+    fn game_assets_layout_resolves_bonds_families() {
+        assert_eq!(
+            AssetUrlLayout::GameAssets.relative_path("bonds_honor/chr_sd_01_01"),
+            "bonds_honor/character/chr_sd_01_01/chr_sd_01_01.png"
+        );
+        assert_eq!(
+            AssetUrlLayout::GameAssets.relative_path("bonds_honor/word/honorname_0102_01_01"),
+            "bonds_honor/word/honorname_0102_01_01/honorname_0102_01_01.png"
+        );
+    }
 }

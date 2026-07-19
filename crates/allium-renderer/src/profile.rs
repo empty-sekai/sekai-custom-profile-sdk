@@ -27,8 +27,35 @@ pub struct HonorSlot {
     pub profile_honor_type: String,
     /// bonds 称号的文字 ID（仅 bonds 类型有效）
     pub bonds_honor_word_id: Option<i64>,
-    /// bonds 称号查看类型（"normal" 或 "reverse"），决定角色左右顺序
+    /// bonds 称号查看类型；可组合 `reverse` 与 `unit_virtual_singer` 标志。
     pub bonds_honor_view_type: Option<String>,
+}
+
+impl HonorSlot {
+    /// 解码游戏可组合的羁绊称号视图标志：（左右反转，使用虚拟歌手角色素材）。
+    pub fn bonds_honor_view_flags(&self) -> (bool, bool) {
+        allium_renderer_core::profile_data::bonds_honor_view_flags(
+            self.bonds_honor_view_type.as_deref(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod honor_slot_tests {
+    use super::HonorSlot;
+
+    #[test]
+    fn bonds_honor_view_type_preserves_composed_flags() {
+        let slot = HonorSlot {
+            bonds_honor_view_type: Some("reverse_unit_virtual_singer".into()),
+            ..HonorSlot::default()
+        };
+        assert_eq!(slot.bonds_honor_view_flags(), (true, true));
+        assert_eq!(
+            HonorSlot::default().bonds_honor_view_flags(),
+            (false, false)
+        );
+    }
 }
 
 /// 队长卡面数据（General 面板 type=5 使用）

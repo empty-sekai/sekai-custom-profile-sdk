@@ -56,17 +56,61 @@ pub struct ResolvedHonor {
 }
 
 impl ResolvedHonor {
+    /// Returns the bundle that owns the degree layer. CN limited-event fan
+    /// honors ship `honor_top_*` as rank overlays only and share the cheer-team
+    /// degree layer; their honorGroups rows omit backgroundAssetbundleName.
+    pub fn effective_background_asset_bundle_name(&self) -> &str {
+        allium_renderer_core::masterdata::effective_honor_background_asset_bundle_name(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.background_asset_bundle_name.as_deref(),
+        )
+    }
+
     pub fn has_rank_overlay(&self) -> bool {
-        self.is_live_master
-            || matches!(self.honor_type.as_str(), "rank_match" | "sekai_echo")
-            || [
-                "honor_top_",
-                "honor_shining",
-                "honor_memorial",
-                "honor_memory",
-            ]
-            .iter()
-            .any(|prefix| self.asset_bundle_name.starts_with(prefix))
+        allium_renderer_core::masterdata::honor_has_rank_overlay(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.is_live_master,
+        )
+    }
+}
+
+#[cfg(test)]
+mod resolved_honor_tests {
+    use super::ResolvedHonor;
+
+    fn honor(asset: &str, honor_type: &str, background: Option<&str>) -> ResolvedHonor {
+        ResolvedHonor {
+            asset_bundle_name: asset.into(),
+            honor_rarity: "high".into(),
+            honor_type: honor_type.into(),
+            background_asset_bundle_name: background.map(str::to_owned),
+            frame_name: None,
+            is_live_master: false,
+            has_star: false,
+            honor_level: 1,
+            honor_mission_type: None,
+        }
+    }
+
+    #[test]
+    fn cn_limited_event_top_honor_uses_shared_cheer_team_degree_layer() {
+        let resolved = honor("honor_top_000020", "limitevent", None);
+        assert_eq!(
+            resolved.effective_background_asset_bundle_name(),
+            "honor_bg_event_cheerteam"
+        );
+        assert!(resolved.has_rank_overlay());
+    }
+
+    #[test]
+    fn explicit_background_remains_authoritative() {
+        let resolved = honor("honor_top_000020", "limitevent", Some("honor_bg_explicit"));
+        assert_eq!(
+            resolved.effective_background_asset_bundle_name(),
+            "honor_bg_explicit"
+        );
     }
 }
 

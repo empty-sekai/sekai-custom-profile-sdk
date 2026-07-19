@@ -15,6 +15,52 @@ pub fn render_honor(
     assets: &AssetStore,
     profile: Option<&crate::profile::ProfileData>,
 ) {
+    render_honor_impl(
+        canvas,
+        honor_id,
+        honor_level,
+        full_size,
+        md,
+        assets,
+        profile,
+        true,
+    );
+}
+
+/// Draws the immutable portion of a standard honor for pre-generated catalogs.
+/// Player-specific live-master progress is intentionally omitted; callers can
+/// layer that small volatile state separately without rebuilding the artwork.
+pub fn render_static_honor(
+    canvas: &Canvas,
+    honor_id: i32,
+    honor_level: i32,
+    full_size: bool,
+    md: &MasterData,
+    assets: &AssetStore,
+) {
+    render_honor_impl(
+        canvas,
+        honor_id,
+        honor_level,
+        full_size,
+        md,
+        assets,
+        None,
+        false,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_honor_impl(
+    canvas: &Canvas,
+    honor_id: i32,
+    honor_level: i32,
+    full_size: bool,
+    md: &MasterData,
+    assets: &AssetStore,
+    profile: Option<&crate::profile::ProfileData>,
+    render_player_overlay: bool,
+) {
     let resolved = match md.resolve_honor(honor_id, honor_level) {
         Some(r) => r,
         None => {
@@ -37,10 +83,7 @@ pub fn render_honor(
     let suffix = if full_size { "main" } else { "sub" };
     let paint = Paint::default();
 
-    let bg_abn = resolved
-        .background_asset_bundle_name
-        .as_deref()
-        .unwrap_or(&resolved.asset_bundle_name);
+    let bg_abn = resolved.effective_background_asset_bundle_name();
     let bg_dir = if resolved.honor_type == "rank_match" {
         "rank_live/honor"
     } else {
@@ -157,7 +200,7 @@ pub fn render_honor(
         }
     }
 
-    if resolved.is_live_master {
+    if resolved.is_live_master && render_player_overlay {
         render_live_master_overlay(canvas, &resolved, full_size, w, h, assets, profile);
     }
     render_stars(canvas, &resolved, full_size, w, h, assets);

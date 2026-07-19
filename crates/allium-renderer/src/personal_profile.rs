@@ -375,14 +375,15 @@ impl ProfileCanvas {
             canvas.scale((scale, scale));
             if let Some(store) = assets {
                 if slot.profile_honor_type == "bonds" {
+                    let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
                     crate::elements::honor::render_bonds_honor(
                         canvas,
                         slot.honor_id,
                         slot.honor_level,
                         slot.full_size,
                         slot.bonds_honor_word_id.unwrap_or(0),
-                        slot.bonds_honor_view_type.as_deref() == Some("reverse"),
-                        false,
+                        inverse,
+                        use_unit_virtual_singer,
                         md,
                         store,
                     );

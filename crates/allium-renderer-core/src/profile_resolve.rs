@@ -1106,14 +1106,15 @@ fn build_component(
         .enumerate()
         .filter_map(|(index, slot)| {
             if slot.profile_honor_type == "bonds" {
+                let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
                 bonds_honor_visual(
                     "userProfile.honorSlots",
                     slot.honor_id,
                     slot.honor_level,
                     index == 0,
                     slot.bonds_honor_word_id.unwrap_or_default(),
-                    slot.bonds_honor_view_type.as_deref() == Some("reverse"),
-                    false,
+                    inverse,
+                    use_unit_virtual_singer,
                     masterdata,
                     metadata,
                 )
@@ -1220,10 +1221,7 @@ fn standard_honor_visual(
         width,
         height: 80.0,
     };
-    let background_name = resolved
-        .background_asset_bundle_name
-        .as_deref()
-        .unwrap_or(&resolved.asset_bundle_name);
+    let background_name = resolved.effective_background_asset_bundle_name().to_owned();
     let background_dir = if resolved.honor_type == "rank_match" {
         "rank_live/honor"
     } else {
@@ -1270,9 +1268,9 @@ fn standard_honor_visual(
             metadata,
         )
     } else {
-        // Standard character, achievement, event and limited-event bundles
-        // contain only degree_main/degree_sub; requesting rank_* creates a
-        // transparent placeholder that does not exist in the game bundle.
+        // Standard character, achievement, event and limited-event degree-only
+        // bundles do not receive a synthetic overlay. Special shared-background
+        // families are selected by `has_rank_overlay` above.
         None
     };
     let progress = profile

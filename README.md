@@ -156,6 +156,25 @@ cargo run --release --bin render-card -- \
   -o output.png
 ```
 
+离线资源目录可以复用 `--serve` 常驻进程的 `render_honor` NDJSON 方法，直接输出游戏
+`380×80` main 或 `180×80` sub WebP，而无需先渲染并扫描整张 1830×812 名片。普通称号的
+静态输出不会烘焙玩家 Live Master 进度；羁绊称号必须显式提供等级、字样、左右顺序和
+虚拟歌手变体。缺失任何必需素材时请求显式失败，不会发布透明占位图。
+
+```json
+{"id":1,"method":"render_honor","params":{"kind":"normal","honorId":6030,"honorLevel":7,"fullSize":true,"quality":90,"output":"./6030.webp"}}
+```
+
+`--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
+调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical
+映射解析 `bonds_honor/character` 与 `bonds_honor/word`，不改变 renderer asset key。
+
+称号的资源语义由 `allium-renderer-core` 单一维护，native 与 WASM 不得各自猜测：国服
+`limitevent` 的 `honor_top_*` 在未显式指定背景时使用共享
+`honor_bg_event_cheerteam` degree 层；`bondsHonorViewType` 是可组合标志，字符串中可同时
+包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免服务端
+性能实现、离线目录生成器和浏览器 resolver 产生不同资源键。
+
 ## 缓存与资源所有权
 
 - 字体 bytes 与逻辑 family 由调用方直接注册或通过任意异步 `FontProvider` 提供，并作为字体解析和 glyph cache identity 的唯一来源；

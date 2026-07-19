@@ -104,18 +104,57 @@ pub struct ResolvedHonor {
     pub honor_mission_type: Option<String>,
 }
 
+/// Resolves the bundle that owns a standard honor's degree layer.
+///
+/// This is a backend-neutral game-data rule. Native and browser renderers
+/// must call it instead of maintaining independent bundle fallbacks.
+pub fn effective_honor_background_asset_bundle_name<'a>(
+    honor_type: &str,
+    asset_bundle_name: &'a str,
+    background_asset_bundle_name: Option<&'a str>,
+) -> &'a str {
+    if let Some(background) = background_asset_bundle_name.filter(|value| !value.is_empty()) {
+        return background;
+    }
+    if honor_type == "limitevent" && asset_bundle_name.starts_with("honor_top_") {
+        return "honor_bg_event_cheerteam";
+    }
+    asset_bundle_name
+}
+
+/// Returns whether a standard honor owns a rank/progress overlay layer.
+pub fn honor_has_rank_overlay(
+    honor_type: &str,
+    asset_bundle_name: &str,
+    is_live_master: bool,
+) -> bool {
+    is_live_master
+        || matches!(honor_type, "rank_match" | "sekai_echo")
+        || [
+            "honor_top_",
+            "honor_shining",
+            "honor_memorial",
+            "honor_memory",
+        ]
+        .iter()
+        .any(|prefix| asset_bundle_name.starts_with(prefix))
+}
+
 impl ResolvedHonor {
+    pub fn effective_background_asset_bundle_name(&self) -> &str {
+        effective_honor_background_asset_bundle_name(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.background_asset_bundle_name.as_deref(),
+        )
+    }
+
     pub fn has_rank_overlay(&self) -> bool {
-        self.is_live_master
-            || matches!(self.honor_type.as_str(), "rank_match" | "sekai_echo")
-            || [
-                "honor_top_",
-                "honor_shining",
-                "honor_memorial",
-                "honor_memory",
-            ]
-            .iter()
-            .any(|prefix| self.asset_bundle_name.starts_with(prefix))
+        honor_has_rank_overlay(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.is_live_master,
+        )
     }
 }
 
@@ -396,5 +435,22 @@ mod tests {
         let honor = data.resolve_honor(3, 1).unwrap();
         assert_eq!(honor.background_asset_bundle_name, None);
         assert_eq!(honor.frame_name, None);
+    }
+
+    #[test]
+    fn cn_limited_event_top_honor_resolves_shared_background_and_rank_overlay() {
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value("honors", serde_json::json!([{ "id": 10140, "assetbundleName": "honor_top_000020", "honorRarity": "low", "groupId": 10034, "levels": [{"level": 1}], "honorMissionType": null }])).unwrap();
+        data.insert_value(
+            "honorGroups",
+            serde_json::json!([{ "id": 10034, "honorType": "limitevent" }]),
+        )
+        .unwrap();
+        let honor = data.resolve_honor(10140, 1).unwrap();
+        assert_eq!(
+            honor.effective_background_asset_bundle_name(),
+            "honor_bg_event_cheerteam"
+        );
+        assert!(honor.has_rank_overlay());
     }
 }

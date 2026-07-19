@@ -48,6 +48,9 @@ render-card：自定义名片渲染 CLI
   --assets-dir <dir>     本地素材目录（key = 相对路径去扩展名）
   --assets-url <url>     动态素材 URL 前缀（接 /<key>.png）。本地缺失的 key
                          才走网络；与 --assets-dir 可叠加
+  --asset-url-layout <layout>
+                         素材 URL 布局：flat（默认）或 game-assets；后者显式映射
+                         bonds_honor character/word 的游戏资源目录结构
   --static-url <url>     静态素材 URL 前缀（边框/图标等，接 /<key>.png）；
                          省略时静态 key 也走 --assets-url
   --font-dir <dir>       字体目录（等效 SCAPUS_FONT_DIR）
@@ -71,6 +74,7 @@ struct Args {
     profile: Option<PathBuf>,
     assets_dir: Option<PathBuf>,
     assets_url: Option<String>,
+    asset_url_layout: fetch::AssetUrlLayout,
     static_url: Option<String>,
     font_dir: Option<PathBuf>,
     format: String,
@@ -88,6 +92,7 @@ fn parse_args() -> Result<Args, String> {
         profile: None,
         assets_dir: None,
         assets_url: None,
+        asset_url_layout: fetch::AssetUrlLayout::Flat,
         static_url: None,
         font_dir: None,
         format: "jpeg".into(),
@@ -114,6 +119,9 @@ fn parse_args() -> Result<Args, String> {
             "--profile" => args.profile = Some(PathBuf::from(take("--profile")?)),
             "--assets-dir" => args.assets_dir = Some(PathBuf::from(take("--assets-dir")?)),
             "--assets-url" => args.assets_url = Some(take("--assets-url")?),
+            "--asset-url-layout" => {
+                args.asset_url_layout = fetch::AssetUrlLayout::parse(&take("--asset-url-layout")?)?
+            }
             "--static-url" => args.static_url = Some(take("--static-url")?),
             "--font-dir" => args.font_dir = Some(PathBuf::from(take("--font-dir")?)),
             "--format" => args.format = take("--format")?,
@@ -352,6 +360,7 @@ fn main() -> ExitCode {
         let asset_urls = serve::AssetUrls {
             dynamic: args.assets_url.clone(),
             static_: args.static_url.clone(),
+            layout: args.asset_url_layout,
         };
         return serve::run(renderer, assets, asset_urls, args.region);
     }
@@ -394,8 +403,13 @@ fn main() -> ExitCode {
     if let Some(dyn_url) = &args.assets_url {
         let want = missing_asset_keys_with_profile(&renderer, &card, profile.as_ref(), &assets);
         if !want.is_empty() {
-            let (ok, fail) =
-                fetch::load_assets_url(&assets, &want, dyn_url, args.static_url.as_deref());
+            let (ok, fail) = fetch::load_assets_url(
+                &assets,
+                &want,
+                dyn_url,
+                args.static_url.as_deref(),
+                args.asset_url_layout,
+            );
             tracing::info!(ok, fail, "素材 URL 拉取完成");
         }
     } else if args.static_url.is_some() {

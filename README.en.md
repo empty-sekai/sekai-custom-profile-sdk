@@ -154,6 +154,29 @@ cargo run --release --bin render-card -- \
   -o output.png
 ```
 
+Offline catalog jobs can reuse a persistent `--serve` process and its `render_honor`
+NDJSON method. It writes an exact game-sized `380x80` main or `180x80` sub WebP without
+rendering and scanning a full 1830x812 card first. Static standard-honor output omits
+player-specific Live Master progress. Bonds requests fully specify the level, word,
+character order, and virtual-singer variant. A missing required asset fails the request
+instead of producing a transparent placeholder.
+
+```json
+{"id":1,"method":"render_honor","params":{"kind":"normal","honorId":6030,"honorLevel":7,"fullSize":true,"quality":90,"output":"./6030.webp"}}
+```
+
+`--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
+`--asset-url-layout game-assets` only when the source follows the extracted game asset
+layout. That explicit mode reuses the shared core canonical mapping for
+`bonds_honor/character` and `bonds_honor/word` without changing renderer asset keys.
+
+Honor asset semantics have one source of truth in `allium-renderer-core`; native and WASM
+backends must not infer them independently. CN `limitevent` `honor_top_*` entries without
+an explicit background use the shared `honor_bg_event_cheerteam` degree layer.
+`bondsHonorViewType` is composable and may contain both `reverse` and
+`unit_virtual_singer`. Native adapters call the core rule functions so production native
+optimization, offline catalog generation, and browser resolution retain identical keys.
+
 ## Cache and resource ownership
 
 - Font bytes and logical families supplied directly or through an arbitrary asynchronous `FontProvider` are the authoritative source for font resolution and glyph cache identity.

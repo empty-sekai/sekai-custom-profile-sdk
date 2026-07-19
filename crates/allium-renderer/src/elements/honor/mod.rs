@@ -5,4 +5,4 @@ mod common;
 mod standard;
 
 pub use bonds::render_bonds_honor;
-pub use standard::render_honor;
+pub use standard::{render_honor, render_static_honor};

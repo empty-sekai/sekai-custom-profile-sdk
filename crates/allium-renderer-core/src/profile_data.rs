@@ -15,6 +15,25 @@ pub struct HonorSlot {
     pub bonds_honor_view_type: Option<String>,
 }
 
+/// Decodes the game's composable bonds-honor view type.
+pub fn bonds_honor_view_flags(view_type: Option<&str>) -> (bool, bool) {
+    let view_type = view_type.unwrap_or_default();
+    (
+        view_type.contains("reverse"),
+        view_type.contains("unit_virtual_singer"),
+    )
+}
+
+impl HonorSlot {
+    /// Decodes the game's composable bonds-honor view type.
+    ///
+    /// Values may combine `reverse` and `unit_virtual_singer`; treating the
+    /// field as an enum would silently discard one of those flags.
+    pub fn bonds_honor_view_flags(&self) -> (bool, bool) {
+        bonds_honor_view_flags(self.bonds_honor_view_type.as_deref())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardState {
     pub card_id: i32,
@@ -261,5 +280,17 @@ mod tests {
         assert!(!serde_json::to_string(&profile)
             .unwrap()
             .contains("privateToken"));
+    }
+
+    #[test]
+    fn bonds_honor_view_type_preserves_composed_flags() {
+        let slot = HonorSlot {
+            bonds_honor_view_type: Some("reverse_unit_virtual_singer".into()),
+            ..HonorSlot::default()
+        };
+        assert_eq!(slot.bonds_honor_view_flags(), (true, true));
+
+        let normal = HonorSlot::default();
+        assert_eq!(normal.bonds_honor_view_flags(), (false, false));
     }
 }

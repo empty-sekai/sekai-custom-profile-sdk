@@ -154,6 +154,62 @@ impl CustomProfileRenderer {
         render_element_layer_cropped(card, &md, asset_ref, profile, webp_quality)
     }
 
+    /// Renders one immutable standard-honor variant as a tightly sized WebP.
+    /// Live-master progress is player state and is not baked into this output.
+    #[cfg(feature = "skia-core")]
+    pub fn render_static_honor_artwork(
+        &self,
+        honor_id: i32,
+        honor_level: i32,
+        full_size: bool,
+        webp_quality: u32,
+    ) -> Result<HonorArtworkOutput, String> {
+        let md = self.snapshot();
+        let fallback_assets = AssetStore::new(1);
+        let assets = self.assets.as_deref().unwrap_or(&fallback_assets);
+        encode_honor_artwork(full_size, webp_quality, |canvas| {
+            crate::elements::honor::render_static_honor(
+                canvas,
+                honor_id,
+                honor_level,
+                full_size,
+                &md,
+                assets,
+            );
+        })
+    }
+
+    /// Renders one fully specified bonds-honor variant as a tightly sized WebP.
+    #[cfg(feature = "skia-core")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_bonds_honor_artwork(
+        &self,
+        honor_id: i32,
+        honor_level: i32,
+        full_size: bool,
+        word_id: i64,
+        inverse: bool,
+        use_unit_virtual_singer: bool,
+        webp_quality: u32,
+    ) -> Result<HonorArtworkOutput, String> {
+        let md = self.snapshot();
+        let fallback_assets = AssetStore::new(1);
+        let assets = self.assets.as_deref().unwrap_or(&fallback_assets);
+        encode_honor_artwork(full_size, webp_quality, |canvas| {
+            crate::elements::honor::render_bonds_honor(
+                canvas,
+                honor_id,
+                honor_level,
+                full_size,
+                word_id,
+                inverse,
+                use_unit_virtual_singer,
+                &md,
+                assets,
+            );
+        })
+    }
+
     /// 批量分层裁剪渲染（统一原语）：见自由函数 `render_all_layers_cropped` 的注释。
     #[cfg(feature = "skia-core")]
     pub fn render_all_layers_cropped(
@@ -631,6 +687,52 @@ pub struct CroppedLayerOutput {
     pub y: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// Encoded pre-generated honor artwork and its exact game dimensions.
+#[cfg(feature = "skia-core")]
+pub struct HonorArtworkOutput {
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[cfg(feature = "skia-core")]
+fn encode_honor_artwork(
+    full_size: bool,
+    webp_quality: u32,
+    draw: impl FnOnce(&skia_safe::Canvas),
+) -> Result<HonorArtworkOutput, String> {
+    use skia_safe::surfaces;
+
+    let width = if full_size { 380 } else { 180 };
+    let height = 80;
+    let mut surface = surfaces::raster_n32_premul((width, height))
+        .ok_or("failed to create honor artwork surface")?;
+    let canvas = surface.canvas();
+    canvas.clear(skia_safe::Color::TRANSPARENT);
+    canvas.save();
+    canvas.translate((width as f32 / 2.0, height as f32 / 2.0));
+    draw(canvas);
+    canvas.restore();
+    let image = surface.image_snapshot();
+    let data = image
+        .encode(
+            None,
+            skia_safe::EncodedImageFormat::WEBP,
+            Some(webp_quality.min(100)),
+        )
+        .ok_or("failed to encode honor artwork as WebP")?
+        .as_bytes()
+        .to_vec();
+    if data.is_empty() {
+        return Err("honor artwork encoder returned no bytes".into());
+    }
+    Ok(HonorArtworkOutput {
+        data,
+        width: width as u32,
+        height: height as u32,
+    })
 }
 
 /// 渲染单个元素到透明画布，裁剪到不透明像素的紧凑边界，编码为 WebP。
@@ -1375,6 +1477,30 @@ mod tests {
             general_backgrounds: vec![],
             story_backgrounds: vec![],
         }
+    }
+
+    #[test]
+    #[cfg(feature = "skia-core")]
+    fn static_honor_artwork_uses_exact_game_dimensions() {
+        fn assert_webp_dimensions(output: HonorArtworkOutput, width: i32, height: i32) {
+            let image = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&output.data))
+                .expect("honor artwork should decode as WebP");
+            assert_eq!(output.width, width as u32);
+            assert_eq!(output.height, height as u32);
+            assert_eq!(image.width(), width);
+            assert_eq!(image.height(), height);
+        }
+
+        let renderer = CustomProfileRenderer::new(Arc::new(NullProvider));
+        let main = renderer
+            .render_static_honor_artwork(1, 1, true, 90)
+            .expect("main honor artwork should encode without masterdata");
+        assert_webp_dimensions(main, 380, 80);
+
+        let sub = renderer
+            .render_static_honor_artwork(1, 1, false, 90)
+            .expect("sub honor artwork should encode without masterdata");
+        assert_webp_dimensions(sub, 180, 80);
     }
 
     /// 测试 1: 在无素材环境下，render_element_layer_cropped 对 stamp 层不 panic。

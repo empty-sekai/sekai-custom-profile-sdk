@@ -134,13 +134,13 @@ pub fn collect_profile_asset_keys(profile: &ProfileData, md: &MasterData) -> Vec
 
     for slot in &profile.honor_slots {
         if slot.profile_honor_type == "bonds" {
-            let inverse = slot.bonds_honor_view_type.as_deref() == Some("reverse");
+            let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
             collect_bonds_honor_keys(
                 slot.honor_id,
                 slot.full_size,
                 slot.bonds_honor_word_id.unwrap_or(0),
                 inverse,
-                false,
+                use_unit_virtual_singer,
                 md,
                 &mut keys,
             );
@@ -178,10 +178,7 @@ fn collect_honor_keys(
     };
     let suffix = if full_size { "main" } else { "sub" };
 
-    let bg_abn = resolved
-        .background_asset_bundle_name
-        .as_deref()
-        .unwrap_or(&resolved.asset_bundle_name);
+    let bg_abn = resolved.effective_background_asset_bundle_name();
     let bg_dir = if resolved.honor_type == "rank_match" {
         "rank_live/honor"
     } else {

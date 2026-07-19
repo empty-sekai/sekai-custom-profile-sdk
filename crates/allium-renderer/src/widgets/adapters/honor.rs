@@ -148,10 +148,7 @@ fn collect_honor_keys(
 
     let mut keys = Vec::new();
     let suffix = if full_size { "main" } else { "sub" };
-    let bg_abn = resolved
-        .background_asset_bundle_name
-        .as_deref()
-        .unwrap_or(&resolved.asset_bundle_name);
+    let bg_abn = resolved.effective_background_asset_bundle_name();
     let bg_dir = if resolved.honor_type == "rank_match" {
         "rank_live/honor"
     } else {
