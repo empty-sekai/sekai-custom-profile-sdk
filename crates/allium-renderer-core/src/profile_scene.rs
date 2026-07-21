@@ -240,6 +240,8 @@ pub struct ProfileResolveSnapshot {
     pub component: Option<ProfileComponentSnapshot>,
     #[serde(default)]
     pub honor_visuals: BTreeMap<String, HonorVisualSnapshot>,
+    #[serde(default)]
+    pub card_member_visuals: BTreeMap<String, CardVisualSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1267,6 +1269,21 @@ pub fn resolve_profile_scene(
                 ));
             }
         }
+        if let ProfileElementRef::CardMember(card_member) = element.value {
+            if card_member.show_master_rank.unwrap_or(false) {
+                if let Some(visual) = snapshot.card_member_visuals.get(&element.source_key) {
+                    let bounds = layer_commands[0].bounds;
+                    let overlay = crate::general_recipe::build_card_member_overlay_recipe(
+                        card_member.member_type.unwrap_or(2),
+                        element.layer_id,
+                        &element.source_key,
+                        bounds,
+                        visual,
+                    );
+                    layer_commands.extend(overlay.iter().map(general_recipe_node_to_command));
+                }
+            }
+        }
         if let (ProfileElementRef::General(general), Some(component)) =
             (element.value, snapshot.component.as_ref())
         {
@@ -1401,6 +1418,10 @@ fn lower_primary_command(
         }
         ProfileElementRef::CardMember(value) => {
             parameters.insert("resource_id".into(), ParameterValue::I64(value.id.into()));
+            parameters.insert(
+                "show_master_rank".into(),
+                ParameterValue::Bool(value.show_master_rank.unwrap_or(false)),
+            );
             let member_type = value.member_type.unwrap_or(2);
             let training = if value.use_after_special_training.unwrap_or(false) {
                 "after_training"
