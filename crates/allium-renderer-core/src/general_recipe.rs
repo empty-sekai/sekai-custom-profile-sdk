@@ -4,7 +4,8 @@ use crate::profile_layout::{
     CHALLENGE_LIVE, COMMENT, MUSIC_CLEAR, MUSIC_CLEAR_TAB, MVP_SUPERSTAR, PLAYER_NAME, TOTAL_POWER,
 };
 use crate::profile_scene::{
-    ComponentControlSource, ComponentControlState, ProfileComponentSnapshot, ProfileResolveError,
+    CardVisualSnapshot, ComponentControlSource, ComponentControlState, ProfileComponentSnapshot,
+    ProfileResolveError,
 };
 use crate::{
     BlendMode, CommandControlBinding, FontRole, InteractionRegionSource, Matrix2d, ParameterValue,
@@ -813,6 +814,49 @@ pub fn build_general_recipe(
     }))
 }
 
+/// Builds the authored `CardMember` information overlay from the same recipes
+/// used by General type 3 (cropped deck card) and type 5 (full leader card).
+/// The artwork remains a separate authored command so `showMasterRank=false`
+/// can preserve the original image-only contract.
+pub fn build_card_member_overlay_recipe(
+    member_type: i32,
+    layer_id: StableId,
+    source_key: &str,
+    bounds: Rect,
+    card: &CardVisualSnapshot,
+) -> Vec<GeneralRecipeNode> {
+    let mut nodes = Vec::new();
+    if member_type == 1 {
+        let scale = (bounds.width / 312.0).min(bounds.height / 512.0);
+        push_cropped_card_overlay_nodes(
+            layer_id,
+            source_key,
+            "card-member",
+            1,
+            bounds,
+            scale,
+            card,
+            TextSource::ProfileField {
+                field: format!("userCards.{}.level", card.card_id),
+                value: format!("Lv.{}", card.level),
+            },
+            Vec::new(),
+            &mut nodes,
+        );
+    } else {
+        push_full_card_overlay_nodes(
+            layer_id,
+            source_key,
+            "card-member",
+            1,
+            bounds,
+            card,
+            &mut nodes,
+        );
+    }
+    nodes
+}
+
 fn build_deck_recipe(
     layer_id: StableId,
     source_key: &str,
@@ -827,10 +871,6 @@ fn build_deck_recipe(
     const CONTAINER_HEIGHT: f32 = 243.0;
     const CARD_WIDTH: f32 = 312.0;
     const CARD_HEIGHT: f32 = 512.0;
-    const RAW_ROOT_WIDTH: f32 = 328.0;
-    const RAW_ROOT_HEIGHT: f32 = 520.0;
-    const BAR_HEIGHT: f32 = 56.39 * CARD_HEIGHT / RAW_ROOT_HEIGHT;
-    const LEVEL_FONT_SIZE: f32 = 24.0;
 
     let slot_width = CONTAINER_WIDTH / SLOT_COUNT as f32;
     let scale = (slot_width / CARD_WIDTH).min(CONTAINER_HEIGHT / CARD_HEIGHT);
@@ -986,121 +1026,18 @@ fn build_deck_recipe(
             descriptor.provenance.clone(),
             clip.clone(),
         ));
-
-        let bar_bounds = transform_card_rect(
-            center_x,
-            scale,
-            Rect {
-                x: -CARD_WIDTH / 2.0,
-                y: CARD_HEIGHT / 2.0 - BAR_HEIGHT,
-                width: CARD_WIDTH,
-                height: BAR_HEIGHT,
-            },
-        );
-        nodes.push(static_styled_image_node(
+        push_cropped_card_overlay_nodes(
             layer_id,
             source_key,
-            &format!("deck-slot-{slot_index}-level-bar"),
+            &format!("deck-slot-{slot_index}"),
             base_ordinal + 1,
-            bar_bounds,
-            "card/bg_base_wh".into(),
-            [68.0 / 255.0, 68.0 / 255.0, 102.0 / 255.0, 1.0],
-            clip.clone(),
-        ));
-        let level_font_size = LEVEL_FONT_SIZE * scale;
-        let level_left = card_bounds.x + (12.9 * CARD_WIDTH / RAW_ROOT_WIDTH) * scale;
-        nodes.push(text_node(
-            layer_id,
-            source_key,
-            &format!("deck-slot-{slot_index}-level"),
-            base_ordinal + 2,
-            Rect {
-                x: level_left,
-                y: bar_bounds.y + (bar_bounds.height - level_font_size) / 2.0,
-                width: (card_bounds.x + card_bounds.width - level_left).max(1.0),
-                height: level_font_size,
-            },
-            localized_level_source(snapshot, level_template_key, &level_template, card.level),
-            level_font_size,
-            [1.0; 4],
-            GeneralTextAlign::Left,
-            0.0,
-            false,
-        ));
-        nodes.push(static_styled_image_node(
-            layer_id,
-            source_key,
-            &format!("deck-slot-{slot_index}-frame"),
-            base_ordinal + 3,
             card_bounds,
-            format!("card/cardFrame_M_{}", rarity_suffix(&card.rarity)),
-            [1.0; 4],
-            clip.clone(),
-        ));
-        nodes.push(static_styled_image_node(
-            layer_id,
-            source_key,
-            &format!("deck-slot-{slot_index}-attribute"),
-            base_ordinal + 4,
-            transform_card_rect(
-                center_x,
-                scale,
-                Rect {
-                    x: -CARD_WIDTH / 2.0 + 8.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
-                    y: -CARD_HEIGHT / 2.0,
-                    width: 64.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
-                    height: 68.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
-                },
-            ),
-            format!("card/icon_attribute_{}_64", card.attribute),
-            [1.0; 4],
-            clip.clone(),
-        ));
-        let star_count = rarity_count(&card.rarity);
-        for star_index in 0..star_count {
-            nodes.push(static_styled_image_node(
-                layer_id,
-                source_key,
-                &format!("deck-slot-{slot_index}-star-{star_index}"),
-                base_ordinal + 5 + star_index as u32,
-                transform_card_rect(
-                    center_x,
-                    scale,
-                    Rect {
-                        x: -CARD_WIDTH / 2.0 + 5.0 + star_index as f32 * 40.0,
-                        y: CARD_HEIGHT / 2.0 - 64.0 - 40.0,
-                        width: 40.0,
-                        height: 40.0,
-                    },
-                ),
-                star_icon_key(&card.rarity, card.after_training).into(),
-                [1.0; 4],
-                clip.clone(),
-            ));
-        }
-        nodes.push(static_styled_image_node(
-            layer_id,
-            source_key,
-            &format!("deck-slot-{slot_index}-master-rank"),
-            base_ordinal + 16,
-            transform_card_rect(
-                center_x,
-                scale,
-                Rect {
-                    x: CARD_WIDTH / 2.0
-                        - 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH
-                        - 1.4 * CARD_WIDTH / RAW_ROOT_WIDTH,
-                    y: CARD_HEIGHT / 2.0
-                        - 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT
-                        - 0.8 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
-                    width: 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
-                    height: 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
-                },
-            ),
-            format!("card/masterRank_S_{}", card.master_rank.clamp(0, 5)),
-            [1.0; 4],
+            scale,
+            card,
+            localized_level_source(snapshot, level_template_key, &level_template, card.level),
             clip,
-        ));
+            nodes,
+        );
     }
     Ok(())
 }
@@ -2336,10 +2273,10 @@ fn build_honor_star_nodes(
     }
 }
 
-fn transform_card_rect(center_x: f32, scale: f32, rect: Rect) -> Rect {
+fn transform_card_rect(center_x: f32, center_y: f32, scale: f32, rect: Rect) -> Rect {
     Rect {
         x: center_x + rect.x * scale,
-        y: -3.0 + rect.y * scale,
+        y: center_y + rect.y * scale,
         width: rect.width * scale,
         height: rect.height * scale,
     }
@@ -2367,6 +2304,192 @@ fn deck_attribute_color(attribute: &str, alpha: f32) -> [f32; 4] {
         _ => (138.0, 189.0, 143.0),
     };
     [red / 255.0, green / 255.0, blue / 255.0, alpha]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_cropped_card_overlay_nodes(
+    layer_id: StableId,
+    source_key: &str,
+    role_prefix: &str,
+    first_ordinal: u32,
+    card_bounds: Rect,
+    scale: f32,
+    card: &CardVisualSnapshot,
+    level_source: TextSource,
+    clips: Vec<GeneralClip>,
+    nodes: &mut Vec<GeneralRecipeNode>,
+) {
+    const CARD_WIDTH: f32 = 312.0;
+    const CARD_HEIGHT: f32 = 512.0;
+    const RAW_ROOT_WIDTH: f32 = 328.0;
+    const RAW_ROOT_HEIGHT: f32 = 520.0;
+    const BAR_HEIGHT: f32 = 56.39 * CARD_HEIGHT / RAW_ROOT_HEIGHT;
+    const LEVEL_FONT_SIZE: f32 = 24.0;
+
+    let center_x = card_bounds.x + card_bounds.width / 2.0;
+    let center_y = card_bounds.y + card_bounds.height / 2.0;
+    let transform = |rect| transform_card_rect(center_x, center_y, scale, rect);
+    let bar_bounds = transform(Rect {
+        x: -CARD_WIDTH / 2.0,
+        y: CARD_HEIGHT / 2.0 - BAR_HEIGHT,
+        width: CARD_WIDTH,
+        height: BAR_HEIGHT,
+    });
+    nodes.push(static_styled_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-level-bar"),
+        first_ordinal,
+        bar_bounds,
+        "card/bg_base_wh".into(),
+        [68.0 / 255.0, 68.0 / 255.0, 102.0 / 255.0, 1.0],
+        clips.clone(),
+    ));
+    let level_font_size = LEVEL_FONT_SIZE * scale;
+    let level_left = card_bounds.x + (12.9 * CARD_WIDTH / RAW_ROOT_WIDTH) * scale;
+    nodes.push(text_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-level"),
+        first_ordinal + 1,
+        Rect {
+            x: level_left,
+            y: bar_bounds.y + (bar_bounds.height - level_font_size) / 2.0,
+            width: (card_bounds.x + card_bounds.width - level_left).max(1.0),
+            height: level_font_size,
+        },
+        level_source,
+        level_font_size,
+        [1.0; 4],
+        GeneralTextAlign::Left,
+        0.0,
+        false,
+    ));
+    nodes.push(static_styled_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-frame"),
+        first_ordinal + 2,
+        card_bounds,
+        format!("card/cardFrame_M_{}", rarity_suffix(&card.rarity)),
+        [1.0; 4],
+        clips.clone(),
+    ));
+    nodes.push(static_styled_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-attribute"),
+        first_ordinal + 3,
+        transform(Rect {
+            x: -CARD_WIDTH / 2.0 + 8.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
+            y: -CARD_HEIGHT / 2.0,
+            width: 64.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
+            height: 68.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
+        }),
+        format!("card/icon_attribute_{}_64", card.attribute),
+        [1.0; 4],
+        clips.clone(),
+    ));
+    for star_index in 0..rarity_count(&card.rarity) {
+        nodes.push(static_styled_image_node(
+            layer_id,
+            source_key,
+            &format!("{role_prefix}-star-{star_index}"),
+            first_ordinal + 4 + star_index as u32,
+            transform(Rect {
+                x: -CARD_WIDTH / 2.0 + 5.0 + star_index as f32 * 40.0,
+                y: CARD_HEIGHT / 2.0 - 64.0 - 40.0,
+                width: 40.0,
+                height: 40.0,
+            }),
+            star_icon_key(&card.rarity, card.after_training).into(),
+            [1.0; 4],
+            clips.clone(),
+        ));
+    }
+    nodes.push(static_styled_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-master-rank"),
+        first_ordinal + 15,
+        transform(Rect {
+            x: CARD_WIDTH / 2.0
+                - 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH
+                - 1.4 * CARD_WIDTH / RAW_ROOT_WIDTH,
+            y: CARD_HEIGHT / 2.0
+                - 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT
+                - 0.8 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
+            width: 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
+            height: 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
+        }),
+        format!("card/masterRank_S_{}", card.master_rank.clamp(0, 5)),
+        [1.0; 4],
+        clips,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_full_card_overlay_nodes(
+    layer_id: StableId,
+    source_key: &str,
+    role_prefix: &str,
+    first_ordinal: u32,
+    bounds: Rect,
+    card: &CardVisualSnapshot,
+    nodes: &mut Vec<GeneralRecipeNode>,
+) {
+    nodes.push(static_overlay_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-frame"),
+        first_ordinal,
+        bounds,
+        format!("card/cardFrame_L_{}", rarity_suffix(&card.rarity)),
+    ));
+    nodes.push(static_overlay_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-attribute"),
+        first_ordinal + 1,
+        Rect {
+            x: bounds.x + bounds.width - 128.0,
+            y: bounds.y,
+            width: 88.0,
+            height: 92.0,
+        },
+        format!("card/icon_attribute_{}_88", card.attribute),
+    ));
+    let star_count = rarity_count(&card.rarity);
+    let star_start_y =
+        bounds.y + bounds.height - 225.0 + (4usize.saturating_sub(star_count)) as f32 * 48.0;
+    for index in 0..star_count {
+        nodes.push(static_overlay_image_node(
+            layer_id,
+            source_key,
+            &format!("{role_prefix}-star-{index}"),
+            first_ordinal + 2 + index as u32,
+            Rect {
+                x: bounds.x + 24.0,
+                y: star_start_y + index as f32 * 48.0,
+                width: 56.0,
+                height: 56.0,
+            },
+            star_icon_key(&card.rarity, card.after_training).into(),
+        ));
+    }
+    nodes.push(static_overlay_image_node(
+        layer_id,
+        source_key,
+        &format!("{role_prefix}-master-rank"),
+        first_ordinal + 2 + star_count as u32,
+        Rect {
+            x: bounds.x + bounds.width - 128.0,
+            y: bounds.y + bounds.height - 128.0,
+            width: 104.0,
+            height: 104.0,
+        },
+        format!("card/masterRank_L_{}", card.master_rank.clamp(0, 5)),
+    ));
 }
 
 fn build_leader_member_recipe(
@@ -2452,58 +2575,7 @@ fn build_leader_member_recipe(
         Vec::new(),
     ));
 
-    nodes.push(static_overlay_image_node(
-        layer_id,
-        source_key,
-        "leader-frame",
-        1,
-        cover,
-        format!("card/cardFrame_L_{}", rarity_suffix(&card.rarity)),
-    ));
-    nodes.push(static_overlay_image_node(
-        layer_id,
-        source_key,
-        "leader-attribute",
-        2,
-        Rect {
-            x: 341.0,
-            y: -266.0,
-            width: 88.0,
-            height: 92.0,
-        },
-        format!("card/icon_attribute_{}_88", card.attribute),
-    ));
-
-    let star_count = rarity_count(&card.rarity);
-    let star_start_y = 39.0 + (4usize.saturating_sub(star_count)) as f32 * 48.0;
-    for index in 0..star_count {
-        nodes.push(static_overlay_image_node(
-            layer_id,
-            source_key,
-            &format!("leader-star-{index}"),
-            3 + index as u32,
-            Rect {
-                x: -447.0,
-                y: star_start_y + index as f32 * 48.0,
-                width: 56.0,
-                height: 56.0,
-            },
-            star_icon_key(&card.rarity, card.after_training).into(),
-        ));
-    }
-    nodes.push(static_overlay_image_node(
-        layer_id,
-        source_key,
-        "leader-master-rank",
-        3 + star_count as u32,
-        Rect {
-            x: 341.0,
-            y: 136.0,
-            width: 104.0,
-            height: 104.0,
-        },
-        format!("card/masterRank_L_{}", card.master_rank.clamp(0, 5)),
-    ));
+    push_full_card_overlay_nodes(layer_id, source_key, "leader", 1, cover, card, nodes);
 }
 
 fn shape_node(
