@@ -792,8 +792,6 @@ fn collect_honor_descriptors(
             overlay,
             star,
             star_high,
-            live_star_on,
-            live_star_off,
             ..
         } => {
             for (name, value) in [
@@ -801,8 +799,6 @@ fn collect_honor_descriptors(
                 ("overlay", overlay.as_ref()),
                 ("star", star.as_ref()),
                 ("star_high", star_high.as_ref()),
-                ("live_star_on", live_star_on.as_ref()),
-                ("live_star_off", live_star_off.as_ref()),
             ] {
                 if let Some(value) = value {
                     add(name, value);
@@ -1398,28 +1394,8 @@ fn standard_honor_visual(
                 id,
                 metadata,
             ),
-            live_star_on: optional_descriptor(
-                "static",
-                "honor/live_master_honor_star_1".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
-            live_star_off: optional_descriptor(
-                "static",
-                "honor/live_master_honor_star_2".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
+            live_star_on: None,
+            live_star_off: None,
         },
     })
 }
@@ -2294,8 +2270,6 @@ mod tests {
         for key in [
             "honor/icon_degreeLv",
             "honor/icon_degreeLv6",
-            "honor/live_master_honor_star_1",
-            "honor/live_master_honor_star_2",
             "honor/mask_degree_main",
             "honor/frame_degree_m_3",
             "honor/bonds/1",
@@ -2306,6 +2280,18 @@ mod tests {
                     request.resource.namespace == "static" && request.resource.key == key
                 }),
                 "canonical local honor resource must be static: {key}"
+            );
+        }
+        for key in [
+            "honor/live_master_honor_star_1",
+            "honor/live_master_honor_star_2",
+        ] {
+            assert!(
+                preparation
+                    .resources
+                    .iter()
+                    .all(|request| request.resource.key != key),
+                "Live Master decoration must not request removed resource: {key}"
             );
         }
         assert!(

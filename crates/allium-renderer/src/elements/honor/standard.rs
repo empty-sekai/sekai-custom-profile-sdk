@@ -201,7 +201,7 @@ fn render_honor_impl(
     }
 
     if resolved.is_live_master && render_player_overlay {
-        render_live_master_overlay(canvas, &resolved, full_size, w, h, assets, profile);
+        render_live_master_overlay(canvas, &resolved, full_size, w, h, profile);
     }
     render_stars(canvas, &resolved, full_size, w, h, assets);
 }
@@ -212,7 +212,6 @@ fn render_live_master_overlay(
     full_size: bool,
     w: f32,
     h: f32,
-    assets: &AssetStore,
     profile: Option<&crate::profile::ProfileData>,
 ) {
     let progress = profile
@@ -225,73 +224,41 @@ fn render_live_master_overlay(
         })
         .unwrap_or(0);
 
-    let font_mgr = FontMgr::default();
-    let typeface = font_mgr
-        .match_family_style("Noto Sans CJK SC", FontStyle::bold())
-        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::bold()));
-    if let Some(tf) = typeface {
-        let font = Font::new(tf, Some(20.0));
-        let text = progress.to_string();
-        let text_w = font.measure_str(&text, None).0;
-        let mut tp = Paint::default();
-        tp.set_style(PaintStyle::Fill);
-        tp.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-        tp.set_anti_alias(true);
-        let (cx, cy) = if full_size {
-            (-w / 2.0 + 270.0, -h / 2.0 + 70.0)
-        } else {
-            (-w / 2.0 + 90.0, -h / 2.0 + 70.0)
-        };
-        canvas.draw_str(&text, Point::new(cx - text_w / 2.0, cy), &font, &tp);
-    }
-
-    let star_count = ((progress / 10) % 10 + 1) as usize;
-    let star_on = assets.get_image("honor/live_master_honor_star_1");
-    let star_off = assets.get_image("honor/live_master_honor_star_2");
-    let stars_pos: [(f32, f32); 10] = if full_size {
-        [
-            (223.0, 68.0),
-            (216.0, 56.0),
-            (208.0, 42.0),
-            (216.0, 27.0),
-            (223.0, 13.0),
-            (295.0, 68.0),
-            (304.0, 56.0),
-            (311.0, 42.0),
-            (303.0, 27.0),
-            (295.0, 13.0),
-        ]
+    let (cx, cy) = if full_size {
+        (-w / 2.0 + 270.0, -h / 2.0 + 70.0)
     } else {
-        [
-            (45.0, 68.0),
-            (38.0, 56.0),
-            (30.0, 42.0),
-            (38.0, 27.0),
-            (45.0, 13.0),
-            (117.0, 68.0),
-            (126.0, 56.0),
-            (133.0, 42.0),
-            (125.0, 27.0),
-            (117.0, 13.0),
-        ]
+        (-w / 2.0 + 90.0, -h / 2.0 + 70.0)
     };
-    let paint = Paint::default();
-    for (i, &(px, py)) in stars_pos.iter().enumerate() {
-        let star_img = if i < star_count { &star_on } else { &star_off };
-        if let Some(img) = star_img {
-            let sw = img.width() as f32;
-            let sh = img.height() as f32;
-            canvas.draw_image_rect(
-                img.clone(),
-                Some((
-                    &Rect::from_xywh(0.0, 0.0, sw, sh),
-                    skia_safe::canvas::SrcRectConstraint::Fast,
-                )),
-                Rect::from_xywh(-w / 2.0 + px, -h / 2.0 + py - 8.0, sw, sh),
-                &paint,
-            );
-        }
-    }
+    draw_live_master_progress_text(canvas, &progress.to_string(), cx, cy);
+}
+
+/// Draws Live Master progress with the same simple-text recipe as the game.
+pub(crate) fn draw_live_master_progress_text(
+    canvas: &Canvas,
+    text: &str,
+    center_x: f32,
+    baseline_y: f32,
+) -> bool {
+    let font_mgr = FontMgr::default();
+    let Some(typeface) = font_mgr
+        .match_family_style("Noto Sans CJK SC", FontStyle::bold())
+        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::bold()))
+    else {
+        return false;
+    };
+    let font = Font::new(typeface, Some(20.0));
+    let text_width = font.measure_str(text, None).0;
+    let mut paint = Paint::default();
+    paint.set_style(PaintStyle::Fill);
+    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+    paint.set_anti_alias(true);
+    canvas.draw_str(
+        text,
+        Point::new(center_x - text_width / 2.0, baseline_y),
+        &font,
+        &paint,
+    );
+    true
 }
 
 fn render_stars(
@@ -352,5 +319,35 @@ fn render_stars(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::draw_live_master_progress_text;
+    use skia_safe::{surfaces, Color};
+
+    #[test]
+    fn live_master_progress_uses_simple_text_pixels() {
+        let mut surface = surfaces::raster_n32_premul((200, 80)).expect("surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+
+        assert!(draw_live_master_progress_text(
+            surface.canvas(),
+            "73",
+            100.0,
+            60.0,
+        ));
+
+        let image = surface.image_snapshot();
+        let mut pixels = vec![0; 200 * 80 * 4];
+        assert!(image.read_pixels(
+            &skia_safe::ImageInfo::new_n32_premul((200, 80), None),
+            &mut pixels,
+            200 * 4,
+            (0, 0),
+            skia_safe::image::CachingHint::Disallow,
+        ));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 }

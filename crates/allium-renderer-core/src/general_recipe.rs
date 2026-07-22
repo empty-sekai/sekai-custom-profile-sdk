@@ -1747,8 +1747,7 @@ fn build_honors_recipe(
                 overlay,
                 star,
                 star_high,
-                live_star_on,
-                live_star_off,
+                ..
             } => build_standard_honor_recipe(
                 layer_id,
                 source_key,
@@ -1762,8 +1761,6 @@ fn build_honors_recipe(
                 overlay.as_ref(),
                 star.as_ref(),
                 star_high.as_ref(),
-                live_star_on.as_ref(),
-                live_star_off.as_ref(),
                 cx,
                 cy,
                 bounds,
@@ -1857,8 +1854,6 @@ fn build_standard_honor_recipe(
     overlay: Option<&crate::profile_scene::ResourceDescriptor>,
     star: Option<&crate::profile_scene::ResourceDescriptor>,
     star_high: Option<&crate::profile_scene::ResourceDescriptor>,
-    live_star_on: Option<&crate::profile_scene::ResourceDescriptor>,
-    live_star_off: Option<&crate::profile_scene::ResourceDescriptor>,
     cx: f32,
     cy: f32,
     bounds: Rect,
@@ -1959,59 +1954,6 @@ fn build_standard_honor_recipe(
             0.0,
             false,
         ));
-        let active = ((progress / 10) % 10 + 1).max(0) as usize;
-        let positions: &[(f32, f32)] = if honor.full_size {
-            &[
-                (223.0, 68.0),
-                (216.0, 56.0),
-                (208.0, 42.0),
-                (216.0, 27.0),
-                (223.0, 13.0),
-                (295.0, 68.0),
-                (304.0, 56.0),
-                (311.0, 42.0),
-                (303.0, 27.0),
-                (295.0, 13.0),
-            ]
-        } else {
-            &[
-                (45.0, 68.0),
-                (38.0, 56.0),
-                (30.0, 42.0),
-                (38.0, 27.0),
-                (45.0, 13.0),
-                (117.0, 68.0),
-                (126.0, 56.0),
-                (133.0, 42.0),
-                (125.0, 27.0),
-                (117.0, 13.0),
-            ]
-        };
-        for (index, (x, y)) in positions.iter().enumerate() {
-            let value = if index < active {
-                live_star_on
-            } else {
-                live_star_off
-            };
-            if let Some(value) = value {
-                nodes.push(honor_image_node(
-                    layer_id,
-                    source_key,
-                    &format!("honor-{}-live-star-{index}", honor.honor_id),
-                    base + 4 + index as u32,
-                    Rect {
-                        x: bounds.x + x,
-                        y: bounds.y + y - 8.0,
-                        width: value.natural_width,
-                        height: value.natural_height,
-                    },
-                    value,
-                    GeneralImageSource::WholeImageExplicit,
-                    GeneralImageSourceConstraint::Fast,
-                    BlendMode::SrcOver,
-                ));
-            }
-        }
     } else if has_star && matches!(honor_type, "character" | "achievement") {
         build_honor_star_nodes(
             layer_id,
@@ -4495,6 +4437,79 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(recipe.nodes.iter().any(|node| matches!(&node.payload, super::GeneralRecipePayload::Image { resource, .. } if resource.key == "honor/frame_degree_s_1")));
+    }
+
+    #[test]
+    fn live_master_honor_keeps_only_the_progress_overlay() {
+        let descriptor = crate::profile_scene::ResourceDescriptor {
+            resource: crate::ResourceKey {
+                namespace: "static".into(),
+                key: "honor/live_master_honor_star_1".into(),
+            },
+            natural_width: 16.0,
+            natural_height: 16.0,
+            provenance: BTreeMap::new(),
+        };
+        let honor = crate::profile_scene::HonorVisualSnapshot {
+            source_field: "userProfile.honorSlots".into(),
+            source_id: "42".into(),
+            honor_id: 42,
+            honor_level: 1,
+            full_size: true,
+            visual: crate::profile_scene::HonorVisualKind::Standard {
+                honor_type: "achievement".into(),
+                has_star: false,
+                is_live_master: true,
+                progress: 73,
+                background: None,
+                frame_candidates: Vec::new(),
+                overlay: None,
+                star: None,
+                star_high: None,
+                live_star_on: Some(descriptor.clone()),
+                live_star_off: Some(descriptor),
+            },
+        };
+        let recipe = super::build_general_recipe(
+            6,
+            StableId(6),
+            "general:6",
+            &ProfileComponentSnapshot {
+                region_fonts: BTreeMap::from([(1, "Noto Sans CJK SC".into())]),
+                honor_slots: vec![honor],
+                ..ProfileComponentSnapshot::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let progress = recipe
+            .nodes
+            .iter()
+            .find(|node| node.role == "honor-42-progress")
+            .expect("Live Master progress command");
+        assert_eq!(
+            progress.bounds,
+            crate::Rect {
+                x: -148.0,
+                y: 13.0,
+                width: 80.0,
+                height: 20.0,
+            }
+        );
+        assert!(matches!(
+            &progress.payload,
+            super::GeneralRecipePayload::Text {
+                source: TextSource::ProfileField { value, .. },
+                font_size: 20.0,
+                align: super::GeneralTextAlign::Center,
+                ..
+            } if value == "73"
+        ));
+        assert!(recipe
+            .nodes
+            .iter()
+            .all(|node| !node.role.contains("live-star")));
     }
 
     #[test]

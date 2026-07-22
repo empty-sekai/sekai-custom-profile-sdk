@@ -810,8 +810,7 @@ fn lower_honor_visual(
             overlay,
             star,
             star_high,
-            live_star_on,
-            live_star_off,
+            ..
         } => {
             if let Some(background) = background {
                 commands.push(descriptor_image_command(
@@ -905,61 +904,6 @@ fn lower_honor_visual(
                     [1.0; 4],
                 ));
                 *ordinal += 1;
-                let star_count = ((*progress / 10) % 10 + 1).max(0) as usize;
-                let positions: &[(f32, f32)] = if honor.full_size {
-                    &[
-                        (223.0, 68.0),
-                        (216.0, 56.0),
-                        (208.0, 42.0),
-                        (216.0, 27.0),
-                        (223.0, 13.0),
-                        (295.0, 68.0),
-                        (304.0, 56.0),
-                        (311.0, 42.0),
-                        (303.0, 27.0),
-                        (295.0, 13.0),
-                    ]
-                } else {
-                    &[
-                        (45.0, 68.0),
-                        (38.0, 56.0),
-                        (30.0, 42.0),
-                        (38.0, 27.0),
-                        (45.0, 13.0),
-                        (117.0, 68.0),
-                        (126.0, 56.0),
-                        (133.0, 42.0),
-                        (125.0, 27.0),
-                        (117.0, 13.0),
-                    ]
-                };
-                for (index, (x, y)) in positions.iter().enumerate() {
-                    let descriptor = if index < star_count {
-                        live_star_on
-                    } else {
-                        live_star_off
-                    };
-                    let Some(descriptor) = descriptor else {
-                        continue;
-                    };
-                    let bounds = Rect {
-                        x: origin_x - w / 2.0 + x,
-                        y: origin_y - h / 2.0 + y - 8.0,
-                        width: descriptor.natural_width,
-                        height: descriptor.natural_height,
-                    };
-                    commands.push(descriptor_image_command(
-                        source_key,
-                        layer_id,
-                        &format!("honor-{}-live-star-{index}", honor.honor_id),
-                        *ordinal,
-                        descriptor,
-                        bounds,
-                        None,
-                        None,
-                    ));
-                    *ordinal += 1;
-                }
             } else if *has_star && matches!(honor_type.as_str(), "character" | "achievement") {
                 if let (Some(star), Some(star_high)) = (star, star_high) {
                     lower_honor_stars(

@@ -200,10 +200,8 @@ fn collect_honor_keys(
         keys.push(format!("honor/frame_degree_{}_{}", size_char, rarity_num));
     }
 
-    if resolved.is_live_master {
-        keys.push("honor/live_master_honor_star_1".to_string());
-        keys.push("honor/live_master_honor_star_2".to_string());
-    } else if resolved.has_star
+    if !resolved.is_live_master
+        && resolved.has_star
         && matches!(resolved.honor_type.as_str(), "character" | "achievement")
     {
         keys.push("honor/icon_degreeLv".to_string());
@@ -318,10 +316,10 @@ mod tests {
                 honor_type: "character".to_string(),
                 background_asset_bundle_name: None,
                 frame_name: None,
-                is_live_master: false,
+                is_live_master: honor_id == 11,
                 has_star: true,
                 honor_level,
-                honor_mission_type: None,
+                honor_mission_type: (honor_id == 11).then(|| "live_master".to_string()),
             })
         }
         fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
@@ -401,6 +399,23 @@ mod tests {
             .asset_keys(&ctx)
             .iter()
             .any(|key| key.contains("honor_10")));
+    }
+
+    #[test]
+    fn live_master_honor_does_not_request_decorative_stars() {
+        let widget = HonorWidget::from_element(&HonorElement {
+            object_data: object_data(),
+            id: 11,
+            full_size: true,
+            honor_level: 7,
+        });
+        let ctx = ctx();
+        let keys = widget.asset_keys(&ctx);
+
+        assert!(keys.iter().any(|key| key.ends_with("/scroll")));
+        assert!(keys
+            .iter()
+            .all(|key| !key.contains("live_master_honor_star")));
     }
 
     #[test]
