@@ -89,6 +89,16 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
       result = { kind: "registerFont", registered: true };
       break;
     }
+    case "registerPrebuiltFont": {
+      assertHash(request.payload.sourceHash);
+      fontSources.set(request.payload.family, {
+        region: request.payload.region,
+        family: request.payload.family,
+        sourceHash: request.payload.sourceHash,
+      });
+      result = { kind: "registerPrebuiltFont", registered: true };
+      break;
+    }
     case "mapGlyphs": {
       const batch = await buildGlyphBatch(request.payload, true) as FreeTypeGlyphMapBatch;
       result = { kind: "mapGlyphs", batch };

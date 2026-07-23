@@ -30,6 +30,12 @@ export type RegisteredFont = {
   bytes: ArrayBuffer;
 };
 
+export type PrebuiltFontContract = {
+  region: string;
+  family: string;
+  sourceHash: string;
+};
+
 export type GlyphBatchRequest = {
   region: string;
   family: string;
@@ -69,6 +75,7 @@ export type RendererWorkerRequest =
   | { id: number; kind: "init"; payload: RendererWorkerInit }
   | { id: number; kind: "contract"; payload: Record<string, never> }
   | { id: number; kind: "registerFont"; payload: RegisteredFont }
+  | { id: number; kind: "registerPrebuiltFont"; payload: PrebuiltFontContract }
   | { id: number; kind: "mapGlyphs"; payload: GlyphBatchRequest }
   | { id: number; kind: "planGlyphs"; payload: GlyphBatchRequest }
   | { id: number; kind: "buildGlyphs"; payload: GlyphBatchRequest }
@@ -118,6 +125,7 @@ export type RendererWorkerResult =
   | { kind: "init"; protocol: typeof RENDERER_WORKER_PROTOCOL }
   | { kind: "contract"; contract: RendererFontContract }
   | { kind: "registerFont"; registered: boolean }
+  | { kind: "registerPrebuiltFont"; registered: boolean }
   | { kind: "mapGlyphs"; batch: FreeTypeGlyphMapBatch }
   | { kind: "planGlyphs"; plan: GlyphRasterPlan }
   | { kind: "buildGlyphs"; batch: FreeTypeGlyphBatch }

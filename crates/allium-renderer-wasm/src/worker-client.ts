@@ -1,6 +1,7 @@
 import {
   type GlyphBatchRequest,
   type LayerMaskOverride,
+  type PrebuiltFontContract,
   type RegisteredFont,
   type RendererFontContract,
   type RendererWorkerRequest,
@@ -68,6 +69,13 @@ export class RendererWorkerClient {
     const bytes = font.bytes.slice(0);
     const result = await this.request("registerFont", { ...font, bytes }, [bytes]);
     if (result.kind !== "registerFont" || !result.registered) throw new RendererWorkerError("FONT_REGISTRATION_FAILED", "Renderer worker rejected the font");
+  }
+
+  async registerPrebuiltFont(font: PrebuiltFontContract): Promise<void> {
+    const result = await this.request("registerPrebuiltFont", font);
+    if (result.kind !== "registerPrebuiltFont" || !result.registered) {
+      throw new RendererWorkerError("FONT_REGISTRATION_FAILED", "Renderer worker rejected the prebuilt font contract");
+    }
   }
 
   async contract(): Promise<RendererFontContract> {

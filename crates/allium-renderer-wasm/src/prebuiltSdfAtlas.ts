@@ -33,6 +33,12 @@ export interface PrebuiltSdfAtlasProvider {
   page(family: string, file: string, context: { signal: AbortSignal }): Promise<ArrayBuffer>;
 }
 
+export type PrebuiltFontContract = {
+  region: string;
+  family: string;
+  sourceHash: string;
+};
+
 type PrebuiltProviderCache = {
   manifests: Map<string, PrebuiltSdfAtlasManifest | null>;
   decodedPages: Map<string, Uint8Array>;
@@ -58,6 +64,21 @@ export function createHttpPrebuiltSdfAtlasProvider(baseUrl: string): PrebuiltSdf
       return response.arrayBuffer();
     },
   };
+}
+
+export async function resolvePrebuiltFontContracts(
+  provider: PrebuiltSdfAtlasProvider,
+  region: string,
+  families: readonly string[],
+  signal: AbortSignal,
+): Promise<PrebuiltFontContract[]> {
+  const contracts: PrebuiltFontContract[] = [];
+  for (const family of new Set(families)) {
+    const manifest = await cachedManifest(provider, family, signal);
+    if (!manifest || !isValidPrebuiltSdfAtlasManifest(manifest, family)) continue;
+    contracts.push({ region, family, sourceHash: manifest.font_sha256 });
+  }
+  return contracts;
 }
 
 export async function buildPrebuiltSdfAtlas(

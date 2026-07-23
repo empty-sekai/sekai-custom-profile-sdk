@@ -33,6 +33,7 @@ import {
 } from "./fontSdfAtlas.js";
 import {
   buildPrebuiltSdfAtlas,
+  resolvePrebuiltFontContracts,
   type PrebuiltSdfAtlasProvider,
 } from "./prebuiltSdfAtlas.js";
 import {
@@ -201,7 +202,7 @@ export class BrowserRenderer {
           abort.signal,
         );
       }
-      if (this.providedFonts) {
+      if (this.providedFonts || this.prebuiltSdfAtlasProvider) {
         const fontPreparation = await options.masterData.prepareProfile({
           documentKey: options.documentKey,
           card: options.card,
@@ -210,10 +211,21 @@ export class BrowserRenderer {
           localizedText,
           fontDemandOnly: true,
         });
-        const missing = preparedFontDemands(fontPreparation, this.region)
-          .filter((request) => !this.fonts.has(request.family));
-        const provided = await this.providedFonts.resolve(missing, abort.signal);
-        await Promise.all([...provided].map(([family, bytes]) => this.registerFont({ family, bytes })));
+        const demands = preparedFontDemands(fontPreparation, this.region);
+        if (this.prebuiltSdfAtlasProvider) {
+          const contracts = await resolvePrebuiltFontContracts(
+            this.prebuiltSdfAtlasProvider,
+            this.region,
+            demands.map((request) => request.family),
+            abort.signal,
+          );
+          await Promise.all(contracts.map((contract) => this.worker.registerPrebuiltFont(contract)));
+        }
+        if (this.providedFonts) {
+          const missing = demands.filter((request) => !this.fonts.has(request.family));
+          const provided = await this.providedFonts.resolve(missing, abort.signal);
+          await Promise.all([...provided].map(([family, bytes]) => this.registerFont({ family, bytes })));
+        }
       }
       const preparation = await options.masterData.prepareProfile({
         documentKey: options.documentKey,
