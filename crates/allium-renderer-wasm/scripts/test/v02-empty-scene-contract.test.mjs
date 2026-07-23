@@ -14,6 +14,15 @@ test("textless profile scenes skip glyph atlas creation and upload", async () =>
   assert.match(scene, /input\.atlas\s*\? await this\.executor\.setSdfAtlas\(input\.atlas\)/);
 });
 
+test("empty authored text remains a valid atlas-free layout layer", async () => {
+  const renderer = await source("src/renderer.ts");
+  const layoutRequest = renderer.match(/function preparedLayoutRequest\([\s\S]*?\n\}/)?.[0] ?? "";
+
+  assert.match(layoutRequest, /if \(!atlas\) \{[\s\S]*?atlas: \{ baseSize: 1, spread: 0, glyphs: \[\] \}/);
+  assert.doesNotMatch(layoutRequest, /text layers without glyph demand/);
+  assert.doesNotMatch(layoutRequest, /layers\.length !== 0/);
+});
+
 test("every semantic draw starts from an opaque white canvas", async () => {
   const executor = await source("src/gpu/webglSemanticCommandExecutor.ts");
 

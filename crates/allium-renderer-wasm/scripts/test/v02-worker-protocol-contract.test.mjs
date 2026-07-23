@@ -65,6 +65,7 @@ test("PNG export snapshots the freshly drawn canonical canvas without retaining 
   assert.match(source, /snapshot\.toBlob/);
   assert.match(source, /snapshot\.convertToBlob\(\{ type: "image\/png" \}\)/);
   assert.doesNotMatch(source, /preserveDrawingBuffer:\s*true/);
+  assert.match(source, /antialias:\s*false/);
 });
 
 test("BrowserScene animation capability comes from compiled dynamic programs", async () => {

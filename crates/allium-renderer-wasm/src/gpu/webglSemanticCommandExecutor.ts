@@ -630,7 +630,11 @@ float shapeDistance() {
 }
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 bool insideClip() {
-  vec2 p[4] = vec2[4](v_clip01.xy, v_clip01.zw, v_clip23.xy, v_clip23.zw);
+  highp vec2 p[4];
+  p[0] = v_clip01.xy;
+  p[1] = v_clip01.zw;
+  p[2] = v_clip23.xy;
+  p[3] = v_clip23.zw;
   float c0 = cross2(p[1] - p[0], v_point - p[0]);
   float c1 = cross2(p[2] - p[1], v_point - p[1]);
   float c2 = cross2(p[3] - p[2], v_point - p[2]);
@@ -670,7 +674,11 @@ uniform int u_maskMode;
 out vec4 outColor;
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 bool insideClip() {
-  vec2 p[4] = vec2[4](v_clip01.xy, v_clip01.zw, v_clip23.xy, v_clip23.zw);
+  highp vec2 p[4];
+  p[0] = v_clip01.xy;
+  p[1] = v_clip01.zw;
+  p[2] = v_clip23.xy;
+  p[3] = v_clip23.zw;
   float c0 = cross2(p[1] - p[0], v_point - p[0]);
   float c1 = cross2(p[2] - p[1], v_point - p[1]);
   float c2 = cross2(p[3] - p[2], v_point - p[2]);
@@ -720,10 +728,13 @@ const COMPOSITE_VERTEX_SHADER = `#version 300 es
 precision highp float;
 out vec2 v_uv;
 void main() {
-  vec2 positions[6] = vec2[6](
-    vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0),
-    vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0)
-  );
+  highp vec2 positions[6];
+  positions[0] = vec2(-1.0, -1.0);
+  positions[1] = vec2(1.0, -1.0);
+  positions[2] = vec2(1.0, 1.0);
+  positions[3] = vec2(-1.0, -1.0);
+  positions[4] = vec2(1.0, 1.0);
+  positions[5] = vec2(-1.0, 1.0);
   vec2 position = positions[gl_VertexID];
   v_uv = position * 0.5 + 0.5;
   gl_Position = vec4(position, 0.0, 1.0);

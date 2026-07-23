@@ -216,8 +216,16 @@ out vec4 v_clip01;
 out vec4 v_clip23;
 const int CORNER_IDS[6] = int[6](0, 1, 3, 3, 1, 2);
 void main() {
-  vec2 positions[4] = vec2[4](a_pos01.xy, a_pos01.zw, a_pos23.xy, a_pos23.zw);
-  vec2 uvs[4] = vec2[4](a_uvRect.xy, vec2(a_uvRect.z, a_uvRect.y), a_uvRect.zw, vec2(a_uvRect.x, a_uvRect.w));
+  highp vec2 positions[4];
+  positions[0] = a_pos01.xy;
+  positions[1] = a_pos01.zw;
+  positions[2] = a_pos23.xy;
+  positions[3] = a_pos23.zw;
+  highp vec2 uvs[4];
+  uvs[0] = a_uvRect.xy;
+  uvs[1] = vec2(a_uvRect.z, a_uvRect.y);
+  uvs[2] = a_uvRect.zw;
+  uvs[3] = vec2(a_uvRect.x, a_uvRect.w);
   int corner = CORNER_IDS[gl_VertexID];
   float layerSlot = a_instanceMeta.y;
   float stateU = (layerSlot + 0.5) / max(u_layerStateWidth, 1.0);
@@ -240,7 +248,11 @@ void main() {
     previewedPosition.x * ${2 / CARD_W} - 1.0,
     1.0 - previewedPosition.y * ${2 / CARD_H}
   );
-  vec2 clipPoints[4] = vec2[4](a_clip01.xy, a_clip01.zw, a_clip23.xy, a_clip23.zw);
+  highp vec2 clipPoints[4];
+  clipPoints[0] = a_clip01.xy;
+  clipPoints[1] = a_clip01.zw;
+  clipPoints[2] = a_clip23.xy;
+  clipPoints[3] = a_clip23.zw;
   for (int index = 0; index < 4; index += 1) {
     vec2 clipPixel = vec2((clipPoints[index].x + 1.0) * ${CARD_W / 2}.0, (1.0 - clipPoints[index].y) * ${CARD_H / 2}.0) + state;
     vec2 transformed = vec2(dot(preview0.xy, clipPixel) + preview0.z, dot(preview1.xy, clipPixel) + preview1.z);
@@ -280,7 +292,11 @@ in vec4 v_clip23;
 out vec4 outColor;
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 bool insideClip() {
-  vec2 p[4] = vec2[4](v_clip01.xy, v_clip01.zw, v_clip23.xy, v_clip23.zw);
+  highp vec2 p[4];
+  p[0] = v_clip01.xy;
+  p[1] = v_clip01.zw;
+  p[2] = v_clip23.xy;
+  p[3] = v_clip23.zw;
   float c0 = cross2(p[1] - p[0], v_point - p[0]);
   float c1 = cross2(p[2] - p[1], v_point - p[1]);
   float c2 = cross2(p[3] - p[2], v_point - p[2]);

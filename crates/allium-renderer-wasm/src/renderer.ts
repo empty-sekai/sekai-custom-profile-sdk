@@ -155,7 +155,7 @@ export class BrowserRenderer {
   static async create(options: BrowserRendererOptions): Promise<BrowserRenderer> {
     const gl = options.canvas.getContext("webgl2", {
       alpha: true,
-      antialias: true,
+      antialias: false,
       depth: false,
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
@@ -390,7 +390,7 @@ export class BrowserRenderer {
       const started = monotonicNow();
       const gl = this.canvas.getContext("webgl2", {
         alpha: true,
-        antialias: true,
+        antialias: false,
         depth: false,
         premultipliedAlpha: true,
         preserveDrawingBuffer: false,
@@ -506,10 +506,6 @@ function preparedLayoutRequest(
     throw new BrowserRendererError("INVALID_PROFILE_PREPARATION", "Profile preparation did not return an authored layout request");
   }
   if (!atlas) {
-    const layers = (request as { layers?: unknown }).layers;
-    if (!Array.isArray(layers) || layers.length !== 0) {
-      throw new BrowserRendererError("INVALID_PROFILE_PREPARATION", "Profile preparation returned text layers without glyph demand");
-    }
     return {
       ...(request as Record<string, unknown>),
       atlas: { baseSize: 1, spread: 0, glyphs: [] },
