@@ -85,7 +85,6 @@ export async function buildPrebuiltSdfAtlas(
   provider: PrebuiltSdfAtlasProvider,
   requests: GlyphRequest[],
   signal: AbortSignal,
-  maxPages = 6,
 ): Promise<SdfAtlas | null> {
   const families = [...new Set(requests.map((request) => request.family))];
   const manifests = new Map<string, PrebuiltSdfAtlasManifest>();
@@ -110,7 +109,6 @@ export async function buildPrebuiltSdfAtlas(
     const key = `${value.request.family}\0${value.glyph.page}`;
     return [key, { family: value.request.family, sourcePage: value.glyph.page }] as const;
   })).values()];
-  if (sourcePages.length > maxPages) return null;
   const compactPage = new Map(sourcePages.map((page, index) => [`${page.family}\0${page.sourcePage}`, index] as const));
   const pagePromises = new Map<number, Promise<Uint8Array>>();
   const controller = new AbortController();
