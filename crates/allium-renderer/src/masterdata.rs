@@ -150,6 +150,10 @@ pub trait MasterDataProvider: Send + Sync {
         None
     }
 
+    fn resolve_localized_text(&self, _key: &str) -> Option<String> {
+        None
+    }
+
     fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         match element_type {
             "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
@@ -245,8 +249,119 @@ impl MasterData {
         self.provider.resolve_player_info_label(id)
     }
 
+    pub fn resolve_localized_text(&self, key: &str) -> Option<String> {
+        self.provider.resolve_localized_text(key)
+    }
+
     /// 表外兜底标签集（语法糖）。
     pub fn labels(&self) -> crate::region::RegionLabels {
         self.region().labels()
+    }
+}
+
+impl allium_renderer_core::masterdata::ProfileMasterData for MasterData {
+    fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+        MasterData::resolve_story_banner(self, story_type, story_id)
+    }
+
+    fn get_card(&self, card_id: i32) -> Option<allium_renderer_core::masterdata::CardEntry> {
+        MasterData::get_card(self, card_id).map(|value| {
+            allium_renderer_core::masterdata::CardEntry {
+                id: value.id,
+                asset_bundle_name: value.asset_bundle_name,
+                card_rarity_type: value.card_rarity_type,
+                attr: value.attr,
+                character_id: value.character_id,
+            }
+        })
+    }
+
+    fn resolve_color(
+        &self,
+        color_id: i32,
+    ) -> Option<allium_renderer_core::masterdata::ResolvedColor> {
+        MasterData::resolve_color(self, color_id).map(|value| {
+            allium_renderer_core::masterdata::ResolvedColor {
+                r: value.r,
+                g: value.g,
+                b: value.b,
+                a: value.a,
+            }
+        })
+    }
+
+    fn resolve_font(&self, font_id: i32) -> Option<String> {
+        MasterData::resolve_font(self, font_id)
+    }
+
+    fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
+        MasterData::resolve_stamp(self, stamp_id)
+    }
+
+    fn resolve_resource(
+        &self,
+        resource_type: &str,
+        id: i32,
+    ) -> Option<allium_renderer_core::masterdata::ResourceInfo> {
+        MasterData::resolve_resource(self, resource_type, id).map(|value| {
+            allium_renderer_core::masterdata::ResourceInfo {
+                file_name: value.file_name,
+                load_value: value.load_val,
+                resource_type: value.resource_type,
+            }
+        })
+    }
+
+    fn resolve_honor(
+        &self,
+        honor_id: i32,
+        honor_level: i32,
+    ) -> Option<allium_renderer_core::masterdata::ResolvedHonor> {
+        MasterData::resolve_honor(self, honor_id, honor_level).map(|value| {
+            allium_renderer_core::masterdata::ResolvedHonor {
+                asset_bundle_name: value.asset_bundle_name,
+                honor_rarity: value.honor_rarity,
+                honor_type: value.honor_type,
+                background_asset_bundle_name: value.background_asset_bundle_name,
+                frame_name: value.frame_name,
+                is_live_master: value.is_live_master,
+                has_star: value.has_star,
+                honor_mission_type: value.honor_mission_type,
+            }
+        })
+    }
+
+    fn get_bonds_honor(
+        &self,
+        id: i32,
+    ) -> Option<allium_renderer_core::masterdata::BondsHonorEntry> {
+        MasterData::get_bonds_honor(self, id).map(|value| {
+            allium_renderer_core::masterdata::BondsHonorEntry {
+                id: value.id,
+                game_character_unit_id1: value.game_character_unit_id1,
+                game_character_unit_id2: value.game_character_unit_id2,
+                honor_rarity: value.honor_rarity,
+            }
+        })
+    }
+
+    fn get_bonds_honor_word(
+        &self,
+        id: i64,
+    ) -> Option<allium_renderer_core::masterdata::BondsHonorWordEntry> {
+        MasterData::get_bonds_honor_word(self, id).map(|value| {
+            allium_renderer_core::masterdata::BondsHonorWordEntry {
+                id: i64::from(value.id),
+                assetbundle_name: value.assetbundle_name,
+            }
+        })
+    }
+
+    fn resolve_unit_virtual_singer(&self, self_id: i32, partner_id: i32) -> i32 {
+        MasterData::resolve_unit_vs_sd(self, self_id, partner_id)
+    }
+
+    fn resolve_localized_text(&self, key: &str) -> Option<String> {
+        MasterData::resolve_localized_text(self, key)
     }
 }

@@ -12,7 +12,6 @@ use skia_safe::{
 
 use crate::sdf::outline as outline_sdf;
 
-#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::sync::{Arc, OnceLock};
 
@@ -301,6 +300,14 @@ fn compute_shader_params(
     _canvas: &Canvas,
     carrier: RuntimeLikeGlyphMeshCarrier,
     underlay_dilate: f32,
+    fx_scale_x: f32,
+) -> TmpShaderParams {
+    compute_shader_params_without_canvas(carrier, underlay_dilate, fx_scale_x)
+}
+
+fn compute_shader_params_without_canvas(
+    carrier: RuntimeLikeGlyphMeshCarrier,
+    underlay_dilate: f32,
     _fx_scale_x: f32,
 ) -> TmpShaderParams {
     let pixel_scale = compute_pixel_scale_from_terms();
@@ -461,7 +468,6 @@ fn production_supersample_grid() -> usize {
 /// 生产渲染由外层单 worker 线程串行驱动，任意时刻至多一个渲染在跑，
 /// 故此池进程内全局共享。线程数由 `SCAPUS_RASTER_THREADS` 控制（默认 2，匹配 AS 机
 /// 2 物理核）。设为 1 时 `par_chunks_mut` 退化为串行执行，无需单独代码路径。
-#[cfg(feature = "parallel")]
 fn raster_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
@@ -576,57 +582,52 @@ where
     let ss_step_y = scale_y / supersample_grid as f32;
     let inv_ss = 1.0 / (supersample_grid * supersample_grid) as f32;
 
-    // 每行像素相互独立，按行切分光栅化。每像素计算只读共享状态
+    // 每行像素相互独立，按行切分并行光栅化。每像素计算只读共享状态
     // （inv 矩阵 / shade 闭包 / glyph SDF），写入本行专属切片，无数据竞争。
-    // 逐像素数学与线程数无关，`parallel` 开关不改变输出（逐字节一致）。
-    let shade_row = |(ry, row): (usize, &mut [u8])| -> bool {
-        let mut row_painted = false;
-        for rx in 0..rw {
-            let mut accum = [0.0_f32; 4];
-            let mut hit = false;
-            for sy in 0..supersample_grid {
-                for sx in 0..supersample_grid {
-                    let device_x =
-                        left as f32 + rx as f32 * scale_x + (sx as f32 + 0.5) * ss_step_x + phase_x;
-                    let device_y =
-                        top as f32 + ry as f32 * scale_y + (sy as f32 + 0.5) * ss_step_y + phase_y;
-                    let local = inv.map_point((device_x, device_y));
-                    let Some(sample) = shade_pixel(local.x, local.y) else {
-                        continue;
-                    };
-                    for i in 0..4 {
-                        accum[i] += sample[i];
-                    }
-                    hit = true;
-                }
-            }
-            if !hit {
-                continue;
-            }
-            let idx = rx * 4;
-            row[idx] = (accum[0] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
-            row[idx + 1] = (accum[1] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
-            row[idx + 2] = (accum[2] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
-            row[idx + 3] = (accum[3] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
-            row_painted = true;
-        }
-        row_painted
-    };
-
-    #[cfg(feature = "parallel")]
+    // 逐像素数学与串行版逐字节一致，输出不随线程数变化。
     let painted = raster_pool().install(|| {
         pixels
             .par_chunks_mut(rw * 4)
             .enumerate()
-            .map(shade_row)
+            .map(|(ry, row)| {
+                let mut row_painted = false;
+                for rx in 0..rw {
+                    let mut accum = [0.0_f32; 4];
+                    let mut hit = false;
+                    for sy in 0..supersample_grid {
+                        for sx in 0..supersample_grid {
+                            let device_x = left as f32
+                                + rx as f32 * scale_x
+                                + (sx as f32 + 0.5) * ss_step_x
+                                + phase_x;
+                            let device_y = top as f32
+                                + ry as f32 * scale_y
+                                + (sy as f32 + 0.5) * ss_step_y
+                                + phase_y;
+                            let local = inv.map_point((device_x, device_y));
+                            let Some(sample) = shade_pixel(local.x, local.y) else {
+                                continue;
+                            };
+                            for i in 0..4 {
+                                accum[i] += sample[i];
+                            }
+                            hit = true;
+                        }
+                    }
+                    if !hit {
+                        continue;
+                    }
+                    let idx = rx * 4;
+                    row[idx] = (accum[0] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
+                    row[idx + 1] = (accum[1] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
+                    row[idx + 2] = (accum[2] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
+                    row[idx + 3] = (accum[3] * inv_ss * 255.0).round().clamp(0.0, 255.0) as u8;
+                    row_painted = true;
+                }
+                row_painted
+            })
             .reduce(|| false, |a, b| a || b)
     });
-    #[cfg(not(feature = "parallel"))]
-    let painted = pixels
-        .chunks_mut(rw * 4)
-        .enumerate()
-        .map(shade_row)
-        .fold(false, |a, b| a || b);
 
     // 缓冲分辨率 rw×rh 放大贴回设备矩形 width×height。rw=width 时 1:1 → Nearest 逐字节等价。
     painted
@@ -845,10 +846,9 @@ fn render_char_sdf_from_outline(
             // 逐位成立）。故两次 gather 取逐位相同的坐标与值，合并为一次，砍掉每像素一次
             // 冗余双线性采样（gather 是热路径瓶颈）。
             let sdf = sample_sdf_alpha(glyph, local_rect, local_x, local_y);
-            // SDF spread band cutoff: multiply underlay alpha by a linear ramp
-            // sdf ≤ 0.08 → zero underlay. Beyond 0.08 the underlay is unmodified.
-            // 0.08 ≈ (spread-1)/spread where spread=6. Eliminates the faint
-            // outline-coloured halo that fills the glyph rect at small sizes.
+            // 在 spread 带远端（sdf ≤ 0.08，距字形轮廓 > 5px）硬截止 underlay，
+            // 消除小字号 outline 在字形格四角铺开的"同色透明底"污染。
+            // 0.08 = (spread-1)/spread ≈ 5/6，在字形边界(spread 外沿)以内不触发。
             let underlay_t = (sdf * shader.underlay_scale - shader.underlay_bias).clamp(0.0, 1.0)
                 * (sdf * 12.5).clamp(0.0, 1.0);
             let face_t = (sdf * shader.face_scale - shader.face_bias).clamp(0.0, 1.0);
@@ -872,6 +872,40 @@ fn render_char_sdf_from_outline(
     );
     // Preserve the SDF-only contract when the glyph is valid but fully culled.
     true
+}
+
+pub(crate) fn resolve_tile_material_direct(
+    carrier: RuntimeLikeGlyphMeshCarrier,
+    fx_scale_x: f32,
+    face_color: Color4f,
+    outline: Option<&SdfOutlineParams>,
+) -> crate::sdf::tile::SdfMaterial {
+    let outline_size = outline.map_or(0.0, |params| params.outline_size.max(0.0));
+    let shader = compute_shader_params_without_canvas(carrier, outline_size, fx_scale_x);
+    let face_alpha = face_color.a;
+    let outline_color = outline.map_or([0.0; 4], |params| {
+        let alpha = params.outline_a.clamp(0.0, 1.0);
+        [
+            params.outline_r * alpha,
+            params.outline_g * alpha,
+            params.outline_b * alpha,
+            alpha,
+        ]
+    });
+    crate::sdf::tile::SdfMaterial {
+        face: [
+            face_color.r * face_alpha,
+            face_color.g * face_alpha,
+            face_color.b * face_alpha,
+            face_alpha,
+        ],
+        outline: outline_color,
+        face_scale: shader.face_scale,
+        face_bias: shader.face_bias,
+        outline_scale: shader.underlay_scale,
+        outline_bias: shader.underlay_bias,
+        vertex_alpha: carrier.vertex_alpha(),
+    }
 }
 
 /// 统一入口。
@@ -958,6 +992,6 @@ mod tests {
             runtime_uv2_y_from_point_size(96.0),
             compute_orthographic_pixel_scale(),
         );
-        assert!((shader_scale - 21.7223).abs() < 1e-4);
+        assert!((shader_scale - 21.7223203).abs() < 1e-4);
     }
 }

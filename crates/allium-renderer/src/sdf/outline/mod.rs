@@ -9,19 +9,18 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use allium_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
 use freetype::{face::LoadFlag, Library, RenderMode};
 use lru::LruCache;
 use ttf_parser::Face as TtfFace;
 
-use self::geometry::{
-    dist_to_cubic, dist_to_line, dist_to_quad, extract_segments, winding_number, Segment, Vec2,
-};
+use self::geometry::extract_segments;
 
 const TMP_POINT_SIZE: f32 = 75.0;
 const TMP_ATLAS_PADDING: usize = 5;
 const TMP_SPREAD: f32 = 6.0;
 
-const FONT_FILE_MAP: [(&str, &[&str]); 8] = [
+const FONT_FILE_MAP: [(&str, &[&str]); 10] = [
     (
         "FZLanTingHei-DB-GBK",
         &["FOT-RodinNTLGPro-DB.ttf", "FOT-RodinNTLGPro-DB.otf"],
@@ -36,6 +35,20 @@ const FONT_FILE_MAP: [(&str, &[&str]); 8] = [
     ("FOT-PopHappinessStd-EB", &["FOT-PopHappinessStd-EB.otf"]),
     ("FOT-Yuruka Std UB", &["FOT-YurukaStd-UB.otf"]),
     ("FOT-YurukaStd-UB", &["FOT-YurukaStd-UB.otf"]),
+    (
+        "DejaVu Sans",
+        &[
+            "DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+    ),
+    (
+        "DejaVuSans",
+        &[
+            "DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ],
+    ),
 ];
 
 /// 生成好的单 glyph SDF。
@@ -134,61 +147,14 @@ fn font_path_cache() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
 /// SDF glyph 缓存容量（条目数上限）。
 ///
 /// 8 个字体 family × 常用 CJK/假名/拉丁字符集，4096 条目 ~25 MB，
-/// 远小于无界 HashMap 的数百 MB 增长风险——`--serve` 常驻模式下 glyph
-/// 缓存跨请求保留，无上限会随字符集累积无限增长。
+/// 远小于无界 HashMap 的数百 MB 增长风险。
+/// key 使用 `(PathBuf, char)` 而非 `(String, char)`，
+/// 消除别名 family（如 "FZLanTingHei-DB-GBK" 与 "FOT-RodinNTLGPro-DB" 指向同一文件）的重复缓存。
 const GLYPH_CACHE_CAPACITY: usize = 4096;
 
-/// 内存注册字体表（family → 字体字节）。查找优先于文件系统路径，
-/// 供无文件系统环境（wasm）或想完全控制字体来源的宿主使用。
-fn font_registry() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// 注册内存字体。同 family 重复注册时覆盖旧字节，并失效相关 glyph 缓存。
-pub fn register_font_bytes(family: &str, bytes: Vec<u8>) {
-    if let Ok(mut registry) = font_registry().lock() {
-        registry.insert(family.to_string(), Arc::new(bytes));
-    }
-    if let Ok(mut cache) = glyph_cache().lock() {
-        let stale: Vec<_> = cache
-            .iter()
-            .filter(|((cached_family, _), _)| cached_family == family)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in stale {
-            cache.pop(&key);
-        }
-    }
-    if let Ok(mut cache) = glyph_id_cache().lock() {
-        cache.retain(|(cached_family, _), _| cached_family != family);
-    }
-}
-
-/// 解析 family 的字体字节：注册表优先，其次文件系统。
-pub(crate) fn resolve_font_bytes(family: &str) -> Option<Arc<Vec<u8>>> {
-    if let Some(bytes) = font_registry()
-        .lock()
-        .ok()
-        .and_then(|registry| registry.get(family).cloned())
-    {
-        return Some(bytes);
-    }
-    let path = resolve_font_path(family)?;
-    load_font_bytes(&path)
-}
-
-/// FreeType 内存 face 的字节载体（Arc 共享，避免每次建 face 复制字体）。
-struct FontData(Arc<Vec<u8>>);
-
-impl std::borrow::Borrow<[u8]> for FontData {
-    fn borrow(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-}
-
-fn glyph_cache() -> &'static Mutex<LruCache<(String, char), Arc<OutlineSdfGlyph>>> {
-    static CACHE: OnceLock<Mutex<LruCache<(String, char), Arc<OutlineSdfGlyph>>>> = OnceLock::new();
+fn glyph_cache() -> &'static Mutex<LruCache<(PathBuf, char), Arc<OutlineSdfGlyph>>> {
+    static CACHE: OnceLock<Mutex<LruCache<(PathBuf, char), Arc<OutlineSdfGlyph>>>> =
+        OnceLock::new();
     CACHE.get_or_init(|| {
         Mutex::new(LruCache::new(
             NonZeroUsize::new(GLYPH_CACHE_CAPACITY).expect("glyph cache capacity > 0"),
@@ -201,8 +167,8 @@ fn font_bytes_cache() -> &'static Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>> 
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn glyph_id_cache() -> &'static Mutex<HashMap<(String, char), Option<u32>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, char), Option<u32>>>> = OnceLock::new();
+fn glyph_id_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<u32>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<u32>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -219,20 +185,29 @@ pub fn resolve_font_path(family: &str) -> Option<PathBuf> {
     let file_names = FONT_FILE_MAP
         .iter()
         .find_map(|(key, files)| (*key == family).then_some(*files))?;
-    let mut candidates = Vec::new();
-    for file_name in file_names {
-        if let Ok(env_dir) = std::env::var("SCAPUS_FONT_DIR") {
-            candidates.push(PathBuf::from(&env_dir).join(file_name));
-        }
-        candidates.push(PathBuf::from("/usr/share/fonts/custom").join(file_name));
-        candidates.push(PathBuf::from("assets/fonts").join(file_name));
-    }
+    let candidates = font_path_candidates(file_names);
 
     let found = candidates.into_iter().find(|path| path.exists());
     if let Ok(mut cache) = font_path_cache().lock() {
         cache.insert(family.to_string(), found.clone());
     }
     found
+}
+
+fn font_path_candidates(file_names: &[&str]) -> Vec<PathBuf> {
+    let configured_dirs = ["SCAPUS_FONT_DIR", "FONT_DIR"]
+        .into_iter()
+        .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
+        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    for file_name in file_names {
+        for directory in &configured_dirs {
+            candidates.push(directory.join(file_name));
+        }
+        candidates.push(PathBuf::from("/usr/share/fonts/custom").join(file_name));
+        candidates.push(PathBuf::from("assets/fonts").join(file_name));
+    }
+    candidates
 }
 
 fn load_font_bytes(font_path: &Path) -> Option<Arc<Vec<u8>>> {
@@ -251,11 +226,12 @@ fn load_font_bytes(font_path: &Path) -> Option<Arc<Vec<u8>>> {
 }
 
 pub(crate) fn load_font_bytes_for_family(family: &str) -> Option<Arc<Vec<u8>>> {
-    resolve_font_bytes(family)
+    let path = resolve_font_path(family)?;
+    load_font_bytes(&path)
 }
 
-fn resolve_glyph_id(family: &str, font_bytes: &Arc<Vec<u8>>, ch: char) -> Option<u32> {
-    let key = (family.to_string(), ch);
+fn resolve_glyph_id(font_path: &Path, ch: char) -> Option<u32> {
+    let key = (font_path.to_path_buf(), ch);
     if let Some(cached) = glyph_id_cache()
         .lock()
         .ok()
@@ -263,9 +239,10 @@ fn resolve_glyph_id(family: &str, font_bytes: &Arc<Vec<u8>>, ch: char) -> Option
     {
         return cached;
     }
-    let resolved = TtfFace::parse(font_bytes.as_slice(), 0)
-        .ok()
-        .and_then(|face| face.glyph_index(ch).map(|gid| gid.0 as u32));
+    let resolved = load_font_bytes(font_path).and_then(|bytes| {
+        let face = TtfFace::parse(bytes.as_slice(), 0).ok()?;
+        face.glyph_index(ch).map(|gid| gid.0 as u32)
+    });
     if let Ok(mut cache) = glyph_id_cache().lock() {
         cache.insert(key, resolved);
     }
@@ -287,9 +264,15 @@ fn edt_supersample() -> Option<usize> {
 }
 
 /// 查询或生成一个 glyph 的 SDF。
+///
+/// 内部用 `(PathBuf, char)` 作为缓存 key，而非 `(family_name, char)`，
+/// 避免别名 family（指向同一字体文件的不同名称）产生重复 SDF。
 pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<OutlineSdfGlyph>> {
     let family = font_family?;
-    let key = (family.to_string(), ch);
+    let path = resolve_font_path(family)?;
+
+    // 用 (font_path, char) 作为 key，消除别名重复
+    let key = (path.clone(), ch);
     if let Some(cached) = glyph_cache()
         .lock()
         .ok()
@@ -298,18 +281,91 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
         return Some(cached);
     }
 
-    let bytes = resolve_font_bytes(family)?;
     let glyph = match edt_supersample() {
-        Some(ss) => generate_outline_sdf_edt(family, &bytes, ch, ss)
-            .or_else(|_| generate_outline_sdf(family, &bytes, ch)) // EDT 失败回退解析法
+        Some(ss) => generate_outline_sdf_edt(&path, ch, ss)
+            .or_else(|_| generate_outline_sdf(&path, ch)) // EDT 失败回退解析法
             .ok()?,
-        None => generate_outline_sdf(family, &bytes, ch).ok()?,
+        None => generate_outline_sdf(&path, ch).ok()?,
     };
     let glyph = Arc::new(glyph);
     if let Ok(mut cache) = glyph_cache().lock() {
         cache.put(key, glyph.clone());
     }
     Some(glyph)
+}
+
+/// 离线 atlas 构建使用的确定性生成方法。
+///
+/// 该入口不读取 `SCAPUS_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，
+/// 且同一进程可以构建不同方法的候选 atlas。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfflineGenerationMethod {
+    Analytic,
+    Edt { supersample: usize },
+}
+
+/// 持久化 FreeType library/face 的离线 atlas glyph 生成器。
+///
+/// 全字体构建会依次处理数万个 cmap codepoint；复用 face 避免每个 glyph 重开字体文件。
+/// 该类型不进入请求期，也不共享给动态 glyph cache。
+pub struct OfflineAtlasGlyphGenerator {
+    // Face 先声明以确保它先于最后一个 Library owner 释放。
+    face: freetype::Face,
+    _library: Library,
+}
+
+impl OfflineAtlasGlyphGenerator {
+    pub fn new(font_family: &str) -> Result<Self, String> {
+        let path = resolve_font_path(font_family)
+            .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
+        Self::new_from_path(&path)
+    }
+
+    pub fn new_from_path(path: &Path) -> Result<Self, String> {
+        let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+        let face = library
+            .new_face(path, 0)
+            .map_err(|err| format!("加载字体失败: {err:?}"))?;
+        face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+            .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
+        Ok(Self {
+            face,
+            _library: library,
+        })
+    }
+
+    /// 返回值中的 `bool` 表示 EDT 是否失败并回退到解析法。回退必须逐 codepoint
+    /// 记录到 manifest，不能悄悄混入另一种生成方法。
+    pub fn generate(
+        &self,
+        ch: char,
+        method: OfflineGenerationMethod,
+    ) -> Result<(OutlineSdfGlyph, bool), String> {
+        let glyph_id = self
+            .face
+            .get_char_index(ch as usize)
+            .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+        match method {
+            OfflineGenerationMethod::Analytic => {
+                generate_outline_sdf_with_face(&self.face, glyph_id, ch).map(|glyph| (glyph, false))
+            }
+            OfflineGenerationMethod::Edt { supersample } => {
+                if !(1..=4).contains(&supersample) {
+                    return Err(format!(
+                        "EDT supersample 必须在 1..=4，实际为 {supersample}"
+                    ));
+                }
+                match generate_outline_sdf_edt_with_face(&self.face, glyph_id, ch, supersample) {
+                    Ok(glyph) => Ok((glyph, false)),
+                    Err(edt_error) => generate_outline_sdf_with_face(&self.face, glyph_id, ch)
+                        .map(|glyph| (glyph, true))
+                        .map_err(|analytic_error| {
+                            format!("EDT 失败: {edt_error}; 解析法回退也失败: {analytic_error}")
+                        }),
+                }
+            }
+        }
+    }
 }
 
 /// 对比工具专用：生成同一 glyph 的解析法 vs EDT 版 SDF，返回两者 + 耗时。
@@ -326,33 +382,37 @@ pub fn benchmark_methods(
     Arc<OutlineSdfGlyph>,
     std::time::Duration,
 )> {
-    let bytes = resolve_font_bytes(font_family)?;
+    let path = resolve_font_path(font_family)?;
 
     let t0 = std::time::Instant::now();
-    let analytic = Arc::new(generate_outline_sdf(font_family, &bytes, ch).ok()?);
+    let analytic = Arc::new(generate_outline_sdf(&path, ch).ok()?);
     let analytic_dur = t0.elapsed();
 
     let t1 = std::time::Instant::now();
-    let edt = Arc::new(generate_outline_sdf_edt(font_family, &bytes, ch, supersample).ok()?);
+    let edt = Arc::new(generate_outline_sdf_edt(&path, ch, supersample).ok()?);
     let edt_dur = t1.elapsed();
 
     Some((analytic, analytic_dur, edt, edt_dur))
 }
 
-fn generate_outline_sdf(
-    family: &str,
-    font_bytes: &Arc<Vec<u8>>,
-    ch: char,
-) -> Result<OutlineSdfGlyph, String> {
+fn generate_outline_sdf(font_path: &Path, ch: char) -> Result<OutlineSdfGlyph, String> {
     let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
     let face = library
-        .new_memory_face2(FontData(Arc::clone(font_bytes)), 0)
+        .new_face(font_path, 0)
         .map_err(|err| format!("加载字体失败: {err:?}"))?;
     face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
         .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
 
-    let glyph_id = resolve_glyph_id(family, font_bytes, ch)
+    let glyph_id = resolve_glyph_id(font_path, ch)
         .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+    generate_outline_sdf_with_face(&face, glyph_id, ch)
+}
+
+fn generate_outline_sdf_with_face(
+    face: &freetype::Face,
+    glyph_id: u32,
+    ch: char,
+) -> Result<OutlineSdfGlyph, String> {
     face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
         .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
 
@@ -390,6 +450,7 @@ fn generate_outline_sdf(
     let rect_left_26_6 = sample_left_px * 64.0;
     let rect_top_26_6 = sample_top_px * 64.0;
 
+    let distance_field = AnalyticDistanceField::new(&contours);
     let mut pixels = vec![0u8; width * height];
     for py in 0..height {
         for px in 0..width {
@@ -397,23 +458,8 @@ fn generate_outline_sdf(
                 rect_left_26_6 + (px as f32 + 0.5) * 64.0,
                 rect_top_26_6 - (py as f32 + 0.5) * 64.0,
             );
-            let mut min_dist = f32::INFINITY;
-            for contour in &contours {
-                for seg in contour {
-                    min_dist = min_dist.min(match *seg {
-                        Segment::Line(seg) => dist_to_line(point, seg),
-                        Segment::Quad(seg) => dist_to_quad(point, seg),
-                        Segment::Cubic(seg) => dist_to_cubic(point, seg),
-                    });
-                }
-            }
-            let sign = if winding_number(point, &contours) != 0 {
-                -1.0
-            } else {
-                1.0
-            };
-            let dist_px = min_dist / 64.0;
-            let gray = (0.5 - sign * dist_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
+            let signed_distance_px = distance_field.signed_distance(point) / 64.0;
+            let gray = (0.5 - signed_distance_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
             pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
@@ -437,20 +483,28 @@ fn generate_outline_sdf(
 /// 与解析法对齐到相同的 width/height/bearing 网格，仅像素填充算法不同。
 /// `supersample` 为超采样因子（1=无超采样，2/4=提升精度但增加计算量）。
 fn generate_outline_sdf_edt(
-    family: &str,
-    font_bytes: &Arc<Vec<u8>>,
+    font_path: &Path,
     ch: char,
     supersample: usize,
 ) -> Result<OutlineSdfGlyph, String> {
     let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
     let face = library
-        .new_memory_face2(FontData(Arc::clone(font_bytes)), 0)
+        .new_face(font_path, 0)
         .map_err(|err| format!("加载字体失败: {err:?}"))?;
     face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
         .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
 
-    let glyph_id = resolve_glyph_id(family, font_bytes, ch)
+    let glyph_id = resolve_glyph_id(font_path, ch)
         .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+    generate_outline_sdf_edt_with_face(&face, glyph_id, ch, supersample)
+}
+
+fn generate_outline_sdf_edt_with_face(
+    face: &freetype::Face,
+    glyph_id: u32,
+    ch: char,
+    supersample: usize,
+) -> Result<OutlineSdfGlyph, String> {
     // 与解析法一致用 NO_HINTING，保证 metrics 和轮廓网格对齐（hinting 会
     // 网格对齐字形、改变 width/height，导致与解析法尺寸不匹配 + 不公平对比）。
     face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
@@ -570,4 +624,59 @@ pub fn atlas_padding() -> f32 {
 }
 pub fn sampling_spread() -> f32 {
     TMP_SPREAD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_glyph_exact(actual: &OutlineSdfGlyph, expected: &OutlineSdfGlyph) {
+        assert_eq!(
+            (actual.width, actual.height),
+            (expected.width, expected.height)
+        );
+        assert_eq!(actual.bearing_x.to_bits(), expected.bearing_x.to_bits());
+        assert_eq!(actual.bearing_y.to_bits(), expected.bearing_y.to_bits());
+        assert_eq!(
+            actual.plane_bearing_x.to_bits(),
+            expected.plane_bearing_x.to_bits()
+        );
+        assert_eq!(
+            actual.plane_bearing_y.to_bits(),
+            expected.plane_bearing_y.to_bits()
+        );
+        assert_eq!(actual.plane_width.to_bits(), expected.plane_width.to_bits());
+        assert_eq!(
+            actual.plane_height.to_bits(),
+            expected.plane_height.to_bits()
+        );
+        assert_eq!(
+            actual.plane_advance_x.to_bits(),
+            expected.plane_advance_x.to_bits()
+        );
+        assert_eq!(actual.pixels, expected.pixels);
+    }
+
+    #[test]
+    #[ignore = "static font is not shipped in the OSS repository"]
+    fn persistent_offline_face_matches_one_shot_generation() {
+        let family = "FZLanTingHei-DB-GBK";
+        let path = resolve_font_path(family).expect("test font must exist");
+        let generator = OfflineAtlasGlyphGenerator::new(family).expect("offline generator");
+        for ch in ['A', '一'] {
+            let analytic_one_shot = generate_outline_sdf(&path, ch).expect("analytic one-shot");
+            let (analytic_persistent, analytic_fallback) = generator
+                .generate(ch, OfflineGenerationMethod::Analytic)
+                .expect("analytic persistent");
+            assert!(!analytic_fallback);
+            assert_glyph_exact(&analytic_persistent, &analytic_one_shot);
+
+            let edt_one_shot = generate_outline_sdf_edt(&path, ch, 2).expect("EDT2 one-shot");
+            let (edt_persistent, edt_fallback) = generator
+                .generate(ch, OfflineGenerationMethod::Edt { supersample: 2 })
+                .expect("EDT2 persistent");
+            assert!(!edt_fallback);
+            assert_glyph_exact(&edt_persistent, &edt_one_shot);
+        }
+    }
 }

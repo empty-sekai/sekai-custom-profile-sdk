@@ -5,12 +5,24 @@
 //! 统一字节预算，超限按 LRU 驱逐。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+#[cfg(not(feature = "skia-core"))]
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use lru::LruCache;
 
 #[cfg(feature = "skia-core")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "skia-core")]
 use std::collections::HashMap;
+
+#[cfg(feature = "skia-core")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShapeSdfSourceIdentity {
+    pub width: i32,
+    pub height: i32,
+    pub rg8_sha256: String,
+}
 
 /// 将缓存 key 规范化为磁盘文件名（`/` → `__`）。
 ///
@@ -230,9 +242,44 @@ pub struct AssetStore {
     /// 静态素材常驻池（不走 LRU，启动时预解码，不占预算）
     #[cfg(feature = "skia-core")]
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
+    #[cfg(feature = "skia-core")]
+    shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
 }
 
 impl AssetStore {
+    #[cfg(feature = "skia-core")]
+    pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let image = self.get_image(key)?;
+        let width = u32::try_from(image.width()).ok()?;
+        let height = u32::try_from(image.height()).ok()?;
+        let row_bytes = usize::try_from(width).ok()?.checked_mul(4)?;
+        let mut pixels = vec![0u8; row_bytes.checked_mul(usize::try_from(height).ok()?)?];
+        let info = skia_safe::ImageInfo::new(
+            (image.width(), image.height()),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        if !image.read_pixels(
+            &info,
+            &mut pixels,
+            row_bytes,
+            (0, 0),
+            skia_safe::image::CachingHint::Allow,
+        ) {
+            return None;
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            let alpha = u32::from(pixel[3]);
+            if alpha < 255 {
+                pixel[0] = ((u32::from(pixel[0]) * alpha + 127) / 255) as u8;
+                pixel[1] = ((u32::from(pixel[1]) * alpha + 127) / 255) as u8;
+                pixel[2] = ((u32::from(pixel[2]) * alpha + 127) / 255) as u8;
+            }
+        }
+        Some((width, height, pixels))
+    }
+
     /// 创建素材存储
     ///
     /// `max_mb` 为总缓存预算（MB），所有 Image 共享此额度。
@@ -241,6 +288,7 @@ impl AssetStore {
         Self {
             cache: Mutex::new(ImageLru::new(max_mb * 1024 * 1024)),
             pinned_images: Mutex::new(HashMap::new()),
+            shape_sdf_identities: Mutex::new(HashMap::new()),
         }
     }
 
@@ -261,15 +309,36 @@ impl AssetStore {
 
     /// 检查 key 是否存在于缓存或磁盘中。
     pub fn contains(&self, key: &str) -> bool {
+        #[cfg(feature = "skia-core")]
+        if self
+            .pinned_images
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(key)
+        {
+            return true;
+        }
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(key)
     }
 
+    #[cfg(feature = "skia-core")]
+    pub fn is_pinned_static(&self, key: &str) -> bool {
+        self.pinned_images
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(key)
+    }
+
     /// 将素材放入缓存（立即解码为 Image，原始字节写磁盘）。
     #[cfg(feature = "skia-core")]
     pub fn put(&self, key: String, data: Vec<u8>) {
+        self.shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&key);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         // 先写磁盘（持久化原始字节供重启后重新加载）
         cache.write_to_disk(&key, &data);
@@ -379,11 +448,67 @@ impl AssetStore {
         None
     }
 
+    #[cfg(feature = "skia-core")]
+    pub(crate) fn shape_sdf_source_identity(
+        &self,
+        key: &str,
+        image: &skia_safe::Image,
+    ) -> Option<ShapeSdfSourceIdentity> {
+        let mut identities = self
+            .shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(identity) = identities.get(key) {
+            return Some(identity.clone());
+        }
+
+        let width = image.width();
+        let height = image.height();
+        let width_usize = usize::try_from(width).ok()?;
+        let height_usize = usize::try_from(height).ok()?;
+        let row_bytes = width_usize.checked_mul(4)?;
+        let mut rgba = vec![0u8; row_bytes.checked_mul(height_usize)?];
+        let info = skia_safe::ImageInfo::new(
+            (width, height),
+            skia_safe::ColorType::RGBA8888,
+            skia_safe::AlphaType::Unpremul,
+            None,
+        );
+        if !image.read_pixels(
+            &info,
+            &mut rgba,
+            row_bytes,
+            (0, 0),
+            skia_safe::image::CachingHint::Allow,
+        ) {
+            return None;
+        }
+        let mut hasher = Sha256::new();
+        for pixel in rgba.chunks_exact(4) {
+            hasher.update([pixel[0], pixel[3]]);
+        }
+        let identity = ShapeSdfSourceIdentity {
+            width,
+            height,
+            rg8_sha256: hex::encode(hasher.finalize()),
+        };
+        identities.insert(key.to_string(), identity.clone());
+        Some(identity)
+    }
+
     /// 将已加载的静态素材预解码并移入常驻池。
     ///
     /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
     #[cfg(feature = "skia-core")]
     fn pre_decode_static(&self, keys_and_data: &[(String, Vec<u8>)]) -> usize {
+        let mut identities = self
+            .shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for (key, _) in keys_and_data {
+            identities.remove(key);
+        }
+        drop(identities);
         let mut count = 0usize;
         let mut pinned = self.pinned_images.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
