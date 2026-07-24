@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfontconfig1-dev libfreetype6-dev libssl-dev pkg-config
+            libfontconfig1-dev libfreetype6-dev libssl-dev libx264-dev pkg-config
 
       - run: cargo fmt --all -- --check
       # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing

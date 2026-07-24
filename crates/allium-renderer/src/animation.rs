@@ -576,7 +576,7 @@ pub(crate) fn export_profile_animation(
                 card,
                 md,
                 document_key,
-                Some(text_atlases.as_ref()),
+                text_atlases.as_deref(),
             )
             .map_err(|error| error.to_string())?,
             None,
@@ -880,11 +880,11 @@ fn rasterize_animation_groups(
     profile: Option<&crate::profile::ProfileData>,
     md: &MasterData,
     assets: Option<&AssetStore>,
-    resolved_scene: Option<&allium_renderer_core::profile_scene::ResolvedProfileScene>,
-    dynamic_expansions: &std::collections::BTreeMap<allium_renderer_core::LayerId, [i32; 4]>,
+    _resolved_scene: Option<&allium_renderer_core::profile_scene::ResolvedProfileScene>,
+    _dynamic_expansions: &std::collections::BTreeMap<allium_renderer_core::LayerId, [i32; 4]>,
     groups: &[AnimationRasterGroup],
     backend: Option<crate::profile_backend::ProfileBackendConfig>,
-    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    _render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
 ) -> Result<
     (
         Vec<RasterLayer>,
@@ -895,9 +895,8 @@ fn rasterize_animation_groups(
     String,
 > {
     use crate::profile_backend::{
-        BackendFallbackCode, BackendFallbackPolicy, ProfileRenderTelemetry, ShapeSdfExecutor,
-        TextSdfExecutor, PROFILE_RENDER_CONTRACT_LEGACY_SKIA,
-        PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
+        ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor,
+        PROFILE_RENDER_CONTRACT_LEGACY_SKIA,
     };
 
     let Some(config) = backend else {
@@ -906,87 +905,33 @@ fn rasterize_animation_groups(
         return Ok((layers, bytes, scratch, None));
     };
     let started = std::time::Instant::now();
-    let selection = renderer.resolve_animation_profile_backend(&config)?;
-    let candidate = selection.text_sdf != TextSdfExecutor::LegacySkia
-        || selection.shape_sdf != ShapeSdfExecutor::Skia;
-    let mut telemetry = ProfileRenderTelemetry::new(
-        config.clone(),
-        if candidate {
-            PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS
-        } else {
-            PROFILE_RENDER_CONTRACT_LEGACY_SKIA
-        },
-    );
+    // The OSS animation exporter currently owns only the Skia layer raster path.
+    // Resolve against that truthful capability surface so candidate requests
+    // either fail closed or take the configured whole-page fallback.
+    let mut capabilities = renderer.profile_backend_capabilities();
+    capabilities.text_simd = false;
+    capabilities.text_scalar_oracle = false;
+    capabilities.shape_simd = false;
+    let selection = config
+        .resolve(capabilities)
+        .map_err(|error| error.to_string())?;
+    let mut telemetry = ProfileRenderTelemetry::new(config, PROFILE_RENDER_CONTRACT_LEGACY_SKIA);
     telemetry.apply_selection(selection.clone());
-    if selection.text_sdf != TextSdfExecutor::LegacySkia {
-        telemetry.fallback_glyph_cache = match resolved_scene {
-            Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, md)?,
-            None => renderer.prepare_profile_fallback_for_animation_card(card, md)?,
-        };
-    }
     telemetry.work.page_count = 1;
     telemetry.work.dynamic_layer_count = groups
         .iter()
         .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
         .count() as u64;
 
-    if !candidate || !selection.fallbacks.is_empty() {
-        let (layers, bytes, scratch) =
-            rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-        telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-        telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-        telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
-        telemetry.bytes.layer_cache_bytes = bytes as u64;
-        telemetry.bytes.scratch_peak_bytes = scratch as u64;
-        telemetry.timings.total_ns = elapsed_ns(started);
-        return Ok((layers, bytes, scratch, Some(telemetry)));
-    }
-
-    renderer.record_animation_profile_atlas_identities(
-        &mut telemetry,
-        selection.text_sdf != TextSdfExecutor::LegacySkia,
-        selection.shape_sdf != ShapeSdfExecutor::Skia,
-        "animation-layer-raster",
-    );
-    match rasterize_animation_groups_candidate(
-        renderer,
-        card,
-        profile,
-        md,
-        assets,
-        groups,
-        dynamic_expansions,
-        &selection,
-        &config,
-        &mut telemetry,
-        render_object_store,
-    ) {
-        Ok((layers, bytes, scratch)) => {
-            telemetry.bytes.layer_cache_bytes = bytes as u64;
-            telemetry.bytes.scratch_peak_bytes = scratch as u64;
-            telemetry.timings.total_ns = elapsed_ns(started);
-            Ok((layers, bytes, scratch, Some(telemetry)))
-        }
-        Err(error) if config.fallback_policy == BackendFallbackPolicy::Page => {
-            telemetry.record_fallback(
-                BackendFallbackCode::ExecutorRuntimeFailure,
-                "animation-layer-raster",
-                error,
-                None,
-                None,
-            );
-            telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-            telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-            telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
-            let (layers, bytes, scratch) =
-                rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-            telemetry.bytes.layer_cache_bytes = bytes as u64;
-            telemetry.bytes.scratch_peak_bytes = scratch as u64;
-            telemetry.timings.total_ns = elapsed_ns(started);
-            Ok((layers, bytes, scratch, Some(telemetry)))
-        }
-        Err(error) => Err(error),
-    }
+    let (layers, bytes, scratch) =
+        rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
+    telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
+    telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
+    telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
+    telemetry.bytes.layer_cache_bytes = bytes as u64;
+    telemetry.bytes.scratch_peak_bytes = scratch as u64;
+    telemetry.timings.total_ns = elapsed_ns(started);
+    Ok((layers, bytes, scratch, Some(telemetry)))
 }
 
 fn rasterize_animation_groups_legacy(
@@ -1019,51 +964,6 @@ fn rasterize_animation_groups_legacy(
     Ok((layers, layer_raster_bytes, scratch_peak_bytes))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rasterize_animation_groups_candidate(
-    renderer: &crate::renderer::CustomProfileRenderer,
-    card: &CustomProfileCard,
-    profile: Option<&crate::profile::ProfileData>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    groups: &[AnimationRasterGroup],
-    dynamic_expansions: &std::collections::BTreeMap<allium_renderer_core::LayerId, [i32; 4]>,
-    selection: &crate::profile_backend::ResolvedProfileBackend,
-    config: &crate::profile_backend::ProfileBackendConfig,
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
-) -> Result<(Vec<RasterLayer>, usize, usize), String> {
-    let mut layers = Vec::with_capacity(groups.len());
-    let mut layer_raster_bytes = 0usize;
-    let mut scratch_peak_bytes = 0usize;
-    for (dynamic_layer_id, members) in groups {
-        let layer_card = grouped_layer_card(card, members);
-        let output = renderer.render_animation_layer_cropped_with_backend(
-            &layer_card,
-            md,
-            assets,
-            profile,
-            animation_group_uses_dynamic_bounds(*dynamic_layer_id),
-            (*dynamic_layer_id).and_then(|id| dynamic_expansions.get(&id).copied()),
-            selection,
-            config.tile_width,
-            config.tile_height,
-            render_object_store,
-        )?;
-        if let Some(execution) = output.execution.as_ref() {
-            record_animation_layer_execution(telemetry, execution);
-        }
-        push_animation_raster(
-            &mut layers,
-            &mut layer_raster_bytes,
-            &mut scratch_peak_bytes,
-            *dynamic_layer_id,
-            output.raster,
-        )?;
-    }
-    Ok((layers, layer_raster_bytes, scratch_peak_bytes))
-}
-
 fn push_animation_raster(
     layers: &mut Vec<RasterLayer>,
     layer_raster_bytes: &mut usize,
@@ -1087,103 +987,6 @@ fn push_animation_raster(
         height: output.height,
     });
     Ok(())
-}
-
-fn record_animation_layer_execution(
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    output: &crate::renderer::FullCardSdfExecutionOutput,
-) {
-    telemetry.work.element_run_count = telemetry
-        .work
-        .element_run_count
-        .saturating_add(output.sdf_run_count.saturating_add(output.legacy_run_count));
-    telemetry.bytes.atlas_mapped_bytes = output.atlas_mapped_bytes;
-    telemetry.timings.surface_create_ns = telemetry
-        .timings
-        .surface_create_ns
-        .saturating_add(output.timings.surface_create_ns);
-    telemetry.timings.surface_clear_ns = telemetry
-        .timings
-        .surface_clear_ns
-        .saturating_add(output.timings.surface_clear_ns);
-    telemetry.timings.sdf_capture_ns = telemetry
-        .timings
-        .sdf_capture_ns
-        .saturating_add(output.timings.capture_ns);
-    telemetry.timings.sdf_capture_rich_parse_ns = telemetry
-        .timings
-        .sdf_capture_rich_parse_ns
-        .saturating_add(output.timings.capture_rich_parse_ns);
-    telemetry.timings.sdf_capture_font_resolve_ns = telemetry
-        .timings
-        .sdf_capture_font_resolve_ns
-        .saturating_add(output.timings.capture_font_resolve_ns);
-    telemetry.timings.sdf_capture_layout_setup_ns = telemetry
-        .timings
-        .sdf_capture_layout_setup_ns
-        .saturating_add(output.timings.capture_layout_setup_ns);
-    telemetry.timings.sdf_capture_measure_ns = telemetry
-        .timings
-        .sdf_capture_measure_ns
-        .saturating_add(output.timings.capture_measure_ns);
-    telemetry.timings.sdf_capture_command_build_ns = telemetry
-        .timings
-        .sdf_capture_command_build_ns
-        .saturating_add(output.timings.capture_command_build_ns);
-    telemetry.timings.sdf_capture_emit_ns = telemetry
-        .timings
-        .sdf_capture_emit_ns
-        .saturating_add(output.timings.capture_emit_ns);
-    telemetry.timings.sdf_command_mapping_ns = telemetry
-        .timings
-        .sdf_command_mapping_ns
-        .saturating_add(output.timings.command_mapping_ns);
-    telemetry.timings.sdf_plan_build_ns = telemetry
-        .timings
-        .sdf_plan_build_ns
-        .saturating_add(output.timings.plan_build_ns);
-    telemetry.timings.sdf_execute_ns = telemetry
-        .timings
-        .sdf_execute_ns
-        .saturating_add(output.timings.execute_ns);
-    telemetry.timings.legacy_element_draw_ns = telemetry
-        .timings
-        .legacy_element_draw_ns
-        .saturating_add(output.timings.legacy_draw_ns);
-    telemetry.timings.rgba_snapshot_ns = telemetry
-        .timings
-        .rgba_snapshot_ns
-        .saturating_add(output.timings.rgba_snapshot_ns);
-    telemetry.timings.dynamic_layer_bounds_ns = telemetry
-        .timings
-        .dynamic_layer_bounds_ns
-        .saturating_add(output.timings.postprocess_bounds_ns);
-    telemetry.timings.dynamic_layer_crop_ns = telemetry
-        .timings
-        .dynamic_layer_crop_ns
-        .saturating_add(output.timings.postprocess_crop_ns);
-    telemetry.record_executed_sdf_commands(
-        output.sdf_text_element_count,
-        output.sdf_shape_element_count,
-        output.captured_text_count,
-    );
-    telemetry.record_sdf_plan(output.plan_stats, output.plan_bytes, output.span_bytes);
-    telemetry.record_sdf_execution(output.execution_stats);
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Text,
-        output.legacy_text_count,
-        0,
-    );
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Shape,
-        output.legacy_shape_count,
-        0,
-    );
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Image,
-        output.legacy_image_count,
-        output.timings.legacy_draw_ns,
-    );
 }
 
 fn elapsed_ns(started: std::time::Instant) -> u64 {

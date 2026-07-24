@@ -60,6 +60,13 @@ impl CustomProfileRenderer {
         self
     }
 
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn mapped_text_sdf_atlases(
+        &self,
+    ) -> Option<Arc<crate::sdf::atlas::MappedSdfAtlasSet>> {
+        self.sdf_atlases.clone()
+    }
+
     #[cfg(feature = "skia-core")]
     pub fn with_shape_sdf_atlas(
         mut self,
@@ -745,6 +752,65 @@ pub struct CroppedLayerOutput {
     pub height: u32,
 }
 
+#[cfg(feature = "animation-export")]
+pub(crate) struct CroppedLayerRaster {
+    pub image: skia_safe::Image,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scratch_peak_bytes: usize,
+}
+
+#[cfg(feature = "animation-export")]
+#[derive(Default)]
+struct AnimationCanvasExpansion {
+    left: i32,
+    right: i32,
+    top: i32,
+    bottom: i32,
+}
+
+#[cfg(feature = "animation-export")]
+fn animation_canvas_expansion(
+    elements: &[crate::elements::RenderElement<'_>],
+    md: &MasterData,
+) -> AnimationCanvasExpansion {
+    const PAD: i32 = 8;
+    let Some(text) = elements.iter().find_map(|element| match element {
+        crate::elements::RenderElement::Text(text) if text.object_data.visible => Some(*text),
+        _ => None,
+    }) else {
+        return AnimationCanvasExpansion::default();
+    };
+    let Some(animation) = crate::text::line_indent_x_animation(text, md) else {
+        return AnimationCanvasExpansion::default();
+    };
+    let (_, _, angle_deg, scale_x, _) = crate::transform::extract_transform(&text.object_data);
+    let radians = angle_deg.to_radians();
+    let cos = radians.cos();
+    let sin = radians.sin();
+    let mut min_dx = 0.0_f32;
+    let mut max_dx = 0.0_f32;
+    let mut min_dy = 0.0_f32;
+    let mut max_dy = 0.0_f32;
+    for frame in animation.frames {
+        let local_x = frame.dx_local * scale_x;
+        let dx = local_x * cos;
+        let dy = local_x * sin;
+        min_dx = min_dx.min(dx);
+        max_dx = max_dx.max(dx);
+        min_dy = min_dy.min(dy);
+        max_dy = max_dy.max(dy);
+    }
+    AnimationCanvasExpansion {
+        left: max_dx.max(0.0).ceil() as i32 + PAD,
+        right: (-min_dx).max(0.0).ceil() as i32 + PAD,
+        top: max_dy.max(0.0).ceil() as i32 + PAD,
+        bottom: (-min_dy).max(0.0).ceil() as i32 + PAD,
+    }
+}
+
 /// Encoded pre-generated honor artwork and its exact game dimensions.
 #[cfg(feature = "skia-core")]
 pub struct HonorArtworkOutput {
@@ -915,6 +981,112 @@ pub fn render_element_layer_cropped(
         y: by,
         width: bw,
         height: bh,
+    })
+}
+
+#[cfg(feature = "animation-export")]
+pub(crate) fn render_element_layer_cropped_animation_raster(
+    card: &CustomProfileCard,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
+    profile: Option<&crate::profile::ProfileData>,
+    include_dynamic_bounds: bool,
+) -> Result<CroppedLayerRaster, String> {
+    let canvas_width = crate::transform::CANVAS_WIDTH as i32;
+    let canvas_height = crate::transform::CANVAS_HEIGHT as i32;
+    let elements = crate::elements::flatten_and_sort(card);
+    let expansion = if include_dynamic_bounds {
+        animation_canvas_expansion(&elements, md)
+    } else {
+        AnimationCanvasExpansion::default()
+    };
+    let surface_width = canvas_width + expansion.left + expansion.right;
+    let surface_height = canvas_height + expansion.top + expansion.bottom;
+    let mut surface = skia_safe::surfaces::raster_n32_premul((surface_width, surface_height))
+        .ok_or("创建动画图层 Surface 失败")?;
+    let canvas = surface.canvas();
+    canvas.clear(skia_safe::Color::TRANSPARENT);
+    canvas.save();
+    canvas.translate((expansion.left as f32, expansion.top as f32));
+    let fallback_assets = crate::assets::AssetStore::new(1);
+    let theme = crate::widgets::theme::Theme::default();
+    for element in &elements {
+        if !element.visible() {
+            continue;
+        }
+        crate::elements::draw_element_on_canvas(
+            canvas,
+            element,
+            md,
+            assets,
+            profile,
+            &fallback_assets,
+            &theme,
+            canvas_width as f32,
+            canvas_height as f32,
+        );
+    }
+    canvas.restore();
+
+    let image = surface.image_snapshot();
+    let row_bytes = surface_width as usize * 4;
+    let info = skia_safe::ImageInfo::new(
+        (surface_width, surface_height),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Unpremul,
+        None,
+    );
+    let surface_bytes = row_bytes
+        .checked_mul(surface_height as usize)
+        .ok_or_else(|| "动画图层像素缓冲区溢出".to_string())?;
+    let mut pixels = vec![0u8; surface_bytes];
+    if !image.read_pixels(
+        &info,
+        &mut pixels,
+        row_bytes,
+        skia_safe::IPoint::new(0, 0),
+        skia_safe::image::CachingHint::Allow,
+    ) {
+        return Err("无法读取动画图层像素数据".into());
+    }
+    let (x, y, width, height) = find_opaque_bounds(
+        &pixels,
+        surface_width as u32,
+        surface_height as u32,
+        row_bytes,
+    );
+    if width == 0 || height == 0 {
+        let mut tiny =
+            skia_safe::surfaces::raster_n32_premul((1, 1)).ok_or("创建 1x1 Surface 失败")?;
+        return Ok(CroppedLayerRaster {
+            image: tiny.image_snapshot(),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            scratch_peak_bytes: surface_bytes,
+        });
+    }
+
+    let mut cropped = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
+        .ok_or("创建动画裁剪 Surface 失败")?;
+    cropped.canvas().draw_image_rect(
+        &image,
+        Some((
+            &skia_safe::Rect::from_xywh(x as f32, y as f32, width as f32, height as f32),
+            skia_safe::canvas::SrcRectConstraint::Strict,
+        )),
+        &skia_safe::Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
+        &skia_safe::Paint::default(),
+    );
+    let cropped_bytes = width as usize * height as usize * 4;
+    Ok(CroppedLayerRaster {
+        image: cropped.image_snapshot(),
+        x: x as i32 - expansion.left,
+        y: y as i32 - expansion.top,
+        width,
+        height,
+        scratch_peak_bytes: surface_bytes.saturating_add(cropped_bytes),
     })
 }
 
