@@ -19,6 +19,12 @@ pub(crate) enum PersonalTheme {}
 pub struct CustomProfileRenderer {
     md_source: RwLock<Arc<dyn MasterDataProvider>>,
     assets: Option<Arc<AssetStore>>,
+    #[cfg(feature = "skia-core")]
+    sdf_atlases: Option<Arc<crate::sdf::atlas::MappedSdfAtlasSet>>,
+    #[cfg(feature = "skia-core")]
+    shape_sdf_atlas: Option<Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>>,
+    #[cfg(feature = "skia-core")]
+    render_object_generations: Option<Arc<crate::render_object::RenderObjectGenerationManager>>,
 }
 
 impl CustomProfileRenderer {
@@ -33,6 +39,12 @@ impl CustomProfileRenderer {
         Self {
             md_source: RwLock::new(provider),
             assets: None,
+            #[cfg(feature = "skia-core")]
+            sdf_atlases: None,
+            #[cfg(feature = "skia-core")]
+            shape_sdf_atlas: None,
+            #[cfg(feature = "skia-core")]
+            render_object_generations: None,
         }
     }
 
@@ -40,6 +52,50 @@ impl CustomProfileRenderer {
     pub fn with_assets(mut self, assets: Arc<AssetStore>) -> Self {
         self.assets = Some(assets);
         self
+    }
+
+    #[cfg(feature = "skia-core")]
+    pub fn with_sdf_atlases(mut self, atlases: Arc<crate::sdf::atlas::MappedSdfAtlasSet>) -> Self {
+        self.sdf_atlases = Some(atlases);
+        self
+    }
+
+    #[cfg(feature = "skia-core")]
+    pub fn with_shape_sdf_atlas(
+        mut self,
+        atlas: Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
+    ) -> Self {
+        self.shape_sdf_atlas = Some(atlas);
+        self
+    }
+
+    #[cfg(feature = "skia-core")]
+    pub fn with_render_object_store(
+        mut self,
+        store: Arc<crate::render_object::MappedRenderObjectStore>,
+    ) -> Self {
+        self.render_object_generations = Some(Arc::new(
+            crate::render_object::RenderObjectGenerationManager::new(store),
+        ));
+        self
+    }
+
+    #[cfg(feature = "skia-core")]
+    pub fn profile_backend_capabilities(
+        &self,
+    ) -> crate::profile_backend::ProfileBackendCapabilities {
+        let simd = turin_sdf_simd_available();
+        let sdf_atlases_available = self.sdf_atlases.as_ref().map_or(false, |a| !a.is_empty());
+        crate::profile_backend::ProfileBackendCapabilities {
+            skia_raster_cpu: true,
+            skia_opengl_llvmpipe: false,
+            skia_vulkan_lavapipe: false,
+            text_legacy_skia: true,
+            text_simd: simd && sdf_atlases_available,
+            text_scalar_oracle: sdf_atlases_available,
+            shape_skia: true,
+            shape_simd: simd && self.shape_sdf_atlas.is_some(),
+        }
     }
 
     /// 热替换 MasterData provider。
@@ -1280,6 +1336,22 @@ pub fn render_all_layers_cropped(
         });
     }
     Ok(out)
+}
+
+/// Runtime probe for the Turin AVX-512 SDF tile executor.
+#[cfg(feature = "skia-core")]
+fn turin_sdf_simd_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+            && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 #[cfg(test)]

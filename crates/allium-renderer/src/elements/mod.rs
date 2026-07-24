@@ -152,9 +152,65 @@ pub fn draw_element_on_canvas(
     canvas_width: f32,
     canvas_height: f32,
 ) {
+    draw_element_on_canvas_observed(
+        canvas,
+        elem,
+        md,
+        assets,
+        profile,
+        fallback_assets,
+        theme,
+        canvas_width,
+        canvas_height,
+        None,
+        SdfObservationMode::RenderAndObserve,
+        None,
+        None,
+    );
+}
+
+#[cfg(feature = "skia-core")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SdfObservationMode {
+    RenderAndObserve,
+    ObserveOnly,
+}
+
+#[cfg(feature = "skia-core")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SdfObservationTimings {
+    pub text_capture: crate::text::TextSdfCaptureTimings,
+}
+
+#[cfg(feature = "skia-core")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_element_on_canvas_observed(
+    canvas: &skia_safe::Canvas,
+    elem: &RenderElement<'_>,
+    md: &crate::masterdata::MasterData,
+    assets: Option<&crate::assets::AssetStore>,
+    profile: Option<&crate::profile::ProfileData>,
+    fallback_assets: &crate::assets::AssetStore,
+    theme: &crate::widgets::theme::Theme,
+    canvas_width: f32,
+    canvas_height: f32,
+    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    observation_mode: SdfObservationMode,
+    text_observer: Option<
+        &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, crate::text::TextSdfCaptureError>),
+    >,
+    shape_observer: Option<
+        &mut dyn FnMut(
+            Result<
+                crate::elements::shape::ResolvedShapeSdfCommand,
+                crate::elements::shape::ShapeSdfCaptureError,
+            >,
+        ),
+    >,
+) -> SdfObservationTimings {
     use crate::context::RenderContext;
-    use crate::elements::shape::draw_shape;
-    use crate::text::{draw_text, TEXT_SCALE};
+    use crate::elements::shape::{capture_shape_sdf, draw_shape, draw_shape_observed};
+    use crate::text::{capture_text_sdf, draw_text, TEXT_SCALE};
     use crate::transform;
     use crate::widgets::adapters::card_member::CardMemberWidget;
     use crate::widgets::adapters::general::GeneralWidget;
@@ -165,6 +221,8 @@ pub fn draw_element_on_canvas(
     };
     use crate::widgets::Widget;
     use skia_safe::Point;
+
+    let mut observation_timings = SdfObservationTimings::default();
 
     let obj = elem.object_data();
     let (x, y, angle, sx, sy) =
@@ -187,9 +245,34 @@ pub fn draw_element_on_canvas(
                 "Text 元素坐标"
             );
             canvas.scale((TEXT_SCALE, TEXT_SCALE));
-            draw_text(canvas, e, md);
+            if let Some(observer) = text_observer {
+                match observation_mode {
+                    SdfObservationMode::RenderAndObserve => {
+                        crate::text::draw_text_observed(canvas, e, md, observer)
+                    }
+                    SdfObservationMode::ObserveOnly => {
+                        observation_timings.text_capture =
+                            capture_text_sdf(canvas, e, md, text_atlases, observer)
+                    }
+                }
+            } else {
+                draw_text(canvas, e, md);
+            }
         }
-        RenderElement::Shape(e) => draw_shape(canvas, e, md, assets),
+        RenderElement::Shape(e) => {
+            if let Some(observer) = shape_observer {
+                match observation_mode {
+                    SdfObservationMode::RenderAndObserve => {
+                        draw_shape_observed(canvas, e, md, assets, Some(observer))
+                    }
+                    SdfObservationMode::ObserveOnly => {
+                        capture_shape_sdf(canvas, e, md, assets, observer)
+                    }
+                }
+            } else {
+                draw_shape(canvas, e, md, assets);
+            }
+        }
         RenderElement::CardMember(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
             let mut ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
@@ -264,4 +347,5 @@ pub fn draw_element_on_canvas(
     }
 
     canvas.restore();
+    observation_timings
 }

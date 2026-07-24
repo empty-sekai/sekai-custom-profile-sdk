@@ -25,6 +25,18 @@ fn face_info_cache() -> &'static Mutex<HashMap<String, Option<TmpFaceInfoConstan
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+thread_local! {
+    /// Constructing Skia's system font manager reparses fontconfig state. Keep
+    /// one manager per renderer thread so repeated Text elements and pages pay
+    /// that cost once while preserving the exact same default-manager lookup
+    /// and fallback behavior.
+    static DEFAULT_FONT_MGR: FontMgr = FontMgr::default();
+}
+
+pub(super) fn with_default_font_mgr<T>(resolve: impl FnOnce(&FontMgr) -> T) -> T {
+    DEFAULT_FONT_MGR.with(resolve)
+}
+
 pub(super) fn resolve_tmp_face_info_constants(family: Option<&str>) -> TmpFaceInfoConstants {
     const DEFAULTS: TmpFaceInfoConstants = TmpFaceInfoConstants {
         point_size: 75.0,

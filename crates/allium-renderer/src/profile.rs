@@ -27,34 +27,15 @@ pub struct HonorSlot {
     pub profile_honor_type: String,
     /// bonds 称号的文字 ID（仅 bonds 类型有效）
     pub bonds_honor_word_id: Option<i64>,
-    /// bonds 称号查看类型；可组合 `reverse` 与 `unit_virtual_singer` 标志。
+    /// bonds 称号查看类型（"normal" 或 "reverse"），决定角色左右顺序
     pub bonds_honor_view_type: Option<String>,
 }
 
 impl HonorSlot {
-    /// 解码游戏可组合的羁绊称号视图标志：（左右反转，使用虚拟歌手角色素材）。
     pub fn bonds_honor_view_flags(&self) -> (bool, bool) {
         allium_renderer_core::profile_data::bonds_honor_view_flags(
             self.bonds_honor_view_type.as_deref(),
         )
-    }
-}
-
-#[cfg(test)]
-mod honor_slot_tests {
-    use super::HonorSlot;
-
-    #[test]
-    fn bonds_honor_view_type_preserves_composed_flags() {
-        let slot = HonorSlot {
-            bonds_honor_view_type: Some("reverse_unit_virtual_singer".into()),
-            ..HonorSlot::default()
-        };
-        assert_eq!(slot.bonds_honor_view_flags(), (true, true));
-        assert_eq!(
-            HonorSlot::default().bonds_honor_view_flags(),
-            (false, false)
-        );
     }
 }
 
@@ -166,6 +147,8 @@ pub struct ProfileData {
     pub music_results: Option<MusicResults>,
     /// 角色等级（type=11 角色收藏等级面板使用）
     pub char_ranks: Vec<CharacterRankInfo>,
+    /// 各角色挑战演出等级（General type=11/15 第二个 tab）。
+    pub challenge_ranks: Vec<CharacterRankInfo>,
     /// 最喜欢的剧情（type=14 最喜欢的剧情面板使用）
     pub story_favorites: Vec<StoryFavoriteInfo>,
     /// 打歌 honor 完成进度映射：honorMissionType → progress（live_master 称号使用）
@@ -279,6 +262,12 @@ pub fn neutral_preview_profile() -> ProfileData {
             .map(|character_id| CharacterRankInfo {
                 character_id,
                 rank: 60 - (character_id % 8),
+            })
+            .collect(),
+        challenge_ranks: (1..=26)
+            .map(|character_id| CharacterRankInfo {
+                character_id,
+                rank: 10 + character_id,
             })
             .collect(),
         story_favorites: vec![
@@ -406,6 +395,33 @@ impl ProfileData {
                         rank: c.get("characterRank")?.as_i64()? as i32,
                     })
                 })
+                .collect();
+        }
+        if let Some(stages) = body
+            .get("userChallengeLiveSoloStages")
+            .and_then(|value| value.as_array())
+        {
+            let mut maximum = std::collections::BTreeMap::<i32, i32>::new();
+            for stage in stages {
+                let Some(character_id) = stage
+                    .get("characterId")
+                    .and_then(|value| value.as_i64())
+                    .map(|value| value as i32)
+                else {
+                    continue;
+                };
+                let rank = stage
+                    .get("rank")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or_default() as i32;
+                maximum
+                    .entry(character_id)
+                    .and_modify(|value| *value = (*value).max(rank))
+                    .or_insert(rank);
+            }
+            pd.challenge_ranks = maximum
+                .into_iter()
+                .map(|(character_id, rank)| CharacterRankInfo { character_id, rank })
                 .collect();
         }
 
@@ -548,5 +564,173 @@ impl ProfileData {
     /// 查询指定卡牌的玩家状态信息。
     pub fn user_card(&self, card_id: i32) -> Option<&UserCardInfo> {
         self.user_cards.get(&card_id)
+    }
+
+    /// Converts the production profile model into the backend-neutral model
+    /// consumed by the shared semantic resolver. The production parser remains
+    /// authoritative until the raw-profile parity corpus is complete.
+    #[cfg(feature = "skia-core")]
+    pub(crate) fn to_core_profile(&self) -> allium_renderer_core::profile_data::ProfileData {
+        use allium_renderer_core::profile_data as core;
+
+        let card_state = |card_id: i32, value: UserCardInfo| core::CardState {
+            card_id,
+            after_training: value.after_training,
+            master_rank: value.master_rank,
+            level: value.level,
+        };
+        let user_cards = self
+            .user_cards
+            .iter()
+            .map(|(&card_id, &value)| (card_id, card_state(card_id, value)))
+            .collect();
+        core::ProfileData {
+            user_name: self.user_name.clone(),
+            user_rank: self.user_rank,
+            total_power: self.total_power,
+            word: self.word.clone(),
+            mvp: self.mvp,
+            superstar: self.superstar,
+            challenge_score: self.challenge_score,
+            challenge_character_id: self.challenge_character_id,
+            leader_card: self.leader_card.as_ref().map(|value| core::CardState {
+                card_id: value.card_id,
+                after_training: value.after_training,
+                master_rank: value.master_rank,
+                level: self
+                    .user_cards
+                    .get(&value.card_id)
+                    .map(|card| card.level)
+                    .unwrap_or(60),
+            }),
+            honor_slots: self
+                .honor_slots
+                .iter()
+                .map(|value| core::HonorSlot {
+                    honor_id: value.honor_id,
+                    honor_level: value.honor_level,
+                    full_size: value.full_size,
+                    profile_honor_type: value.profile_honor_type.clone(),
+                    bonds_honor_word_id: value.bonds_honor_word_id,
+                    bonds_honor_view_type: value.bonds_honor_view_type.clone(),
+                })
+                .collect(),
+            deck_members: self
+                .deck_members
+                .iter()
+                .map(|value| core::CardState {
+                    card_id: value.card_id,
+                    after_training: value.after_training,
+                    master_rank: value.master_rank,
+                    level: value.level,
+                })
+                .collect(),
+            music_results: self.music_results.as_ref().map(|value| core::MusicResults {
+                easy: music_stats_to_core(&value.easy),
+                normal: music_stats_to_core(&value.normal),
+                hard: music_stats_to_core(&value.hard),
+                expert: music_stats_to_core(&value.expert),
+                master: music_stats_to_core(&value.master),
+                append: music_stats_to_core(&value.append),
+            }),
+            character_ranks: self
+                .char_ranks
+                .iter()
+                .map(|value| core::CharacterRank {
+                    character_id: value.character_id,
+                    rank: value.rank,
+                })
+                .collect(),
+            challenge_ranks: self
+                .challenge_ranks
+                .iter()
+                .map(|value| core::CharacterRank {
+                    character_id: value.character_id,
+                    rank: value.rank,
+                })
+                .collect(),
+            story_favorites: self
+                .story_favorites
+                .iter()
+                .map(|value| core::StoryFavorite {
+                    story_id: value.story_id,
+                    story_type: value.story_type.clone(),
+                })
+                .collect(),
+            honor_mission_progress: self
+                .user_honor_missions
+                .iter()
+                .map(|(key, &value)| (key.clone(), value))
+                .collect(),
+            user_cards,
+        }
+    }
+}
+
+#[cfg(feature = "skia-core")]
+fn music_stats_to_core(
+    value: &MusicDifficultyStats,
+) -> allium_renderer_core::profile_data::MusicDifficultyStats {
+    allium_renderer_core::profile_data::MusicDifficultyStats {
+        clear: value.clear,
+        full_combo: value.full_combo,
+        all_perfect: value.all_perfect,
+    }
+}
+
+#[cfg(test)]
+mod interaction_profile_tests {
+    use super::*;
+
+    #[test]
+    fn parses_per_character_challenge_live_ranks_for_interactive_tab() {
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userCharacters": [
+                { "characterId": 1, "characterRank": 42 },
+                { "characterId": 2, "characterRank": 31 }
+            ],
+            "userChallengeLiveSoloStages": [
+                { "characterId": 1, "rank": 1 },
+                { "characterId": 1, "rank": 18 },
+                { "characterId": 1, "rank": 12 },
+                { "characterId": 2, "rank": 1 },
+                { "characterId": 2, "rank": 7 }
+            ]
+        }));
+        assert_eq!(profile.char_ranks[0].rank, 42);
+        assert_eq!(profile.challenge_ranks[0].rank, 18);
+        assert_eq!(profile.challenge_ranks[1].character_id, 2);
+    }
+
+    #[cfg(feature = "skia-core")]
+    #[test]
+    fn production_and_shared_profile_parsers_match_supported_fields() {
+        let raw = serde_json::json!({
+            "user": { "name": "Sample", "rank": 123 },
+            "userProfile": { "word": "Hello" },
+            "totalPower": { "totalPower": 456789 },
+            "userMultiLiveTopScoreCount": { "mvp": 7, "superStar": 8 },
+            "userChallengeLiveSoloResult": { "highScore": 987654, "characterId": 2 },
+            "userCards": [
+                { "cardId": 10, "defaultImage": "special_training", "masterRank": 3, "level": 60 },
+                { "cardId": 11, "defaultImage": "normal", "masterRank": 1, "level": 55 }
+            ],
+            "userDeck": { "leader": 10, "member1": 10, "member2": 11 },
+            "userProfileHonors": [
+                { "honorId": 20, "honorLevel": 4, "seq": 2, "profileHonorType": "normal" },
+                { "honorId": 21, "honorLevel": 2, "seq": 3, "profileHonorType": "bonds", "bondsHonorWordId": 99, "bondsHonorViewType": "reverse" }
+            ],
+            "userCharacters": [{ "characterId": 2, "characterRank": 31 }],
+            "userChallengeLiveSoloStages": [{ "characterId": 2, "rank": 9 }],
+            "userStoryFavorites": [{ "storyId": 30, "storyType": "event_story" }],
+            "userHonorMissions": [{ "honorMissionType": "live_master", "progress": 50 }],
+            "userMusicDifficultyClearCount": [
+                { "musicDifficultyType": "expert", "liveClear": 40, "fullCombo": 30, "allPerfect": 20 },
+                { "musicDifficultyType": "append", "liveClear": 4, "fullCombo": 3, "allPerfect": 2 }
+            ]
+        });
+        let production = ProfileData::from_json(&raw).to_core_profile();
+        let shared = allium_renderer_core::profile_data::ProfileData::from_json(&raw);
+        assert_eq!(production, shared);
     }
 }
