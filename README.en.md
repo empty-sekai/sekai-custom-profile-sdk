@@ -13,6 +13,12 @@ Rendering is one capability of the SDK. The repository contains two rendering ad
 
 Both adapters share a backend-independent Rust semantic core. The browser package uses a dedicated Rust/WASM and WebGL2 execution path, while the native adapter uses Rust and Skia.
 
+## Live demo
+
+[profile.mizore.art](https://profile.mizore.art) is built on the SDK's browser renderer and lets you edit and preview custom profile cards in the browser:
+
+![Card editor text tool](docs/images/editor-text-tool.png)
+
 ## Responsibilities
 
 Rust/WASM owns:
