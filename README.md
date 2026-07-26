@@ -13,6 +13,12 @@ renderer 是 SDK 内的一项能力。仓库包含两个面向不同运行环境
 
 两者共享与后端无关的 Rust semantic core。浏览器包采用独立的 Rust/WASM + WebGL2 执行路径，native adapter 采用 Rust + Skia 执行路径。
 
+## 在线演示
+
+[profile.mizore.art](https://profile.mizore.art) 基于本 SDK 的 browser renderer 构建，可在浏览器中编辑并预览自定义名片：
+
+![名片编辑器文本工具](docs/images/editor-text-tool.png)
+
 ## 设计边界
 
 Rust/WASM 负责：
