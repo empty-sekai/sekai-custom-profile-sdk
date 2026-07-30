@@ -262,7 +262,7 @@ fn layout_layer(
                         raw_ch,
                     );
                     let glyph_advance_caret = glyph_advance_tmp * seg_scale;
-                    current_line_advances_tmp.push(glyph_advance_caret + cspace_raw_tmp);
+                    current_line_advances_tmp.push(glyph_advance_tmp + cspace_raw_tmp);
                     let glyph_asc_tmp = measure_size * (66.0 / 75.0) * TEXT_SCALE;
                     let glyph_des_tmp = measure_size * (9.0 / 75.0) * TEXT_SCALE;
                     vbounds_max_top = vbounds_max_top.max(voffset_tmp + glyph_asc_tmp);
@@ -1647,6 +1647,41 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn line_indent_program_uses_preferred_width_advance_without_scale() {
+        let request = |scale: f32| {
+            serde_json::json!({
+                "layers": [{
+                    "id": "curtain", "z": 0,
+                    "text": format!("<line-indent=96%><size=1250><scale={scale}>A"),
+                    "region": "cn", "fontFamily": "SyntheticSans",
+                    "fontSourceHash": "a".repeat(64),
+                    "x": 0.0, "y": 0.0, "rotationDeg": 0.0,
+                    "scaleX": 1.0, "scaleY": 1.0,
+                    "fontSize": 24.0, "color": [1.0,1.0,1.0,1.0],
+                    "outlineColor": [0.0,0.0,0.0,0.0],
+                    "colorRgb": [255.0,255.0,255.0], "outlineWidth": 0.0,
+                    "lineSpacing": 0.0, "textType": 0, "dynamic": null
+                }],
+                "atlas": { "baseSize": 75.0, "spread": 6.0, "glyphs": [] },
+                "tick": 0, "frameMode": "animate"
+            })
+        };
+        let normal: serde_json::Value =
+            serde_json::from_str(&build_layout_json(&request(1.0).to_string()).unwrap()).unwrap();
+        let scaled: serde_json::Value =
+            serde_json::from_str(&build_layout_json(&request(60.0).to_string()).unwrap()).unwrap();
+
+        assert_eq!(
+            normal["dynamicPrograms"][0]["lineAdvancesTmp"],
+            scaled["dynamicPrograms"][0]["lineAdvancesTmp"]
+        );
+        assert_ne!(
+            normal["instances"][0]["layoutMetrics"]["lineWidths"],
+            scaled["instances"][0]["layoutMetrics"]["lineWidths"]
         );
     }
 
