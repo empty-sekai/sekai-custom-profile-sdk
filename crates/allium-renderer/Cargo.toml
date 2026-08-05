@@ -101,11 +101,6 @@ path = "tools/render_deck.rs"
 required-features = ["dev"]
 
 [[bin]]
-name = "render-ranking-preview"
-path = "tools/render_ranking_preview.rs"
-required-features = ["dev"]
-
-[[bin]]
 name = "render-task043-layer"
 path = "tools/render_task043_layer.rs"
 required-features = ["dev"]

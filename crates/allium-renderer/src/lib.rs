@@ -44,8 +44,6 @@ pub mod profile;
 pub mod profile_backend;
 #[cfg(feature = "skia-core")]
 pub mod profile_compositor;
-#[cfg(feature = "scenes")]
-pub mod ranking;
 pub mod region;
 pub mod render_document;
 pub mod render_object;

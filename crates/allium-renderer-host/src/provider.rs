@@ -55,10 +55,8 @@ impl JsonMasterDataProvider {
 
     /// 设置 region（链式 builder）。
     ///
-    /// region 驱动：
-    /// - `map_font_name` 的 FOT→FZ 映射仅在 [`Region::Cn`] 生效，其余原样返回；
-    /// - `draw_general_text` 的 CJK fallback 字体族按 region 切换；
-    /// - `RegionLabels` 表外兜底标签按 region 取。
+    /// region 是 provider 元数据，经 [`MasterDataProvider::region`] 暴露给
+    /// 引擎；面板标签本地化由 `allium_renderer_core::locale` 提供。
     pub fn with_region(mut self, region: Region) -> Self {
         self.region = region;
         self
