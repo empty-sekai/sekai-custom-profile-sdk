@@ -29,6 +29,9 @@ commit_parsers = [
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
   { message = "^perf", group = "Performance" },
+  # Breaking changes stay visible in the release notes even when the commit
+  # type is housekeeping (e.g. refactor with a BREAKING CHANGE footer).
+  { message = "^refactor", body = "BREAKING CHANGE", group = "Breaking Changes" },
   # Housekeeping types (refactor/docs/test/ci/build/chore/revert) are kept
   # out of the user-facing release notes.
   { message = ".*", skip = true },
