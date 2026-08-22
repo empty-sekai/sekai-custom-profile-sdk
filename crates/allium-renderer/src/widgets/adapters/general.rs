@@ -107,7 +107,6 @@ mod tests {
     use crate::assets::AssetStore;
     use crate::context::RenderContext;
     use crate::types::{GeneralElement, ObjectData, Quaternion, Vec3};
-    use crate::widgets::theme::Theme;
     use crate::widgets::Widget;
 
     #[test]
@@ -137,8 +136,7 @@ mod tests {
             general_type: Some(3),
         });
         let assets = AssetStore::new(8);
-        let theme = Theme::default();
-        let ctx = RenderContext::new(&assets, &theme);
+        let ctx = RenderContext::new(&assets);
 
         assert_eq!(widget.name(), "general");
         assert_eq!(widget.measure(&ctx), (844.0, 305.0));
@@ -148,8 +146,7 @@ mod tests {
     fn general_widget_from_document_uses_profile_general_name() {
         let widget = GeneralWidget::from_general_type(13);
         let assets = AssetStore::new(8);
-        let theme = Theme::default();
-        let ctx = RenderContext::new(&assets, &theme);
+        let ctx = RenderContext::new(&assets);
 
         assert_eq!(widget.name(), "profile_general");
         assert_eq!(widget.measure(&ctx), (610.0, 127.0));

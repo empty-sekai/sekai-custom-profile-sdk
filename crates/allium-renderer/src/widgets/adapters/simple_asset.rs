@@ -308,7 +308,6 @@ mod tests {
     use crate::assets::AssetStore;
     use crate::context::RenderContext;
     use crate::types::{ObjectData, Quaternion, StampElement, Vec3};
-    use crate::widgets::theme::Theme;
     use crate::widgets::Widget;
 
     fn stamp_element() -> StampElement {
@@ -341,8 +340,7 @@ mod tests {
     #[test]
     fn stamp_widget_has_asset_key_and_reasonable_measure() {
         let assets = AssetStore::new(8);
-        let theme = Theme::default();
-        let ctx = RenderContext::new(&assets, &theme);
+        let ctx = RenderContext::new(&assets);
         let widget = StampWidget::from_element(&stamp_element(), &ctx);
 
         assert_eq!(widget.name(), "stamp");

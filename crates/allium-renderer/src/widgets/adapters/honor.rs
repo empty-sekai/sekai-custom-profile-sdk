@@ -284,7 +284,6 @@ mod tests {
     };
     use crate::types::{BondsHonorElement, HonorElement, ObjectData, Quaternion, Vec3};
     use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
-    use crate::widgets::theme::Theme;
     use crate::widgets::Widget;
     use std::sync::Arc;
 
@@ -379,9 +378,8 @@ mod tests {
 
     fn ctx() -> RenderContext<'static> {
         let assets = Box::leak(Box::new(AssetStore::new(8)));
-        let theme = Box::leak(Box::new(Theme::default()));
         let masterdata = Box::leak(Box::new(MasterData::new(Arc::new(TestProvider))));
-        RenderContext::new(assets, theme).with_masterdata(masterdata)
+        RenderContext::new(assets).with_masterdata(masterdata)
     }
 
     #[test]

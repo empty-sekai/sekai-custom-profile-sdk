@@ -5,22 +5,16 @@ use crate::masterdata::{MasterData, MasterDataProvider};
 use crate::types::{CustomProfileCard, UserCustomProfileCard};
 use std::sync::{Arc, RwLock};
 
-/// 个人资料画布主题别名。`scenes` 关闭时为不可构造的占位类型，
-/// 使共享的内部渲染函数签名在两种配置下一致（永远只会传 `None`）。
-#[cfg(feature = "scenes")]
-#[allow(dead_code)] // 仅在 skia-core 渲染路径中作为签名占位
-pub(crate) type PersonalTheme = crate::personal_profile::PersonalProfileTheme;
-#[cfg(not(feature = "scenes"))]
-#[derive(Clone, Copy)]
-#[allow(dead_code)] // 仅在 skia-core 渲染路径中作为签名占位
-pub(crate) enum PersonalTheme {}
-
 /// 自定义名片渲染器。
 pub struct CustomProfileRenderer {
     md_source: RwLock<Arc<dyn MasterDataProvider>>,
     assets: Option<Arc<AssetStore>>,
+    /// Hot-swappable so a generated fallback atlas can be published without
+    /// rebuilding the renderer.
     #[cfg(feature = "skia-core")]
-    sdf_atlases: Option<Arc<crate::sdf::atlas::MappedSdfAtlasSet>>,
+    sdf_atlases: arc_swap::ArcSwap<crate::sdf::atlas::MappedSdfAtlasSet>,
+    #[cfg(feature = "skia-core")]
+    profile_fallback_sdf_cache: Option<Arc<crate::sdf::fallback_cache::PersistentFallbackSdfCache>>,
     #[cfg(feature = "skia-core")]
     shape_sdf_atlas: Option<Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>>,
     #[cfg(feature = "skia-core")]
@@ -40,7 +34,11 @@ impl CustomProfileRenderer {
             md_source: RwLock::new(provider),
             assets: None,
             #[cfg(feature = "skia-core")]
-            sdf_atlases: None,
+            sdf_atlases: arc_swap::ArcSwap::from_pointee(
+                crate::sdf::atlas::MappedSdfAtlasSet::new(),
+            ),
+            #[cfg(feature = "skia-core")]
+            profile_fallback_sdf_cache: None,
             #[cfg(feature = "skia-core")]
             shape_sdf_atlas: None,
             #[cfg(feature = "skia-core")]
@@ -55,8 +53,22 @@ impl CustomProfileRenderer {
     }
 
     #[cfg(feature = "skia-core")]
-    pub fn with_sdf_atlases(mut self, atlases: Arc<crate::sdf::atlas::MappedSdfAtlasSet>) -> Self {
-        self.sdf_atlases = Some(atlases);
+    pub fn with_sdf_atlases(self, atlases: Arc<crate::sdf::atlas::MappedSdfAtlasSet>) -> Self {
+        self.sdf_atlases.store(atlases);
+        self
+    }
+
+    /// Installs the persistent FreeType fallback glyph cache.
+    ///
+    /// Codepoints missing from the declared font's atlas are generated from the
+    /// fallback face and published into the atlas set, so layout and rendering
+    /// stay on FreeType instead of substituting another engine's metrics.
+    #[cfg(feature = "skia-core")]
+    pub fn with_profile_fallback_sdf_cache(
+        mut self,
+        cache: Arc<crate::sdf::fallback_cache::PersistentFallbackSdfCache>,
+    ) -> Self {
+        self.profile_fallback_sdf_cache = Some(cache);
         self
     }
 
@@ -64,7 +76,8 @@ impl CustomProfileRenderer {
     pub(crate) fn mapped_text_sdf_atlases(
         &self,
     ) -> Option<Arc<crate::sdf::atlas::MappedSdfAtlasSet>> {
-        self.sdf_atlases.clone()
+        let atlases = self.sdf_atlases.load_full();
+        (!atlases.is_empty()).then_some(atlases)
     }
 
     #[cfg(feature = "skia-core")]
@@ -92,7 +105,7 @@ impl CustomProfileRenderer {
         &self,
     ) -> crate::profile_backend::ProfileBackendCapabilities {
         let simd = turin_sdf_simd_available();
-        let sdf_atlases_available = self.sdf_atlases.as_ref().map_or(false, |a| !a.is_empty());
+        let sdf_atlases_available = !self.sdf_atlases.load().is_empty();
         crate::profile_backend::ProfileBackendCapabilities {
             skia_raster_cpu: true,
             skia_opengl_llvmpipe: false,
@@ -103,6 +116,124 @@ impl CustomProfileRenderer {
             shape_skia: true,
             shape_simd: simd && self.shape_sdf_atlas.is_some(),
         }
+    }
+
+    /// Pre-warms the FreeType fallback glyphs this card needs.
+    ///
+    /// A no-op unless a fallback cache is installed, so callers that supply
+    /// complete atlases pay nothing. Resolving the card here keeps glyph
+    /// generation off the compositing path.
+    #[cfg(feature = "skia-core")]
+    fn prewarm_profile_fallback(
+        &self,
+        card: &CustomProfileCard,
+        md: &MasterData,
+        profile: Option<&crate::profile::ProfileData>,
+    ) -> Result<(), String> {
+        if self.profile_fallback_sdf_cache.is_none() {
+            return Ok(());
+        }
+        let scene = crate::semantic_resolve::resolve_card_commands_with_profile(
+            card,
+            md,
+            "profile-fallback-prewarm",
+            profile,
+            "und",
+            self.assets.as_deref(),
+        )
+        .map_err(|error| format!("fallback prewarm could not resolve the card: {error}"))?;
+        self.ensure_profile_fallback_for_scenes(std::iter::once(&scene), md)?;
+        Ok(())
+    }
+
+    /// Generates any codepoints the declared fonts' atlases lack, from the
+    /// FreeType fallback face, and publishes the result into the atlas set.
+    ///
+    /// Runs before rendering so the request path only ever reads atlases; it
+    /// never generates glyphs while compositing.
+    #[cfg(feature = "skia-core")]
+    fn ensure_profile_fallback_for_scenes<'a>(
+        &self,
+        scenes: impl IntoIterator<Item = &'a allium_renderer_core::profile_scene::ResolvedProfileScene>,
+        md: &MasterData,
+    ) -> Result<Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>, String> {
+        use allium_renderer_core::{FontRole, SemanticCommandPayload, TextSource};
+        use std::collections::BTreeSet;
+
+        let Some(cache) = self.profile_fallback_sdf_cache.as_deref() else {
+            return Ok(None);
+        };
+        let atlases = self.sdf_atlases.load_full();
+        let mut requested = BTreeSet::new();
+        for scene in scenes {
+            for command in &scene.commands {
+                // Live-master progress text is player state, not authored glyphs.
+                if command.role.starts_with("honor-") && command.role.ends_with("-progress") {
+                    continue;
+                }
+                let SemanticCommandPayload::Text {
+                    source, font_role, ..
+                } = &command.payload
+                else {
+                    continue;
+                };
+                let font_id = match font_role {
+                    FontRole::RegionFontId(font_id) => *font_id,
+                };
+                let Some(primary_family) = md.resolve_font(font_id) else {
+                    continue;
+                };
+                if primary_family == crate::sdf::atlas::PROFILE_TEXT_FALLBACK_FONT_FAMILY {
+                    continue;
+                }
+                let Some((_, primary_atlas)) = atlases.atlas_for_font_family(&primary_family)
+                else {
+                    continue;
+                };
+                let value = match source {
+                    TextSource::Authored { value }
+                    | TextSource::ProfileField { value, .. }
+                    | TextSource::MasterData { value, .. }
+                    | TextSource::Localized { value, .. } => value,
+                };
+                requested.extend(value.chars().filter_map(|ch| {
+                    (!ch.is_whitespace()
+                        && !ch.is_control()
+                        && primary_atlas.glyph(u32::from(ch)).is_none())
+                    .then_some(u32::from(ch))
+                }));
+            }
+        }
+        self.ensure_profile_fallback_codepoints(requested, cache, &atlases)
+    }
+
+    #[cfg(feature = "skia-core")]
+    fn ensure_profile_fallback_codepoints(
+        &self,
+        requested: std::collections::BTreeSet<u32>,
+        cache: &crate::sdf::fallback_cache::PersistentFallbackSdfCache,
+        atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
+    ) -> Result<Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>, String> {
+        if requested.is_empty() {
+            return Ok(None);
+        }
+
+        let (atlas, report) = cache.ensure_codepoints(&requested)?;
+        if let Some(atlas) = atlas {
+            let already_published = atlases
+                .atlas_for_font_family(cache.font_family())
+                .is_some_and(|(_, installed)| {
+                    installed.manifest_sha256() == atlas.manifest_sha256()
+                });
+            if !already_published {
+                let mut updated = (*self.sdf_atlases.load_full()).clone();
+                updated
+                    .replace_or_insert(atlas)
+                    .map_err(|error| error.to_string())?;
+                self.sdf_atlases.store(Arc::new(updated));
+            }
+        }
+        Ok(Some(report))
     }
 
     /// 热替换 MasterData provider。
@@ -142,45 +273,8 @@ impl CustomProfileRenderer {
     ) -> Result<Vec<u8>, String> {
         let md = self.snapshot();
         let asset_ref = self.assets.as_deref();
+        self.prewarm_profile_fallback(card, &md, profile)?;
         render_card(card, &md, asset_ref, profile)
-    }
-
-    #[cfg(all(feature = "skia-core", feature = "scenes"))]
-    pub fn render_personal_profile(
-        &self,
-        input: &crate::personal_profile::PersonalProfileRenderInput,
-    ) -> Result<crate::traits::RenderOutput, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        crate::personal_profile::render_personal_profile(input, &md, asset_ref)
-    }
-
-    #[cfg(all(feature = "skia-core", feature = "scenes"))]
-    pub fn render_personal_profile_canvas(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        theme: crate::personal_profile::PersonalProfileTheme,
-    ) -> Result<Vec<u8>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        render_card_personal_profile_canvas(card, &md, asset_ref, profile, theme)
-    }
-
-    #[cfg(all(feature = "skia-core", feature = "scenes"))]
-    pub fn render_personal_profile_canvas_sized(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        theme: crate::personal_profile::PersonalProfileTheme,
-        width: u32,
-        height: u32,
-    ) -> Result<Vec<u8>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        render_card_personal_profile_canvas_sized(
-            card, &md, asset_ref, profile, theme, width, height,
-        )
     }
 
     #[cfg(feature = "skia-core")]
@@ -191,6 +285,7 @@ impl CustomProfileRenderer {
     ) -> Result<Vec<u8>, String> {
         let md = self.snapshot();
         let asset_ref = self.assets.as_deref();
+        self.prewarm_profile_fallback(card, &md, profile)?;
         render_card_png(card, &md, asset_ref, profile)
     }
 
@@ -202,6 +297,7 @@ impl CustomProfileRenderer {
     ) -> Result<Vec<u8>, String> {
         let md = self.snapshot();
         let asset_ref = self.assets.as_deref();
+        self.prewarm_profile_fallback(card, &md, profile)?;
         render_card_png_transparent(card, &md, asset_ref, profile)
     }
 
@@ -339,36 +435,6 @@ impl CustomProfileRenderer {
         Err("Skia 渲染未启用，请使用 --features skia 编译".into())
     }
 
-    #[cfg(all(not(feature = "skia-core"), feature = "scenes"))]
-    pub fn render_personal_profile(
-        &self,
-        _input: &crate::personal_profile::PersonalProfileRenderInput,
-    ) -> Result<crate::traits::RenderOutput, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(all(not(feature = "skia-core"), feature = "scenes"))]
-    pub fn render_personal_profile_canvas(
-        &self,
-        _card: &CustomProfileCard,
-        _profile: Option<&crate::profile::ProfileData>,
-        _theme: crate::personal_profile::PersonalProfileTheme,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(all(not(feature = "skia-core"), feature = "scenes"))]
-    pub fn render_personal_profile_canvas_sized(
-        &self,
-        _card: &CustomProfileCard,
-        _profile: Option<&crate::profile::ProfileData>,
-        _theme: crate::personal_profile::PersonalProfileTheme,
-        _width: u32,
-        _height: u32,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
     #[cfg(not(feature = "skia-core"))]
     pub fn render_by_seq(
         &self,
@@ -462,36 +528,12 @@ fn render_card_encoded(
     format: skia_safe::EncodedImageFormat,
     quality: u32,
 ) -> Result<Vec<u8>, String> {
-    render_card_encoded_with_background(
+    render_card_encoded_sized(
         card,
         md,
         assets,
         profile,
         clear_color,
-        None,
-        format,
-        quality,
-    )
-}
-
-#[cfg(feature = "skia-core")]
-fn render_card_encoded_with_background(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    clear_color: skia_safe::Color,
-    personal_theme: Option<PersonalTheme>,
-    format: skia_safe::EncodedImageFormat,
-    quality: u32,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded_with_background_sized(
-        card,
-        md,
-        assets,
-        profile,
-        clear_color,
-        personal_theme,
         format,
         quality,
         crate::transform::CANVAS_WIDTH as u32,
@@ -500,13 +542,12 @@ fn render_card_encoded_with_background(
 }
 
 #[cfg(feature = "skia-core")]
-fn render_card_encoded_with_background_sized(
+fn render_card_encoded_sized(
     card: &CustomProfileCard,
     md: &MasterData,
     assets: Option<&AssetStore>,
     profile: Option<&crate::profile::ProfileData>,
     clear_color: skia_safe::Color,
-    personal_theme: Option<PersonalTheme>,
     format: skia_safe::EncodedImageFormat,
     quality: u32,
     canvas_width: u32,
@@ -518,20 +559,7 @@ fn render_card_encoded_with_background_sized(
         .ok_or("创建 Skia Surface 失败")?;
 
     let canvas = surface.canvas();
-    match personal_theme {
-        #[cfg(feature = "scenes")]
-        Some(theme) => draw_personal_profile_general_background(
-            canvas,
-            theme,
-            canvas_width as f32,
-            canvas_height as f32,
-        ),
-        #[cfg(not(feature = "scenes"))]
-        Some(theme) => match theme {},
-        None => {
-            canvas.clear(clear_color);
-        }
-    }
+    canvas.clear(clear_color);
 
     let elements = crate::elements::flatten_and_sort(card);
     let text_count = elements
@@ -546,7 +574,6 @@ fn render_card_encoded_with_background_sized(
 
     // 循环外一次性构造共享上下文，避免每个元素重建（#29）。
     let fallback_assets = crate::assets::AssetStore::new(1);
-    let theme = crate::widgets::theme::Theme::default();
     for elem in &elements {
         if !elem.visible() {
             continue;
@@ -558,7 +585,6 @@ fn render_card_encoded_with_background_sized(
             assets,
             profile,
             &fallback_assets,
-            &theme,
             canvas_width as f32,
             canvas_height as f32,
         );
@@ -573,75 +599,6 @@ fn render_card_encoded_with_background_sized(
             _ => "图片编码失败".to_string(),
         })?;
     Ok(data.as_bytes().to_vec())
-}
-
-#[cfg(all(feature = "skia-core", feature = "scenes"))]
-fn draw_personal_profile_general_background(
-    canvas: &skia_safe::Canvas,
-    theme: crate::personal_profile::PersonalProfileTheme,
-    canvas_width: f32,
-    canvas_height: f32,
-) {
-    let (bg, niigo, miku, line, panel, edge, shadow) = match theme {
-        crate::personal_profile::PersonalProfileTheme::NiigoDark => (
-            skia_safe::Color::from_argb(255, 20, 20, 28),
-            skia_safe::Color::from_argb(255, 136, 122, 240),
-            skia_safe::Color::from_argb(255, 168, 216, 232),
-            skia_safe::Color::from_argb(18, 54, 58, 82),
-            skia_safe::Color::from_argb(232, 246, 246, 252),
-            skia_safe::Color::from_argb(84, 107, 105, 146),
-            skia_safe::Color::from_argb(56, 0, 0, 0),
-        ),
-        crate::personal_profile::PersonalProfileTheme::MikuLight => (
-            skia_safe::Color::from_argb(255, 229, 242, 247),
-            skia_safe::Color::from_argb(255, 125, 112, 224),
-            skia_safe::Color::from_argb(255, 65, 164, 194),
-            skia_safe::Color::from_argb(24, 56, 92, 112),
-            skia_safe::Color::from_argb(150, 255, 255, 255),
-            skia_safe::Color::from_argb(60, 70, 120, 140),
-            skia_safe::Color::from_argb(22, 0, 42, 54),
-        ),
-    };
-
-    canvas.clear(bg);
-
-    let mut paint = skia_safe::Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_style(skia_safe::PaintStyle::Fill);
-    paint.set_color(niigo);
-    canvas.draw_rect(
-        skia_safe::Rect::from_xywh(0.0, 0.0, canvas_width * 0.64, 5.0),
-        &paint,
-    );
-    paint.set_color(miku);
-    canvas.draw_rect(
-        skia_safe::Rect::from_xywh(canvas_width * 0.64, 0.0, canvas_width * 0.22, 5.0),
-        &paint,
-    );
-
-    let card_rect =
-        skia_safe::Rect::from_xywh(28.0, 38.0, canvas_width - 56.0, canvas_height - 76.0);
-
-    paint.set_style(skia_safe::PaintStyle::Fill);
-    paint.set_color(shadow);
-    canvas.draw_round_rect(card_rect.with_offset((0.0, 8.0)), 8.0, 8.0, &paint);
-
-    paint.set_style(skia_safe::PaintStyle::Fill);
-    paint.set_color(panel);
-    canvas.draw_round_rect(card_rect, 8.0, 8.0, &paint);
-
-    paint.set_style(skia_safe::PaintStyle::Stroke);
-    paint.set_stroke_width(1.0);
-    paint.set_color(edge);
-    canvas.draw_round_rect(card_rect, 8.0, 8.0, &paint);
-
-    paint.set_style(skia_safe::PaintStyle::Stroke);
-    paint.set_stroke_width(1.0);
-    paint.set_color(line);
-    for i in -8..48 {
-        let x = i as f32 * 72.0;
-        canvas.draw_line((x, canvas_height), (x + 420.0, 0.0), &paint);
-    }
 }
 
 #[cfg(feature = "skia-core")]
@@ -659,50 +616,6 @@ pub fn render_card(
         skia_safe::Color::WHITE,
         skia_safe::EncodedImageFormat::JPEG,
         90,
-    )
-}
-
-#[cfg(all(feature = "skia-core", feature = "scenes"))]
-pub fn render_card_personal_profile_canvas(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    theme: crate::personal_profile::PersonalProfileTheme,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded_with_background(
-        card,
-        md,
-        assets,
-        profile,
-        skia_safe::Color::WHITE,
-        Some(theme),
-        skia_safe::EncodedImageFormat::JPEG,
-        90,
-    )
-}
-
-#[cfg(all(feature = "skia-core", feature = "scenes"))]
-pub fn render_card_personal_profile_canvas_sized(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    theme: crate::personal_profile::PersonalProfileTheme,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded_with_background_sized(
-        card,
-        md,
-        assets,
-        profile,
-        skia_safe::Color::WHITE,
-        Some(theme),
-        skia_safe::EncodedImageFormat::JPEG,
-        90,
-        width,
-        height,
     )
 }
 
@@ -885,7 +798,6 @@ pub fn render_element_layer_cropped(
     );
     // 循环外一次性构造共享上下文，避免每个元素重建（#29）。
     let fallback_assets = crate::assets::AssetStore::new(1);
-    let theme = crate::widgets::theme::Theme::default();
     for elem in &elements {
         if !elem.visible() {
             continue;
@@ -897,7 +809,6 @@ pub fn render_element_layer_cropped(
             assets,
             profile,
             &fallback_assets,
-            &theme,
             w as f32,
             h as f32,
         );
@@ -1009,7 +920,6 @@ pub(crate) fn render_element_layer_cropped_animation_raster(
     canvas.save();
     canvas.translate((expansion.left as f32, expansion.top as f32));
     let fallback_assets = crate::assets::AssetStore::new(1);
-    let theme = crate::widgets::theme::Theme::default();
     for element in &elements {
         if !element.visible() {
             continue;
@@ -1021,7 +931,6 @@ pub(crate) fn render_element_layer_cropped_animation_raster(
             assets,
             profile,
             &fallback_assets,
-            &theme,
             canvas_width as f32,
             canvas_height as f32,
         );
@@ -1528,8 +1437,11 @@ fn turin_sdf_simd_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "skia-core")]
     use super::*;
+    #[cfg(feature = "skia-core")]
     use crate::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
+    #[cfg(feature = "skia-core")]
     use crate::types::{
         BondsHonorEntry, BondsHonorWordEntry, CardEntry, CustomProfileCard, HonorEntry, ObjectData,
         Quaternion, StampElement, TextElement, Vec3,
@@ -1537,8 +1449,10 @@ mod tests {
 
     /// 全部返回 None 的 MasterData provider，模拟"无素材"环境。
     /// 此环境可能触发渲染 panic（Issue #5 根因）。
+    #[cfg(feature = "skia-core")]
     struct NullProvider;
 
+    #[cfg(feature = "skia-core")]
     impl MasterDataProvider for NullProvider {
         fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
             None
@@ -1581,6 +1495,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "skia-core")]
     fn default_object_data(layer: i32, visible: bool) -> ObjectData {
         ObjectData {
             layer,
@@ -1607,6 +1522,7 @@ mod tests {
 
     /// Issue #5 用户 7493593928021629747 的简单名片结构：
     /// 4 个 invisible shapes + 4 个 visible stamps + 4 个 invisible texts = 12 层
+    #[cfg(feature = "skia-core")]
     fn issue5_simple_card() -> CustomProfileCard {
         CustomProfileCard {
             shapes: vec![

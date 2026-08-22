@@ -467,7 +467,6 @@ fn main() -> Result<(), String> {
         flat_times.push(tf.elapsed().as_secs_f64() * 1e3);
 
         let fallback = AssetStore::new(1);
-        let theme = allium_renderer::widgets::theme::Theme::default();
         let tl = Instant::now();
         for elem in &elements {
             if !elem.visible() {
@@ -495,7 +494,6 @@ fn main() -> Result<(), String> {
                 assets.as_deref(),
                 Some(&profile),
                 &fallback,
-                &theme,
                 w as f32,
                 h as f32,
             );

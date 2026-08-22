@@ -1,4 +1,4 @@
-use skia_safe::{FontMgr, FontStyle, Typeface};
+use skia_safe::{FontMgr, Typeface};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -119,18 +119,13 @@ pub(super) fn resolve_same_source_typeface(
     resolved
 }
 
+/// Resolves a declared family to a face loaded from the caller-provided font
+/// bytes, and only those.
+///
+/// There is deliberately no system-font substitution: the SDK contract is that
+/// the caller supplies the fonts, and a silently substituted face would report
+/// different metrics and would not match the glyph atlas built for the declared
+/// family. An unresolvable family is reported as such instead.
 pub(super) fn resolve_typeface(font_mgr: &FontMgr, family: Option<&str>) -> Option<Typeface> {
-    resolve_same_source_typeface(font_mgr, family).or_else(|| {
-        family.and_then(|name| {
-            let tf = font_mgr.match_family_style(name, FontStyle::default());
-            if let Some(ref t) = tf {
-                tracing::trace!(
-                    requested = name,
-                    resolved = %t.family_name(),
-                    "字体匹配"
-                );
-            }
-            tf
-        })
-    })
+    resolve_same_source_typeface(font_mgr, family)
 }

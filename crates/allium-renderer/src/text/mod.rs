@@ -73,6 +73,40 @@ pub(crate) fn prewarm_profile_font_families<'a>(
     Ok((family_count, capture_elapsed_ns(Some(started))))
 }
 
+/// Resolves one glyph's horizontal advance from FreeType only.
+///
+/// Order: the prebuilt atlas (its metrics are FreeType-derived), then on-demand
+/// SDF generation when no atlas is installed, then FreeType's `hmtx` for glyphs
+/// that have no outline to generate from. Skia is never consulted: it rounds
+/// every advance to a whole pixel, and that error accumulates along a run.
+#[cfg(feature = "skia-core")]
+fn freetype_advance_x(
+    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    family: Option<&str>,
+    ch: char,
+    display_char: char,
+    measure_size: f32,
+) -> Option<f32> {
+    atlas_layout_glyph_metrics(atlases, family, display_char)
+        .map(|glyph| glyph.advance_x * (measure_size / glyph.point_size))
+        .or_else(|| {
+            // With atlases installed the atlas is authoritative; generating here
+            // would put glyph work on the request path.
+            if atlases.is_some() {
+                None
+            } else {
+                lookup_or_generate(family, ch).as_ref().map(|g| {
+                    g.plane_advance_x() * (measure_size / sdf_outline::sampling_point_size())
+                })
+            }
+        })
+        .filter(|v| *v > 0.0)
+        .or_else(|| {
+            sdf_outline::glyph_advance_x(family, ch)
+                .map(|advance| advance * (measure_size / sdf_outline::sampling_point_size()))
+        })
+}
+
 fn effective_vertex_alpha_u8(alpha_override: Option<f32>, base_alpha_u8: u8) -> u8 {
     let override_u8 =
         alpha_override.map(|alpha| (alpha.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8);
@@ -287,22 +321,11 @@ fn measure_text_units_tmp(
             }
             let (display, char_scale) = transform_char_for_segment(ch, seg);
             let display_char = display.chars().next().unwrap_or(ch);
-            let ft_hadv = atlas_layout_glyph_metrics(atlases, family.as_deref(), display_char)
-                .map(|glyph| glyph.advance_x * (measure_size / glyph.point_size))
-                .or_else(|| {
-                    lookup_or_generate(family.as_deref(), ch).as_ref().map(|g| {
-                        g.plane_advance_x() * (measure_size / sdf_outline::sampling_point_size())
-                    })
-                })
-                .filter(|v| *v > 0.0);
-            let advance = match ft_hadv {
-                Some(value) => value,
-                None => {
-                    let typeface = lazy_measure_typeface(&mut typeface, family.as_deref())?;
-                    let font = Font::new(typeface, Some(measure_size));
-                    tmp_measure_advance(&display, &font, measure_size)
-                }
-            };
+            let ft_hadv =
+                freetype_advance_x(atlases, family.as_deref(), ch, display_char, measure_size);
+            // A codepoint absent from the font has no advance and nothing to
+            // draw; it is skipped rather than measured by another engine.
+            let advance = ft_hadv?;
             let advance_tmp = advance * char_scale * seg_scale * TEXT_SCALE + cspace_raw_tmp;
             units.push(allium_renderer_core::MeasuredTextUnit {
                 advance: advance_tmp,
@@ -1072,7 +1095,6 @@ fn draw_text_with_fallback_policy(
             } else {
                 seg_size
             };
-            let seg_font = Font::new(typeface.clone(), Some(measure_size));
             let part_chars: Vec<char> = part.chars().collect();
             let cspace_raw_tmp = seg.cspace.unwrap_or(0.0);
             let seg_scale = seg.scale.unwrap_or(1.0);
@@ -1081,33 +1103,21 @@ fn draw_text_with_fallback_policy(
             let mut measured = 0.0f32;
             for ch in &part_chars {
                 let (display, char_scale) = transform_char_for_segment(*ch, seg);
-                // advance 优先用 FreeType（与 TMP FontEngine 同源，真机 truth 已验证），
-                // Skia measure_str 对半角符号（如 `)`）advance 偏小约 10%，导致 cspace 画弧层
-                // 字符间距偏小、弧形变形。回退 Skia 仅用于 SDF 未覆盖字符。
-                let atlas_hadv = atlas_layout_glyph_metrics(
+                // Advances come from FreeType only: it is the engine TMP itself
+                // uses, and it reports the true subpixel advance. Skia rounds
+                // every advance to a whole pixel (up to 0.5px per glyph), which
+                // accumulates along a run and visibly deforms arc-laid text.
+                // Codepoints the declared atlas lacks are pre-warmed into the
+                // fallback atlas before rendering, so the atlas is authoritative
+                // here and on-demand generation stays off the request path.
+                let ft_hadv = freetype_advance_x(
                     capture_atlases,
                     resolved_name_ref,
+                    *ch,
                     display.chars().next().unwrap_or(*ch),
-                )
-                .map(|g| g.advance_x * (measure_size / g.point_size));
-                let ft_hadv = atlas_hadv
-                    .or_else(|| {
-                        if capture_atlases.is_some() {
-                            None
-                        } else {
-                            lookup_or_generate(resolved_name_ref, *ch)
-                                .as_ref()
-                                .map(|g| {
-                                    g.plane_advance_x()
-                                        * (measure_size / sdf_outline::sampling_point_size())
-                                })
-                        }
-                    })
-                    .filter(|v| *v > 0.0);
-                let glyph_hadv_tmp_layout = (ft_hadv
-                    .unwrap_or_else(|| tmp_measure_advance(&display, &seg_font, measure_size)))
-                    * char_scale
-                    * TEXT_SCALE;
+                    measure_size,
+                );
+                let glyph_hadv_tmp_layout = ft_hadv.unwrap_or(0.0) * char_scale * TEXT_SCALE;
                 measured += glyph_hadv_tmp_layout * seg_scale / TEXT_SCALE;
                 update_cpv_width_for_char(
                     &mut max_cpv_width_tmp,
@@ -1569,7 +1579,13 @@ fn draw_text_with_fallback_policy(
                 );
                 let ft_advance_x = atlas_metrics
                     .map(|metrics| metrics.advance_x * ft_scale)
-                    .or_else(|| sdf_glyph.as_ref().map(|g| g.plane_advance_x() * ft_scale));
+                    .or_else(|| sdf_glyph.as_ref().map(|g| g.plane_advance_x() * ft_scale))
+                    .or_else(|| {
+                        // Outline-free glyphs (the space) carry an hmtx advance
+                        // but cannot produce an SDF.
+                        sdf_outline::glyph_advance_x(resolved_name_ref, *ch)
+                            .map(|advance| advance * ft_scale)
+                    });
                 let ft_pivot_x = atlas_metrics
                     .map(|metrics| (metrics.bearing_x + metrics.width / 2.0) * ft_scale)
                     .or_else(|| {

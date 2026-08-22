@@ -278,31 +278,6 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     }
 }
 
-/// 从 WidgetDocument 中收集所有 AssetImage 节点的 asset_key。
-pub fn collect_document_asset_keys(document: &crate::widget_node::WidgetDocument) -> Vec<String> {
-    let mut keys = Vec::new();
-    collect_node_asset_keys(&document.root, &mut keys);
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
-fn collect_node_asset_keys(node: &crate::widget_node::WidgetNode, keys: &mut Vec<String>) {
-    match &node.kind {
-        crate::widget_node::NodeKind::AssetImage { asset_key, .. } => {
-            if !asset_key.is_empty() {
-                keys.push(asset_key.clone());
-            }
-        }
-        crate::widget_node::NodeKind::Container { children, .. } => {
-            for child in children {
-                collect_node_asset_keys(child, keys);
-            }
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::key_to_s3_path;

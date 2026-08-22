@@ -294,6 +294,52 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
     Some(glyph)
 }
 
+fn advance_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<f32>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<f32>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Horizontal advance for one codepoint, in the same units as
+/// [`OutlineSdfGlyph::plane_advance_x`].
+///
+/// Glyphs with no outline — the space being the one that matters in practice —
+/// cannot produce an SDF, so [`lookup_or_generate`] rejects them and their
+/// advance was previously taken from another engine. FreeType has the advance in
+/// `hmtx` regardless of whether there is anything to draw, so read it directly
+/// using the same face setup the SDF path uses (`TMP_POINT_SIZE` at 72 dpi,
+/// `NO_HINTING`) to keep both sources on one metric.
+pub fn glyph_advance_x(font_family: Option<&str>, ch: char) -> Option<f32> {
+    let family = font_family?;
+    let path = resolve_font_path(family)?;
+
+    let key = (path.clone(), ch);
+    if let Some(cached) = advance_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return cached;
+    }
+
+    let advance = load_glyph_advance_x(&path, ch);
+    if let Ok(mut cache) = advance_cache().lock() {
+        cache.insert(key, advance);
+    }
+    advance
+}
+
+fn load_glyph_advance_x(font_path: &Path, ch: char) -> Option<f32> {
+    let library = Library::init().ok()?;
+    let face = library.new_face(font_path, 0).ok()?;
+    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+        .ok()?;
+    let glyph_id = resolve_glyph_id(font_path, ch)?;
+    face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
+        .ok()?;
+    let metrics = face.glyph().raw().metrics;
+    Some((metrics.horiAdvance as f32) / 64.0)
+}
+
 /// 离线 atlas 构建使用的确定性生成方法。
 ///
 /// 该入口不读取 `SCAPUS_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，

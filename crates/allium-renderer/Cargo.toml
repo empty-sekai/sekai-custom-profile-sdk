@@ -17,7 +17,6 @@ memmap2 = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 rayon = { version = "1.11", optional = true }
-chrono = { version = "0.4", optional = true }
 skia-safe = { version = "0.97", optional = true }
 freetype-rs = { version = "0.38", optional = true }
 ttf-parser = { version = "0.25", optional = true }
@@ -49,7 +48,6 @@ skia-core = ["dep:skia-safe", "dep:freetype-rs", "dep:ttf-parser"]
 skia = [
     "skia-core",
     "parallel",
-    "scenes",
     "skia-safe/textlayout",
     "skia-safe/svg",
     "skia-safe/vulkan",
@@ -63,8 +61,6 @@ bundled-freetype = ["freetype-rs/bundled"]
 jpeg-turbo = ["dep:turbojpeg-sys"]
 # Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
-# Application-specific native scenes.
-scenes = ["dep:chrono"]
 animation-export = ["skia", "dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
 dev = ["skia", "dep:tracing-subscriber"]
 
@@ -91,13 +87,18 @@ path = "tools/check_fonts.rs"
 required-features = ["dev"]
 
 [[bin]]
-name = "dump-outline-sdf"
-path = "tools/dump_outline_sdf.rs"
+name = "font-metric-parity"
+path = "tools/font_metric_parity.rs"
 required-features = ["dev"]
 
 [[bin]]
-name = "render-deck"
-path = "tools/render_deck.rs"
+name = "png-parity"
+path = "tools/png_parity.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "dump-outline-sdf"
+path = "tools/dump_outline_sdf.rs"
 required-features = ["dev"]
 
 [[bin]]

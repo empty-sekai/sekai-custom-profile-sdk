@@ -123,9 +123,8 @@ pub fn draw_element(
     profile: Option<&crate::profile::ProfileData>,
 ) {
     // 单次调用便利包装：自行构造共享上下文。批量渲染请用 draw_element_on_canvas
-    // 并在循环外复用 fallback_assets / theme。
+    // 并在循环外复用 fallback_assets。
     let fallback_assets = crate::assets::AssetStore::new(1);
-    let theme = crate::widgets::theme::Theme::default();
     draw_element_on_canvas(
         canvas,
         elem,
@@ -133,7 +132,6 @@ pub fn draw_element(
         assets,
         profile,
         &fallback_assets,
-        &theme,
         crate::transform::CANVAS_WIDTH,
         crate::transform::CANVAS_HEIGHT,
     );
@@ -148,7 +146,6 @@ pub fn draw_element_on_canvas(
     assets: Option<&crate::assets::AssetStore>,
     profile: Option<&crate::profile::ProfileData>,
     fallback_assets: &crate::assets::AssetStore,
-    theme: &crate::widgets::theme::Theme,
     canvas_width: f32,
     canvas_height: f32,
 ) {
@@ -159,7 +156,6 @@ pub fn draw_element_on_canvas(
         assets,
         profile,
         fallback_assets,
-        theme,
         canvas_width,
         canvas_height,
         None,
@@ -191,7 +187,6 @@ pub(crate) fn draw_element_on_canvas_observed(
     assets: Option<&crate::assets::AssetStore>,
     profile: Option<&crate::profile::ProfileData>,
     fallback_assets: &crate::assets::AssetStore,
-    theme: &crate::widgets::theme::Theme,
     canvas_width: f32,
     canvas_height: f32,
     text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
@@ -275,7 +270,7 @@ pub(crate) fn draw_element_on_canvas_observed(
         }
         RenderElement::CardMember(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(profile) = profile {
                 ctx = ctx.with_profile(profile);
             }
@@ -285,24 +280,24 @@ pub(crate) fn draw_element_on_canvas_observed(
         }
         RenderElement::Stamp(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             StampWidget::from_element(e, &ctx).draw(canvas, 0.0, 0.0, &ctx);
         }
         RenderElement::Other(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(widget) = OtherWidget::from_element(e, &ctx) {
                 widget.draw(canvas, 0.0, 0.0, &ctx);
             }
         }
         RenderElement::BondsHonor(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             BondsHonorWidget::from_element(e).draw(canvas, 0.0, 0.0, &ctx);
         }
         RenderElement::Honor(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(profile) = profile {
                 ctx = ctx.with_profile(profile);
             }
@@ -310,14 +305,14 @@ pub(crate) fn draw_element_on_canvas_observed(
         }
         RenderElement::Collection(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(widget) = CollectionWidget::from_element(e, &ctx) {
                 widget.draw(canvas, 0.0, 0.0, &ctx);
             }
         }
         RenderElement::General(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(profile) = profile {
                 ctx = ctx.with_profile(profile);
             }
@@ -325,21 +320,21 @@ pub(crate) fn draw_element_on_canvas_observed(
         }
         RenderElement::StandMember(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(widget) = StandMemberWidget::from_element(e, &ctx) {
                 widget.draw(canvas, 0.0, 0.0, &ctx);
             }
         }
         RenderElement::GeneralBackground(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(widget) = GeneralBgWidget::from_element(e, &ctx) {
                 widget.draw(canvas, 0.0, 0.0, &ctx);
             }
         }
         RenderElement::StoryBackground(e) => {
             let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store, theme).with_masterdata(md);
+            let ctx = RenderContext::new(asset_store).with_masterdata(md);
             if let Some(widget) = StoryBgWidget::from_element(e, &ctx) {
                 widget.draw(canvas, 0.0, 0.0, &ctx);
             }

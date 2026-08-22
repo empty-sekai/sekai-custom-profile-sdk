@@ -151,7 +151,6 @@ mod tests {
     use crate::assets::AssetStore;
     use crate::context::RenderContext;
     use crate::types::{CardMemberElement, ObjectData, Quaternion, Vec3};
-    use crate::widgets::theme::Theme;
     use crate::widgets::Widget;
 
     fn card_member(member_type: Option<i32>) -> CardMemberElement {
@@ -187,8 +186,7 @@ mod tests {
     #[test]
     fn card_member_measure_uses_fixed_crop_size_for_type1() {
         let assets = AssetStore::new(8);
-        let theme = Theme::default();
-        let ctx = RenderContext::new(&assets, &theme);
+        let ctx = RenderContext::new(&assets);
         let widget = CardMemberWidget {
             id: 1,
             member_type: 1,
@@ -202,8 +200,7 @@ mod tests {
     #[test]
     fn card_member_asset_keys_include_main_asset() {
         let assets = AssetStore::new(8);
-        let theme = Theme::default();
-        let ctx = RenderContext::new(&assets, &theme);
+        let ctx = RenderContext::new(&assets);
         let _ = card_member(Some(2));
         let widget = CardMemberWidget {
             id: 1,
