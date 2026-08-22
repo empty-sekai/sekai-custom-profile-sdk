@@ -93,7 +93,6 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     let mut trns_gray: Option<u16> = None;
     let mut trns_rgb: Option<[u16; 3]> = None;
     let mut idat: Vec<u8> = Vec::new();
-    let mut saw_iend = false;
 
     while pos + 8 <= data.len() {
         let length = be_u32(&data[pos..pos + 4]) as usize;
@@ -177,19 +176,17 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
                 }
             }
             b"IDAT" => idat.extend_from_slice(body),
-            b"IEND" => {
-                saw_iend = true;
-                break;
-            }
+            // IEND carries no data, so it is only an early exit here. Its
+            // absence is not treated as corruption: the checks below prove the
+            // pixel data is complete on its own, and real encoders do ship files
+            // that stop after the last frame chunk.
+            b"IEND" => break,
             _ => {}
         }
         pos = body_end + 4;
     }
 
     let header = header.ok_or(CodecError::Format("missing IHDR"))?;
-    if !saw_iend {
-        return Err(CodecError::Format("missing IEND"));
-    }
     if idat.is_empty() {
         return Err(CodecError::Format("missing IDAT"));
     }

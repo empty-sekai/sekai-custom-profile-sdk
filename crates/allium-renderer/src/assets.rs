@@ -3,6 +3,12 @@
 //! `AssetStore` 使用单一 LRU 缓存管理解码后的 Skia Image。
 //! 素材下载后立即解码为 Image 存入缓存，不保留原始字节。
 //! 统一字节预算，超限按 LRU 驱逐。
+//!
+//! Decoding is done by `crate::codec`, not by Skia. The decoded samples are
+//! premultiplied here — `round(value * alpha / 255)`, which is bit-identical to
+//! what a Skia decode produces internally — and wrapped as a raster image for the
+//! draw path. `png-parity` gates that equivalence over the asset corpus and over
+//! every (value, alpha) pair.
 
 use std::path::PathBuf;
 #[cfg(not(feature = "skia-core"))]
@@ -34,6 +40,61 @@ fn normalize_disk_key(key: &str) -> std::borrow::Cow<'_, str> {
     } else {
         std::borrow::Cow::Borrowed(key)
     }
+}
+
+/// Decodes an encoded asset into a premultiplied raster image.
+///
+/// Only PNG is accepted: it is the only container the profile asset pipeline
+/// produces, and a decoder that guesses at other formats would risk handing the
+/// compositor a wrong-coloured surface it cannot distinguish from authored
+/// content. Anything else is refused with a logged reason rather than decoded
+/// partially or replaced by a blank.
+#[cfg(feature = "skia-core")]
+fn decode_asset(key: &str, encoded: &[u8]) -> Option<skia_safe::Image> {
+    if !crate::codec::png::is_png(encoded) {
+        tracing::warn!(
+            asset_key = key,
+            bytes = encoded.len(),
+            "asset is not a PNG; refusing to decode it"
+        );
+        return None;
+    }
+    let decoded = match crate::codec::png::decode(encoded) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            tracing::warn!(asset_key = key, %error, "asset PNG could not be decoded");
+            return None;
+        }
+    };
+    let mut pixels = decoded.pixels;
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha < 255 {
+            pixel[0] = crate::codec::premultiply_channel(pixel[0], alpha);
+            pixel[1] = crate::codec::premultiply_channel(pixel[1], alpha);
+            pixel[2] = crate::codec::premultiply_channel(pixel[2], alpha);
+        }
+    }
+    let width = i32::try_from(decoded.width).ok()?;
+    let height = i32::try_from(decoded.height).ok()?;
+    let row_bytes = usize::try_from(decoded.width).ok()?.checked_mul(4)?;
+    let info = skia_safe::ImageInfo::new(
+        (width, height),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Premul,
+        None,
+    );
+    let image =
+        skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(&pixels), row_bytes);
+    if image.is_none() {
+        tracing::warn!(
+            asset_key = key,
+            width = decoded.width,
+            height = decoded.height,
+            "decoded asset could not be wrapped as a raster image"
+        );
+    }
+    image
 }
 
 /// 统一字节预算的 LRU 缓存，只存解码后的 Image。
@@ -127,8 +188,7 @@ impl ImageLru {
         if let Some(ref dir) = self.disk_cache_dir {
             let path = dir.join(&*normalize_disk_key(key));
             if let Ok(data) = std::fs::read(&path) {
-                let skia_data = skia_safe::Data::new_copy(&data);
-                if let Some(image) = skia_safe::Image::from_encoded(skia_data) {
+                if let Some(image) = decode_asset(key, &data) {
                     self.put(key.to_string(), image);
                     return true;
                 }
@@ -247,6 +307,12 @@ pub struct AssetStore {
 }
 
 impl AssetStore {
+    /// Returns the asset as premultiplied RGBA8, tightly packed.
+    ///
+    /// The cached image already holds exactly this buffer, so the read is a copy
+    /// rather than a conversion. Reading it back as non-premultiplied and
+    /// multiplying by alpha again would produce the same bytes but lose precision
+    /// on the way through.
     #[cfg(feature = "skia-core")]
     pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
         let image = self.get_image(key)?;
@@ -257,7 +323,7 @@ impl AssetStore {
         let info = skia_safe::ImageInfo::new(
             (image.width(), image.height()),
             skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
+            skia_safe::AlphaType::Premul,
             None,
         );
         if !image.read_pixels(
@@ -268,14 +334,6 @@ impl AssetStore {
             skia_safe::image::CachingHint::Allow,
         ) {
             return None;
-        }
-        for pixel in pixels.chunks_exact_mut(4) {
-            let alpha = u32::from(pixel[3]);
-            if alpha < 255 {
-                pixel[0] = ((u32::from(pixel[0]) * alpha + 127) / 255) as u8;
-                pixel[1] = ((u32::from(pixel[1]) * alpha + 127) / 255) as u8;
-                pixel[2] = ((u32::from(pixel[2]) * alpha + 127) / 255) as u8;
-            }
         }
         Some((width, height, pixels))
     }
@@ -343,8 +401,7 @@ impl AssetStore {
         // 先写磁盘（持久化原始字节供重启后重新加载）
         cache.write_to_disk(&key, &data);
         // 立即解码
-        let skia_data = skia_safe::Data::new_copy(&data);
-        if let Some(image) = skia_safe::Image::from_encoded(skia_data) {
+        if let Some(image) = decode_asset(&key, &data) {
             cache.put(key, image);
         }
         // data 在此处 drop，不保留原始字节
@@ -513,8 +570,7 @@ impl AssetStore {
         let mut pinned = self.pinned_images.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         for (key, data) in keys_and_data {
-            let skia_data = skia_safe::Data::new_copy(data);
-            if let Some(image) = skia_safe::Image::from_encoded(skia_data) {
+            if let Some(image) = decode_asset(key, data) {
                 // 先尝试从 LRU 取出（如果 put 已经放进去）
                 cache.pop(key);
                 pinned.insert(key.clone(), image);

@@ -110,3 +110,8 @@ required-features = ["dev"]
 name = "render-profile"
 path = "tools/render_profile.rs"
 required-features = ["dev"]
+
+[[bin]]
+name = "skia-unpremul-table"
+path = "tools/skia_unpremul_table.rs"
+required-features = ["dev"]
