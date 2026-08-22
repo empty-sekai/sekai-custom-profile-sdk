@@ -302,52 +302,6 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
     Some(glyph)
 }
 
-fn advance_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<f32>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<f32>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Horizontal advance for one codepoint, in the same units as
-/// [`OutlineSdfGlyph::plane_advance_x`].
-///
-/// Glyphs with no outline — the space being the one that matters in practice —
-/// cannot produce an SDF, so [`lookup_or_generate`] rejects them and their
-/// advance was previously taken from another engine. FreeType has the advance in
-/// `hmtx` regardless of whether there is anything to draw, so read it directly
-/// using the same face setup the SDF path uses (`TMP_POINT_SIZE` at 72 dpi,
-/// `NO_HINTING`) to keep both sources on one metric.
-pub fn glyph_advance_x(font_family: Option<&str>, ch: char) -> Option<f32> {
-    let family = font_family?;
-    let path = resolve_font_path(family)?;
-
-    let key = (path.clone(), ch);
-    if let Some(cached) = advance_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&key).copied())
-    {
-        return cached;
-    }
-
-    let advance = load_glyph_advance_x(&path, ch);
-    if let Ok(mut cache) = advance_cache().lock() {
-        cache.insert(key, advance);
-    }
-    advance
-}
-
-fn load_glyph_advance_x(font_path: &Path, ch: char) -> Option<f32> {
-    let library = Library::init().ok()?;
-    let face = library.new_face(font_path, 0).ok()?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
-        .ok()?;
-    let glyph_id = resolve_glyph_id(font_path, ch)?;
-    face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
-        .ok()?;
-    let metrics = face.glyph().raw().metrics;
-    Some((metrics.horiAdvance as f32) / 64.0)
-}
-
 /// 离线 atlas 构建使用的确定性生成方法。
 ///
 /// 该入口不读取 `SCAPUS_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，
@@ -366,25 +320,49 @@ pub struct OfflineAtlasGlyphGenerator {
     // Face 先声明以确保它先于最后一个 Library owner 释放。
     face: freetype::Face,
     _library: Library,
+    spread: f32,
 }
 
 impl OfflineAtlasGlyphGenerator {
     pub fn new(font_family: &str) -> Result<Self, String> {
+        Self::new_at_sampling(font_family, TMP_POINT_SIZE, TMP_SPREAD)
+    }
+
+    pub fn new_at_sampling(
+        font_family: &str,
+        point_size: f32,
+        spread: f32,
+    ) -> Result<Self, String> {
+        if !point_size.is_finite() || point_size <= 0.0 {
+            return Err("离线 atlas point size 非法".into());
+        }
+        if !spread.is_finite() || spread <= 0.0 {
+            return Err("离线 atlas spread 非法".into());
+        }
         let path = resolve_font_path(font_family)
             .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
-        Self::new_from_path(&path)
+        Self::new_from_path_at_sampling(&path, point_size, spread)
     }
 
     pub fn new_from_path(path: &Path) -> Result<Self, String> {
+        Self::new_from_path_at_sampling(path, TMP_POINT_SIZE, TMP_SPREAD)
+    }
+
+    pub fn new_from_path_at_sampling(
+        path: &Path,
+        point_size: f32,
+        spread: f32,
+    ) -> Result<Self, String> {
         let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
         let face = library
             .new_face(path, 0)
             .map_err(|err| format!("加载字体失败: {err:?}"))?;
-        face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+        face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
             .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
         Ok(Self {
             face,
             _library: library,
+            spread,
         })
     }
 
@@ -401,7 +379,8 @@ impl OfflineAtlasGlyphGenerator {
             .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
         match method {
             OfflineGenerationMethod::Analytic => {
-                generate_outline_sdf_with_face(&self.face, glyph_id, ch).map(|glyph| (glyph, false))
+                generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
+                    .map(|glyph| (glyph, false))
             }
             OfflineGenerationMethod::Edt { supersample } => {
                 if !(1..=4).contains(&supersample) {
@@ -409,13 +388,24 @@ impl OfflineAtlasGlyphGenerator {
                         "EDT supersample 必须在 1..=4，实际为 {supersample}"
                     ));
                 }
-                match generate_outline_sdf_edt_with_face(&self.face, glyph_id, ch, supersample) {
+                match generate_outline_sdf_edt_with_face(
+                    &self.face,
+                    glyph_id,
+                    ch,
+                    supersample,
+                    self.spread,
+                ) {
                     Ok(glyph) => Ok((glyph, false)),
-                    Err(edt_error) => generate_outline_sdf_with_face(&self.face, glyph_id, ch)
-                        .map(|glyph| (glyph, true))
-                        .map_err(|analytic_error| {
-                            format!("EDT 失败: {edt_error}; 解析法回退也失败: {analytic_error}")
-                        }),
+                    Err(edt_error) => generate_outline_sdf_with_face_at_spread(
+                        &self.face,
+                        glyph_id,
+                        ch,
+                        self.spread,
+                    )
+                    .map(|glyph| (glyph, true))
+                    .map_err(|analytic_error| {
+                        format!("EDT 失败: {edt_error}; 解析法回退也失败: {analytic_error}")
+                    }),
                 }
             }
         }
@@ -467,6 +457,15 @@ fn generate_outline_sdf_with_face(
     glyph_id: u32,
     ch: char,
 ) -> Result<OutlineSdfGlyph, String> {
+    generate_outline_sdf_with_face_at_spread(face, glyph_id, ch, TMP_SPREAD)
+}
+
+fn generate_outline_sdf_with_face_at_spread(
+    face: &freetype::Face,
+    glyph_id: u32,
+    ch: char,
+    spread: f32,
+) -> Result<OutlineSdfGlyph, String> {
     face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
         .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
 
@@ -491,7 +490,7 @@ fn generate_outline_sdf_with_face(
     let rect_top_px = bear_y.ceil();
     let rect_right_px = (bear_x + met_w).ceil();
     let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = TMP_SPREAD.ceil();
+    let spread_px = spread.ceil();
     let sample_left_px = rect_left_px - spread_px;
     let sample_top_px = rect_top_px + spread_px;
     let sample_right_px = rect_right_px + spread_px;
@@ -513,7 +512,7 @@ fn generate_outline_sdf_with_face(
                 rect_top_26_6 - (py as f32 + 0.5) * 64.0,
             );
             let signed_distance_px = distance_field.signed_distance(point) / 64.0;
-            let gray = (0.5 - signed_distance_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
+            let gray = (0.5 - signed_distance_px / (2.0 * spread)).clamp(0.0, 1.0);
             pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
@@ -541,16 +540,51 @@ fn generate_outline_sdf_edt(
     ch: char,
     supersample: usize,
 ) -> Result<OutlineSdfGlyph, String> {
+    generate_outline_sdf_edt_at_point_size(font_path, ch, supersample, TMP_POINT_SIZE, TMP_SPREAD)
+}
+
+/// Generate a request-local EDT glyph at the requested sampling point size.
+///
+/// This deliberately bypasses `glyph_cache`: callers use it when the final
+/// device transform would magnify the immutable 75px atlas enough to expose
+/// its texel grid. The returned metrics and bitmap are both expressed at
+/// `point_size`, so consumers can preserve the authored layout while sampling
+/// close to one SDF texel per device pixel.
+pub(crate) fn generate_realtime_edt(
+    font_family: &str,
+    ch: char,
+    point_size: f32,
+    spread: f32,
+    supersample: usize,
+) -> Result<OutlineSdfGlyph, String> {
+    if !point_size.is_finite() || point_size <= 0.0 {
+        return Err("实时 EDT point size 非法".into());
+    }
+    if !spread.is_finite() || spread <= 0.0 {
+        return Err("实时 EDT spread 非法".into());
+    }
+    let path = resolve_font_path(font_family)
+        .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
+    generate_outline_sdf_edt_at_point_size(&path, ch, supersample, point_size, spread)
+}
+
+fn generate_outline_sdf_edt_at_point_size(
+    font_path: &Path,
+    ch: char,
+    supersample: usize,
+    point_size: f32,
+    spread: f32,
+) -> Result<OutlineSdfGlyph, String> {
     let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
     let face = library
         .new_face(font_path, 0)
         .map_err(|err| format!("加载字体失败: {err:?}"))?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+    face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
         .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
 
     let glyph_id = resolve_glyph_id(font_path, ch)
         .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
-    generate_outline_sdf_edt_with_face(&face, glyph_id, ch, supersample)
+    generate_outline_sdf_edt_with_face(&face, glyph_id, ch, supersample, spread)
 }
 
 fn generate_outline_sdf_edt_with_face(
@@ -558,6 +592,7 @@ fn generate_outline_sdf_edt_with_face(
     glyph_id: u32,
     ch: char,
     supersample: usize,
+    spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
     // 与解析法一致用 NO_HINTING，保证 metrics 和轮廓网格对齐（hinting 会
     // 网格对齐字形、改变 width/height，导致与解析法尺寸不匹配 + 不公平对比）。
@@ -576,7 +611,7 @@ fn generate_outline_sdf_edt_with_face(
     let rect_top_px = bear_y.ceil();
     let rect_right_px = (bear_x + met_w).ceil();
     let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = TMP_SPREAD.ceil();
+    let spread_px = spread.ceil();
     let sample_left_px = rect_left_px - spread_px;
     let sample_top_px = rect_top_px + spread_px;
     let sample_right_px = rect_right_px + spread_px;
@@ -651,7 +686,7 @@ fn generate_outline_sdf_edt_with_face(
                 }
             }
             let dist_px = sum / (ss * ss) as f32 / ss as f32; // 还原到物理像素单位
-            let gray = (0.5 - dist_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
+            let gray = (0.5 - dist_px / (2.0 * spread)).clamp(0.0, 1.0);
             pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
@@ -678,6 +713,52 @@ pub fn atlas_padding() -> f32 {
 }
 pub fn sampling_spread() -> f32 {
     TMP_SPREAD
+}
+
+fn advance_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<f32>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<f32>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Horizontal advance for one codepoint, in the same units as
+/// [`OutlineSdfGlyph::plane_advance_x`].
+///
+/// Glyphs with no outline — the space being the one that matters in practice —
+/// cannot produce an SDF, so [`lookup_or_generate`] rejects them and their
+/// advance was previously taken from another engine. FreeType has the advance in
+/// `hmtx` regardless of whether there is anything to draw, so read it directly
+/// using the same face setup the SDF path uses (`TMP_POINT_SIZE` at 72 dpi,
+/// `NO_HINTING`) to keep both sources on one metric.
+pub fn glyph_advance_x(font_family: Option<&str>, ch: char) -> Option<f32> {
+    let family = font_family?;
+    let path = resolve_font_path(family)?;
+
+    let key = (path.clone(), ch);
+    if let Some(cached) = advance_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).copied())
+    {
+        return cached;
+    }
+
+    let advance = load_glyph_advance_x(&path, ch);
+    if let Ok(mut cache) = advance_cache().lock() {
+        cache.insert(key, advance);
+    }
+    advance
+}
+
+fn load_glyph_advance_x(font_path: &Path, ch: char) -> Option<f32> {
+    let library = Library::init().ok()?;
+    let face = library.new_face(font_path, 0).ok()?;
+    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+        .ok()?;
+    let glyph_id = resolve_glyph_id(font_path, ch)?;
+    face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
+        .ok()?;
+    let metrics = face.glyph().raw().metrics;
+    Some((metrics.horiAdvance as f32) / 64.0)
 }
 
 #[cfg(test)]
@@ -712,7 +793,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "static font is not shipped in the OSS repository"]
     fn persistent_offline_face_matches_one_shot_generation() {
         let family = "FZLanTingHei-DB-GBK";
         let path = resolve_font_path(family).expect("test font must exist");
@@ -732,5 +812,22 @@ mod tests {
             assert!(!edt_fallback);
             assert_glyph_exact(&edt_persistent, &edt_one_shot);
         }
+    }
+
+    #[test]
+    fn realtime_edt_parentheses_scale_the_source_grid_without_cache_reuse() {
+        let family = "FZLanTingHei-DB-GBK";
+        for ch in ['(', ')'] {
+            let normal = generate_realtime_edt(family, ch, 75.0, 6.0, 2).expect("normal EDT");
+            let huge = generate_realtime_edt(family, ch, 300.0, 24.0, 2).expect("huge EDT");
+            assert!(huge.width() > normal.width() * 2);
+            assert!(huge.height() > normal.height() * 2);
+            assert!(huge.pixels().iter().any(|&value| value != 0));
+        }
+    }
+
+    #[test]
+    fn realtime_edt_rejects_non_positive_distance_spread() {
+        assert!(generate_realtime_edt("unused", '(', 300.0, 0.0, 2).is_err());
     }
 }

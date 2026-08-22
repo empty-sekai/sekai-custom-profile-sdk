@@ -173,7 +173,7 @@ pub struct MappedSdfAtlas {
 #[derive(Clone, Default)]
 pub struct MappedSdfAtlasSet {
     atlases: Vec<Arc<MappedSdfAtlas>>,
-    by_font_family: BTreeMap<String, u16>,
+    by_font_family: BTreeMap<String, Vec<u16>>,
 }
 
 impl MappedSdfAtlasSet {
@@ -183,34 +183,57 @@ impl MappedSdfAtlasSet {
 
     pub fn insert(&mut self, atlas: Arc<MappedSdfAtlas>) -> Result<u16, SdfAtlasError> {
         let family = atlas.manifest().font_family.clone();
-        if let Some(existing_id) = self.by_font_family.get(&family).copied() {
-            let existing = self
-                .atlases
-                .get(usize::from(existing_id))
-                .ok_or_else(|| SdfAtlasError::Invalid("corrupt atlas registry".into()))?;
-            if existing.manifest() == atlas.manifest() {
-                return Ok(existing_id);
+        if let Some(existing_ids) = self.by_font_family.get(&family) {
+            for existing_id in existing_ids.iter().copied() {
+                let existing = self
+                    .atlases
+                    .get(usize::from(existing_id))
+                    .ok_or_else(|| SdfAtlasError::Invalid("corrupt atlas registry".into()))?;
+                if existing.manifest() == atlas.manifest() {
+                    return Ok(existing_id);
+                }
+                if existing.manifest().font_sha256 != atlas.manifest().font_sha256 {
+                    return Err(SdfAtlasError::Invalid(format!(
+                        "font family {family} has conflicting font identities across sampling tiers"
+                    )));
+                }
+                if existing.manifest().point_size.to_bits() == atlas.manifest().point_size.to_bits()
+                {
+                    return Err(SdfAtlasError::Invalid(format!(
+                        "font family {family} point size {} has conflicting atlas identities",
+                        atlas.manifest().point_size
+                    )));
+                }
             }
-            return Err(SdfAtlasError::Invalid(format!(
-                "font family {family} has conflicting atlas identities"
-            )));
         }
         let id = u16::try_from(self.atlases.len())
             .map_err(|_| SdfAtlasError::Invalid("too many atlas sets".into()))?;
         self.atlases.push(atlas);
-        self.by_font_family.insert(family, id);
+        let atlases = &self.atlases;
+        let ids = self.by_font_family.entry(family).or_default();
+        ids.push(id);
+        ids.sort_by(|left, right| {
+            atlases[usize::from(*left)]
+                .manifest()
+                .point_size
+                .total_cmp(&atlases[usize::from(*right)].manifest().point_size)
+        });
         Ok(id)
     }
 
     pub fn replace_or_insert(&mut self, atlas: Arc<MappedSdfAtlas>) -> Result<u16, SdfAtlasError> {
         let family = atlas.manifest().font_family.clone();
-        if let Some(existing_id) = self.by_font_family.get(&family).copied() {
-            let slot = self
-                .atlases
-                .get_mut(usize::from(existing_id))
-                .ok_or_else(|| SdfAtlasError::Invalid("corrupt atlas registry".into()))?;
-            *slot = atlas;
-            return Ok(existing_id);
+        if let Some(existing_ids) = self.by_font_family.get(&family) {
+            for existing_id in existing_ids.iter().copied() {
+                let slot = self
+                    .atlases
+                    .get_mut(usize::from(existing_id))
+                    .ok_or_else(|| SdfAtlasError::Invalid("corrupt atlas registry".into()))?;
+                if slot.manifest().point_size.to_bits() == atlas.manifest().point_size.to_bits() {
+                    *slot = atlas;
+                    return Ok(existing_id);
+                }
+            }
         }
         self.insert(atlas)
     }
@@ -220,8 +243,58 @@ impl MappedSdfAtlasSet {
     }
 
     pub fn atlas_for_font_family(&self, family: &str) -> Option<(u16, &MappedSdfAtlas)> {
-        let id = *self.by_font_family.get(family)?;
+        let id = *self.by_font_family.get(family)?.first()?;
         Some((id, self.atlas(id)?))
+    }
+
+    pub fn atlas_for_font_family_at_least(
+        &self,
+        family: &str,
+        minimum_point_size: f32,
+    ) -> Option<(u16, &MappedSdfAtlas)> {
+        self.by_font_family
+            .get(family)?
+            .iter()
+            .copied()
+            .filter_map(|id| Some((id, self.atlas(id)?)))
+            .find(|(_, atlas)| atlas.manifest().point_size >= minimum_point_size)
+    }
+
+    /// Select the smallest sampling tier at or above `minimum_point_size`
+    /// which actually contains `codepoint`. Sparse high-resolution tiers are
+    /// intentionally allowed to omit most of a font's cmap.
+    pub fn glyph_for_font_family_at_least(
+        &self,
+        family: &str,
+        codepoint: u32,
+        minimum_point_size: f32,
+    ) -> Option<(u16, &MappedSdfAtlas, &SdfAtlasGlyphManifest)> {
+        self.by_font_family
+            .get(family)?
+            .iter()
+            .copied()
+            .filter_map(|id| Some((id, self.atlas(id)?)))
+            .filter(|(_, atlas)| atlas.manifest().point_size >= minimum_point_size)
+            .find_map(|(id, atlas)| atlas.glyph(codepoint).map(|glyph| (id, atlas, glyph)))
+    }
+
+    /// Best available higher-resolution tier for an oversized glyph when no
+    /// installed sparse tier reaches the requested sampling size. This keeps
+    /// the complete 3x tier as a deterministic no-generation fallback.
+    pub fn highest_glyph_for_font_family_above(
+        &self,
+        family: &str,
+        codepoint: u32,
+        minimum_exclusive_point_size: f32,
+    ) -> Option<(u16, &MappedSdfAtlas, &SdfAtlasGlyphManifest)> {
+        self.by_font_family
+            .get(family)?
+            .iter()
+            .rev()
+            .copied()
+            .filter_map(|id| Some((id, self.atlas(id)?)))
+            .filter(|(_, atlas)| atlas.manifest().point_size > minimum_exclusive_point_size)
+            .find_map(|(id, atlas)| atlas.glyph(codepoint).map(|glyph| (id, atlas, glyph)))
     }
 
     pub fn profile_glyph_for_font_family(
@@ -268,6 +341,29 @@ impl MappedSdfAtlasSet {
         std::hint::black_box(report)
     }
 
+    /// Touch only the smallest sampling tier for each font family. Higher
+    /// resolution tiers remain mmap-lazy so their full file size never turns
+    /// into startup RSS merely because they are installed.
+    pub fn prewarm_primary_pages(&self) -> SdfAtlasPrewarmReport {
+        let primary_ids = self
+            .by_font_family
+            .values()
+            .filter_map(|ids| ids.first().copied())
+            .collect::<Vec<_>>();
+        let mut report = SdfAtlasPrewarmReport {
+            atlas_count: primary_ids.len() as u64,
+            ..SdfAtlasPrewarmReport::default()
+        };
+        for id in primary_ids {
+            if let Some(atlas) = self.atlas(id) {
+                for page in atlas.pages() {
+                    prewarm_mapped_page(&page.mapping, &mut report);
+                }
+            }
+        }
+        std::hint::black_box(report)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &MappedSdfAtlas> {
         self.atlases.iter().map(Arc::as_ref)
     }
@@ -275,6 +371,23 @@ impl MappedSdfAtlasSet {
 
 impl MappedSdfAtlas {
     pub fn open(manifest_path: impl AsRef<Path>) -> Result<Self, SdfAtlasError> {
+        Self::open_with_page_hash_verification(manifest_path, true)
+    }
+
+    /// Open an atlas embedded in a content-addressed, read-only image that was
+    /// already fully verified by the offline builder. Manifest structure,
+    /// page paths, lengths and headers are still validated, but page payloads
+    /// are not read solely to repeat their SHA-256 at process startup.
+    pub fn open_trusted_immutable_artifact(
+        manifest_path: impl AsRef<Path>,
+    ) -> Result<Self, SdfAtlasError> {
+        Self::open_with_page_hash_verification(manifest_path, false)
+    }
+
+    fn open_with_page_hash_verification(
+        manifest_path: impl AsRef<Path>,
+        verify_page_hashes: bool,
+    ) -> Result<Self, SdfAtlasError> {
         let manifest_path = manifest_path.as_ref();
         let manifest_bytes = std::fs::read(manifest_path).map_err(|source| SdfAtlasError::Io {
             path: manifest_path.to_path_buf(),
@@ -289,7 +402,7 @@ impl MappedSdfAtlas {
         let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
         let mut pages = Vec::with_capacity(manifest.pages.len());
         for page in &manifest.pages {
-            pages.push(map_page(root, page)?);
+            pages.push(map_page(root, page, verify_page_hashes)?);
         }
         let glyph_by_codepoint = manifest
             .glyphs
@@ -438,6 +551,7 @@ fn validate_manifest(manifest: &SdfAtlasManifest) -> Result<(), SdfAtlasError> {
 fn map_page(
     root: &Path,
     descriptor: &SdfAtlasPageManifest,
+    verify_page_hash: bool,
 ) -> Result<MappedSdfAtlasPage, SdfAtlasError> {
     let path = root.join(&descriptor.file);
     let file = File::open(&path).map_err(|source| SdfAtlasError::Io {
@@ -466,13 +580,23 @@ fn map_page(
             path.display()
         )));
     }
-    let actual = hex::encode(Sha256::digest(&mapping));
-    if actual != descriptor.file_sha256 {
-        return Err(SdfAtlasError::HashMismatch {
-            path,
-            expected: descriptor.file_sha256.clone(),
-            actual,
-        });
+    if verify_page_hash {
+        let actual = hex::encode(Sha256::digest(&mapping));
+        if actual != descriptor.file_sha256 {
+            return Err(SdfAtlasError::HashMismatch {
+                path,
+                expected: descriptor.file_sha256.clone(),
+                actual,
+            });
+        }
+        // Hash validation necessarily faults the complete mapping once.
+        // Release those clean pages before the explicit primary-tier prewarm.
+        #[cfg(target_os = "linux")]
+        // SAFETY: the digest borrow ended above; this is a read-only file
+        // mapping, so refaulting restores the same immutable verified bytes.
+        unsafe {
+            let _ = mapping.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
+        }
     }
     Ok(MappedSdfAtlasPage {
         width: descriptor.width,
@@ -532,7 +656,13 @@ mod tests {
         }
     }
 
-    fn write_test_atlas(root: &Path, family: &str, codepoint: Option<u32>) -> Arc<MappedSdfAtlas> {
+    fn write_test_atlas_at_sampling(
+        root: &Path,
+        family: &str,
+        codepoint: Option<u32>,
+        point_size: f32,
+        spread: f32,
+    ) -> Arc<MappedSdfAtlas> {
         std::fs::create_dir_all(root).expect("create atlas directory");
         let page = write_test_page(root);
         let glyphs = codepoint
@@ -551,8 +681,8 @@ mod tests {
             generator_contract: "outline-edt-v1".into(),
             font_family: family.into(),
             font_sha256: "00".repeat(32),
-            point_size: 75.0,
-            spread: 6.0,
+            point_size,
+            spread,
             pages: vec![page],
             generation: generation_report(u32::try_from(glyphs.len()).expect("glyph count")),
             glyphs,
@@ -564,6 +694,104 @@ mod tests {
         )
         .expect("write manifest");
         Arc::new(MappedSdfAtlas::open(manifest_path).expect("open test atlas"))
+    }
+
+    fn write_test_atlas(root: &Path, family: &str, codepoint: Option<u32>) -> Arc<MappedSdfAtlas> {
+        write_test_atlas_at_sampling(root, family, codepoint, 75.0, 6.0)
+    }
+
+    #[test]
+    fn atlas_set_keeps_three_x_tier_lazy_and_selectable() {
+        let root = tempfile::tempdir().expect("temporary atlas directory");
+        let base = write_test_atlas_at_sampling(
+            &root.path().join("base"),
+            "test-family",
+            Some(u32::from('(')),
+            75.0,
+            6.0,
+        );
+        let three_x = write_test_atlas_at_sampling(
+            &root.path().join("three-x"),
+            "test-family",
+            Some(u32::from('(')),
+            225.0,
+            18.0,
+        );
+        let mut set = MappedSdfAtlasSet::new();
+        let base_id = set.insert(base).expect("insert base tier");
+        let three_x_id = set.insert(three_x).expect("insert 3x tier");
+
+        assert_eq!(
+            set.atlas_for_font_family("test-family").map(|v| v.0),
+            Some(base_id)
+        );
+        assert_eq!(
+            set.atlas_for_font_family_at_least("test-family", 225.0)
+                .map(|v| v.0),
+            Some(three_x_id)
+        );
+        let report = set.prewarm_primary_pages();
+        assert_eq!(report.atlas_count, 1);
+        assert_eq!(report.page_count, 1);
+    }
+
+    #[test]
+    fn sparse_sampling_tiers_select_the_smallest_adequate_glyph() {
+        let root = tempfile::tempdir().expect("temporary atlas directory");
+        let base = write_test_atlas_at_sampling(
+            &root.path().join("base"),
+            "test-family",
+            Some(u32::from('(')),
+            75.0,
+            6.0,
+        );
+        let three_x = write_test_atlas_at_sampling(
+            &root.path().join("three-x"),
+            "test-family",
+            Some(u32::from('(')),
+            225.0,
+            18.0,
+        );
+        let six_x_missing = write_test_atlas_at_sampling(
+            &root.path().join("six-x-missing"),
+            "test-family",
+            Some(u32::from('A')),
+            450.0,
+            36.0,
+        );
+        let twelve_x = write_test_atlas_at_sampling(
+            &root.path().join("twelve-x"),
+            "test-family",
+            Some(u32::from('(')),
+            900.0,
+            72.0,
+        );
+        let mut set = MappedSdfAtlasSet::new();
+        set.insert(base).expect("insert base tier");
+        let three_x_id = set.insert(three_x).expect("insert 3x tier");
+        set.insert(six_x_missing).expect("insert sparse 6x tier");
+        let twelve_x_id = set.insert(twelve_x).expect("insert sparse 12x tier");
+
+        assert_eq!(
+            set.glyph_for_font_family_at_least("test-family", u32::from('('), 300.0)
+                .map(|value| value.0),
+            Some(twelve_x_id)
+        );
+        assert_eq!(
+            set.highest_glyph_for_font_family_above("test-family", u32::from('('), 75.0)
+                .map(|value| value.0),
+            Some(twelve_x_id)
+        );
+        assert!(set
+            .glyph_for_font_family_at_least("test-family", u32::from('('), 1000.0)
+            .is_none());
+        assert_eq!(
+            set.highest_glyph_for_font_family_above("test-family", u32::from('A'), 75.0)
+                .map(|value| value.0),
+            set.atlas_for_font_family_at_least("test-family", 450.0)
+                .map(|value| value.0)
+        );
+        assert_ne!(three_x_id, twelve_x_id);
     }
 
     #[test]
@@ -605,6 +833,38 @@ mod tests {
         assert_eq!(atlas.pages()[0].texel(3, 5), Some(43));
         assert_eq!(atlas.pages()[0].texel(8, 0), None);
         assert_eq!(atlas.glyph(u32::from('A')).map(|glyph| glyph.page), Some(0));
+    }
+
+    #[test]
+    fn trusted_immutable_open_skips_only_the_redundant_payload_digest() {
+        let root = tempfile::tempdir().expect("temporary atlas directory");
+        let mut page = write_test_page(root.path());
+        page.file_sha256 = "ff".repeat(32);
+        let manifest = SdfAtlasManifest {
+            schema: ATLAS_MANIFEST_SCHEMA.into(),
+            generator_contract: "outline-edt-v1".into(),
+            font_family: "trusted-image-font".into(),
+            font_sha256: "00".repeat(32),
+            point_size: 225.0,
+            spread: 18.0,
+            pages: vec![page],
+            glyphs: Vec::new(),
+            generation: generation_report(0),
+        };
+        let manifest_path = root.path().join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        assert!(matches!(
+            MappedSdfAtlas::open(&manifest_path),
+            Err(SdfAtlasError::HashMismatch { .. })
+        ));
+        let trusted = MappedSdfAtlas::open_trusted_immutable_artifact(&manifest_path)
+            .expect("trusted immutable image atlas");
+        assert_eq!(trusted.pages()[0].texel(3, 5), Some(43));
     }
 
     #[test]

@@ -880,20 +880,44 @@ unsafe fn gather_texel(
     channel: i32,
     active: __mmask16,
 ) -> Result<__m512i, SdfTileError> {
-    let (block_bytes, channels) = match page.format {
+    let (block_bytes, channels): (i32, usize) = match page.format {
         SdfSwizzledFormat::TextR8 => (64, 1),
         SdfSwizzledFormat::ShapeRg8 => (128, 2),
     };
     let offsets = _mm512_add_epi32(
         _mm512_add_epi32(
             _mm512_mullo_epi32(block_ids(page.width, x, y), _mm512_set1_epi32(block_bytes)),
-            _mm512_mullo_epi32(local_offsets(x, y), _mm512_set1_epi32(channels)),
+            _mm512_mullo_epi32(local_offsets(x, y), _mm512_set1_epi32(channels as i32)),
         ),
         _mm512_set1_epi32(channel),
     );
-    let Some(max_offset) = page.payload.len().checked_sub(std::mem::size_of::<i32>()) else {
+    let Some(max_logical_offset) = page.payload.len().checked_sub(channels) else {
         return Err(SdfTileError::CorruptPlan);
     };
+    let mut lane_offsets = [0i32; LANES];
+    _mm512_storeu_si512(lane_offsets.as_mut_ptr().cast(), offsets);
+    let mut needs_tail_read = false;
+    for (lane, &offset) in lane_offsets.iter().enumerate() {
+        if active & (1u16 << lane) == 0 {
+            continue;
+        }
+        let offset = usize::try_from(offset).map_err(|_| SdfTileError::CorruptPlan)?;
+        if offset > max_logical_offset {
+            return Err(SdfTileError::CorruptPlan);
+        }
+        needs_tail_read |= offset.saturating_add(std::mem::size_of::<i32>()) > page.payload.len();
+    }
+    if needs_tail_read {
+        let mut packed = [0i32; LANES];
+        for (lane, &offset) in lane_offsets.iter().enumerate() {
+            if active & (1u16 << lane) == 0 {
+                continue;
+            }
+            packed[lane] = read_packed_texel(page.payload, offset, channels)?;
+        }
+        return Ok(_mm512_loadu_si512(packed.as_ptr().cast()));
+    }
+    let max_offset = page.payload.len() - std::mem::size_of::<i32>();
     let below_zero = _mm512_cmplt_epi32_mask(offsets, _mm512_setzero_si512());
     let above_payload = if max_offset > i32::MAX as usize {
         0
@@ -909,6 +933,33 @@ unsafe fn gather_texel(
         offsets,
         page.payload.as_ptr().cast(),
     ))
+}
+
+fn read_packed_texel(payload: &[u8], offset: i32, channels: usize) -> Result<i32, SdfTileError> {
+    let offset = usize::try_from(offset).map_err(|_| SdfTileError::CorruptPlan)?;
+    let texel = payload
+        .get(offset..offset.saturating_add(channels))
+        .ok_or(SdfTileError::CorruptPlan)?;
+    Ok(texel
+        .iter()
+        .enumerate()
+        .fold(0i32, |packed, (shift, byte)| {
+            packed | (i32::from(*byte) << (shift * 8))
+        }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_packed_texel;
+
+    #[test]
+    fn packed_texel_reads_valid_text_and_shape_payload_tails() {
+        let payload = [10, 20, 30, 40, 50];
+        assert_eq!(read_packed_texel(&payload, 4, 1), Ok(50));
+        assert_eq!(read_packed_texel(&payload, 3, 2), Ok(40 | (50 << 8)));
+        assert!(read_packed_texel(&payload, 4, 2).is_err());
+        assert!(read_packed_texel(&payload, -1, 1).is_err());
+    }
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]

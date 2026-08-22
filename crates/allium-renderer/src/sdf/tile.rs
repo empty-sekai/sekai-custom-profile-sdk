@@ -939,19 +939,22 @@ impl SdfTilePlan {
                 .filter(|(original, visible)| **original != 0 && **visible == 0)
                 .count() as u64,
         };
-        Ok((
-            Self {
-                grid: self.grid,
-                commands: self.commands.clone(),
-                axis_shape_programs: self.axis_shape_programs.clone(),
-                direct_axis_shape: None,
-                spans,
-                tile_offsets,
-                stats,
-            }
-            .prepare_direct_axis_shape()?,
-            occlusion,
-        ))
+        let had_direct_axis_shape = self.direct_axis_shape.is_some();
+        let visible = Self {
+            grid: self.grid,
+            commands: self.commands.clone(),
+            axis_shape_programs: self.axis_shape_programs.clone(),
+            direct_axis_shape: None,
+            spans,
+            tile_offsets,
+            stats,
+        };
+        let visible = if had_direct_axis_shape {
+            visible.prepare_direct_axis_shape()?
+        } else {
+            visible
+        };
+        Ok((visible, occlusion))
     }
 
     fn axis_shape_program(&self, command: usize) -> Option<&AxisAlignedShapeProgram> {
@@ -1387,8 +1390,8 @@ impl SdfTilePlan {
     }
 
     /// Executes 16 fragments per ZMM packet using the immutable swizzled mmap
-    /// pages directly. Falls back to the scalar FP32 oracle when AVX-512F/FMA/BW/VBMI
-    /// or physical atlas views are absent, preserving byte-identical output.
+    /// pages directly. The executor is intentionally hardware-specific and
+    /// fails closed when AVX-512F/FMA/BW/VBMI or physical atlas views are absent.
     pub fn execute_simd(
         &self,
         atlas: &impl SdfAtlasSource,
@@ -1398,33 +1401,34 @@ impl SdfTilePlan {
     ) -> Result<SdfExecutionStats, SdfTileError> {
         #[cfg(target_arch = "x86_64")]
         {
-            if std::arch::is_x86_feature_detected!("avx512f")
+            if !(std::arch::is_x86_feature_detected!("avx512f")
                 && std::arch::is_x86_feature_detected!("avx512bw")
                 && std::arch::is_x86_feature_detected!("avx512vbmi")
-                && std::arch::is_x86_feature_detected!("fma")
+                && std::arch::is_x86_feature_detected!("fma"))
             {
-                // SAFETY: every target feature required by the implementation was
-                // checked immediately above; page bounds remain checked in Rust.
-                return unsafe {
-                    simd_x86::execute(
-                        self,
-                        atlas,
-                        SdfDestination::Clear(clear),
-                        output,
-                        accumulation,
-                    )
-                };
+                return Err(SdfTileError::SimdUnavailable);
             }
+            // SAFETY: every target feature required by the implementation was
+            // checked immediately above; page bounds remain checked in Rust.
+            return unsafe {
+                simd_x86::execute(
+                    self,
+                    atlas,
+                    SdfDestination::Clear(clear),
+                    output,
+                    accumulation,
+                )
+            };
         }
-        match accumulation {
-            SdfAccumulationMode::Rgba8Writeback => self.execute_scalar(atlas, clear, output),
-            SdfAccumulationMode::F32Tile => self.execute_scalar_f32(atlas, clear, output),
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (atlas, clear, output, accumulation);
+            Err(SdfTileError::SimdUnavailable)
         }
     }
 
     /// AVX-512 equivalent of [`Self::execute_scalar_f32_over`]. The executor
     /// loads only touched destination tiles and preserves all untouched bytes.
-    /// Falls back to the scalar FP32 oracle when AVX-512 is unavailable.
     pub fn execute_simd_f32_over(
         &self,
         atlas: &impl SdfAtlasSource,
@@ -1432,23 +1436,28 @@ impl SdfTilePlan {
     ) -> Result<SdfExecutionStats, SdfTileError> {
         #[cfg(target_arch = "x86_64")]
         {
-            if std::arch::is_x86_feature_detected!("avx512f")
+            if !(std::arch::is_x86_feature_detected!("avx512f")
                 && std::arch::is_x86_feature_detected!("avx512bw")
                 && std::arch::is_x86_feature_detected!("avx512vbmi")
-                && std::arch::is_x86_feature_detected!("fma")
+                && std::arch::is_x86_feature_detected!("fma"))
             {
-                return unsafe {
-                    simd_x86::execute(
-                        self,
-                        atlas,
-                        SdfDestination::LoadExisting,
-                        output,
-                        SdfAccumulationMode::F32Tile,
-                    )
-                };
+                return Err(SdfTileError::SimdUnavailable);
             }
+            return unsafe {
+                simd_x86::execute(
+                    self,
+                    atlas,
+                    SdfDestination::LoadExisting,
+                    output,
+                    SdfAccumulationMode::F32Tile,
+                )
+            };
         }
-        self.execute_scalar_f32_over(atlas, output)
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (atlas, output);
+            Err(SdfTileError::SimdUnavailable)
+        }
     }
 }
 
@@ -1549,6 +1558,75 @@ pub struct MixedSdfAtlasSource<'a> {
     text: &'a MappedSdfAtlasSet,
     shape: Option<&'a MappedShapeSdfAtlas>,
     shape_atlas_set: Option<u16>,
+    runtime_text: &'a [RuntimeTextSdfPage],
+    runtime_text_atlas_set: Option<u16>,
+}
+
+/// Request-local high-resolution Text SDF page. It is never inserted into the
+/// immutable atlas registry or any process cache.
+pub(crate) struct RuntimeTextSdfPage {
+    width: u32,
+    height: u32,
+    payload: Vec<u8>,
+}
+
+impl RuntimeTextSdfPage {
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        self.payload.len() as u64
+    }
+
+    pub(crate) fn from_outline(
+        glyph: &crate::sdf::outline::OutlineSdfGlyph,
+        codepoint: u32,
+        page: u16,
+    ) -> Result<(Self, SdfAtlasGlyphManifest), SdfTileError> {
+        let width = glyph
+            .width()
+            .checked_add(7)
+            .ok_or(SdfTileError::SizeOverflow)?
+            / 8
+            * 8;
+        let height = glyph
+            .height()
+            .checked_add(7)
+            .ok_or(SdfTileError::SizeOverflow)?
+            / 8
+            * 8;
+        let mut linear = vec![
+            0u8;
+            width
+                .checked_mul(height)
+                .ok_or(SdfTileError::SizeOverflow)?
+        ];
+        for y in 0..glyph.height() {
+            linear[y * width..y * width + glyph.width()]
+                .copy_from_slice(&glyph.pixels()[y * glyph.width()..(y + 1) * glyph.width()]);
+        }
+        let mut payload = vec![0u8; linear.len()];
+        let blocks_per_row = width / 8;
+        for y in 0..height {
+            for x in 0..width {
+                let block = (y / 8) * blocks_per_row + x / 8;
+                let in_block = (y % 8) * 8 + x % 8;
+                payload[block * 64 + in_block] = linear[y * width + x];
+            }
+        }
+        Ok((
+            Self {
+                width: u32::try_from(width).map_err(|_| SdfTileError::SizeOverflow)?,
+                height: u32::try_from(height).map_err(|_| SdfTileError::SizeOverflow)?,
+                payload,
+            },
+            SdfAtlasGlyphManifest {
+                codepoint,
+                page,
+                rect: [0, 0, glyph.width() as u32, glyph.height() as u32],
+                plane_bearing: [glyph.plane_bearing_x(), glyph.plane_bearing_y()],
+                plane_size: [glyph.plane_width(), glyph.plane_height()],
+                plane_advance_x: glyph.plane_advance_x(),
+            },
+        ))
+    }
 }
 
 impl<'a> MixedSdfAtlasSource<'a> {
@@ -1563,16 +1641,42 @@ impl<'a> MixedSdfAtlasSource<'a> {
             text,
             shape,
             shape_atlas_set,
+            runtime_text: &[],
+            runtime_text_atlas_set: None,
         })
+    }
+
+    pub(crate) fn with_runtime_text(
+        text: &'a MappedSdfAtlasSet,
+        shape: Option<&'a MappedShapeSdfAtlas>,
+        runtime_text: &'a [RuntimeTextSdfPage],
+    ) -> Result<Self, SdfTileError> {
+        let mut source = Self::new(text, shape)?;
+        if !runtime_text.is_empty() {
+            source.runtime_text_atlas_set = Some(
+                u16::try_from(text.len() + usize::from(shape.is_some()))
+                    .map_err(|_| SdfTileError::TooManyAtlasSets)?,
+            );
+            source.runtime_text = runtime_text;
+        }
+        Ok(source)
     }
 
     pub const fn shape_atlas_set(&self) -> Option<u16> {
         self.shape_atlas_set
     }
+
+    pub const fn runtime_text_atlas_set(&self) -> Option<u16> {
+        self.runtime_text_atlas_set
+    }
 }
 
 impl SdfAtlasSource for MixedSdfAtlasSource<'_> {
     fn page_dimensions(&self, atlas_set: u16, page: u16) -> Option<(u32, u32)> {
+        if Some(atlas_set) == self.runtime_text_atlas_set {
+            let page = self.runtime_text.get(usize::from(page))?;
+            return Some((page.width, page.height));
+        }
         if Some(atlas_set) == self.shape_atlas_set {
             return self
                 .shape?
@@ -1588,6 +1692,20 @@ impl SdfAtlasSource for MixedSdfAtlasSource<'_> {
     }
 
     fn texel(&self, atlas_set: u16, page: u16, x: u32, y: u32) -> Option<SdfAtlasTexel> {
+        if Some(atlas_set) == self.runtime_text_atlas_set {
+            let page = self.runtime_text.get(usize::from(page))?;
+            if x >= page.width || y >= page.height {
+                return None;
+            }
+            let blocks_per_row = page.width / 8;
+            let block = (y / 8) * blocks_per_row + x / 8;
+            let in_block = (y % 8) * 8 + x % 8;
+            return page
+                .payload
+                .get((block * 64 + in_block) as usize)
+                .copied()
+                .map(SdfAtlasTexel::Text);
+        }
         if Some(atlas_set) == self.shape_atlas_set {
             return self
                 .shape?
@@ -1605,6 +1723,15 @@ impl SdfAtlasSource for MixedSdfAtlasSource<'_> {
     }
 
     fn swizzled_page(&self, atlas_set: u16, page: u16) -> Option<SdfSwizzledPage<'_>> {
+        if Some(atlas_set) == self.runtime_text_atlas_set {
+            let page = self.runtime_text.get(usize::from(page))?;
+            return Some(SdfSwizzledPage {
+                width: page.width,
+                height: page.height,
+                format: SdfSwizzledFormat::TextR8,
+                payload: &page.payload,
+            });
+        }
         if Some(atlas_set) == self.shape_atlas_set {
             let page = self.shape?.pages().get(usize::from(page))?;
             return Some(SdfSwizzledPage {
@@ -3032,8 +3159,8 @@ mod tests {
             result.expect("supported SIMD over execution");
             assert_eq!(simd, output);
         } else {
-            result.expect("scalar fallback execution");
-            assert_eq!(simd, output);
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
+            assert_eq!(simd, background.repeat(8));
         }
     }
 
@@ -3101,10 +3228,9 @@ mod tests {
             over_result.expect("supported SIMD over execution");
             assert_eq!(over_simd, over_oracle);
         } else {
-            result.expect("scalar fallback execution");
-            over_result.expect("scalar fallback over execution");
-            assert_eq!(simd, oracle);
-            assert_eq!(over_simd, over_oracle);
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
+            assert_eq!(over_result, Err(SdfTileError::SimdUnavailable));
+            assert_eq!(over_simd, background);
         }
     }
 
@@ -3144,8 +3270,7 @@ mod tests {
             assert_eq!(stats.swizzled_packet_count, 1);
             assert_eq!(stats.gather_fallback_packet_count, 0);
         } else {
-            result.expect("scalar fallback execution");
-            assert_eq!(simd, oracle);
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
         }
     }
 
@@ -3202,8 +3327,7 @@ mod tests {
             assert_eq!(stats.swizzled_packet_count, 1);
             assert_eq!(stats.gather_fallback_packet_count, 0);
         } else {
-            result.expect("scalar fallback execution");
-            assert_eq!(simd, oracle);
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
         }
     }
 
@@ -3262,8 +3386,7 @@ mod tests {
             assert_eq!(stats.swizzled_packet_count, 0);
             assert_eq!(stats.gather_fallback_packet_count, 0);
         } else {
-            result.expect("scalar fallback execution");
-            assert_eq!(simd, oracle);
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
         }
     }
 
@@ -3449,6 +3572,10 @@ mod tests {
 
         assert!(plan.axis_shape_program(0).is_some());
         assert!(plan.direct_axis_shape_spans().is_none());
+        let mask = PixelOcclusionMask::new(73, 41).expect("occlusion mask");
+        let (visible, _) = plan.visible_plan(&mask).expect("visible one-shot plan");
+        assert!(visible.axis_shape_program(0).is_some());
+        assert!(visible.direct_axis_shape_spans().is_none());
         let background = [17, 31, 47, 191].repeat(73 * 41);
         let mut oracle = background.clone();
         plan.execute_scalar_f32_over(&atlas, &mut oracle)
