@@ -5,10 +5,14 @@
 //! surface backend only controls image/composite submission, while the SDF
 //! executor controls text and, when enabled, shape coverage generation.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const PROFILE_RENDER_TELEMETRY_SCHEMA: &str = "allium.profile-render.telemetry.v3";
+// v7 invalidates artifacts rendered before TMP-compatible malformed hex colors.
+pub const PROFILE_RENDER_CACHE_SCHEMA: &str = "allium.profile-render.cache.v7";
 pub const PROFILE_RENDER_CONTRACT_LEGACY_SKIA: &str = "allium.profile-render.legacy-skia.v1";
 pub const PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS: &str =
     "allium.profile-render.ordered-sdf-runs.v1";
@@ -342,6 +346,8 @@ pub struct ProfileRenderTimings {
     pub sdf_capture_emit_ns: u64,
     /// Time spent mapping resolved primitives to immutable atlas commands.
     pub sdf_command_mapping_ns: u64,
+    #[serde(default)]
+    pub realtime_edt_generation_ns: u64,
     /// Time spent building ordered per-tile spans for executable SDF runs.
     pub sdf_plan_build_ns: u64,
     /// Combined Text+Shape executor time. This is intentionally not split by
@@ -407,6 +413,8 @@ pub struct ProfileRenderWork {
     #[serde(default)]
     pub deck_art_variant_miss_count: u64,
     pub glyph_count: u64,
+    #[serde(default)]
+    pub realtime_edt_glyph_count: u64,
     pub shape_count: u64,
     pub element_run_count: u64,
     pub ordered_span_count: u64,
@@ -449,6 +457,8 @@ pub struct ProfileRenderWork {
 pub struct ProfileRenderBytes {
     pub atlas_file_bytes: u64,
     pub atlas_mapped_bytes: u64,
+    #[serde(default)]
+    pub realtime_edt_page_bytes: u64,
     #[serde(default)]
     pub render_object_mapped_bytes: u64,
     #[serde(default)]
@@ -518,6 +528,143 @@ pub struct ProfileAtlasIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RealtimeEdtGlyphTelemetry {
+    pub character: String,
+    pub codepoint: u32,
+    pub font_family: String,
+    pub device_magnification_milli: u32,
+    pub target_point_size_milli: u32,
+    pub generation_ns: u64,
+    pub page_bytes: u64,
+    /// Number of captured glyph placements that reused this one generated page.
+    #[serde(default)]
+    pub substitution_count: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RealtimeEdtBatchTelemetry {
+    /// Oversized placements served directly from the immutable 3x atlas tier.
+    #[serde(default)]
+    pub precomputed_3x_substitution_count: u64,
+    /// Oversized placements with request-local generation disabled whose
+    /// resolved glyph was absent from every sampling tier above the base
+    /// atlas.
+    #[serde(default)]
+    pub precomputed_3x_miss_count: u64,
+    /// Oversized placements served from any adequate precomputed sampling
+    /// tier, including sparse analytic tiers above 3x.
+    #[serde(default)]
+    pub precomputed_tier_substitution_count: u64,
+    /// Adequate precomputed tier lookups that missed the resolved glyph.
+    #[serde(default)]
+    pub precomputed_tier_miss_count: u64,
+    /// Substitutions grouped by the selected atlas point size in milli-points.
+    /// This is sufficient to prove which tier executed without recording
+    /// additional text content.
+    #[serde(default)]
+    pub precomputed_tier_substitutions_by_point_size_milli: BTreeMap<u32, u64>,
+    /// Oversized placements which deliberately kept an installed lower tier
+    /// because request-local generation was disabled.
+    #[serde(default)]
+    pub realtime_generation_disabled_fallback_count: u64,
+    /// Disabled-generation fallbacks grouped by the point size of the
+    /// installed tier that served the placement, in milli-points. Kept apart
+    /// from `precomputed_tier_substitutions_by_point_size_milli` so adequate
+    /// selections stay distinguishable from degraded fallbacks.
+    #[serde(default)]
+    pub realtime_generation_disabled_fallbacks_by_point_size_milli: BTreeMap<u32, u64>,
+    /// Oversized glyph placements collected before any request-local EDT work starts.
+    pub collected_glyph_count: u64,
+    /// Exact `(family, codepoint, point size, spread)` requests after deduplication.
+    pub unique_request_count: u64,
+    /// Placements served by an already-collected request identity.
+    pub reused_glyph_count: u64,
+    /// Unique requests that produced a runtime page.
+    pub generated_request_count: u64,
+    /// Captured glyphs with a finite non-positive resolved size; TMP treats these as invisible.
+    pub skipped_non_positive_font_size_count: u64,
+    pub font_unavailable_fallback_count: u64,
+    pub generation_failed_fallback_count: u64,
+    pub runtime_page_failed_fallback_count: u64,
+    pub runtime_command_failed_fallback_count: u64,
+    pub capacity_fallback_count: u64,
+    /// Wall time for the bounded parallel generation batch, including stable page assembly.
+    pub batch_wall_ns: u64,
+    /// Sum of the individual worker generation durations.
+    pub worker_generation_ns: u64,
+}
+
+impl RealtimeEdtBatchTelemetry {
+    pub(crate) fn accumulate(&mut self, other: &Self) {
+        self.precomputed_3x_substitution_count = self
+            .precomputed_3x_substitution_count
+            .saturating_add(other.precomputed_3x_substitution_count);
+        self.precomputed_3x_miss_count = self
+            .precomputed_3x_miss_count
+            .saturating_add(other.precomputed_3x_miss_count);
+        self.precomputed_tier_substitution_count = self
+            .precomputed_tier_substitution_count
+            .saturating_add(other.precomputed_tier_substitution_count);
+        self.precomputed_tier_miss_count = self
+            .precomputed_tier_miss_count
+            .saturating_add(other.precomputed_tier_miss_count);
+        for (point_size_milli, count) in &other.precomputed_tier_substitutions_by_point_size_milli {
+            let accumulated = self
+                .precomputed_tier_substitutions_by_point_size_milli
+                .entry(*point_size_milli)
+                .or_default();
+            *accumulated = accumulated.saturating_add(*count);
+        }
+        self.realtime_generation_disabled_fallback_count = self
+            .realtime_generation_disabled_fallback_count
+            .saturating_add(other.realtime_generation_disabled_fallback_count);
+        for (point_size_milli, count) in
+            &other.realtime_generation_disabled_fallbacks_by_point_size_milli
+        {
+            let accumulated = self
+                .realtime_generation_disabled_fallbacks_by_point_size_milli
+                .entry(*point_size_milli)
+                .or_default();
+            *accumulated = accumulated.saturating_add(*count);
+        }
+        self.collected_glyph_count = self
+            .collected_glyph_count
+            .saturating_add(other.collected_glyph_count);
+        self.unique_request_count = self
+            .unique_request_count
+            .saturating_add(other.unique_request_count);
+        self.reused_glyph_count = self
+            .reused_glyph_count
+            .saturating_add(other.reused_glyph_count);
+        self.generated_request_count = self
+            .generated_request_count
+            .saturating_add(other.generated_request_count);
+        self.skipped_non_positive_font_size_count = self
+            .skipped_non_positive_font_size_count
+            .saturating_add(other.skipped_non_positive_font_size_count);
+        self.font_unavailable_fallback_count = self
+            .font_unavailable_fallback_count
+            .saturating_add(other.font_unavailable_fallback_count);
+        self.generation_failed_fallback_count = self
+            .generation_failed_fallback_count
+            .saturating_add(other.generation_failed_fallback_count);
+        self.runtime_page_failed_fallback_count = self
+            .runtime_page_failed_fallback_count
+            .saturating_add(other.runtime_page_failed_fallback_count);
+        self.runtime_command_failed_fallback_count = self
+            .runtime_command_failed_fallback_count
+            .saturating_add(other.runtime_command_failed_fallback_count);
+        self.capacity_fallback_count = self
+            .capacity_fallback_count
+            .saturating_add(other.capacity_fallback_count);
+        self.batch_wall_ns = self.batch_wall_ns.saturating_add(other.batch_wall_ns);
+        self.worker_generation_ns = self
+            .worker_generation_ns
+            .saturating_add(other.worker_generation_ns);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProfileRenderTelemetry {
     pub schema: String,
     pub requested: ProfileBackendConfig,
@@ -532,6 +679,10 @@ pub struct ProfileRenderTelemetry {
     pub surface_identity: ProfileSurfaceIdentity,
     #[serde(default)]
     pub atlas_identities: Vec<ProfileAtlasIdentity>,
+    #[serde(default)]
+    pub realtime_edt_glyphs: Vec<RealtimeEdtGlyphTelemetry>,
+    #[serde(default)]
+    pub realtime_edt_batch: RealtimeEdtBatchTelemetry,
     pub timings: ProfileRenderTimings,
     pub work: ProfileRenderWork,
     pub bytes: ProfileRenderBytes,
@@ -556,6 +707,8 @@ impl ProfileRenderTelemetry {
             atlas_contract: None,
             surface_identity: ProfileSurfaceIdentity::default(),
             atlas_identities: Vec::new(),
+            realtime_edt_glyphs: Vec::new(),
+            realtime_edt_batch: RealtimeEdtBatchTelemetry::default(),
             timings: ProfileRenderTimings::default(),
             work: ProfileRenderWork::default(),
             bytes: ProfileRenderBytes::default(),

@@ -20,7 +20,7 @@ use lru::LruCache;
 #[cfg(feature = "skia-core")]
 use sha2::{Digest, Sha256};
 #[cfg(feature = "skia-core")]
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 #[cfg(feature = "skia-core")]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -304,6 +304,10 @@ pub struct AssetStore {
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
     #[cfg(feature = "skia-core")]
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
+    /// Missing image identities observed since the last audit drain. This is
+    /// populated only on a real lookup miss and is therefore off the hit path.
+    #[cfg(feature = "skia-core")]
+    missing_image_keys: Mutex<BTreeSet<String>>,
 }
 
 impl AssetStore {
@@ -347,6 +351,7 @@ impl AssetStore {
             cache: Mutex::new(ImageLru::new(max_mb * 1024 * 1024)),
             pinned_images: Mutex::new(HashMap::new()),
             shape_sdf_identities: Mutex::new(HashMap::new()),
+            missing_image_keys: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -483,6 +488,19 @@ impl AssetStore {
     /// 查找顺序：常驻池 → LRU 缓存 → 磁盘回退（重新解码）。
     #[cfg(feature = "skia-core")]
     pub fn get_image(&self, key: &str) -> Option<skia_safe::Image> {
+        self.get_image_with_audit(key, true)
+    }
+
+    /// Looks up an intentionally optional recipe candidate without emitting a
+    /// repair miss. Use this only when the recipe has an explicit fallback or
+    /// omission contract for the key.
+    #[cfg(feature = "skia-core")]
+    pub fn get_image_optional(&self, key: &str) -> Option<skia_safe::Image> {
+        self.get_image_with_audit(key, false)
+    }
+
+    #[cfg(feature = "skia-core")]
+    fn get_image_with_audit(&self, key: &str, record_missing: bool) -> Option<skia_safe::Image> {
         // 1. 常驻池
         {
             let pinned = self.pinned_images.lock().unwrap_or_else(|e| e.into_inner());
@@ -502,7 +520,27 @@ impl AssetStore {
             return cache.get(key);
         }
 
+        drop(cache);
+        if record_missing {
+            self.missing_image_keys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key.to_owned());
+        }
         None
+    }
+
+    /// Drains the deduplicated image misses observed by render recipes. The
+    /// offline object builder uses this for structured repair input; request
+    /// rendering continues to follow the recipe's existing optional/fallback
+    /// behavior.
+    #[cfg(feature = "skia-core")]
+    pub fn take_missing_image_keys(&self) -> Vec<String> {
+        let mut missing = self
+            .missing_image_keys
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut *missing).into_iter().collect()
     }
 
     #[cfg(feature = "skia-core")]

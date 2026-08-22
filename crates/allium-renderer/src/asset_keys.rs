@@ -278,9 +278,35 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     }
 }
 
+/// Maps an indexed game-asset path back to the runtime key used by `AssetStore`.
+/// Most assets only drop their image extension; bonds Honor sources use an
+/// additional directory layer that is not part of the runtime key.
+pub fn logical_path_to_asset_key(logical_path: &str) -> Option<String> {
+    let normalized = logical_path.trim_start_matches('/').replace('\\', "/");
+    let (base, extension) = normalized.rsplit_once('.')?;
+    if !matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg"
+    ) {
+        return None;
+    }
+    let parts = base.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["bonds_honor", "character", directory, file]
+            if directory == file && file.starts_with("chr_sd_") =>
+        {
+            Some(format!("bonds_honor/{file}"))
+        }
+        ["bonds_honor", "word", directory, file] if directory == file => {
+            Some(format!("bonds_honor/word/{file}"))
+        }
+        _ => Some(base.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::key_to_s3_path;
+    use super::{key_to_s3_path, logical_path_to_asset_key};
 
     const PREFIX: &str = "assets/cn/";
 
@@ -330,5 +356,20 @@ mod tests {
             key_to_s3_path("character/member_small/abn/card_normal", PREFIX),
             "assets/cn/character/member_small/abn/card_normal.png"
         );
+    }
+
+    #[test]
+    fn indexed_bonds_honor_paths_restore_runtime_keys() {
+        for key in [
+            "bonds_honor/chr_sd_01_01",
+            "bonds_honor/word/honorname_0102_01_01",
+            "honor/example/degree_main",
+        ] {
+            let logical_path = key_to_s3_path(key, "");
+            assert_eq!(
+                logical_path_to_asset_key(&logical_path).as_deref(),
+                Some(key)
+            );
+        }
     }
 }
