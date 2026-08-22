@@ -1,4 +1,10 @@
-use skia_safe::{FontMgr, Typeface};
+//! TextMesh Pro face constants for a declared font family.
+//!
+//! Font bytes themselves are loaded by `sdf::outline`; nothing here rasterizes
+//! or measures. There is deliberately no system-font substitution: the SDK
+//! contract is that the caller supplies the fonts, and a substituted face would
+//! report different metrics than the glyph atlas built for the declared family.
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -15,26 +21,9 @@ pub(super) struct TmpFaceInfoConstants {
     pub cap_line: f32,
 }
 
-fn typeface_cache() -> &'static Mutex<HashMap<String, Option<Typeface>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<Typeface>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 fn face_info_cache() -> &'static Mutex<HashMap<String, Option<TmpFaceInfoConstants>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<TmpFaceInfoConstants>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-thread_local! {
-    /// Constructing Skia's system font manager reparses fontconfig state. Keep
-    /// one manager per renderer thread so repeated Text elements and pages pay
-    /// that cost once while preserving the exact same default-manager lookup
-    /// and fallback behavior.
-    static DEFAULT_FONT_MGR: FontMgr = FontMgr::default();
-}
-
-pub(super) fn with_default_font_mgr<T>(resolve: impl FnOnce(&FontMgr) -> T) -> T {
-    DEFAULT_FONT_MGR.with(resolve)
 }
 
 pub(super) fn resolve_tmp_face_info_constants(family: Option<&str>) -> TmpFaceInfoConstants {
@@ -88,44 +77,4 @@ pub(super) fn resolve_tmp_face_info_constants(family: Option<&str>) -> TmpFaceIn
     }
 
     resolved.unwrap_or(DEFAULTS)
-}
-
-pub(super) fn resolve_same_source_typeface(
-    font_mgr: &FontMgr,
-    family: Option<&str>,
-) -> Option<Typeface> {
-    let family = family?;
-
-    if let Some(cached) = typeface_cache()
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(family).cloned())
-    {
-        return cached;
-    }
-
-    // 名字踩了 `sdf::outline` 命名空间(历史遗留：SDF 侧也要读字体字节),但
-    // 函数本身只做 TTF/OTF 磁盘读取 + Arc 缓存,不涉及 SDF 图元/光栅化。
-    // 护栏"IR 节点不得触达 sdf"这里指重 SDF 路径(rasterize+draw_text),不含
-    // 字体加载 helper。TODO(W-post): 把 helper 搬到 `text` / 独立 `font_loader` 模块,
-    // 消除反向依赖 + 简化护栏 grep。
-    let resolved = crate::sdf::outline::load_font_bytes_for_family(family)
-        .and_then(|bytes| font_mgr.new_from_data(bytes.as_slice(), None));
-
-    if let Ok(mut cache) = typeface_cache().lock() {
-        cache.insert(family.to_string(), resolved.clone());
-    }
-
-    resolved
-}
-
-/// Resolves a declared family to a face loaded from the caller-provided font
-/// bytes, and only those.
-///
-/// There is deliberately no system-font substitution: the SDK contract is that
-/// the caller supplies the fonts, and a silently substituted face would report
-/// different metrics and would not match the glyph atlas built for the declared
-/// family. An unresolvable family is reported as such instead.
-pub(super) fn resolve_typeface(font_mgr: &FontMgr, family: Option<&str>) -> Option<Typeface> {
-    resolve_same_source_typeface(font_mgr, family)
 }

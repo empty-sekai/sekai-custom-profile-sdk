@@ -6,7 +6,7 @@ use allium_renderer::assets::AssetStore;
 use allium_renderer::init::install_fonts;
 use allium_renderer::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
 use allium_renderer::renderer::CustomProfileRenderer;
-use allium_renderer::text::resolve_custom_profile_typeface;
+use allium_renderer::sdf::outline::load_font_bytes_for_family;
 use allium_renderer::text::richtext::parse_rich_segments;
 use allium_renderer::text::richtext::{Indent, SizeSpec};
 use allium_renderer::transform::quaternion_to_degrees;
@@ -211,10 +211,19 @@ fn transform_char_for_segment_local(ch: char) -> (String, f32) {
     (ch.to_string(), 1.0)
 }
 
+/// Builds a Skia face from the same font bytes the render path loads.
+///
+/// This tool compares Skia's layout against the renderer's, so it needs a Skia
+/// face; the renderer itself no longer constructs one.
+fn resolve_debug_typeface(font_mgr: &FontMgr, family: Option<&str>) -> Option<skia_safe::Typeface> {
+    let bytes = load_font_bytes_for_family(family?)?;
+    font_mgr.new_from_data(bytes.as_slice(), None)
+}
+
 fn dump_layout_metrics(provider: &Task043Provider, text: &TextElement) -> Result<(), String> {
     let font_mgr = FontMgr::default();
     let family = provider.resolve_font(text.font_id);
-    let typeface = resolve_custom_profile_typeface(&font_mgr, family.as_deref())
+    let typeface = resolve_debug_typeface(&font_mgr, family.as_deref())
         .or_else(|| font_mgr.legacy_make_typeface(None, skia_safe::FontStyle::default()))
         .ok_or_else(|| "无法解析调试字体".to_string())?;
     let segments = parse_rich_segments(&text.text);
@@ -415,7 +424,7 @@ fn dump_layout_metrics(provider: &Task043Provider, text: &TextElement) -> Result
 fn dump_geometry(provider: &Task043Provider, text: &TextElement) -> Result<(), String> {
     let font_mgr = FontMgr::default();
     let family = provider.resolve_font(text.font_id);
-    let typeface = resolve_custom_profile_typeface(&font_mgr, family.as_deref())
+    let typeface = resolve_debug_typeface(&font_mgr, family.as_deref())
         .or_else(|| font_mgr.legacy_make_typeface(None, skia_safe::FontStyle::default()))
         .ok_or_else(|| "无法解析调试字体".to_string())?;
     let angle = quaternion_to_degrees(&text.object_data.rotation);

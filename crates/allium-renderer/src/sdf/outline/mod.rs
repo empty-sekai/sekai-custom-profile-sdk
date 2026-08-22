@@ -225,7 +225,7 @@ fn load_font_bytes(font_path: &Path) -> Option<Arc<Vec<u8>>> {
     bytes
 }
 
-pub(crate) fn load_font_bytes_for_family(family: &str) -> Option<Arc<Vec<u8>>> {
+pub fn load_font_bytes_for_family(family: &str) -> Option<Arc<Vec<u8>>> {
     let path = resolve_font_path(family)?;
     load_font_bytes(&path)
 }

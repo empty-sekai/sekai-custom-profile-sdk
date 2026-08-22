@@ -6,8 +6,8 @@
 //! 3. 依据 live 材质参数重建 face / underlay coverage
 
 use skia_safe::{
-    AlphaType, Canvas, Color4f, ColorType, Data, FilterMode, Font, ImageInfo, MipmapMode, Paint,
-    Point, Rect, SamplingOptions,
+    AlphaType, Canvas, Color4f, ColorType, Data, FilterMode, ImageInfo, MipmapMode, Paint, Point,
+    Rect, SamplingOptions,
 };
 
 use crate::sdf::outline as outline_sdf;
@@ -653,34 +653,15 @@ pub struct SdfOutlineParams {
     pub font_size: f32,
 }
 
-/// 兼容旧调用名；正式路径只走轮廓动态 SDF。
-pub fn render_char_face_from_atlas(
+/// Rasterizes a glyph's face from its dynamically generated outline SDF.
+///
+/// Returns false when the character has no usable outline, so the caller can
+/// account for it rather than substitute another engine.
+pub fn render_char_face_from_outline(
     canvas: &Canvas,
     ch: &str,
     pos: Point,
-    font: &Font,
-    font_family: Option<&str>,
-    carrier: RuntimeLikeGlyphMeshCarrier,
-    fx_scale_x: f32,
-    face_color: Color4f,
-) -> bool {
-    render_char_face_from_outline(
-        canvas,
-        ch,
-        pos,
-        font,
-        font_family,
-        carrier,
-        fx_scale_x,
-        face_color,
-    )
-}
-
-fn render_char_face_from_outline(
-    canvas: &Canvas,
-    ch: &str,
-    pos: Point,
-    font: &Font,
+    font_size: f32,
     font_family: Option<&str>,
     carrier: RuntimeLikeGlyphMeshCarrier,
     fx_scale_x: f32,
@@ -707,7 +688,7 @@ fn render_char_face_from_outline(
         return false;
     }
 
-    let logical_scale = font.size() / point_size;
+    let logical_scale = font_size / point_size;
     if logical_scale <= 0.0 {
         return false;
     }
@@ -742,36 +723,11 @@ fn render_char_face_from_outline(
     true
 }
 
-/// 兼容旧调用名；正式路径只走轮廓动态 SDF。
-pub fn render_char_sdf_from_atlas(
-    canvas: &Canvas,
-    ch: &str,
-    pos: Point,
-    font: &Font,
-    font_family: Option<&str>,
-    carrier: RuntimeLikeGlyphMeshCarrier,
-    fx_scale_x: f32,
-    face_color: Color4f,
-    params: &SdfOutlineParams,
-) -> bool {
-    render_char_sdf_from_outline(
-        canvas,
-        ch,
-        pos,
-        font,
-        font_family,
-        carrier,
-        fx_scale_x,
-        face_color,
-        params,
-    )
-}
-
 fn render_char_sdf_from_outline(
     canvas: &Canvas,
     ch: &str,
     pos: Point,
-    font: &Font,
+    font_size: f32,
     font_family: Option<&str>,
     carrier: RuntimeLikeGlyphMeshCarrier,
     fx_scale_x: f32,
@@ -799,7 +755,7 @@ fn render_char_sdf_from_outline(
         return false;
     }
 
-    let logical_scale = font.size() / point_size;
+    let logical_scale = font_size / point_size;
     if logical_scale <= 0.0 {
         return false;
     }
@@ -913,7 +869,7 @@ pub fn render_char_sdf(
     canvas: &Canvas,
     ch: &str,
     pos: Point,
-    font: &Font,
+    font_size: f32,
     font_family: Option<&str>,
     carrier: RuntimeLikeGlyphMeshCarrier,
     fx_scale_x: f32,
@@ -924,7 +880,7 @@ pub fn render_char_sdf(
         canvas,
         ch,
         pos,
-        font,
+        font_size,
         font_family,
         carrier,
         fx_scale_x,
@@ -934,23 +890,14 @@ pub fn render_char_sdf(
         return;
     }
 
+    // No outline means no glyph to rasterize. Drawing it through a different
+    // engine would place it at a pivot this path never computed, so the glyph is
+    // skipped and reported instead.
     tracing::debug!(
         text = ch,
         font_family = font_family.unwrap_or("<none>"),
-        "outline SDF glyph generation failed; falling back to plain text draw"
+        "no outline available for glyph; skipped"
     );
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color4f(
-        Color4f::new(
-            face_color.r,
-            face_color.g,
-            face_color.b,
-            face_color.a * carrier.vertex_alpha(),
-        ),
-        None,
-    );
-    canvas.draw_str(ch, pos, font, &paint);
 }
 
 #[cfg(test)]

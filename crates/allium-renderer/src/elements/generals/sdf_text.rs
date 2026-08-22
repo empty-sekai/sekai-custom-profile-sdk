@@ -1,8 +1,8 @@
 use super::*;
 use crate::text::{
-    capture_text_sdf_region_font_only_with_placement, draw_text_region_font_only_with_placement,
-    wrap_rich_text_to_width, wrap_rich_text_to_width_with_atlases, TextRenderPlacement,
-    TextSdfCaptureError, TextSdfCaptureTimings, TEXT_SCALE,
+    capture_text_sdf_with_placement, draw_text_with_placement, wrap_rich_text_to_width,
+    wrap_rich_text_to_width_with_atlases, TextRenderPlacement, TextSdfCaptureError,
+    TextSdfCaptureTimings, TEXT_SCALE,
 };
 use crate::types::{ObjectData, Quaternion, TextElement, Vec3};
 
@@ -103,7 +103,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
     }
     canvas.save();
     canvas.scale((TEXT_SCALE, TEXT_SCALE));
-    let timings = capture_text_sdf_region_font_only_with_placement(
+    let timings = capture_text_sdf_with_placement(
         canvas,
         &spec.element,
         md,
@@ -272,6 +272,6 @@ fn draw_general_sdf_text_impl(
     canvas.save();
     canvas.translate(spec.origin);
     canvas.scale((TEXT_SCALE, TEXT_SCALE));
-    draw_text_region_font_only_with_placement(canvas, &spec.element, md, spec.render_placement);
+    draw_text_with_placement(canvas, &spec.element, md, spec.render_placement);
     canvas.restore();
 }

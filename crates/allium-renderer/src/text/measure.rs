@@ -1,5 +1,4 @@
 use crate::text::richtext::{CaseTransform, Indent, InlineAlign, SizeSpec, TextSegment};
-use skia_safe::Font;
 
 pub(super) struct RichTextGlobal {
     pub scale: f32,
@@ -53,15 +52,6 @@ pub(super) fn resolve_indent_value(
         Some(Indent::Percent(v)) => Some(box_w * v / 100.0),
         None => None,
     }
-}
-
-pub(super) fn tmp_measure_advance(text: &str, font: &Font, _font_size: f32) -> f32 {
-    let mut total = 0.0f32;
-    for ch in text.chars() {
-        let s = ch.to_string();
-        total += font.measure_str(&s, None).0;
-    }
-    total
 }
 
 pub(super) fn is_fullwidth_char(ch: char) -> bool {
