@@ -1517,6 +1517,92 @@ fn render_live_master_progress_text(
     Ok(())
 }
 
+/// Conservative device-space bounds for all currently visible commands.
+///
+/// The result deliberately does not intersect command clips: animation layers
+/// need a safe source raster before their per-frame transform is applied, and
+/// a small guard covers filter/SDF fringes outside authored command bounds.
+pub(crate) fn visible_scene_device_bounds(
+    scene: &ResolvedProfileScene,
+    guard: f32,
+) -> Result<Option<(i32, i32, u32, u32)>, ProfileCompositorError> {
+    let layers = collect_layers(scene)?;
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for command in &scene.commands {
+        let layer = layers.get(&command.layer_id).copied().ok_or_else(|| {
+            ProfileCompositorError::MissingLayer(format!("{:?}", command.layer_id))
+        })?;
+        let control_state = evaluate_command_control_state(scene, command)?;
+        if !layer.authored_visible || !control_state.visible {
+            continue;
+        }
+        let bounds = command.bounds;
+        if !bounds.x.is_finite()
+            || !bounds.y.is_finite()
+            || !bounds.width.is_finite()
+            || !bounds.height.is_finite()
+            || bounds.width <= 0.0
+            || bounds.height <= 0.0
+        {
+            continue;
+        }
+        let mut command_matrix = command.matrix;
+        command_matrix[5] += control_state.translate_y;
+        let matrix = compose_matrix(layer.matrix, command_matrix);
+        for (x, y) in [
+            transform_point(matrix, bounds.x, bounds.y),
+            transform_point(matrix, bounds.x + bounds.width, bounds.y),
+            transform_point(matrix, bounds.x + bounds.width, bounds.y + bounds.height),
+            transform_point(matrix, bounds.x, bounds.y + bounds.height),
+        ] {
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+        return Ok(None);
+    }
+    let guard = guard.max(0.0);
+    let left = (min_x - guard).floor();
+    let top = (min_y - guard).floor();
+    let right = (max_x + guard).ceil();
+    let bottom = (max_y + guard).ceil();
+    if left < i32::MIN as f32
+        || top < i32::MIN as f32
+        || right > i32::MAX as f32
+        || bottom > i32::MAX as f32
+        || right <= left
+        || bottom <= top
+    {
+        return Err(ProfileCompositorError::InvalidCanvas {
+            width: 0,
+            height: 0,
+        });
+    }
+    let left = left as i32;
+    let top = top as i32;
+    let width = u32::try_from(right as i64 - left as i64).map_err(|_| {
+        ProfileCompositorError::InvalidCanvas {
+            width: 0,
+            height: 0,
+        }
+    })?;
+    let height = u32::try_from(bottom as i64 - top as i64)
+        .map_err(|_| ProfileCompositorError::InvalidCanvas { width, height: 0 })?;
+    canvas_bytes(width, height)?;
+    Ok(Some((left, top, width, height)))
+}
+
 /// Validation-only Skia implementation of the same image command subset.
 /// It is intentionally separate from the scalar oracle and is never selected
 /// by the production backend.
@@ -3600,6 +3686,126 @@ mod tests {
             .expect("Skia reference");
             assert_eq!(output.pixels, reference.pixels);
         }
+    }
+
+    #[test]
+    fn visible_scene_bounds_include_layer_and_scroll_translation() {
+        let layer_id = StableId(401);
+        let control_id = StableId(402);
+        let mut command = image_command(
+            "scroll-bounds",
+            layer_id,
+            "dummy",
+            Rect {
+                x: 2.0,
+                y: 3.0,
+                width: 10.0,
+                height: 6.0,
+            },
+            Rect::default(),
+            BlendMode::SrcOver,
+        );
+        command
+            .control_bindings
+            .push(CommandControlBinding::ScrollContent { control_id });
+        let mut scene = scene(
+            test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 20.0, 30.0]),
+            vec![command],
+        );
+        scene.controls.push(ComponentControlSource {
+            id: control_id,
+            layer_id,
+            role: "scroll".into(),
+            state: ComponentControlState::Scroll {
+                offset: 4.0,
+                min: 0.0,
+                max: 10.0,
+                viewport_extent: 10.0,
+                content_extent: 20.0,
+                step: 1.0,
+            },
+        });
+
+        assert_eq!(
+            visible_scene_device_bounds(&scene, 2.0).unwrap(),
+            Some((20, 27, 14, 10))
+        );
+    }
+
+    #[test]
+    fn tight_translated_scene_matches_full_surface_crop_exactly() {
+        let (_temp, store) = store(vec![(
+            "texture:assets/tight",
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 192, 0, 0, 255, 128, 255, 255, 255, 64,
+            ],
+        )]);
+        let layer_id = StableId(403);
+        let scene = scene(
+            test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 7.0, 5.0]),
+            vec![image_command(
+                "tight",
+                layer_id,
+                "tight",
+                Rect {
+                    width: 2.0,
+                    height: 2.0,
+                    ..Rect::default()
+                },
+                Rect {
+                    width: 1.0,
+                    height: 1.0,
+                    ..Rect::default()
+                },
+                BlendMode::SrcOver,
+            )],
+        );
+        let (left, top, width, height) = visible_scene_device_bounds(&scene, 0.0)
+            .unwrap()
+            .expect("visible bounds");
+        assert_eq!((left, top, width, height), (7, 5, 2, 2));
+
+        let mut full = vec![0; 16 * 12 * 4];
+        render_image_commands_into(
+            &scene,
+            &store,
+            16,
+            12,
+            ImageExecutor::Scalar,
+            &mut full,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut translated = scene.clone();
+        translated.layers[0].matrix[4] -= left as f32;
+        translated.layers[0].matrix[5] -= top as f32;
+        let mut tight = vec![0; width as usize * height as usize * 4];
+        render_image_commands_into(
+            &translated,
+            &store,
+            width,
+            height,
+            ImageExecutor::Scalar,
+            &mut tight,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut cropped = Vec::with_capacity(tight.len());
+        for y in top as usize..(top as usize + height as usize) {
+            let start = (y * 16 + left as usize) * 4;
+            cropped.extend_from_slice(&full[start..start + width as usize * 4]);
+        }
+        assert_eq!(tight, cropped);
     }
 
     #[test]
