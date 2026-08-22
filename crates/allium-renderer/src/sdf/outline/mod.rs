@@ -20,7 +20,7 @@ const TMP_POINT_SIZE: f32 = 75.0;
 const TMP_ATLAS_PADDING: usize = 5;
 const TMP_SPREAD: f32 = 6.0;
 
-const FONT_FILE_MAP: [(&str, &[&str]); 10] = [
+const FONT_FILE_MAP: [(&str, &[&str]); 12] = [
     (
         "FZLanTingHei-DB-GBK",
         &["FOT-RodinNTLGPro-DB.ttf", "FOT-RodinNTLGPro-DB.otf"],
@@ -35,6 +35,14 @@ const FONT_FILE_MAP: [(&str, &[&str]); 10] = [
     ("FOT-PopHappinessStd-EB", &["FOT-PopHappinessStd-EB.otf"]),
     ("FOT-Yuruka Std UB", &["FOT-YurukaStd-UB.otf"]),
     ("FOT-YurukaStd-UB", &["FOT-YurukaStd-UB.otf"]),
+    // Source Han Sans is the open-licensed CJK sans shipped alongside the game
+    // faces. It carries the same outlines as Noto Sans CJK, which is what the
+    // Live Master progress recipe used to reach through fontconfig.
+    (
+        "Source Han Sans SC",
+        &["SourceHanSansSC-Medium.otf", "SourceHanSansSC-Regular.otf"],
+    ),
+    ("SourceHanSansSC-Medium", &["SourceHanSansSC-Medium.otf"]),
     (
         "DejaVu Sans",
         &[

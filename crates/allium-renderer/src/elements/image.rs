@@ -2,7 +2,7 @@ use crate::assets::AssetStore;
 use crate::widgets::card_util::{
     cover_crop_rect, draw_stars_horizontal, rarity_count, rarity_suffix, star_icon_key,
 };
-use skia_safe::{Canvas, Color4f, Font, FontMgr, FontStyle, Paint, Point, Rect};
+use skia_safe::{Canvas, Color4f, Font, Paint, Point, Rect};
 
 const CARD_CROP_WIDTH: f32 = 312.0;
 const CARD_CROP_HEIGHT: f32 = 512.0;
@@ -157,13 +157,12 @@ fn draw_type1_info_bar(canvas: &Canvas, assets: Option<&AssetStore>, card_rect: 
     }
     canvas.restore();
 
-    let font_mgr = FontMgr::default();
-    let typeface = font_mgr
-        .match_family_style(crate::widgets::theme::fonts::EMPHASIS, FontStyle::normal())
-        .or_else(|| {
-            font_mgr.match_family_style(crate::widgets::theme::fonts::PRIMARY, FontStyle::normal())
-        })
-        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()));
+    // The info bar declares the game's emphasis face and falls back to its
+    // primary face. Both are caller-supplied; neither is resolved through the
+    // host's font configuration, which does not know these families and would
+    // quietly substitute an unrelated typeface.
+    let typeface = crate::elements::bundled_typeface(crate::widgets::theme::fonts::EMPHASIS)
+        .or_else(|| crate::elements::bundled_typeface(crate::widgets::theme::fonts::PRIMARY));
     let Some(typeface) = typeface else {
         return;
     };
@@ -326,8 +325,7 @@ pub fn draw_image_placeholder(canvas: &Canvas, type_name: &str, id: i32) {
     border.set_anti_alias(true);
     canvas.draw_round_rect(rect, 8.0, 8.0, &border);
 
-    let font_mgr = FontMgr::default();
-    if let Some(tf) = font_mgr.legacy_make_typeface(None, FontStyle::default()) {
+    if let Some(tf) = crate::elements::bundled_typeface(crate::widgets::theme::fonts::PRIMARY) {
         let font = Font::new(tf, Some(10.0));
         let mut tp = Paint::default();
         tp.set_color4f(Color4f::new(0.3, 0.3, 0.3, 1.0), None);

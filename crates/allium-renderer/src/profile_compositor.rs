@@ -3320,8 +3320,7 @@ mod tests {
     #[test]
     fn live_master_progress_uses_legacy_simple_text_pixels_without_sdf() {
         use skia_safe::{
-            surfaces, AlphaType, Color4f, ColorType, Font, FontMgr, FontStyle, ImageInfo, Paint,
-            PaintStyle, Point,
+            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Paint, PaintStyle, Point,
         };
 
         let layer_id = StableId(302);
@@ -3374,11 +3373,11 @@ mod tests {
         let info = ImageInfo::new((200, 80), ColorType::RGBA8888, AlphaType::Premul, None);
         let mut surface =
             surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(200 * 4), None).unwrap();
-        let font_mgr = FontMgr::default();
-        let typeface = font_mgr
-            .match_family_style("Noto Sans CJK SC", FontStyle::bold())
-            .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::bold()))
-            .unwrap();
+        // The reference draw resolves its face exactly as the compositor does,
+        // so this compares the recipe rather than two font lookups.
+        let typeface =
+            crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
+                .expect("Live Master progress face; set FONT_DIR to the font directory");
         let font = Font::new(typeface, Some(20.0));
         let text_width = font.measure_str("73", None).0;
         let mut paint = Paint::default();

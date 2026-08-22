@@ -11,6 +11,44 @@ pub mod image;
 #[cfg(feature = "skia-core")]
 pub mod shape;
 
+/// Builds a Skia face from font bytes the caller supplied.
+///
+/// The element draw path still rasterizes a few labels through Skia, but it
+/// resolves the face the same way the rest of the engine does: from a declared
+/// family mapped to a file under the configured font directory. There is no
+/// system-font lookup, because a substituted face silently renders text in
+/// whatever the host image happens to ship — which is how the card info bar came
+/// to draw its level in DejaVu Sans while declaring a game font.
+///
+/// Returns `None` when the family is not available, so callers skip the label
+/// rather than draw it in an unrelated typeface.
+#[cfg(feature = "skia-core")]
+pub(crate) fn bundled_typeface(family: &str) -> Option<skia_safe::Typeface> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<skia_safe::Typeface>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(family).cloned())
+    {
+        return cached;
+    }
+    let resolved = crate::sdf::outline::load_font_bytes_for_family(family)
+        .and_then(|bytes| skia_safe::FontMgr::new().new_from_data(bytes.as_slice(), None));
+    if resolved.is_none() {
+        tracing::warn!(
+            font_family = family,
+            "declared font family is unavailable; the label is skipped"
+        );
+    }
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(family.to_string(), resolved.clone());
+    }
+    resolved
+}
 use crate::types::*;
 
 /// 扁平化后的渲染元素（统一不同类型以便排序）。

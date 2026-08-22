@@ -11,9 +11,7 @@ use crate::masterdata::MasterData;
 #[cfg(feature = "skia-core")]
 use crate::profile::ProfileData;
 #[cfg(feature = "skia-core")]
-use skia_safe::{
-    Canvas, Color, Color4f, Font, FontMgr, FontStyle, Paint, PaintStyle, Point, Rect, Typeface,
-};
+use skia_safe::{Canvas, Color, Color4f, Font, Paint, PaintStyle, Point, Rect};
 
 #[cfg(feature = "skia-core")]
 pub(crate) mod layout;
@@ -775,9 +773,8 @@ fn draw_placeholder(canvas: &Canvas, gtype: i32) {
     let rect = Rect::from_xywh(-50.0, -50.0, 100.0, 100.0);
     canvas.draw_round_rect(rect, 8.0, 8.0, &paint);
 
-    let font_mgr = FontMgr::default();
-    if let Some(tf) = font_mgr.legacy_make_typeface(None, FontStyle::default()) {
-        let font = Font::new(tf as Typeface, Some(12.0));
+    if let Some(tf) = crate::elements::bundled_typeface(crate::widgets::theme::fonts::PRIMARY) {
+        let font = Font::new(tf, Some(12.0));
         let mut tp = Paint::default();
         tp.set_color4f(Color4f::new(0.3, 0.3, 0.3, 1.0), None);
         let label = format!("General\n#{gtype}");
@@ -787,56 +784,33 @@ fn draw_placeholder(canvas: &Canvas, gtype: i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// 验证 typeface 解析链在无法匹配字体时返回 None 而非 panic（Issue #5 修复验证）。
-    /// 修复前此处使用 .expect("无法创建 Typeface") 会在字体不可用时 panic；
-    /// 修复后使用 match typeface { Some => ..., None => return } 安全处理。
+    /// An unavailable family resolves to `None` instead of panicking, so a
+    /// caller skips the label rather than drawing it in a substituted typeface.
     #[test]
     #[cfg(feature = "skia-core")]
-    fn typeface_fallback_chain_returns_none_gracefully() {
-        let font_mgr = FontMgr::default();
-        let style = FontStyle::normal();
-
-        // 测试：使用一个不存在的字体名 → 应该 fallback 到 Noto Sans CJK 或系统字体
-        let resolved_name: Option<&str> = Some("NonExistentFont12345");
-        let typeface = resolved_name
-            .and_then(|name| font_mgr.match_family_style(name, style))
-            .or_else(|| font_mgr.match_family_style("Noto Sans CJK SC", style))
-            .or_else(|| font_mgr.legacy_make_typeface(None, style));
-
-        // 在大多数系统上，至少有一个 fallback 字体可用
-        // 但关键是：即使 typeface 为 None，代码也不应该 panic
-        if let Some(_tf) = typeface {
-            // fallback 链找到了可用字体 — 正常路径
-        } else {
-            // 所有 fallback 都失败 — 修复后的代码会 warn + return，而非 panic
-            // 此测试确认 None 情况被正确处理
-        }
+    fn bundled_typeface_reports_an_unavailable_family_as_none() {
+        assert!(crate::elements::bundled_typeface("NoSuchFamily12345").is_none());
     }
 
-    /// 验证 catch_unwind 能隔离 draw_general_text 中的任何意外 panic。
+    /// The declared families the element path draws must resolve from the
+    /// configured font directory, with no host font configuration involved.
     #[test]
     #[cfg(feature = "skia-core")]
-    fn draw_general_text_is_panic_safe() {
-        let _w = crate::transform::CANVAS_WIDTH as i32;
-        let _h = crate::transform::CANVAS_HEIGHT as i32;
-
-        // 模拟修复后的 match 逻辑
-        let font_mgr = FontMgr::default();
-        let style = FontStyle::normal();
-        let typeface = None
-            .and_then(|_: Option<&str>| None::<skia_safe::Typeface>)
-            .or_else(|| font_mgr.match_family_style("Noto Sans CJK SC", style))
-            .or_else(|| font_mgr.legacy_make_typeface(None, style));
-
-        // 修复后的核心逻辑：不再使用 .expect()，而是安全 match
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            match typeface {
-                Some(_tf) => { /* 正常渲染 */ }
-                None => { /* 修复后：warn + return，不 panic */ }
+    fn bundled_typeface_resolves_the_families_the_element_path_declares() {
+        for family in [
+            crate::widgets::theme::fonts::PRIMARY,
+            crate::widgets::theme::fonts::EMPHASIS,
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        ] {
+            if crate::sdf::outline::resolve_font_path(family).is_none() {
+                // The font directory is not populated in this environment; the
+                // mapping itself is covered by the resolver's own tests.
+                continue;
             }
-        }));
-        assert!(result.is_ok(), "typeface 安全 match 不应该 panic");
+            assert!(
+                crate::elements::bundled_typeface(family).is_some(),
+                "{family} resolved to a file but could not be loaded"
+            );
+        }
     }
 }

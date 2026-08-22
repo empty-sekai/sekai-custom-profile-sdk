@@ -3,7 +3,7 @@
 use super::common::draw_placeholder;
 use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, ResolvedHonor};
-use skia_safe::{Canvas, Color4f, Font, FontMgr, FontStyle, Paint, PaintStyle, Point, Rect};
+use skia_safe::{Canvas, Color4f, Font, Paint, PaintStyle, Point, Rect};
 
 /// 绘制普通称号。
 pub fn render_honor(
@@ -233,16 +233,19 @@ fn render_live_master_overlay(
 }
 
 /// Draws Live Master progress with the same simple-text recipe as the game.
+///
+/// This number is not TMP text: the game draws it with a plain UI text component,
+/// so it keeps a simple centred glyph fill rather than going through the SDF
+/// atlas. The face comes from the caller-supplied font directory like every other
+/// family the engine draws.
 pub(crate) fn draw_live_master_progress_text(
     canvas: &Canvas,
     text: &str,
     center_x: f32,
     baseline_y: f32,
 ) -> bool {
-    let font_mgr = FontMgr::default();
-    let Some(typeface) = font_mgr
-        .match_family_style("Noto Sans CJK SC", FontStyle::bold())
-        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::bold()))
+    let Some(typeface) =
+        crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
     else {
         return false;
     };
