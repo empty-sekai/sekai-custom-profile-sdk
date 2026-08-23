@@ -54,6 +54,10 @@ pub enum ShapeSdfExecutor {
     /// Measure the page and select SIMD only when its validated classifier
     /// says the work is large enough. This mode must never use player IDs.
     Auto,
+    /// Slow correctness oracle used by tests and candidate analysis only. It
+    /// consumes the same typed RG8 Shape atlas plan as `Simd` through the
+    /// scalar tile executor, so it runs on hosts without AVX-512.
+    ScalarOracle,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -130,6 +134,7 @@ pub struct ProfileBackendCapabilities {
     pub text_scalar_oracle: bool,
     pub shape_skia: bool,
     pub shape_simd: bool,
+    pub shape_scalar_oracle: bool,
 }
 
 impl ProfileBackendCapabilities {
@@ -146,6 +151,7 @@ impl ProfileBackendCapabilities {
             text_scalar_oracle: false,
             shape_skia: true,
             shape_simd: false,
+            shape_scalar_oracle: false,
         }
     }
 }
@@ -297,6 +303,7 @@ fn shape_available(requested: ShapeSdfExecutor, capabilities: ProfileBackendCapa
     match requested {
         ShapeSdfExecutor::Skia => capabilities.shape_skia,
         ShapeSdfExecutor::Simd | ShapeSdfExecutor::Auto => capabilities.shape_simd,
+        ShapeSdfExecutor::ScalarOracle => capabilities.shape_scalar_oracle,
     }
 }
 
@@ -1210,6 +1217,7 @@ mod tests {
                 text_scalar_oracle: false,
                 shape_skia: true,
                 shape_simd: true,
+                shape_scalar_oracle: false,
             })
             .expect("available Shape Auto must resolve");
         assert_eq!(resolved.shape_sdf, ShapeSdfExecutor::Simd);

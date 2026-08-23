@@ -146,6 +146,7 @@ impl CustomProfileRenderer {
             text_scalar_oracle: sdf_atlases_available,
             shape_skia: true,
             shape_simd: simd && self.shape_sdf_atlas.is_some(),
+            shape_scalar_oracle: self.shape_sdf_atlas.is_some(),
         }
     }
 
@@ -605,8 +606,6 @@ impl CustomProfileRenderer {
         report.profile_surface_scratch_bytes = profile_surface_bytes as u64;
         report.profile_surface_page_touch_count = profile_surface_bytes.div_ceil(4096) as u64;
         let surface_init_started = std::time::Instant::now();
-        let width = crate::transform::CANVAS_WIDTH as u32;
-        let height = crate::transform::CANVAS_HEIGHT as u32;
         let mut rgba = self.take_profile_rgba_scratch(profile_surface_bytes, [255; 4]);
         // Touch every page of the page-sized scratch so the first request does
         // not pay the faults.
@@ -615,6 +614,8 @@ impl CustomProfileRenderer {
         report.profile_surface_init_ns = elapsed_ns(surface_init_started);
         #[cfg(feature = "jpeg-turbo")]
         {
+            let width = crate::transform::CANVAS_WIDTH as u32;
+            let height = crate::transform::CANVAS_HEIGHT as u32;
             let jpeg_probe = crate::jpeg_turbo::encode_rgba(&[255u8; 8 * 8 * 4], 8, 8, 90)
                 .map_err(|error| format!("JPEG encoder prewarm failed: {error}"))?;
             report.jpeg_encoder_prewarm_bytes = jpeg_probe.len() as u64;
@@ -1594,6 +1595,7 @@ impl CustomProfileRenderer {
         let shape_executor = match actual_shape {
             ShapeSdfExecutor::Skia => None,
             ShapeSdfExecutor::Simd => Some(FullCardSdfCandidateExecutor::SimdF32),
+            ShapeSdfExecutor::ScalarOracle => Some(FullCardSdfCandidateExecutor::ScalarF32),
             ShapeSdfExecutor::Auto => unreachable!("Auto is resolved to a concrete executor"),
         };
 
@@ -3977,6 +3979,37 @@ pub struct OrderedLayerRaster {
 }
 
 impl CustomProfileRenderer {
+    /// Renders a card's animation export: preflights the compiled scene,
+    /// rasterizes each element layer through the ordered SDF path with the
+    /// executors the backend selection grants, composites the frames, and
+    /// encodes them with the preset's format. Static cards return
+    /// `animated: false` without an artifact.
+    #[cfg(feature = "animation-export")]
+    pub fn render_animation_with_profile_backend(
+        &self,
+        card: &CustomProfileCard,
+        profile: Option<&crate::profile::ProfileData>,
+        document_key: &str,
+        region: &str,
+        preset: &crate::animation::ResolvedAnimationPreset,
+        backend: Option<crate::profile_backend::ProfileBackendConfig>,
+    ) -> Result<crate::animation::ProfileAnimationExport, String> {
+        let generation = self.pin_render_object_generation();
+        let md = self.snapshot();
+        crate::animation::export_profile_animation(
+            self,
+            card,
+            profile,
+            document_key,
+            region,
+            &md,
+            self.assets.as_deref(),
+            preset,
+            backend,
+            generation.store(),
+        )
+    }
+
     /// Renders one element layer through the ordered SDF path — the same
     /// pipeline the profile backend uses for full pages — onto a transparent
     /// surface expanded for the layer's dynamic travel, then crops to the
@@ -4020,6 +4053,9 @@ impl CustomProfileRenderer {
             crate::profile_backend::ShapeSdfExecutor::Skia => None,
             crate::profile_backend::ShapeSdfExecutor::Simd => {
                 Some(FullCardSdfCandidateExecutor::SimdF32)
+            }
+            crate::profile_backend::ShapeSdfExecutor::ScalarOracle => {
+                Some(FullCardSdfCandidateExecutor::ScalarF32)
             }
             crate::profile_backend::ShapeSdfExecutor::Auto => {
                 return Err("shape executor Auto must be resolved by the caller".into());

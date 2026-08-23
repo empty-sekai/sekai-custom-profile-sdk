@@ -1015,7 +1015,7 @@ fn rasterize_animation_groups(
     ),
     String,
 > {
-    use crate::profile_backend::{ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor};
+    use crate::profile_backend::ProfileRenderTelemetry;
 
     let Some(config) = backend else {
         return Err(
@@ -1037,8 +1037,7 @@ fn rasterize_animation_groups(
         .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
         .count() as u64;
 
-    let sdf_selected = selection.text_sdf != TextSdfExecutor::LegacySkia
-        || selection.shape_sdf != ShapeSdfExecutor::Skia;
+    let sdf_selected = animation_selection_grants_sdf_executors(&selection);
     let (layers, bytes, scratch) = if sdf_selected {
         let forbid_legacy_elements =
             selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
@@ -1062,6 +1061,17 @@ fn rasterize_animation_groups(
     telemetry.bytes.scratch_peak_bytes = scratch as u64;
     telemetry.timings.total_ns = elapsed_ns(started);
     Ok((layers, bytes, scratch, Some(telemetry)))
+}
+
+/// Whether a resolved backend grants an executor the ordered layer raster can
+/// run on. Animation frames come from the same ordered SDF path pages use, and
+/// there is no layer raster behind it, so a selection that grants neither
+/// executor is rejected rather than degraded.
+fn animation_selection_grants_sdf_executors(
+    selection: &crate::profile_backend::ResolvedProfileBackend,
+) -> bool {
+    selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia
+        || selection.shape_sdf != crate::profile_backend::ShapeSdfExecutor::Skia
 }
 
 /// Rasterizes each animation group through the ordered SDF path — the same
@@ -4459,6 +4469,75 @@ mod tests {
         redraw_full_frame(&mut oracle, 8, 4, &layers, &after);
 
         assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
+    }
+
+    #[test]
+    fn animation_layers_reject_a_selection_without_sdf_executors() {
+        use crate::profile_backend::{
+            ProfileSurfaceBackend, ResolvedProfileBackend, ShapeSdfExecutor, TextSdfExecutor,
+        };
+
+        let legacy_only = ResolvedProfileBackend {
+            surface: ProfileSurfaceBackend::SkiaRasterCpu,
+            text_sdf: TextSdfExecutor::LegacySkia,
+            shape_sdf: ShapeSdfExecutor::Skia,
+            fallbacks: Vec::new(),
+        };
+        assert!(!animation_selection_grants_sdf_executors(&legacy_only));
+
+        for (text_sdf, shape_sdf) in [
+            (TextSdfExecutor::Simd, ShapeSdfExecutor::Skia),
+            (TextSdfExecutor::LegacySkia, ShapeSdfExecutor::Simd),
+            (
+                TextSdfExecutor::ScalarOracle,
+                ShapeSdfExecutor::ScalarOracle,
+            ),
+        ] {
+            let selection = ResolvedProfileBackend {
+                surface: ProfileSurfaceBackend::SkiaRasterCpu,
+                text_sdf,
+                shape_sdf,
+                fallbacks: Vec::new(),
+            };
+            assert!(
+                animation_selection_grants_sdf_executors(&selection),
+                "{text_sdf:?}/{shape_sdf:?} grants an ordered executor",
+            );
+        }
+    }
+
+    #[test]
+    fn every_encoder_is_byte_deterministic_for_one_frame_sequence() {
+        // Animation artifacts are compared byte-for-byte across engine
+        // revisions, so no encoder may embed a wall-clock stamp, an address,
+        // or any other per-run value.
+        let spec = AnimationEncodeSpec {
+            width: 16,
+            height: 8,
+            fps: 12,
+            frame_count: 3,
+            looped: true,
+            output_budget_bytes: 1_000_000,
+            gif_quality: 80,
+        };
+        let frame_at = |index: u32| {
+            let shade = (index * 40 + 15) as u8;
+            Ok(vec![shade, 255 - shade, shade / 2, 255].repeat(16 * 8))
+        };
+        for format in [
+            AnimationFormat::Gif,
+            AnimationFormat::Webp,
+            AnimationFormat::Apng,
+            AnimationFormat::Mp4,
+        ] {
+            let first = encode_rgba_frames(format, &spec, frame_at).unwrap();
+            let second = encode_rgba_frames(format, &spec, frame_at).unwrap();
+            validate_magic(format, &first.data).unwrap();
+            assert_eq!(
+                first.data, second.data,
+                "{format:?} encoded two different byte streams for one frame sequence",
+            );
+        }
     }
 
     #[test]

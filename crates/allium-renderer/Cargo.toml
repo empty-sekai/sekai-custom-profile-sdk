@@ -53,8 +53,7 @@ jpeg-turbo = ["dep:turbojpeg-sys"]
 # Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
 # Animation encoders. Layer rasterization runs through the ordered SDF path
-# when a backend config selects SDF executors; the legacy layer raster
-# additionally needs a `skia` preset.
+# selected by the profile backend config.
 animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
 dev = ["skia-oracle", "parallel", "dep:tracing-subscriber"]
 
@@ -113,4 +112,8 @@ required-features = ["dev"]
 
 [[example]]
 name = "ordered_pages"
+
+[[example]]
+name = "animation_export"
+required-features = ["animation-export"]
 
