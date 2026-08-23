@@ -1,9 +1,14 @@
-use super::*;
+use super::layout;
+use crate::masterdata::MasterData;
+#[cfg(feature = "skia-core")]
+use skia_safe::{Canvas, Color4f, Point};
+
 use crate::text::{
-    capture_text_sdf_with_placement, draw_text_with_placement, wrap_rich_text_to_width,
-    wrap_rich_text_to_width_with_atlases, TextRenderPlacement, TextSdfCaptureError,
-    TextSdfCaptureTimings, TEXT_SCALE,
+    capture_text_sdf_with_placement, wrap_rich_text_to_width_with_atlases, TextRenderPlacement,
+    TextSdfCaptureError, TextSdfCaptureTimings, TEXT_SCALE,
 };
+#[cfg(feature = "skia-core")]
+use crate::text::{draw_text_with_placement, wrap_rich_text_to_width};
 use crate::types::{ObjectData, Quaternion, TextElement, Vec3};
 
 #[derive(Clone, Copy)]
@@ -15,7 +20,9 @@ pub(super) enum SdfTextAlign {
 
 pub(crate) struct GeneralSdfTextSpec {
     pub element: TextElement,
-    pub(super) origin: Point,
+    /// Element-centre translation `(x, y)` the canvas draw path applies.
+    #[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+    pub(super) origin: [f32; 2],
     pub(super) render_placement: TextRenderPlacement,
 }
 
@@ -53,7 +60,7 @@ pub(crate) fn build_general_sdf_text_from_lowered(
             w: width,
             h: 0.0,
         },
-        Color4f::new(color[0], color[1], color[2], color[3]),
+        color,
         align,
         lowered_font_size * TEXT_SCALE,
         line_spacing,
@@ -128,7 +135,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
 pub(super) fn build_general_sdf_text(
     text: &str,
     layout: &layout::ElementLayout,
-    color: Color4f,
+    color: [f32; 4],
     align: SdfTextAlign,
     font_size: f32,
     line_spacing: f32,
@@ -139,14 +146,13 @@ pub(super) fn build_general_sdf_text(
 pub(super) fn build_general_sdf_text_with_font(
     text: &str,
     layout: &layout::ElementLayout,
-    color: Color4f,
+    color: [f32; 4],
     align: SdfTextAlign,
     font_size: f32,
     line_spacing: f32,
     font_id: i32,
 ) -> GeneralSdfTextSpec {
-    let rgba = [color.r, color.g, color.b, color.a]
-        .map(|channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let rgba = color.map(|channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
     let text = format!(
         "<color=#{:02X}{:02X}{:02X}{:02X}>{text}</color>",
         rgba[0], rgba[1], rgba[2], rgba[3]
@@ -188,7 +194,7 @@ pub(super) fn build_general_sdf_text_with_font(
             text,
             text_type,
         },
-        origin: Point::new(layout.cx, -layout.cy),
+        origin: [layout.cx, -layout.cy],
         render_placement: TextRenderPlacement {
             anchor_x,
             baseline: Some(font_size * 0.35 / TEXT_SCALE),
@@ -196,6 +202,7 @@ pub(super) fn build_general_sdf_text_with_font(
     }
 }
 
+#[cfg(feature = "skia-core")]
 pub(super) fn draw_general_sdf_text_wrapped(
     canvas: &Canvas,
     text: &str,
@@ -222,6 +229,7 @@ pub(super) fn draw_general_sdf_text_wrapped(
     );
 }
 
+#[cfg(feature = "skia-core")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_general_sdf_text_with_font(
     canvas: &Canvas,
@@ -249,6 +257,7 @@ pub(super) fn draw_general_sdf_text_with_font(
     );
 }
 
+#[cfg(feature = "skia-core")]
 #[allow(clippy::too_many_arguments)]
 fn draw_general_sdf_text_impl(
     canvas: &Canvas,
@@ -266,7 +275,7 @@ fn draw_general_sdf_text_impl(
     let mut spec = build_general_sdf_text_with_font(
         text,
         layout,
-        color,
+        [color.r, color.g, color.b, color.a],
         align,
         font_size,
         line_spacing,
@@ -279,7 +288,7 @@ fn draw_general_sdf_text_impl(
         spec.render_placement.baseline = render_baseline;
     }
     canvas.save();
-    canvas.translate(spec.origin);
+    canvas.translate(Point::new(spec.origin[0], spec.origin[1]));
     canvas.scale((TEXT_SCALE, TEXT_SCALE));
     draw_text_with_placement(canvas, &spec.element, md, spec.render_placement);
     canvas.restore();

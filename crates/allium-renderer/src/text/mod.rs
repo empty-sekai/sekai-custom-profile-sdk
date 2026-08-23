@@ -803,6 +803,7 @@ enum TextDecorationKind {
 struct TextLayoutRun {
     font_family: Option<String>,
     draw_ops: Vec<DrawCharOp>,
+    #[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
     decorations: Vec<TextDecorationOp>,
     timings: TextSdfCaptureTimings,
 }

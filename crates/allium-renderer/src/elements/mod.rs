@@ -1,9 +1,6 @@
 //! 场景元素渲染模块。
 
-#[cfg(feature = "skia-core")]
 pub mod generals;
-#[cfg(not(feature = "skia-core"))]
-pub mod generals {}
 #[cfg(feature = "skia-core")]
 pub mod honor;
 #[cfg(feature = "skia-core")]

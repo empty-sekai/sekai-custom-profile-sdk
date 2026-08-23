@@ -1219,19 +1219,7 @@ fn render_image_commands_into(
                 break;
             }
         }
-        #[cfg(not(feature = "skia-core"))]
-        let text_only = {
-            // Semantic text still resolves its glyph stream through the layout
-            // module, which has not been ported off the raster backend. A build
-            // without it reports the commands as skipped instead of a partial
-            // page, so the caller sees the gap.
-            let _ = &text_batch;
-            false
-        };
         if text_only && !text_batch.is_empty() {
-            #[cfg(not(feature = "skia-core"))]
-            unreachable!("text batching is disabled without the layout module");
-            #[cfg(feature = "skia-core")]
             let execution = render_semantic_text_commands(
                 &text_batch,
                 semantic_sdf,
@@ -1240,14 +1228,11 @@ fn render_image_commands_into(
                 height,
                 executor,
             )?;
-            #[cfg(feature = "skia-core")]
-            {
-                stats.text_command_count = text_batch.len() as u64;
-                stats.blended_fragment_count = execution.blended_fragment_count;
-                stats.simd_packet_count = execution.simd_packet_count;
-                stats.render_ns = elapsed_ns(started);
-                return Ok(stats);
-            }
+            stats.text_command_count = text_batch.len() as u64;
+            stats.blended_fragment_count = execution.blended_fragment_count;
+            stats.simd_packet_count = execution.simd_packet_count;
+            stats.render_ns = elapsed_ns(started);
+            return Ok(stats);
         }
     }
 
@@ -1294,16 +1279,6 @@ fn render_image_commands_into(
                     .last_mut()
                     .map(|target| target.pixels.as_mut_slice())
                     .unwrap_or(destination);
-                #[cfg(not(feature = "skia-core"))]
-                {
-                    // See the batching note above: the glyph stream is not
-                    // available without the layout module.
-                    let _ = (semantic_sdf, target, executor);
-                    stats.skipped_text_command_count =
-                        stats.skipped_text_command_count.saturating_add(1);
-                    continue;
-                }
-                #[cfg(feature = "skia-core")]
                 let execution = render_semantic_text_command(
                     command,
                     layer,
@@ -1314,16 +1289,13 @@ fn render_image_commands_into(
                     height,
                     executor,
                 )?;
-                #[cfg(feature = "skia-core")]
-                {
-                    stats.text_command_count = stats.text_command_count.saturating_add(1);
-                    stats.blended_fragment_count = stats
-                        .blended_fragment_count
-                        .saturating_add(execution.blended_fragment_count);
-                    stats.simd_packet_count = stats
-                        .simd_packet_count
-                        .saturating_add(execution.simd_packet_count);
-                }
+                stats.text_command_count = stats.text_command_count.saturating_add(1);
+                stats.blended_fragment_count = stats
+                    .blended_fragment_count
+                    .saturating_add(execution.blended_fragment_count);
+                stats.simd_packet_count = stats
+                    .simd_packet_count
+                    .saturating_add(execution.simd_packet_count);
             }
             SemanticCommandPayload::Shape {
                 primitive,
@@ -2254,7 +2226,6 @@ fn unsupported<T>(role: &str, feature: &str) -> Result<T, ProfileCompositorError
     })
 }
 
-#[cfg(feature = "skia-core")]
 fn render_semantic_text_command(
     command: &SemanticCommandSource,
     layer: &LayerSource,
@@ -2275,7 +2246,6 @@ fn render_semantic_text_command(
     )
 }
 
-#[cfg(feature = "skia-core")]
 fn render_semantic_text_commands(
     commands: &[(&SemanticCommandSource, &LayerSource, f32)],
     context: SemanticSdfContext<'_>,
@@ -2316,7 +2286,6 @@ fn render_semantic_text_commands(
     })
 }
 
-#[cfg(feature = "skia-core")]
 fn append_semantic_text_draws(
     command: &SemanticCommandSource,
     layer: &LayerSource,

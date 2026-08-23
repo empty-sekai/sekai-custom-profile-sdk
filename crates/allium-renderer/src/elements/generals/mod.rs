@@ -13,11 +13,8 @@ use crate::profile::ProfileData;
 #[cfg(feature = "skia-core")]
 use skia_safe::{Canvas, Color, Color4f, Font, Paint, PaintStyle, Point, Rect};
 
-#[cfg(feature = "skia-core")]
 pub(crate) mod layout;
-#[cfg(feature = "skia-core")]
 pub(crate) mod sdf_text;
-#[cfg(feature = "skia-core")]
 
 /// 绘制 General 面板（canvas 原点已在元素中心）。
 #[cfg(feature = "skia-core")]
@@ -481,7 +478,7 @@ fn draw_shared_general_recipe(
     }
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
 fn strip_live_master_star_assets(
     snapshot: &mut allium_renderer_core::profile_scene::ProfileComponentSnapshot,
 ) {
@@ -499,7 +496,7 @@ fn strip_live_master_star_assets(
     }
 }
 
-#[cfg(all(test, feature = "skia-core"))]
+#[cfg(test)]
 mod sdf_text_contract_tests {
     use super::*;
 
@@ -513,7 +510,7 @@ mod sdf_text_contract_tests {
                 w: 200.0,
                 h: 32.0,
             },
-            Color4f::new(0.2, 0.2, 0.2, 1.0),
+            [0.2, 0.2, 0.2, 1.0],
             sdf_text::SdfTextAlign::Left,
             26.0,
             6.0,
@@ -521,7 +518,7 @@ mod sdf_text_contract_tests {
         assert_eq!(spec.element.font_id, 1);
         assert!(spec.element.text.contains("<color=#ff0000>玩家</color>"));
         assert_eq!(spec.element.text_type & 0x07, 1);
-        assert_eq!(spec.origin.x, 10.0);
+        assert_eq!(spec.origin[0], 10.0);
         assert_eq!(spec.render_placement.anchor_x, -50.0);
         assert_eq!(spec.render_placement.baseline, Some(26.0 * 0.35 / 2.0));
     }
@@ -536,7 +533,7 @@ mod sdf_text_contract_tests {
                 w: 400.0,
                 h: 96.0,
             },
-            Color4f::new(0.2, 0.2, 0.2, 1.0),
+            [0.2, 0.2, 0.2, 1.0],
             sdf_text::SdfTextAlign::Left,
             26.0,
             6.0,
@@ -555,13 +552,13 @@ mod sdf_text_contract_tests {
                 w: 200.0,
                 h: 32.0,
             },
-            Color4f::new(1.0, 1.0, 1.0, 1.0),
+            [1.0, 1.0, 1.0, 1.0],
             sdf_text::SdfTextAlign::Right,
             26.0,
             0.0,
         );
         assert_eq!(spec.element.text_type & 0x07, 4);
-        assert_eq!(spec.origin.x, 10.0);
+        assert_eq!(spec.origin[0], 10.0);
         assert_eq!(spec.render_placement.anchor_x, 50.0);
     }
 
@@ -699,6 +696,7 @@ mod sdf_text_contract_tests {
         assert!(!source.contains(&["canvas.clip_", "rect(spec.clip"].concat()));
     }
 
+    #[cfg(feature = "skia-core")]
     #[test]
     fn fused_level_bar_tint_is_pixel_exact_to_native_src_in_layer() {
         use skia_safe::{surfaces, AlphaType, ColorType, IPoint, ImageInfo};
