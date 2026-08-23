@@ -1021,22 +1021,28 @@ fn rasterize_animation_groups(
     };
 
     let Some(config) = backend else {
-        let (layers, bytes, scratch) =
-            rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-        return Ok((layers, bytes, scratch, None));
+        #[cfg(not(feature = "skia-core"))]
+        {
+            return Err(
+                "animation without a backend config uses the legacy layer raster,                  which requires the raster backend"
+                    .into(),
+            );
+        }
+        #[cfg(feature = "skia-core")]
+        {
+            let (layers, bytes, scratch) =
+                rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
+            return Ok((layers, bytes, scratch, None));
+        }
     };
     let started = std::time::Instant::now();
-    // The OSS animation exporter currently owns only the Skia layer raster path.
-    // Resolve against that truthful capability surface so candidate requests
-    // either fail closed or take the configured whole-page fallback.
-    let mut capabilities = renderer.profile_backend_capabilities();
-    capabilities.text_simd = false;
-    capabilities.text_scalar_oracle = false;
-    capabilities.shape_simd = false;
     let selection = config
-        .resolve(capabilities)
+        .resolve(renderer.profile_backend_capabilities())
         .map_err(|error| error.to_string())?;
-    let mut telemetry = ProfileRenderTelemetry::new(config, PROFILE_RENDER_CONTRACT_LEGACY_SKIA);
+    let mut telemetry = ProfileRenderTelemetry::new(
+        config,
+        crate::profile_backend::PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
+    );
     telemetry.apply_selection(selection.clone());
     telemetry.work.page_count = 1;
     telemetry.work.dynamic_layer_count = groups
@@ -1044,17 +1050,86 @@ fn rasterize_animation_groups(
         .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
         .count() as u64;
 
-    let (layers, bytes, scratch) =
-        rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-    telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-    telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-    telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
+    let sdf_selected = selection.text_sdf != TextSdfExecutor::LegacySkia
+        || selection.shape_sdf != ShapeSdfExecutor::Skia;
+    let (layers, bytes, scratch) = if sdf_selected {
+        let forbid_legacy_elements =
+            selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
+        rasterize_animation_groups_ordered(
+            renderer,
+            card,
+            profile,
+            groups,
+            selection.text_sdf,
+            selection.shape_sdf,
+            forbid_legacy_elements,
+        )?
+    } else {
+        #[cfg(not(feature = "skia-core"))]
+        {
+            let _ = (md, assets);
+            return Err("the legacy animation layer raster requires the raster backend".into());
+        }
+        #[cfg(feature = "skia-core")]
+        {
+            let (layers, bytes, scratch) =
+                rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
+            telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
+            telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
+            telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
+            (layers, bytes, scratch)
+        }
+    };
     telemetry.bytes.layer_cache_bytes = bytes as u64;
     telemetry.bytes.scratch_peak_bytes = scratch as u64;
     telemetry.timings.total_ns = elapsed_ns(started);
     Ok((layers, bytes, scratch, Some(telemetry)))
 }
 
+/// Rasterizes each animation group through the ordered SDF path — the same
+/// pipeline the profile backend uses for pages — with the executors the
+/// backend selection granted.
+fn rasterize_animation_groups_ordered(
+    renderer: &crate::renderer::CustomProfileRenderer,
+    card: &CustomProfileCard,
+    profile: Option<&crate::profile::ProfileData>,
+    groups: &[AnimationRasterGroup],
+    text_sdf: crate::profile_backend::TextSdfExecutor,
+    shape_sdf: crate::profile_backend::ShapeSdfExecutor,
+    forbid_legacy_elements: bool,
+) -> Result<(Vec<RasterLayer>, usize, usize), String> {
+    let mut layers = Vec::with_capacity(groups.len());
+    let mut layer_raster_bytes = 0usize;
+    let mut scratch_peak_bytes = 0usize;
+    for (dynamic_layer_id, members) in groups {
+        let layer_card = grouped_layer_card(card, members);
+        let output = renderer.render_ordered_element_layer_cropped(
+            &layer_card,
+            profile,
+            text_sdf,
+            shape_sdf,
+            animation_group_uses_dynamic_bounds(*dynamic_layer_id),
+            forbid_legacy_elements,
+        )?;
+        push_animation_raster(
+            &mut layers,
+            &mut layer_raster_bytes,
+            &mut scratch_peak_bytes,
+            *dynamic_layer_id,
+            crate::renderer::CroppedLayerRaster {
+                pixels: output.pixels,
+                x: output.x,
+                y: output.y,
+                width: output.width,
+                height: output.height,
+                scratch_peak_bytes: output.scratch_peak_bytes,
+            },
+        )?;
+    }
+    Ok((layers, layer_raster_bytes, scratch_peak_bytes))
+}
+
+#[cfg(feature = "skia-core")]
 fn rasterize_animation_groups_legacy(
     card: &CustomProfileCard,
     profile: Option<&crate::profile::ProfileData>,
@@ -4451,6 +4526,7 @@ mod tests {
     /// across integer, fractional, upscaled, downscaled and partly off-canvas
     /// placements, blending a translucent source onto a noisy premultiplied
     /// ground.
+    #[cfg(feature = "skia-core")]
     #[test]
     fn the_frame_blit_matches_the_reference_draw() {
         let mut state = 0xDEAD_BEEF_CAFE_BABEu64;

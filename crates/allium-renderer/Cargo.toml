@@ -63,7 +63,10 @@ bundled-freetype = ["freetype-rs/bundled"]
 jpeg-turbo = ["dep:turbojpeg-sys"]
 # Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
-animation-export = ["skia", "dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
+# Animation encoders. Layer rasterization runs through the ordered SDF path
+# when a backend config selects SDF executors; the legacy layer raster
+# additionally needs a `skia` preset.
+animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
 dev = ["skia", "dep:tracing-subscriber"]
 
 [[example]]
@@ -131,4 +134,8 @@ required-features = ["dev"]
 [[bin]]
 name = "build-render-object-store"
 path = "tools/build_render_object_store.rs"
+required-features = ["dev"]
+
+[[example]]
+name = "layer_parity"
 required-features = ["dev"]

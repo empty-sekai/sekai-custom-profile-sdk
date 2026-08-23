@@ -3121,7 +3121,7 @@ pub fn render_element_layer_cropped(
     render_element_layer_cropped_impl(card, md, assets, profile, webp_quality, true)
 }
 
-#[cfg(feature = "animation-export")]
+#[cfg(all(feature = "animation-export", feature = "skia-core"))]
 pub(crate) fn render_element_layer_cropped_animation_raster(
     card: &CustomProfileCard,
     md: &MasterData,
@@ -3148,7 +3148,6 @@ pub(crate) fn render_element_layer_cropped_animation_raster(
 }
 
 /// 扫描像素缓冲区，找到所有 alpha > 0 像素的最小包围矩形。
-#[cfg(feature = "skia-core")]
 fn find_opaque_bounds(
     pixels: &[u8],
     width: u32,
@@ -5397,7 +5396,6 @@ fn render_element_layer_cropped_impl(
     })
 }
 
-#[cfg(feature = "skia-core")]
 struct CroppedLayerRasterWithMetadata {
     /// Tight premultiplied RGBA8, `width * 4` bytes per row.
     pixels: Vec<u8>,
@@ -5487,8 +5485,136 @@ fn render_element_layer_cropped_raster_impl(
     })
 }
 
+/// Premultiplied RGBA8 layer raster produced by the ordered SDF path,
+/// cropped to the tight non-transparent bounds.
+pub struct OrderedLayerRaster {
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    pub pixels: Vec<u8>,
+    /// Crop offset in canvas coordinates (any dynamic expansion removed).
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Dynamic timeline metadata for the layer, when requested and present.
+    pub dynamic: Option<LayerDynamic>,
+    /// Elements the run drew through the legacy renderer; zero when the
+    /// SDF executors and the software image path covered everything.
+    pub legacy_element_count: u64,
+    /// Peak transient bytes: the full surface plus the cropped copy.
+    pub scratch_peak_bytes: usize,
+}
+
+impl CustomProfileRenderer {
+    /// Renders one element layer through the ordered SDF path — the same
+    /// pipeline the profile backend uses for full pages — onto a transparent
+    /// surface expanded for the layer's dynamic travel, then crops to the
+    /// tight non-transparent bounds. Executor choices follow the backend
+    /// vocabulary; `ShapeSdfExecutor::Auto` must be resolved by the caller.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_ordered_element_layer_cropped(
+        &self,
+        card: &CustomProfileCard,
+        profile: Option<&crate::profile::ProfileData>,
+        text_sdf: crate::profile_backend::TextSdfExecutor,
+        shape_sdf: crate::profile_backend::ShapeSdfExecutor,
+        include_dynamic_bounds: bool,
+        forbid_legacy_elements: bool,
+    ) -> Result<OrderedLayerRaster, String> {
+        let md = self.snapshot();
+        let w = crate::transform::CANVAS_WIDTH as i32;
+        let h = crate::transform::CANVAS_HEIGHT as i32;
+        let dynamic = if include_dynamic_bounds {
+            let elements = crate::elements::flatten_and_sort(card);
+            layer_dynamic_for_elements(&elements, &md)
+        } else {
+            None
+        };
+        let expansion = dynamic
+            .as_ref()
+            .map(dynamic_canvas_expansion)
+            .unwrap_or_default();
+        let surface_w = w + expansion.left + expansion.right;
+        let surface_h = h + expansion.top + expansion.bottom;
+        let text_executor = match text_sdf {
+            crate::profile_backend::TextSdfExecutor::LegacySkia => None,
+            crate::profile_backend::TextSdfExecutor::Simd => {
+                Some(FullCardSdfCandidateExecutor::SimdF32)
+            }
+            crate::profile_backend::TextSdfExecutor::ScalarOracle => {
+                Some(FullCardSdfCandidateExecutor::ScalarF32)
+            }
+        };
+        let shape_executor = match shape_sdf {
+            crate::profile_backend::ShapeSdfExecutor::Skia => None,
+            crate::profile_backend::ShapeSdfExecutor::Simd => {
+                Some(FullCardSdfCandidateExecutor::SimdF32)
+            }
+            crate::profile_backend::ShapeSdfExecutor::Auto => {
+                return Err("shape executor Auto must be resolved by the caller".into());
+            }
+        };
+        let spec = OrderedSdfSurfaceSpec {
+            surface_width: u32::try_from(surface_w)
+                .map_err(|_| "layer surface width overflow".to_string())?,
+            surface_height: u32::try_from(surface_h)
+                .map_err(|_| "layer surface height overflow".to_string())?,
+            canvas_width: w as u32,
+            canvas_height: h as u32,
+            canvas_origin_x: expansion.left as f32,
+            canvas_origin_y: expansion.top as f32,
+            clear_rgba: [0, 0, 0, 0],
+            prepare_direct_axis_shape: false,
+            forbid_legacy_elements,
+        };
+        let generation = self.pin_render_object_generation();
+        let mut output = self.render_ordered_sdf_surface_candidate(
+            card,
+            profile,
+            text_executor,
+            shape_executor,
+            32,
+            32,
+            false,
+            false,
+            spec,
+            &md,
+            self.assets.as_deref(),
+            None,
+            generation.store(),
+        )?;
+        let rgba = std::mem::take(&mut output.rgba);
+        let row_bytes = surface_w as usize * 4;
+        let surface_bytes = row_bytes * surface_h as usize;
+        let (bx, by, bw, bh) = opaque_bounds_for_pixels(&rgba, surface_w, surface_h, row_bytes)?;
+        let raster = if bw == 0 || bh == 0 {
+            OrderedLayerRaster {
+                pixels: Vec::new(),
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                dynamic,
+                legacy_element_count: output.legacy_element_count,
+                scratch_peak_bytes: surface_bytes,
+            }
+        } else {
+            OrderedLayerRaster {
+                pixels: crop_pixels_lossless(&rgba, row_bytes, bx, by, bw, bh)?,
+                x: bx as i32 - expansion.left,
+                y: by as i32 - expansion.top,
+                width: bw,
+                height: bh,
+                dynamic,
+                legacy_element_count: output.legacy_element_count,
+                scratch_peak_bytes: surface_bytes.saturating_add(bw as usize * bh as usize * 4),
+            }
+        };
+        self.recycle_profile_rgba_scratch(rgba);
+        Ok(raster)
+    }
+}
+
 /// Copies a tight sub-rectangle out of a premultiplied RGBA8 buffer.
-#[cfg(feature = "skia-core")]
 fn crop_pixels_lossless(
     pixels: &[u8],
     source_row_bytes: usize,
@@ -5511,65 +5637,6 @@ fn crop_pixels_lossless(
     Ok(cropped)
 }
 
-/// Creates a tight Skia raster directly from an executor-owned premultiplied
-/// RGBA8 surface. Unlike the generic image path, this performs no full-surface
-/// `SkData` copy, no `read_pixels`, and no intermediate crop surface.
-#[cfg(feature = "animation-export")]
-#[allow(clippy::too_many_arguments)]
-fn crop_premul_rgba8_direct(
-    pixels: &[u8],
-    surface_width: u32,
-    surface_height: u32,
-    row_bytes: usize,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-) -> Result<skia_safe::Image, String> {
-    let required_bytes = row_bytes
-        .checked_mul(surface_height as usize)
-        .ok_or_else(|| "animation backend surface byte length overflow".to_string())?;
-    if row_bytes < surface_width as usize * 4 || pixels.len() < required_bytes {
-        return Err("animation backend RGBA surface is truncated".to_string());
-    }
-    let right = x
-        .checked_add(width)
-        .ok_or_else(|| "animation backend crop x overflow".to_string())?;
-    let bottom = y
-        .checked_add(height)
-        .ok_or_else(|| "animation backend crop y overflow".to_string())?;
-    if width == 0 || height == 0 || right > surface_width || bottom > surface_height {
-        return Err("animation backend crop is outside the RGBA surface".to_string());
-    }
-
-    let tight_row_bytes = width as usize * 4;
-    let tight_len = tight_row_bytes
-        .checked_mul(height as usize)
-        .ok_or_else(|| "animation backend crop byte length overflow".to_string())?;
-    let mut tight = vec![0u8; tight_len];
-    for row in 0..height as usize {
-        let source_start = (y as usize + row)
-            .saturating_mul(row_bytes)
-            .saturating_add(x as usize * 4);
-        let source_end = source_start
-            .checked_add(tight_row_bytes)
-            .ok_or_else(|| "animation backend crop row overflow".to_string())?;
-        let destination_start = row * tight_row_bytes;
-        tight[destination_start..destination_start + tight_row_bytes]
-            .copy_from_slice(&pixels[source_start..source_end]);
-    }
-
-    let info = skia_safe::ImageInfo::new(
-        (width as i32, height as i32),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Premul,
-        None,
-    );
-    skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(&tight), tight_row_bytes)
-        .ok_or_else(|| "create cropped animation backend raster image failed".to_string())
-}
-
-#[cfg(feature = "skia-core")]
 fn layer_dynamic_for_elements(
     elements: &[crate::elements::RenderElement<'_>],
     md: &MasterData,
@@ -5659,7 +5726,6 @@ fn render_layer_pixels(
     Ok(pixels)
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Default)]
 struct CanvasExpansion {
     left: i32,
@@ -5668,7 +5734,6 @@ struct CanvasExpansion {
     bottom: i32,
 }
 
-#[cfg(feature = "skia-core")]
 fn dynamic_canvas_expansion(dynamic: &LayerDynamic) -> CanvasExpansion {
     const PAD: i32 = 8;
     let mut min_dx = 0.0_f32;
@@ -5699,7 +5764,6 @@ fn dynamic_canvas_expansion(dynamic: &LayerDynamic) -> CanvasExpansion {
 ///
 /// Only the alpha channel takes part, so premultiplication does not affect the
 /// result.
-#[cfg(feature = "skia-core")]
 fn opaque_bounds_for_pixels(
     pixels: &[u8],
     w: i32,
@@ -5712,7 +5776,6 @@ fn opaque_bounds_for_pixels(
     Ok(find_opaque_bounds(pixels, w as u32, h as u32, row_bytes))
 }
 
-#[cfg(feature = "skia-core")]
 fn find_opaque_bounds_scalar(
     pixels: &[u8],
     width: u32,
@@ -5757,7 +5820,7 @@ fn find_opaque_bounds_scalar(
 /// Checks 16 RGBA8 pixels per ZMM load. The compare produces one bit per byte;
 /// BMI2 PEXT compacts byte positions 3, 7, ... 63 into a 16-bit pixel mask.
 /// The tail remains scalar, avoiding masked-load setup once per scanline.
-#[cfg(all(feature = "skia", target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,bmi2")]
 unsafe fn find_opaque_bounds_avx512(
     pixels: &[u8],
