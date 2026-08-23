@@ -69,7 +69,7 @@ pub(crate) fn build_general_sdf_text_from_lowered(
 /// not own advances, wrapping, baselines, or font fallback.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_general_sdf_text_from_lowered(
-    canvas: &Canvas,
+    base_affine: [f32; 6],
     text: &str,
     bounds_width: f32,
     color: [f32; 4],
@@ -102,10 +102,18 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
             spec.element.text = wrapped;
         }
     }
-    canvas.save();
-    canvas.scale((TEXT_SCALE, TEXT_SCALE));
+    // The lowered capture used to scale a canvas by TEXT_SCALE after the
+    // content transform; the same composition expressed directly.
+    let scaled_base = [
+        base_affine[0] * TEXT_SCALE,
+        base_affine[1] * TEXT_SCALE,
+        base_affine[2] * TEXT_SCALE,
+        base_affine[3] * TEXT_SCALE,
+        base_affine[4],
+        base_affine[5],
+    ];
     let timings = capture_text_sdf_with_placement(
-        canvas,
+        scaled_base,
         &spec.element,
         md,
         Some(atlases),
@@ -113,7 +121,6 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
         outline,
         observer,
     );
-    canvas.restore();
     Ok(timings)
 }
 

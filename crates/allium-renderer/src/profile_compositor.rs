@@ -2204,16 +2204,8 @@ fn render_semantic_text_commands(
     executor: ImageExecutor,
 ) -> Result<crate::sdf::tile::SdfExecutionStats, ProfileCompositorError> {
     let mut draws = Vec::new();
-    let capture_canvas = skia_safe::Canvas::new_null();
     for &(command, layer, translate_y) in commands {
-        append_semantic_text_draws(
-            command,
-            layer,
-            translate_y,
-            context,
-            &capture_canvas,
-            &mut draws,
-        )?;
+        append_semantic_text_draws(command, layer, translate_y, context, &mut draws)?;
     }
     if draws.is_empty() {
         return Ok(crate::sdf::tile::SdfExecutionStats::default());
@@ -2248,7 +2240,6 @@ fn append_semantic_text_draws(
     layer: &LayerSource,
     translate_y: f32,
     context: SemanticSdfContext<'_>,
-    capture_canvas: &skia_safe::Canvas,
     draws: &mut Vec<crate::sdf::tile::SdfDrawCommand>,
 ) -> Result<(), ProfileCompositorError> {
     let SemanticCommandPayload::Text {
@@ -2343,10 +2334,8 @@ fn append_semantic_text_draws(
         },
         Err(error) => capture_error = Some(format!("{error:?}")),
     };
-    capture_canvas.save();
-    capture_canvas.concat(&skia_safe::Matrix::from_affine(&content_matrix));
     let capture = crate::elements::generals::sdf_text::capture_general_sdf_text_from_lowered(
-        capture_canvas,
+        content_matrix,
         value,
         command.bounds.width,
         *color,
@@ -2364,7 +2353,6 @@ fn append_semantic_text_draws(
         context.text_atlases,
         &mut observer,
     );
-    capture_canvas.restore();
     capture.map_err(|reason| ProfileCompositorError::SemanticSdf {
         role: command.role.clone(),
         reason,
