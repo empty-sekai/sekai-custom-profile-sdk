@@ -1208,7 +1208,7 @@ fn render_image_commands_into(
                     width,
                     height,
                 )?;
-                #[cfg(not(feature = "skia"))]
+                #[cfg(not(feature = "skia-core"))]
                 {
                     let _ = (target, width, height);
                     stats.skipped_text_command_count =
@@ -1505,8 +1505,6 @@ fn render_live_master_progress_text(
     width: u32,
     height: u32,
 ) -> Result<(), ProfileCompositorError> {
-    use skia_safe::{surfaces, AlphaType, ColorType, ImageInfo, Matrix};
-
     let SemanticCommandPayload::Text { source, size, .. } = &command.payload else {
         return Err(ProfileCompositorError::SemanticSdf {
             role: command.role.clone(),
@@ -1527,27 +1525,30 @@ fn render_live_master_progress_text(
         .and_then(|placement| placement.baseline)
         .map(|value| value * 2.0)
         .unwrap_or(font_size / 2.0);
-    let dimensions = (
-        i32::try_from(width)
-            .map_err(|_| ProfileCompositorError::InvalidCanvas { width, height })?,
-        i32::try_from(height)
-            .map_err(|_| ProfileCompositorError::InvalidCanvas { width, height })?,
-    );
-    let info = ImageInfo::new(dimensions, ColorType::RGBA8888, AlphaType::Premul, None);
-    let mut surface = surfaces::wrap_pixels(&info, destination, Some(width as usize * 4), None)
-        .ok_or_else(|| ProfileCompositorError::SemanticSdf {
-            role: command.role.clone(),
-            reason: "wrap live-master progress destination".into(),
-        })?;
     let mut local_matrix = command.matrix;
     local_matrix[5] += translate_y;
     let matrix = compose_matrix(layer.matrix, local_matrix);
-    let canvas = surface.canvas();
-    canvas.save();
-    canvas.concat(&Matrix::from_affine(&matrix));
-    let rendered =
-        crate::elements::honor::draw_live_master_progress_text(canvas, text, 0.0, baseline);
-    canvas.restore();
+    // The dependency-free raster reproduces the draw at a rounded pen point,
+    // which is only the same transform when the matrix carries no scale, skew
+    // or rotation. Honor slots are lowered translation-only; anything else
+    // fails closed rather than drifting.
+    if matrix[0] != 1.0 || matrix[1] != 0.0 || matrix[2] != 0.0 || matrix[3] != 1.0 {
+        return unsupported(&command.role, "transformed live-master progress text");
+    }
+    let rendered = crate::text::simple_raster::draw_centered_white_text(
+        destination,
+        width,
+        height,
+        crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        text,
+        20.0,
+        matrix[4],
+        matrix[5] + baseline,
+    )
+    .map_err(|reason| ProfileCompositorError::SemanticSdf {
+        role: command.role.clone(),
+        reason,
+    })?;
     if !rendered {
         return Err(ProfileCompositorError::SemanticSdf {
             role: command.role.clone(),
@@ -3693,6 +3694,114 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(stats.text_command_count, 1);
         assert_eq!(stats.skipped_text_command_count, 0);
+    }
+
+    /// The dependency-free digit raster must also blend exactly like the Skia
+    /// draw over content that is already on the page, not just over
+    /// transparency.
+    #[cfg(feature = "skia-core")]
+    #[test]
+    fn live_master_progress_blends_exactly_over_existing_content() {
+        use skia_safe::{
+            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Paint, PaintStyle, Point,
+        };
+
+        if crate::sdf::outline::load_font_bytes_for_family(
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        )
+        .is_none()
+        {
+            eprintln!("skipping: FONT_DIR does not provide the progress face");
+            return;
+        }
+
+        // Deterministic premultiplied noise: alpha >= every channel.
+        let background: Vec<u8> = {
+            let mut state = 0x0123_4567_89AB_CDEFu64;
+            (0..200 * 80)
+                .flat_map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    let alpha = (state >> 32) as u8;
+                    [
+                        ((state >> 8) as u8).min(alpha),
+                        ((state >> 16) as u8).min(alpha),
+                        ((state >> 24) as u8).min(alpha),
+                        alpha,
+                    ]
+                })
+                .collect()
+        };
+
+        let layer_id = StableId(312);
+        let mut command = SemanticCommandSource::profile_text(
+            StableId(313),
+            layer_id,
+            "honor-4243-progress",
+            "userHonorMissions.4243",
+            "2470",
+            FontRole::RegionFontId(1),
+        );
+        command.matrix = [1.0, 0.0, 0.0, 1.0, 100.7, 50.3];
+        if let SemanticCommandPayload::Text {
+            source,
+            size,
+            color,
+            alignment,
+            ..
+        } = &mut command.payload
+        {
+            *source = TextSource::ProfileField {
+                field: "userHonorMissions.4243".into(),
+                value: "2470".into(),
+            };
+            *size = 20.0;
+            *color = [1.0; 4];
+            *alignment = 2;
+        }
+        let scene = scene(
+            test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            vec![command],
+        );
+        let (_temp, store) = store(vec![("dummy", 1, 1, vec![0; 4])]);
+        let mut actual = background.clone();
+        render_image_commands_into(
+            &scene,
+            &store,
+            200,
+            80,
+            ImageExecutor::Scalar,
+            &mut actual,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut expected = background;
+        let info = ImageInfo::new((200, 80), ColorType::RGBA8888, AlphaType::Premul, None);
+        let mut surface =
+            surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(200 * 4), None).unwrap();
+        let typeface =
+            crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
+                .expect("progress face");
+        let font = Font::new(typeface, Some(20.0));
+        let text_width = font.measure_str("2470", None).0;
+        let mut paint = Paint::default();
+        paint.set_style(PaintStyle::Fill);
+        paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+        paint.set_anti_alias(true);
+        surface.canvas().draw_str(
+            "2470",
+            Point::new(100.7 - text_width / 2.0, 50.3 + 10.0),
+            &font,
+            &paint,
+        );
+        drop(surface);
+
+        assert_eq!(actual, expected);
     }
 
     fn store(

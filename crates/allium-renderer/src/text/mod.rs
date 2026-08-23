@@ -5,6 +5,8 @@ mod font;
 #[cfg(feature = "skia-core")]
 mod measure;
 pub mod richtext;
+#[cfg(feature = "skia-core")]
+pub(crate) mod simple_raster;
 
 #[cfg(feature = "skia-core")]
 use crate::masterdata::{MasterData, ResolvedColor};
