@@ -426,7 +426,8 @@ struct DrawCharOp {
     skew_x: f32,
     rotate_deg: f32,
     font_size: f32,
-    face: Paint,
+    /// Straight (non-premultiplied) RGBA of the glyph face, in unit range.
+    face: [f32; 4],
     sdf_params: Option<crate::sdf::rasterize::SdfOutlineParams>,
     mesh_carrier: crate::sdf::rasterize::RuntimeLikeGlyphMeshCarrier,
 }
@@ -674,7 +675,7 @@ fn execute_draw_ops_skia(
             continue;
         }
         if let Some(ref sdf_p) = op.sdf_params {
-            let fc = op.face.color4f();
+            let fc = skia_safe::Color4f::new(op.face[0], op.face[1], op.face[2], op.face[3]);
             crate::sdf::rasterize::render_char_sdf(
                 canvas,
                 &op.ch,
@@ -687,7 +688,7 @@ fn execute_draw_ops_skia(
                 sdf_p,
             );
         } else {
-            let fc = op.face.color4f();
+            let fc = skia_safe::Color4f::new(op.face[0], op.face[1], op.face[2], op.face[3]);
             let rendered = crate::sdf::rasterize::render_char_face_from_outline(
                 canvas,
                 &op.ch,
@@ -777,7 +778,7 @@ fn resolve_text_sdf_glyph_from_affine(
     op: &DrawCharOp,
     resolved_font_family: Option<&str>,
 ) -> Result<ResolvedTextSdfGlyph, TextSdfCaptureError> {
-    let face_color = op.face.color4f();
+    let face_color = op.face;
     Ok(ResolvedTextSdfGlyph {
         text: op.ch.clone(),
         font_family: resolved_font_family.map(str::to_owned),
@@ -794,7 +795,7 @@ fn resolve_text_sdf_glyph_from_affine(
         material: crate::sdf::rasterize::resolve_tile_material_direct(
             op.mesh_carrier,
             op.scale_x,
-            face_color,
+            skia_safe::Color4f::new(face_color[0], face_color[1], face_color[2], face_color[3]),
             op.sdf_params.as_ref(),
         ),
     })
@@ -1726,7 +1727,7 @@ fn draw_text_with_placement_policy(
                     skew_x: if seg.italic { -0.21 } else { 0.0 },
                     rotate_deg: seg.rotate.unwrap_or(0.0),
                     font_size: render_size,
-                    face: fp.clone(),
+                    face: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0, 1.0],
                     sdf_params: if has_outline {
                         resolve_outline_params(outline_override, text, md, render_size)
                     } else {
@@ -1806,7 +1807,7 @@ fn draw_text_with_placement_policy(
                 skew_x: 0.0,
                 rotate_deg: 0.0,
                 font_size: base_size,
-                face: fp,
+                face: [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0, 1.0],
                 sdf_params: if has_outline {
                     resolve_outline_params(outline_override, text, md, base_size)
                 } else {
@@ -2281,8 +2282,7 @@ mod tests {
     fn direct_capture_matrix_matches_canvas_concat_recipe() {
         use skia_safe::{Color4f, Paint, Point};
 
-        let mut face = Paint::default();
-        face.set_color4f(Color4f::new(0.2, 0.4, 0.6, 0.75), None);
+        let face = [0.2f32, 0.4, 0.6, 0.75];
         let op = super::DrawCharOp {
             ch: "A".into(),
             x: 13.25,
@@ -2339,8 +2339,7 @@ mod tests {
             [0.9271839, 0.3746066, -0.3746066, 0.9271839, 17.0, -9.0],
             [1.2, -0.15, 0.35, 0.8, -3.25, 41.5],
         ];
-        let mut face = Paint::default();
-        face.set_color4f(Color4f::new(0.2, 0.4, 0.6, 0.75), None);
+        let face = [0.2f32, 0.4, 0.6, 0.75];
         let op = super::DrawCharOp {
             ch: "字".into(),
             x: 13.25,
