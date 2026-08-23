@@ -605,6 +605,7 @@ fn try_render_general_base_into(
             "general-base-tile",
             None,
             None,
+            None,
             ImageExecutor::Simd,
         )?;
         base_fragments = base_fragments.saturating_add(raster.fragments);
@@ -945,6 +946,7 @@ pub fn build_deck_art_variant_simd(
         [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         BlendMode::SrcOver,
         "deck-art-variant-builder",
+        None,
         None,
         None,
         ImageExecutor::Simd,
@@ -1300,7 +1302,6 @@ fn render_image_commands_into(
                     layer.matrix,
                     matrix,
                     clip.as_ref(),
-                    alpha_mask.as_ref(),
                     &command.metadata,
                 )?;
                 let object_key = render_object_key_for_resource(resource);
@@ -1353,6 +1354,25 @@ fn render_image_commands_into(
                     }
                     (object, *uv)
                 };
+                // The mask resolves like any other resource, including the
+                // source fallback, so a mask that has no baked object still
+                // renders instead of dropping the command.
+                let mask_key = alpha_mask.as_ref().map(render_object_key_for_resource);
+                let mask_fallback = match (&mask_key, alpha_mask.as_ref()) {
+                    (Some(key), Some(resource)) if store.object(key).is_none() => {
+                        load_source_fallback_object(assets, resource)?
+                    }
+                    _ => None,
+                };
+                let mask_object = match (&mask_key, alpha_mask.as_ref()) {
+                    (Some(key), Some(_)) => Some(
+                        store
+                            .object(key)
+                            .or_else(|| mask_fallback.as_ref().map(OwnedRenderObject::mapped))
+                            .ok_or_else(|| ProfileCompositorError::MissingObject(key.clone()))?,
+                    ),
+                    _ => None,
+                };
                 let target = targets
                     .last_mut()
                     .map(|target| target.pixels.as_mut_slice())
@@ -1370,6 +1390,7 @@ fn render_image_commands_into(
                     &command.role,
                     command_clip,
                     image_clip,
+                    mask_object,
                     executor,
                 )?;
                 stats.image_command_count = stats.image_command_count.saturating_add(1);
@@ -1687,7 +1708,6 @@ pub fn render_image_scene_skia_reference(
                     layer.matrix,
                     matrix,
                     clip.as_ref(),
-                    alpha_mask.as_ref(),
                     &command.metadata,
                 )?;
                 if !tint.iter().all(|value| value.to_bits() == 1.0f32.to_bits()) {
@@ -1755,6 +1775,47 @@ pub fn render_image_scene_skia_reference(
                         }
                     }
                 }
+                // A mask is applied by drawing the image into an isolated layer
+                // and then drawing the mask over it with DstIn, which is the
+                // recipe the element path uses.
+                let mask_image = match alpha_mask {
+                    Some(resource) => {
+                        let mask_key = render_object_key_for_resource(resource);
+                        let object = store.object(&mask_key).ok_or_else(|| {
+                            ProfileCompositorError::MissingObject(mask_key.clone())
+                        })?;
+                        validate_object(object, &command.role)?;
+                        let info = ImageInfo::new(
+                            (object.entry.width as i32, object.entry.height as i32),
+                            ColorType::RGBA8888,
+                            AlphaType::Premul,
+                            None,
+                        );
+                        Some(
+                            images::raster_from_data(
+                                &info,
+                                Data::new_copy(object.pixels),
+                                object.entry.row_bytes as usize,
+                            )
+                            .ok_or_else(|| {
+                                ProfileCompositorError::SkiaReference(format!(
+                                    "create mask {mask_key}"
+                                ))
+                            })?,
+                        )
+                    }
+                    None => None,
+                };
+                if mask_image.is_some() {
+                    canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(
+                        &SkiaRect::from_xywh(
+                            command.bounds.x,
+                            command.bounds.y,
+                            command.bounds.width,
+                            command.bounds.height,
+                        ),
+                    ));
+                }
                 let mut paint = Paint::default();
                 paint.set_blend_mode(skia_blend_mode(command.blend_mode));
                 let source = SkiaRect::from_xywh(
@@ -1773,6 +1834,12 @@ pub fn render_image_scene_skia_reference(
                         _ => SrcRectConstraint::Fast,
                     };
                     canvas.draw_image_rect(image, Some((&source, constraint)), destination, &paint);
+                }
+                if let Some(mask) = mask_image {
+                    let mut mask_paint = Paint::default();
+                    mask_paint.set_blend_mode(skia_safe::BlendMode::DstIn);
+                    canvas.draw_image_rect(&mask, None, destination, &mask_paint);
+                    canvas.restore();
                 }
                 canvas.restore();
                 stats.image_command_count = stats.image_command_count.saturating_add(1);
@@ -1911,7 +1978,6 @@ fn validate_image_command(
     clip_matrix: Matrix2d,
     matrix: Matrix2d,
     image_clip: Option<&allium_renderer_core::ImageClip>,
-    alpha_mask: Option<&ResourceKey>,
     metadata: &BTreeMap<String, ParameterValue>,
 ) -> Result<(Option<AxisAlignedClip>, Option<ImageClipGeometry>), ProfileCompositorError> {
     let command_clip = command_clip
@@ -1928,9 +1994,6 @@ fn validate_image_command(
         }
         allium_renderer_core::ImageClip::Ellipse => ImageClipGeometry::Ellipse,
     });
-    if alpha_mask.is_some() {
-        return unsupported(role, "alpha mask");
-    }
     if matches!(metadata.get("sampling"), Some(ParameterValue::Text(value)) if value != "nearest") {
         return unsupported(role, "non-nearest sampling");
     }
@@ -2008,6 +2071,23 @@ fn intersect_bounds_with_clip(
     let y0 = bounds.y0.max(clamp(clip.min_y.floor(), u32::MAX));
     let y1 = bounds.y1.min(clamp(clip.max_y.ceil(), u32::MAX));
     (x0 < x1 && y0 < y1).then_some(CompositionBounds { x0, y0, x1, y1 })
+}
+
+/// Samples an alpha mask's coverage at a normalised position within the
+/// command's bounds, with the same nearest-neighbour rule as the source.
+fn mask_alpha_at(
+    mask: MappedRenderObject<'_>,
+    u: f32,
+    v: f32,
+    role: &str,
+) -> Result<u8, ProfileCompositorError> {
+    let mx = (u * mask.entry.width as f32).floor();
+    let my = (v * mask.entry.height as f32).floor();
+    let mx = mx.max(0.0).min(mask.entry.width.saturating_sub(1) as f32) as u32;
+    let my = my.max(0.0).min(mask.entry.height.saturating_sub(1) as f32) as u32;
+    let pixel = object_pixel(mask, mx, my)
+        .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))?;
+    Ok(pixel[3])
 }
 
 fn command_clip_contains_bounds(clip: AxisAlignedClip, bounds: Rect, matrix: Matrix2d) -> bool {
@@ -2306,12 +2386,6 @@ fn raster_semantic_shape_command(
     translate_y: f32,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
-    if command.blend_mode != BlendMode::SrcOver {
-        return unsupported(
-            &command.role,
-            &format!("shape blend mode {:?}", command.blend_mode),
-        );
-    }
     let bounds = command.bounds;
     if !bounds.x.is_finite()
         || !bounds.y.is_finite()
@@ -2393,6 +2467,7 @@ fn raster_semantic_shape_command(
                         gradient,
                         stroke,
                         stroke_width,
+                        command.blend_mode,
                     )
                 };
                 if active != 0 {
@@ -2439,7 +2514,7 @@ fn raster_semantic_shape_command(
                     height: canvas_height,
                 },
             )?;
-            blend_pixel(pixel, source, BlendMode::SrcOver);
+            blend_pixel(pixel, source, command.blend_mode);
             stats.fragments = stats.fragments.saturating_add(1);
             stats.scalar_fragments = stats.scalar_fragments.saturating_add(1);
         }
@@ -2527,10 +2602,14 @@ fn raster_image_command(
     role: &str,
     command_clip: Option<AxisAlignedClip>,
     image_clip: Option<ImageClipGeometry>,
+    alpha_mask: Option<MappedRenderObject<'_>>,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
     validate_geometry(bounds, uv, tint, matrix, role)?;
     validate_object(source, role)?;
+    if let Some(mask) = alpha_mask {
+        validate_object(mask, role)?;
+    }
     if bounds.width == 0.0 || bounds.height == 0.0 {
         return Ok(RasterImageStats::default());
     }
@@ -2573,12 +2652,19 @@ fn raster_image_command(
     let mut stats = RasterImageStats::default();
     let packet_blend = executor == ImageExecutor::Simd
         && tint.iter().all(|value| value.to_bits() == 1.0f32.to_bits());
+    // The two fast paths below read the source straight out of the mapped
+    // object, so they cannot fold a second texture into the sample. A masked
+    // command gathers through the loop instead, where the mask is applied before
+    // either blender sees the source.
+    let direct_source_sampling = alpha_mask.is_none();
     #[cfg(target_arch = "x86_64")]
     let affine_packet_blend = packet_blend
+        && direct_source_sampling
         && source.pixels.len() <= i32::MAX as usize
         && source.entry.row_bytes <= i32::MAX as u32;
 
     if packet_blend
+        && direct_source_sampling
         && matrix[0] > 0.0
         && matrix[3] > 0.0
         && matrix[1].to_bits() == 0.0f32.to_bits()
@@ -2666,8 +2752,23 @@ fn raster_image_command(
                     .max(0.0)
                     .min(source.entry.height.saturating_sub(1) as f32)
                     as u32;
-                let source_pixel = object_pixel(source, sx, sy)
+                let mut source_pixel = object_pixel(source, sx, sy)
                     .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))?;
+                if let Some(mask) = alpha_mask {
+                    // The mask spans the command bounds, so it is sampled at the
+                    // same normalised position as the source. Its alpha scales
+                    // the premultiplied source, which is what a `DstIn` draw of
+                    // the mask over the same bounds produces.
+                    let coverage = mask_alpha_at(mask, u, v, role)?;
+                    if coverage == 0 {
+                        continue;
+                    }
+                    if coverage != u8::MAX {
+                        source_pixel = std::array::from_fn(|channel| {
+                            mul_div_255_round(source_pixel[channel], coverage)
+                        });
+                    }
+                }
                 let lane = usize::try_from(packet_x - x).unwrap_or_default();
                 source_pixels[lane] = u32::from_le_bytes(source_pixel);
                 active_mask |= 1u16 << lane;
@@ -4078,6 +4179,230 @@ mod tests {
                 render_image_scene_skia_reference(&scene(layer, vec![clipped]), &store, 2, 1)
                     .expect("Skia reference");
             assert_eq!(output.pixels, reference.pixels);
+        }
+    }
+
+    /// An alpha mask scales the source's coverage, which is what a `DstIn` draw
+    /// of the mask over the same bounds produces. The mask covers the left half
+    /// fully, the right half not at all.
+    #[test]
+    fn an_alpha_mask_scales_source_coverage_over_the_command_bounds() {
+        let (_temp, store) = store(vec![
+            ("texture:assets/mask", 2, 1, vec![0, 0, 0, 255, 0, 0, 0, 0]),
+            ("texture:assets/white", 2, 1, vec![255; 8]),
+        ]);
+        let layer_id = StableId::derive("layer", b"alpha-mask");
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        };
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut command = image_command(
+            "masked",
+            layer_id,
+            "white",
+            bounds,
+            unit,
+            BlendMode::SrcOver,
+        );
+        let SemanticCommandPayload::Image { alpha_mask, .. } = &mut command.payload else {
+            unreachable!("image command helper must create an image payload");
+        };
+        *alpha_mask = Some(ResourceKey {
+            namespace: "assets".into(),
+            key: "mask".into(),
+        });
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        for executor in [ImageExecutor::Scalar, ImageExecutor::Simd] {
+            if executor == ImageExecutor::Simd && !packet_simd_available() {
+                continue;
+            }
+            let mut pixels = vec![0u8; 2 * 4];
+            render_image_commands_into(
+                &scene(layer.clone(), vec![command.clone()]),
+                &store,
+                2,
+                1,
+                executor,
+                &mut pixels,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{executor:?}: {error}"));
+            assert_eq!(pixels, vec![255, 255, 255, 255, 0, 0, 0, 0], "{executor:?}");
+        }
+    }
+
+    /// A partially covering mask scales every premultiplied channel, keeping the
+    /// result premultiplied rather than only dimming alpha.
+    #[test]
+    fn a_partial_alpha_mask_keeps_the_source_premultiplied() {
+        let (_temp, store) = store(vec![
+            ("texture:assets/half", 1, 1, vec![0, 0, 0, 128]),
+            ("texture:assets/white", 1, 1, vec![255; 4]),
+        ]);
+        let layer_id = StableId::derive("layer", b"partial-mask");
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut command =
+            image_command("masked", layer_id, "white", unit, unit, BlendMode::SrcOver);
+        let SemanticCommandPayload::Image { alpha_mask, .. } = &mut command.payload else {
+            unreachable!("image command helper must create an image payload");
+        };
+        *alpha_mask = Some(ResourceKey {
+            namespace: "assets".into(),
+            key: "half".into(),
+        });
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let output =
+            render_image_scene_scalar(&scene(layer.clone(), vec![command.clone()]), &store, 1, 1)
+                .expect("partial mask");
+        // round(255 * 128 / 255) on every channel, alpha included.
+        assert_eq!(output.pixels, vec![128, 128, 128, 128]);
+        #[cfg(feature = "skia-core")]
+        {
+            let reference =
+                render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 1, 1)
+                    .expect("Skia reference");
+            assert_eq!(output.pixels, reference.pixels);
+        }
+    }
+
+    /// A shape command's blend mode is honoured rather than assumed to be
+    /// `SrcOver`, and the packet and scalar rasterizers agree on it.
+    #[test]
+    fn shape_blend_mode_is_honoured_and_simd_matches_scalar() {
+        let layer_id = StableId::derive("layer", b"shape-blend");
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 6.0,
+            height: 2.0,
+        };
+        for blend_mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::Add] {
+            let mut command = shape_command(
+                "shape",
+                layer_id,
+                bounds,
+                ShapePrimitive::Rect,
+                [0.75, 0.5, 0.25, 1.0],
+                None,
+                [0.0; 4],
+                0.0,
+            );
+            command.blend_mode = blend_mode;
+            let commands = vec![command];
+            let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let (_temp, store) = store(vec![("texture:assets/unused", 1, 1, vec![0; 4])]);
+            let mut scalar = vec![64u8; 6 * 2 * 4];
+            render_image_commands_into(
+                &scene(layer.clone(), commands.clone()),
+                &store,
+                6,
+                2,
+                ImageExecutor::Scalar,
+                &mut scalar,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
+            assert_ne!(scalar, vec![64u8; 6 * 2 * 4], "{blend_mode:?} drew nothing");
+            if packet_simd_available() {
+                let mut simd = vec![64u8; 6 * 2 * 4];
+                render_image_commands_into(
+                    &scene(layer, commands),
+                    &store,
+                    6,
+                    2,
+                    ImageExecutor::Simd,
+                    &mut simd,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{blend_mode:?} SIMD: {error}"));
+                assert_eq!(simd, scalar, "{blend_mode:?}");
+            }
+        }
+    }
+
+    /// The packet blender and the scalar blender must agree bit for bit on the
+    /// separable modes too, over a run wide enough to cover a full packet plus a
+    /// masked tail.
+    #[test]
+    fn separable_blend_modes_simd_matches_scalar() {
+        if !packet_simd_available() {
+            return;
+        }
+        const WIDTH: u32 = 21;
+        let under: Vec<u8> = (0..WIDTH)
+            .flat_map(|x| {
+                let v = (x * 11 % 256) as u8;
+                [v, 255 - v, v / 2, (64 + x * 7 % 192) as u8]
+            })
+            .collect();
+        let over: Vec<u8> = (0..WIDTH)
+            .flat_map(|x| {
+                let v = (x * 13 % 256) as u8;
+                [255 - v, v, v / 3, (32 + x * 9 % 224) as u8]
+            })
+            .collect();
+        let (_temp, store) = store(vec![
+            ("texture:assets/over", WIDTH, 1, over),
+            ("texture:assets/under", WIDTH, 1, under),
+        ]);
+        for blend_mode in [
+            BlendMode::SrcOver,
+            BlendMode::SrcIn,
+            BlendMode::DstIn,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Add,
+        ] {
+            let layer_id = StableId::derive("layer", b"separable-simd");
+            let bounds = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: WIDTH as f32,
+                height: 1.0,
+            };
+            let unit = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            };
+            let commands = vec![
+                image_command("under", layer_id, "under", bounds, unit, BlendMode::SrcOver),
+                image_command("over", layer_id, "over", bounds, unit, blend_mode),
+            ];
+            let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let scalar = render_image_scene_scalar(
+                &scene(layer.clone(), commands.clone()),
+                &store,
+                WIDTH,
+                1,
+            )
+            .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
+            let simd = render_image_scene_simd(&scene(layer, commands), &store, WIDTH, 1)
+                .unwrap_or_else(|error| panic!("{blend_mode:?} SIMD: {error}"));
+            assert_eq!(simd.pixels, scalar.pixels, "{blend_mode:?}");
         }
     }
 

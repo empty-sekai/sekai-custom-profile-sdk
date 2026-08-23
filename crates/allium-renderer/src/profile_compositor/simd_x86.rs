@@ -164,6 +164,7 @@ pub(super) unsafe fn raster_semantic_shape_packet(
     gradient: Option<&LinearGradient>,
     stroke: [f32; 4],
     stroke_width: f32,
+    blend_mode: BlendMode,
 ) -> u16 {
     let packet_mask = if lane_count == 16 {
         u16::MAX
@@ -286,7 +287,7 @@ pub(super) unsafe fn raster_semantic_shape_packet(
             ),
         );
     }
-    blend_rgba8_vector(destination, packed, active, BlendMode::SrcOver);
+    blend_rgba8_vector(destination, packed, active, blend_mode);
     covered
 }
 
