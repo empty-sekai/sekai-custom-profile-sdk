@@ -3022,7 +3022,8 @@ pub struct CroppedLayerOutput {
 
 #[cfg(feature = "animation-export")]
 pub(crate) struct CroppedLayerRaster {
-    pub image: skia_safe::Image,
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    pub pixels: Vec<u8>,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -3153,7 +3154,7 @@ pub(crate) fn render_element_layer_cropped_animation_raster(
         include_dynamic_bounds,
     )?;
     Ok(CroppedLayerRaster {
-        image: raster.image,
+        pixels: raster.pixels,
         x: raster.x,
         y: raster.y,
         width: raster.width,
@@ -5441,23 +5442,25 @@ fn render_element_layer_cropped_impl(
         profile,
         include_dynamic_metadata,
     )?;
-    let ctx: Option<&mut skia_safe::gpu::DirectContext> = None;
-    let encoded = raster
-        .image
-        .encode(ctx, skia_safe::EncodedImageFormat::WEBP, Some(webp_quality))
-        .ok_or_else(|| {
-            format!(
-                "WebP 编码失败 (crop {}x{} at {},{})",
-                raster.image.width(),
-                raster.image.height(),
-                raster.x,
-                raster.y
-            )
-        })?;
-    let data = encoded.as_bytes().to_vec();
-    if data.is_empty() {
-        return Err("WebP 编码产生空数据".to_string());
+    // The cropped layer is emitted as lossless PNG through the engine's own
+    // codec. `quality` has no effect on a lossless format and is accepted only
+    // so the call shape stays stable for callers that still pass one.
+    let _ = webp_quality;
+    if raster.width == 0 || raster.height == 0 {
+        return Err("图层裁剪结果为空".to_string());
     }
+    let mut samples = raster.pixels.clone();
+    for pixel in samples.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha != 0 && alpha != u8::MAX {
+            for channel in 0..3 {
+                pixel[channel] =
+                    crate::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
+            }
+        }
+    }
+    let data = crate::codec::png::encode_rgba(raster.width, raster.height, &samples)
+        .map_err(|error| format!("PNG 编码失败: {error}"))?;
     Ok(CroppedLayerOutput {
         data,
         x: raster.x,
@@ -5470,7 +5473,8 @@ fn render_element_layer_cropped_impl(
 
 #[cfg(feature = "skia-core")]
 struct CroppedLayerRasterWithMetadata {
-    image: skia_safe::Image,
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    pixels: Vec<u8>,
     x: i32,
     y: i32,
     width: u32,
@@ -5513,7 +5517,7 @@ fn render_element_layer_cropped_raster_impl(
     let surface_w = w + expansion.left + expansion.right;
     let surface_h = h + expansion.top + expansion.bottom;
 
-    let image = render_layer_image(
+    let pixels = render_layer_pixels(
         &elements,
         md,
         assets,
@@ -5525,14 +5529,12 @@ fn render_element_layer_cropped_raster_impl(
         (expansion.left as f32, expansion.top as f32),
     )?;
     let row_bytes = surface_w as usize * 4;
-    let (bx, by, bw, bh) = opaque_bounds_for_image(&image, surface_w, surface_h, row_bytes)?;
+    let (bx, by, bw, bh) = opaque_bounds_for_pixels(&pixels, surface_w, surface_h, row_bytes)?;
     tracing::debug!(bx, by, bw, bh, "像素包围盒扫描完成");
 
     if bw == 0 || bh == 0 {
-        let mut tiny =
-            skia_safe::surfaces::raster_n32_premul((1, 1)).ok_or("创建 1x1 Surface 失败")?;
         return Ok(CroppedLayerRasterWithMetadata {
-            image: tiny.image_snapshot(),
+            pixels: Vec::new(),
             x: 0,
             y: 0,
             width: 0,
@@ -5543,11 +5545,11 @@ fn render_element_layer_cropped_raster_impl(
         });
     }
 
-    let crop_img = crop_image_lossless(&image, bx, by, bw, bh)?;
+    let cropped = crop_pixels_lossless(&pixels, row_bytes, bx, by, bw, bh)?;
     #[cfg(feature = "animation-export")]
     let cropped_bytes = bw as usize * bh as usize * 4;
     Ok(CroppedLayerRasterWithMetadata {
-        image: crop_img,
+        pixels: cropped,
         x: bx as i32 - expansion.left,
         y: by as i32 - expansion.top,
         width: bw,
@@ -5559,26 +5561,28 @@ fn render_element_layer_cropped_raster_impl(
     })
 }
 
+/// Copies a tight sub-rectangle out of a premultiplied RGBA8 buffer.
 #[cfg(feature = "skia-core")]
-fn crop_image_lossless(
-    image: &skia_safe::Image,
+fn crop_pixels_lossless(
+    pixels: &[u8],
+    source_row_bytes: usize,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-) -> Result<skia_safe::Image, String> {
-    let mut surface = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
-        .ok_or("创建裁剪 Surface 失败")?;
-    surface.canvas().draw_image_rect(
-        image,
-        Some((
-            &skia_safe::Rect::from_xywh(x as f32, y as f32, width as f32, height as f32),
-            skia_safe::canvas::SrcRectConstraint::Strict,
-        )),
-        &skia_safe::Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
-        &skia_safe::Paint::default(),
-    );
-    Ok(surface.image_snapshot())
+) -> Result<Vec<u8>, String> {
+    let row_bytes = width as usize * 4;
+    let start_of = |row: usize| (y as usize + row) * source_row_bytes + x as usize * 4;
+    if pixels.len() < start_of(height as usize - 1) + row_bytes {
+        return Err("裁剪区域超出图层像素缓冲".to_string());
+    }
+    let mut cropped = vec![0u8; row_bytes * height as usize];
+    for row in 0..height as usize {
+        let source = start_of(row);
+        cropped[row * row_bytes..(row + 1) * row_bytes]
+            .copy_from_slice(&pixels[source..source + row_bytes]);
+    }
+    Ok(cropped)
 }
 
 /// Creates a tight Skia raster directly from an executor-owned premultiplied
@@ -5675,7 +5679,11 @@ fn layer_dynamic_for_elements(
 
 #[cfg(feature = "skia-core")]
 #[allow(clippy::too_many_arguments)]
-fn render_layer_image(
+/// Renders the element layer into a caller-owned premultiplied RGBA8 buffer.
+///
+/// The buffer is the surface's own storage, so the pixels are available without
+/// a snapshot or a readback.
+fn render_layer_pixels(
     elements: &[crate::elements::RenderElement<'_>],
     md: &MasterData,
     assets: Option<&AssetStore>,
@@ -5685,9 +5693,18 @@ fn render_layer_image(
     surface_h: i32,
     canvas_size: (i32, i32),
     canvas_origin: (f32, f32),
-) -> Result<skia_safe::Image, String> {
-    let mut surface = skia_safe::surfaces::raster_n32_premul((surface_w, surface_h))
-        .ok_or("创建 Skia Surface 失败")?;
+) -> Result<Vec<u8>, String> {
+    let row_bytes = surface_w as usize * 4;
+    let mut pixels = vec![0u8; row_bytes * surface_h as usize];
+    let info = skia_safe::ImageInfo::new(
+        (surface_w, surface_h),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Premul,
+        None,
+    );
+    let mut surface =
+        skia_safe::surfaces::wrap_pixels(&info, pixels.as_mut_slice(), Some(row_bytes), None)
+            .ok_or("创建 Skia Surface 失败")?;
     let canvas = surface.canvas();
     canvas.clear(skia_safe::Color::TRANSPARENT);
     canvas.save();
@@ -5712,7 +5729,8 @@ fn render_layer_image(
     }
 
     canvas.restore();
-    Ok(surface.image_snapshot())
+    drop(surface);
+    Ok(pixels)
 }
 
 #[cfg(feature = "skia-core")]
@@ -5751,32 +5769,21 @@ fn dynamic_canvas_expansion(dynamic: &LayerDynamic) -> CanvasExpansion {
     }
 }
 
+/// Tight non-transparent bounds of a premultiplied RGBA8 layer buffer.
+///
+/// Only the alpha channel takes part, so premultiplication does not affect the
+/// result.
 #[cfg(feature = "skia-core")]
-fn opaque_bounds_for_image(
-    image: &skia_safe::Image,
+fn opaque_bounds_for_pixels(
+    pixels: &[u8],
     w: i32,
     h: i32,
     row_bytes: usize,
 ) -> Result<(u32, u32, u32, u32), String> {
-    let info = skia_safe::ImageInfo::new(
-        (w, h),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Unpremul,
-        None,
-    );
-    let mut pixel_buf = vec![0u8; row_bytes * h as usize];
-    if !image.read_pixels(
-        &info,
-        &mut pixel_buf,
-        row_bytes,
-        skia_safe::IPoint::new(0, 0),
-        skia_safe::image::CachingHint::Allow,
-    ) {
-        return Err("无法读取像素数据".to_string());
+    if pixels.len() < row_bytes * h as usize {
+        return Err("图层像素缓冲长度不足".to_string());
     }
-    Ok(find_opaque_bounds(
-        &pixel_buf, w as u32, h as u32, row_bytes,
-    ))
+    Ok(find_opaque_bounds(pixels, w as u32, h as u32, row_bytes))
 }
 
 #[cfg(feature = "skia-core")]

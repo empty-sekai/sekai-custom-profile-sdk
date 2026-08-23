@@ -396,11 +396,140 @@ pub fn plan_page_execution(animated: bool, static_policy: &str) -> Result<PageEx
 
 struct RasterLayer {
     dynamic_layer_id: Option<allium_renderer_core::LayerId>,
-    image: skia_safe::Image,
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    pixels: Vec<u8>,
     x: f32,
     y: f32,
     width: u32,
     height: u32,
+}
+
+/// Axis-aligned float rectangle in device space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrameRect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl FrameRect {
+    fn from_xywh(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            left: x,
+            top: y,
+            right: x + width,
+            bottom: y + height,
+        }
+    }
+
+    fn left(self) -> f32 {
+        self.left
+    }
+
+    fn top(self) -> f32 {
+        self.top
+    }
+
+    fn right(self) -> f32 {
+        self.right
+    }
+
+    fn bottom(self) -> f32 {
+        self.bottom
+    }
+}
+
+/// Opaque white, the animation canvas ground.
+const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+/// Fills `rect` of a premultiplied RGBA8 canvas with opaque white, replacing
+/// whatever was there. This is the `BlendMode::Src` clear the dirty-region
+/// redraw performs before recompositing.
+fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
+    if rect.is_empty() {
+        return;
+    }
+    let row_bytes = canvas_width as usize * 4;
+    for y in rect.top..rect.bottom {
+        let start = y as usize * row_bytes + rect.left as usize * 4;
+        let end = start + (rect.right - rect.left) as usize * 4;
+        for pixel in canvas[start..end].chunks_exact_mut(4) {
+            pixel.copy_from_slice(&WHITE);
+        }
+    }
+}
+
+/// Draws a premultiplied RGBA8 source into `destination` over the device
+/// rectangle `rect`, source-over, sampling nearest.
+///
+/// The device coverage is the aliased rounding of each edge, and each covered
+/// pixel takes the source texel its center maps to — the same rule the image
+/// compositor uses for an axis-aligned nearest-sampled command. `clip`
+/// restricts the write without moving the sampling grid, so a dirty-region
+/// redraw produces the pixels a full redraw would.
+fn blit_layer(
+    destination: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    rect: FrameRect,
+    clip: PixelRect,
+) {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0.0 || height <= 0.0 || source_width == 0 || source_height == 0 {
+        return;
+    }
+    let x0 = ((rect.left + 0.5).floor() as i32).max(clip.left).max(0);
+    let y0 = ((rect.top + 0.5).floor() as i32).max(clip.top).max(0);
+    let x1 = ((rect.right + 0.5).floor() as i32)
+        .min(clip.right)
+        .min(canvas_width as i32);
+    let y1 = ((rect.bottom + 0.5).floor() as i32)
+        .min(clip.bottom)
+        .min(canvas_height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let u_scale = source_width as f32 / width;
+    let v_scale = source_height as f32 / height;
+    let row_bytes = canvas_width as usize * 4;
+    let source_row_bytes = source_width as usize * 4;
+    for y in y0..y1 {
+        // Nearest sampling: map the device pixel center into texel coordinates,
+        // then take the texel whose center is closest, with an exact tie going
+        // to the lower index — the reference sampler's rounding.
+        let v = ((y as f32 + 0.5 - rect.top) * v_scale - 1.0).ceil() as i32;
+        let v = v.clamp(0, source_height as i32 - 1) as usize;
+        let source_row = v * source_row_bytes;
+        let destination_row = y as usize * row_bytes;
+        for x in x0..x1 {
+            let u = ((x as f32 + 0.5 - rect.left) * u_scale - 1.0).ceil() as i32;
+            let u = u.clamp(0, source_width as i32 - 1) as usize;
+            let si = source_row + u * 4;
+            let alpha = source[si + 3];
+            if alpha == 0 {
+                continue;
+            }
+            let di = destination_row + x as usize * 4;
+            if alpha == u8::MAX {
+                destination[di..di + 4].copy_from_slice(&source[si..si + 4]);
+                continue;
+            }
+            // Source-over on premultiplied bytes with the 255->256 alpha
+            // promotion: `out = s + d - ((d * (a + 1)) >> 8)`. Reproduces the
+            // reference blitter exactly; see the parity test.
+            let scale = u32::from(alpha) + 1;
+            for channel in 0..4 {
+                let over = u32::from(source[si + channel]);
+                let under = u32::from(destination[di + channel]);
+                destination[di + channel] = (over + under - ((under * scale) >> 8)).min(255) as u8;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -463,21 +592,12 @@ impl PixelRect {
             && self.right >= other.right
             && self.bottom >= other.bottom
     }
-
-    fn as_skia(self) -> skia_safe::Rect {
-        skia_safe::Rect::from_ltrb(
-            self.left as f32,
-            self.top as f32,
-            self.right as f32,
-            self.bottom as f32,
-        )
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LayerFrameState {
     visible: bool,
-    destination: skia_safe::Rect,
+    destination: FrameRect,
     pixel_bounds: PixelRect,
 }
 
@@ -501,7 +621,8 @@ enum FrameCompositeUpdate {
 }
 
 struct AnimationFrameCompositor {
-    surface: skia_safe::Surface,
+    /// Premultiplied RGBA8 canvas the frames composite into.
+    canvas: Vec<u8>,
     width: u32,
     height: u32,
     scale: f32,
@@ -980,7 +1101,7 @@ fn push_animation_raster(
     *scratch_peak_bytes = (*scratch_peak_bytes).max(output.scratch_peak_bytes);
     layers.push(RasterLayer {
         dynamic_layer_id,
-        image: output.image,
+        pixels: output.pixels,
         x: output.x as f32,
         y: output.y as f32,
         width: output.width,
@@ -1076,10 +1197,12 @@ fn plan_ticks(
 
 impl AnimationFrameCompositor {
     fn new(width: u32, height: u32, scale: f32) -> Result<Self, String> {
-        let surface = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
-            .ok_or_else(|| "create animation compositor surface failed".to_string())?;
+        let bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| "animation compositor canvas size overflow".to_string())?;
         Ok(Self {
-            surface,
+            canvas: vec![0; bytes],
             width,
             height,
             scale,
@@ -1132,7 +1255,7 @@ impl AnimationFrameCompositor {
             && self.previous_states.len() == states.len();
         let composite_started = std::time::Instant::now();
         let (mut update, dirty_regions) = if !sequential {
-            redraw_full_frame(&mut self.surface, layers, &states);
+            redraw_full_frame(&mut self.canvas, self.width, self.height, layers, &states);
             self.telemetry.full_composites = self.telemetry.full_composites.saturating_add(1);
             (FrameCompositeUpdate::Full, None)
         } else {
@@ -1153,7 +1276,14 @@ impl AnimationFrameCompositor {
                 (FrameCompositeUpdate::Reused, None)
             } else {
                 for region in &dirty.regions {
-                    redraw_dirty_frame(&mut self.surface, layers, &states, *region);
+                    redraw_dirty_frame(
+                        &mut self.canvas,
+                        self.width,
+                        self.height,
+                        layers,
+                        &states,
+                        *region,
+                    );
                 }
                 self.telemetry.dirty_composites = self.telemetry.dirty_composites.saturating_add(1);
                 self.telemetry.dirty_regions = self
@@ -1177,8 +1307,8 @@ impl AnimationFrameCompositor {
         let readback_started = std::time::Instant::now();
         let readback_bytes = match dirty_regions.as_deref() {
             Some(regions) => {
-                let changed_macroblocks = read_animation_surface_regions_rgba_into_exact(
-                    &mut self.surface,
+                let changed_macroblocks = read_canvas_regions_rgba_into_exact(
+                    &self.canvas,
                     self.width,
                     self.height,
                     regions,
@@ -1190,7 +1320,7 @@ impl AnimationFrameCompositor {
                 regions.iter().map(|region| region.area() * 4).sum()
             }
             None if update == FrameCompositeUpdate::Full => {
-                read_animation_surface_rgba_into(&mut self.surface, self.width, self.height, rgba)?;
+                read_canvas_rgba_into(&self.canvas, self.width, self.height, rgba)?;
                 rgba.len() as u64
             }
             None => 0,
@@ -1218,7 +1348,7 @@ fn layer_frame_state(
         .and_then(|value| value.dynamic.as_ref())
         .map(|value| value.transform)
         .unwrap_or_default();
-    let destination = skia_safe::Rect::from_xywh(
+    let destination = FrameRect::from_xywh(
         (layer.x + transform.dx) * scale,
         (layer.y + transform.dy) * scale,
         layer.width as f32 * scale,
@@ -1235,13 +1365,9 @@ fn layer_frame_state(
     }
 }
 
-fn pixel_bounds_for_destination(
-    destination: skia_safe::Rect,
-    width: u32,
-    height: u32,
-) -> PixelRect {
-    // Keep one guard pixel around the geometric destination so filtered or
-    // sub-pixel Skia coverage never survives just outside the dirty clip.
+fn pixel_bounds_for_destination(destination: FrameRect, width: u32, height: u32) -> PixelRect {
+    // Keep one guard pixel around the geometric destination so sub-pixel
+    // coverage never survives just outside the dirty clip.
     PixelRect {
         left: (destination.left().floor() as i32 - 1).max(0),
         top: (destination.top().floor() as i32 - 1).max(0),
@@ -1251,35 +1377,33 @@ fn pixel_bounds_for_destination(
 }
 
 fn redraw_full_frame(
-    surface: &mut skia_safe::Surface,
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
 ) {
-    let full = PixelRect::full(surface.width() as u32, surface.height() as u32);
-    let canvas = surface.canvas();
-    canvas.clear(skia_safe::Color::WHITE);
-    draw_animation_layers(canvas, layers, states, full);
+    let full = PixelRect::full(width, height);
+    fill_white(canvas, width, full);
+    draw_animation_layers(canvas, width, height, layers, states, full);
 }
 
 fn redraw_dirty_frame(
-    surface: &mut skia_safe::Surface,
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
     dirty: PixelRect,
 ) {
-    let canvas = surface.canvas();
-    canvas.save();
-    canvas.clip_rect(dirty.as_skia(), None, Some(false));
-    let mut clear = skia_safe::Paint::default();
-    clear.set_color(skia_safe::Color::WHITE);
-    clear.set_blend_mode(skia_safe::BlendMode::Src);
-    canvas.draw_rect(dirty.as_skia(), &clear);
-    draw_animation_layers(canvas, layers, states, dirty);
-    canvas.restore();
+    fill_white(canvas, width, dirty);
+    draw_animation_layers(canvas, width, height, layers, states, dirty);
 }
 
 fn draw_animation_layers(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
     dirty: PixelRect,
@@ -1288,56 +1412,63 @@ fn draw_animation_layers(
         if !state.visible || !state.pixel_bounds.intersects(dirty) {
             continue;
         }
-        canvas.draw_image_rect(
-            &layer.image,
-            None,
-            &state.destination,
-            &skia_safe::Paint::default(),
+        blit_layer(
+            canvas,
+            width,
+            height,
+            &layer.pixels,
+            layer.width,
+            layer.height,
+            state.destination,
+            dirty,
         );
     }
 }
 
-fn read_animation_surface_rgba(
-    surface: &mut skia_safe::Surface,
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, String> {
-    let mut rgba = vec![0u8; width as usize * height as usize * 4];
-    read_animation_surface_rgba_into(surface, width, height, &mut rgba)?;
-    Ok(rgba)
-}
-
-fn read_animation_surface_rgba_into(
-    surface: &mut skia_safe::Surface,
+/// Copies the whole premultiplied canvas out as non-premultiplied RGBA, which is
+/// what the frame encoders consume.
+fn read_canvas_rgba_into(
+    canvas: &[u8],
     width: u32,
     height: u32,
     rgba: &mut [u8],
 ) -> Result<(), String> {
     let required = width as usize * height as usize * 4;
-    if rgba.len() != required {
+    if rgba.len() != required || canvas.len() != required {
         return Err("animation frame RGBA buffer has the wrong length".into());
     }
-    let image = surface.image_snapshot();
-    let info = skia_safe::ImageInfo::new(
-        (width as i32, height as i32),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Unpremul,
-        None,
-    );
-    if !image.read_pixels(
-        &info,
-        rgba,
-        width as usize * 4,
-        skia_safe::IPoint::new(0, 0),
-        skia_safe::image::CachingHint::Disallow,
-    ) {
-        return Err("read animation frame pixels failed".into());
+    for (source, destination) in canvas.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+        unpremultiply_pixel(source, destination);
     }
     Ok(())
 }
 
-fn read_animation_surface_regions_rgba_into_exact(
-    surface: &mut skia_safe::Surface,
+/// Non-premultiplied copy of one pixel, using the same recovery the page
+/// encoder applies so both outputs agree byte for byte.
+#[inline]
+fn unpremultiply_pixel(source: &[u8], destination: &mut [u8]) {
+    let alpha = source[3];
+    destination[3] = alpha;
+    if alpha == 0 {
+        destination[0] = 0;
+        destination[1] = 0;
+        destination[2] = 0;
+        return;
+    }
+    if alpha == u8::MAX {
+        destination[0] = source[0];
+        destination[1] = source[1];
+        destination[2] = source[2];
+        return;
+    }
+    for channel in 0..3 {
+        destination[channel] =
+            crate::codec::unpremultiply_channel_like_skia(source[channel], alpha);
+    }
+}
+
+fn read_canvas_regions_rgba_into_exact(
+    canvas: &[u8],
     width: u32,
     height: u32,
     regions: &[PixelRect],
@@ -1357,7 +1488,9 @@ fn read_animation_surface_regions_rgba_into_exact(
         .ok_or_else(|| "animation macroblock map size overflow".to_string())?;
     changed_macroblock_flags.resize(mb_count, 0);
     changed_macroblock_flags.fill(0);
-    let image = surface.image_snapshot();
+    if canvas.len() != required {
+        return Err("animation canvas has the wrong length".into());
+    }
     for region in regions {
         if region.is_empty() {
             continue;
@@ -1366,20 +1499,16 @@ fn read_animation_surface_regions_rgba_into_exact(
         let region_height = (region.bottom - region.top) as usize;
         let packed_row_bytes = region_width * 4;
         scratch.resize(packed_row_bytes * region_height, 0);
-        let info = skia_safe::ImageInfo::new(
-            (region_width as i32, region_height as i32),
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
-            None,
-        );
-        if !image.read_pixels(
-            &info,
-            scratch,
-            packed_row_bytes,
-            skia_safe::IPoint::new(region.left, region.top),
-            skia_safe::image::CachingHint::Disallow,
-        ) {
-            return Err("read animation dirty region pixels failed".into());
+        for local_y in 0..region_height {
+            let source_row = (region.top as usize + local_y) * row_bytes + region.left as usize * 4;
+            let destination_row = local_y * packed_row_bytes;
+            for local_x in 0..region_width {
+                let source = source_row + local_x * 4;
+                let destination = destination_row + local_x * 4;
+                let (before, after) = scratch.split_at_mut(destination);
+                let _ = before;
+                unpremultiply_pixel(&canvas[source..source + 4], &mut after[..4]);
+            }
         }
         mark_changed_macroblocks_for_region(
             rgba,
@@ -1479,13 +1608,16 @@ fn composite_frame(
     height: u32,
     scale: f32,
 ) -> Result<Vec<u8>, String> {
-    let mut surface = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
-        .ok_or_else(|| "create animation frame surface failed".to_string())?;
-    let canvas = surface.canvas();
+    let bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "animation frame size overflow".to_string())?;
+    let mut canvas = vec![0u8; bytes];
+    let full = PixelRect::full(width, height);
     // The game always renders a complete custom-profile card over its default
     // white canvas. Keeping full animation frames opaque also lets GIF delta
     // frames erase a moving layer by writing white pixels at its old position.
-    canvas.clear(skia_safe::Color::WHITE);
+    fill_white(&mut canvas, width, full);
     for layer in layers {
         let state = layer.dynamic_layer_id.and_then(|id| scene.state(id));
         if state.is_some_and(|value| !value.render_mask) {
@@ -1495,20 +1627,26 @@ fn composite_frame(
             .and_then(|value| value.dynamic.as_ref())
             .map(|value| value.transform)
             .unwrap_or_default();
-        let destination = skia_safe::Rect::from_xywh(
+        let destination = FrameRect::from_xywh(
             (layer.x + transform.dx) * scale,
             (layer.y + transform.dy) * scale,
             layer.width as f32 * scale,
             layer.height as f32 * scale,
         );
-        canvas.draw_image_rect(
-            &layer.image,
-            None,
-            &destination,
-            &skia_safe::Paint::default(),
+        blit_layer(
+            &mut canvas,
+            width,
+            height,
+            &layer.pixels,
+            layer.width,
+            layer.height,
+            destination,
+            full,
         );
     }
-    read_animation_surface_rgba(&mut surface, width, height)
+    let mut rgba = vec![0u8; bytes];
+    read_canvas_rgba_into(&canvas, width, height, &mut rgba)?;
+    Ok(rgba)
 }
 
 fn grouped_layer_card(
@@ -1669,39 +1807,40 @@ pub fn wrap_static_png(
     png: &[u8],
     preset: &ResolvedAnimationPreset,
 ) -> Result<EncodedAnimation, String> {
-    let image = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(png))
-        .ok_or_else(|| "decode static PNG for animation wrap failed".to_string())?;
-    let source_width = image.width() as u32;
-    let source_height = image.height() as u32;
+    let decoded = crate::codec::png::decode(png)
+        .map_err(|error| format!("decode static PNG for animation wrap failed: {error}"))?;
+    let source_width = decoded.width;
+    let source_height = decoded.height;
     let scale = (preset.maximum_long_edge as f32 / source_width.max(source_height) as f32).min(1.0);
     let width = (source_width as f32 * scale).round() as u32;
     let height = (source_height as f32 * scale).round() as u32;
-    let mut surface = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
-        .ok_or_else(|| "create static wrap surface failed".to_string())?;
-    surface.canvas().clear(skia_safe::Color::TRANSPARENT);
-    surface.canvas().draw_image_rect(
-        &image,
-        None,
-        &skia_safe::Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
-        &skia_safe::Paint::default(),
-    );
-    let snapshot = surface.image_snapshot();
-    let info = skia_safe::ImageInfo::new(
-        (width as i32, height as i32),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Unpremul,
-        None,
-    );
-    let mut rgba = vec![0; width as usize * height as usize * 4];
-    if !snapshot.read_pixels(
-        &info,
-        &mut rgba,
-        width as usize * 4,
-        skia_safe::IPoint::new(0, 0),
-        skia_safe::image::CachingHint::Disallow,
-    ) {
-        return Err("read static wrap pixels failed".into());
+    let bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "static wrap size overflow".to_string())?;
+    // The decoder yields non-premultiplied samples; the blit composites in
+    // premultiplied space, so premultiply on the way in and recover on the way
+    // out.
+    let mut source = decoded.pixels;
+    for pixel in source.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        for channel in 0..3 {
+            pixel[channel] = crate::codec::premultiply_channel(pixel[channel], alpha);
+        }
     }
+    let mut canvas = vec![0u8; bytes];
+    blit_layer(
+        &mut canvas,
+        width,
+        height,
+        &source,
+        source_width,
+        source_height,
+        FrameRect::from_xywh(0.0, 0.0, width as f32, height as f32),
+        PixelRect::full(width, height),
+    );
+    let mut rgba = vec![0u8; bytes];
+    read_canvas_rgba_into(&canvas, width, height, &mut rgba)?;
     encode_rgba_frames_with_h264(
         preset.format,
         &AnimationEncodeSpec {
@@ -4238,72 +4377,175 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    fn solid_layer(
+        rgba: [u8; 4],
+        x: f32,
+        y: f32,
+        width: u32,
+        height: u32,
+        dynamic_layer_id: Option<allium_renderer_core::LayerId>,
+    ) -> RasterLayer {
+        RasterLayer {
+            dynamic_layer_id,
+            pixels: rgba.repeat(width as usize * height as usize),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn layer_state(x: f32, y: f32, width: f32, height: f32) -> LayerFrameState {
+        let destination = FrameRect::from_xywh(x, y, width, height);
+        LayerFrameState {
+            visible: true,
+            destination,
+            pixel_bounds: pixel_bounds_for_destination(destination, 8, 4),
+        }
+    }
+
+    fn read_frame(canvas: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let mut rgba = vec![0u8; width as usize * height as usize * 4];
+        read_canvas_rgba_into(canvas, width, height, &mut rgba).unwrap();
+        rgba
+    }
+
     #[test]
     fn dirty_compositor_matches_full_redraw_with_interleaved_static_layer() {
-        fn solid_layer(
-            color: skia_safe::Color,
-            x: f32,
-            y: f32,
-            width: u32,
-            height: u32,
-            dynamic_layer_id: Option<allium_renderer_core::LayerId>,
-        ) -> RasterLayer {
-            let mut surface =
-                skia_safe::surfaces::raster_n32_premul((width as i32, height as i32)).unwrap();
-            surface.canvas().clear(color);
-            RasterLayer {
-                dynamic_layer_id,
-                image: surface.image_snapshot(),
-                x,
-                y,
-                width,
-                height,
-            }
-        }
-
-        fn state(x: f32, y: f32, width: f32, height: f32) -> LayerFrameState {
-            let destination = skia_safe::Rect::from_xywh(x, y, width, height);
-            LayerFrameState {
-                visible: true,
-                destination,
-                pixel_bounds: pixel_bounds_for_destination(destination, 8, 4),
-            }
-        }
-
         let layers = vec![
-            solid_layer(skia_safe::Color::BLUE, 0.0, 0.0, 8, 4, None),
+            solid_layer([0, 0, 255, 255], 0.0, 0.0, 8, 4, None),
             solid_layer(
-                skia_safe::Color::RED,
+                [255, 0, 0, 255],
                 1.0,
                 1.0,
                 2,
                 2,
                 Some(allium_renderer_core::StableId(1)),
             ),
-            solid_layer(skia_safe::Color::GREEN, 3.0, 0.0, 2, 4, None),
+            solid_layer([0, 128, 0, 255], 3.0, 0.0, 2, 4, None),
         ];
         let before = vec![
-            state(0.0, 0.0, 8.0, 4.0),
-            state(1.0, 1.0, 2.0, 2.0),
-            state(3.0, 0.0, 2.0, 4.0),
+            layer_state(0.0, 0.0, 8.0, 4.0),
+            layer_state(1.0, 1.0, 2.0, 2.0),
+            layer_state(3.0, 0.0, 2.0, 4.0),
         ];
         let after = vec![
-            state(0.0, 0.0, 8.0, 4.0),
-            state(5.0, 1.0, 2.0, 2.0),
-            state(3.0, 0.0, 2.0, 4.0),
+            layer_state(0.0, 0.0, 8.0, 4.0),
+            layer_state(5.0, 1.0, 2.0, 2.0),
+            layer_state(3.0, 0.0, 2.0, 4.0),
         ];
         let dirty = before[1].pixel_bounds.union(after[1].pixel_bounds);
 
-        let mut incremental = skia_safe::surfaces::raster_n32_premul((8, 4)).unwrap();
-        redraw_full_frame(&mut incremental, &layers, &before);
-        redraw_dirty_frame(&mut incremental, &layers, &after, dirty);
-        let incremental = read_animation_surface_rgba(&mut incremental, 8, 4).unwrap();
+        let mut incremental = vec![0u8; 8 * 4 * 4];
+        redraw_full_frame(&mut incremental, 8, 4, &layers, &before);
+        redraw_dirty_frame(&mut incremental, 8, 4, &layers, &after, dirty);
 
-        let mut oracle = skia_safe::surfaces::raster_n32_premul((8, 4)).unwrap();
-        redraw_full_frame(&mut oracle, &layers, &after);
-        let oracle = read_animation_surface_rgba(&mut oracle, 8, 4).unwrap();
+        let mut oracle = vec![0u8; 8 * 4 * 4];
+        redraw_full_frame(&mut oracle, 8, 4, &layers, &after);
 
-        assert_eq!(incremental, oracle);
+        assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
+    }
+
+    /// The frame blit replaces `Canvas::draw_image_rect` with nearest sampling,
+    /// no anti-aliasing and source-over. The reference draw stays as the oracle
+    /// across integer, fractional, upscaled, downscaled and partly off-canvas
+    /// placements, blending a translucent source onto a noisy premultiplied
+    /// ground.
+    #[test]
+    fn the_frame_blit_matches_the_reference_draw() {
+        let mut state = 0xDEAD_BEEF_CAFE_BABEu64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let (source_width, source_height) = (13u32, 7u32);
+        // Valid premultiplied noise: every channel at or below alpha.
+        let source: Vec<u8> = (0..source_width * source_height)
+            .flat_map(|_| {
+                let value = next();
+                let alpha = (value >> 24) as u8;
+                [
+                    (value as u8).min(alpha),
+                    ((value >> 8) as u8).min(alpha),
+                    ((value >> 16) as u8).min(alpha),
+                    alpha,
+                ]
+            })
+            .collect();
+        let (canvas_width, canvas_height) = (40u32, 30u32);
+        let placements = [
+            (3.0f32, 4.0f32, 13.0f32, 7.0f32),
+            (3.5, 4.25, 13.0, 7.0),
+            (2.0, 3.0, 26.0, 14.0),
+            (1.0, 2.0, 6.5, 3.5),
+            (0.7, 1.3, 9.1, 5.6),
+            (-2.5, -1.5, 20.0, 10.0),
+            (5.25, 6.75, 19.5, 10.5),
+        ];
+        for (x, y, width, height) in placements {
+            let ground: Vec<u8> = (0..canvas_width * canvas_height)
+                .flat_map(|_| {
+                    let value = next();
+                    let alpha = (value >> 32) as u8;
+                    [
+                        ((value >> 4) as u8).min(alpha),
+                        ((value >> 12) as u8).min(alpha),
+                        ((value >> 20) as u8).min(alpha),
+                        alpha,
+                    ]
+                })
+                .collect();
+
+            let mut actual = ground.clone();
+            blit_layer(
+                &mut actual,
+                canvas_width,
+                canvas_height,
+                &source,
+                source_width,
+                source_height,
+                FrameRect::from_xywh(x, y, width, height),
+                PixelRect::full(canvas_width, canvas_height),
+            );
+
+            let mut expected = ground;
+            let info = skia_safe::ImageInfo::new(
+                (canvas_width as i32, canvas_height as i32),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Premul,
+                None,
+            );
+            let mut surface = skia_safe::surfaces::wrap_pixels(
+                &info,
+                expected.as_mut_slice(),
+                Some(canvas_width as usize * 4),
+                None,
+            )
+            .unwrap();
+            let source_info = skia_safe::ImageInfo::new(
+                (source_width as i32, source_height as i32),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Premul,
+                None,
+            );
+            let image = skia_safe::images::raster_from_data(
+                &source_info,
+                skia_safe::Data::new_copy(&source),
+                source_width as usize * 4,
+            )
+            .unwrap();
+            surface.canvas().draw_image_rect(
+                &image,
+                None,
+                skia_safe::Rect::from_xywh(x, y, width, height),
+                &skia_safe::Paint::default(),
+            );
+            drop(surface);
+
+            assert_eq!(actual, expected, "placement {x},{y} {width}x{height}");
+        }
     }
 
     #[test]
