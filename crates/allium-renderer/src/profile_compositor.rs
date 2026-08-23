@@ -1274,7 +1274,6 @@ fn render_image_commands_into(
                     .last_mut()
                     .map(|target| target.pixels.as_mut_slice())
                     .unwrap_or(destination);
-                #[cfg(feature = "skia-core")]
                 render_live_master_progress_text(
                     command,
                     layer,
@@ -1283,13 +1282,6 @@ fn render_image_commands_into(
                     width,
                     height,
                 )?;
-                #[cfg(not(feature = "skia-core"))]
-                {
-                    let _ = (target, width, height);
-                    stats.skipped_text_command_count =
-                        stats.skipped_text_command_count.saturating_add(1);
-                    continue;
-                }
                 stats.text_command_count = stats.text_command_count.saturating_add(1);
             }
             SemanticCommandPayload::Text { .. } => {
@@ -1584,7 +1576,6 @@ fn is_live_master_progress_command(command: &SemanticCommandSource) -> bool {
     command.role.starts_with("honor-") && command.role.ends_with("-progress")
 }
 
-#[cfg(feature = "skia-core")]
 fn render_live_master_progress_text(
     command: &SemanticCommandSource,
     layer: &LayerSource,
