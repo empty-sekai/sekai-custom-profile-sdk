@@ -148,7 +148,7 @@ layer 显隐复用当前动态 timeline、layout cache、glyph atlas 与图片�
 
 ## Native renderer
 
-native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供；`skia` feature 启用 native production preset。
+native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供；`skia` feature 启用 native production preset。不启用 `skia` 时 CLI 仍可构建并通过 profile backend 渲染（`--backend native`，需安装文本/图形 SDF atlas 与 render-object store；JPEG 输出另需 `allium-renderer/jpeg-turbo`），需要 legacy 渲染器的请求会带原因显式失败。
 
 ```sh
 cargo test --workspace --all-features
