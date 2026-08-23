@@ -4,7 +4,9 @@ use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, MasterDataProvider};
 use crate::types::{CustomProfileCard, UserCustomProfileCard};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(feature = "skia-core")]
+use std::sync::Mutex;
+use std::sync::{Arc, RwLock};
 
 /// Immutable render-object generation pinned for one external render request.
 /// Cloning this token clones only the `Arc`, never the mapped pages.
@@ -2562,6 +2564,7 @@ impl CustomProfileRenderer {
         Ok(scene.dump())
     }
 
+    #[cfg(feature = "skia-core")]
     pub(crate) fn prepare_realtime_edt_batch(
         &self,
         cards: &[CustomProfileCard],
@@ -2614,6 +2617,7 @@ impl CustomProfileRenderer {
         }))
     }
 
+    #[cfg(feature = "skia-core")]
     pub(crate) fn with_realtime_edt_batch<T>(
         &self,
         batch: Arc<RealtimeEdtPreparedBatch>,
