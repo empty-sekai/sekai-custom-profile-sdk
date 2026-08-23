@@ -33,7 +33,6 @@ pub mod init;
 pub mod jpeg_turbo;
 pub mod masterdata;
 pub mod profile;
-#[cfg(feature = "skia-core")]
 pub mod profile_backend;
 #[cfg(feature = "skia-core")]
 pub mod profile_compositor;
@@ -42,7 +41,6 @@ pub mod render_object;
 pub mod render_object_catalog;
 pub mod renderer;
 pub mod resource_provider;
-#[cfg(feature = "skia-core")]
 pub mod sdf;
 #[cfg(feature = "skia-core")]
 pub mod semantic_resolve;

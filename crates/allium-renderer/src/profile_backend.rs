@@ -953,6 +953,8 @@ pub struct ProfileBackendRenderOutput {
     pub telemetry: ProfileRenderTelemetry,
 }
 
+/// Batch output; carries a compiled profile, which the semantic resolver builds.
+#[cfg(feature = "skia-core")]
 pub struct ProfileBackendBatchRenderOutput {
     pub compiled: crate::compiled_profile::CompiledProfileBatch,
     pub prepared_render_objects: Option<crate::compiled_profile::PreparedRenderObjectBatch>,

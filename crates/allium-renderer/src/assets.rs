@@ -19,8 +19,9 @@ use lru::LruCache;
 
 #[cfg(feature = "skia-core")]
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 #[cfg(feature = "skia-core")]
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 #[cfg(feature = "skia-core")]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -299,6 +300,9 @@ pub struct AssetStore {
     /// 原始字节缓存（非 skia 构建降级）
     #[cfg(not(feature = "skia-core"))]
     cache: Mutex<ByteLru>,
+    /// Keys pinned as static assets. Independent of how (or whether) they were
+    /// decoded, so resource resolution can consult it in any build.
+    pinned_static_keys: Mutex<BTreeSet<String>>,
     /// 静态素材常驻池（不走 LRU，启动时预解码，不占预算）
     #[cfg(feature = "skia-core")]
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
@@ -349,6 +353,7 @@ impl AssetStore {
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ImageLru::new(max_mb * 1024 * 1024)),
+            pinned_static_keys: Mutex::new(BTreeSet::new()),
             pinned_images: Mutex::new(HashMap::new()),
             shape_sdf_identities: Mutex::new(HashMap::new()),
             missing_image_keys: Mutex::new(BTreeSet::new()),
@@ -359,6 +364,7 @@ impl AssetStore {
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ByteLru::new(max_mb * 1024 * 1024)),
+            pinned_static_keys: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -387,12 +393,11 @@ impl AssetStore {
             .contains(key)
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn is_pinned_static(&self, key: &str) -> bool {
-        self.pinned_images
+        self.pinned_static_keys
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .contains_key(key)
+            .contains(key)
     }
 
     /// 将素材放入缓存（立即解码为 Image，原始字节写磁盘）。
@@ -612,6 +617,10 @@ impl AssetStore {
                 // 先尝试从 LRU 取出（如果 put 已经放进去）
                 cache.pop(key);
                 pinned.insert(key.clone(), image);
+                self.pinned_static_keys
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(key.clone());
                 count += 1;
             }
         }
