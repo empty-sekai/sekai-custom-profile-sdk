@@ -114,7 +114,7 @@ fn sdf_mask_alpha(red: u8, source_alpha: u8, threshold: f32) -> u8 {
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_shape_sdf_command(
-    canvas: &Canvas,
+    affine: [f32; 6],
     shape: &ShapeElement,
     asset_key: &str,
     width: i32,
@@ -143,10 +143,6 @@ fn resolve_shape_sdf_command(
             height,
         });
     }
-    let affine = canvas
-        .local_to_device_as_3x3()
-        .to_affine()
-        .ok_or(ShapeSdfCaptureError::PerspectiveTransform)?;
     let local_to_device = Affine2 {
         scale_x: affine[0],
         skew_y: affine[1],
@@ -285,11 +281,52 @@ pub(crate) fn capture_shape_sdf(
     assets: Option<&AssetStore>,
     observer: &mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>),
 ) {
-    draw_shape_with_observer(canvas, shape, md, assets, Some(observer), false);
+    let affine = canvas
+        .local_to_device_as_3x3()
+        .to_affine()
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    capture_shape_sdf_from_affine(affine, shape, md, assets, observer);
+}
+
+/// Resolves a shape's SDF command with the device transform supplied directly,
+/// so the capture needs no canvas.
+pub(crate) fn capture_shape_sdf_from_affine(
+    affine: [f32; 6],
+    shape: &ShapeElement,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
+    observer: &mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>),
+) {
+    shape_with_observer(None, affine, shape, md, assets, Some(observer), false);
 }
 
 fn draw_shape_with_observer(
     canvas: &Canvas,
+    shape: &ShapeElement,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
+    observer: Option<&mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>)>,
+    render_pixels: bool,
+) {
+    let affine = canvas
+        .local_to_device_as_3x3()
+        .to_affine()
+        .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    shape_with_observer(
+        Some(canvas),
+        affine,
+        shape,
+        md,
+        assets,
+        observer,
+        render_pixels,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shape_with_observer(
+    canvas: Option<&Canvas>,
+    device_affine: [f32; 6],
     shape: &ShapeElement,
     md: &MasterData,
     assets: Option<&AssetStore>,
@@ -373,7 +410,7 @@ fn draw_shape_with_observer(
                     asset_store.shape_sdf_source_identity(&asset_key, &mask_img)
                 {
                     resolve_shape_sdf_command(
-                        canvas,
+                        device_affine,
                         shape,
                         &asset_key,
                         identity.width,
@@ -428,7 +465,7 @@ fn draw_shape_with_observer(
                     hasher.update([pixel[0], pixel[3]]);
                 }
                 resolve_shape_sdf_command(
-                    canvas,
+                    device_affine,
                     shape,
                     &asset_key,
                     mask_img.width(),
@@ -463,6 +500,12 @@ fn draw_shape_with_observer(
             )
         };
 
+        let canvas = match canvas {
+            Some(canvas) => canvas,
+            // Only the legacy draw path asks for pixels, and it always supplies
+            // a canvas; a capture-only call has nothing left to do here.
+            None => return,
+        };
         if shape.outline_size > 0.01 {
             if let (Some(ol_mask), Some(face_mask)) = (
                 make_sdf_mask(outline_sdf_threshold),
@@ -514,6 +557,11 @@ fn draw_shape_with_observer(
     if !render_pixels {
         return;
     }
+    let canvas = match canvas {
+        Some(canvas) => canvas,
+        // Same as above: pixels are only requested by the legacy draw path.
+        None => return,
+    };
 
     let outline_thickness = shape.outline_size * rect_size * 0.05;
     let stroke_paint = outline_color_paint.as_ref().map(|p| {

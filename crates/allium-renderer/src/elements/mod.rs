@@ -216,6 +216,50 @@ pub(crate) struct SdfObservationTimings {
     pub text_capture: crate::text::TextSdfCaptureTimings,
 }
 
+/// Device transform an element's own drawing sits under, as an affine in
+/// `[sx, ky, kx, sy, tx, ty]` layout.
+///
+/// This is the translate/rotate/scale sequence the element walker applies, in
+/// the same order and with the same skipping thresholds, so a capture that
+/// never touches a canvas resolves the identical matrix. A parity test pins it
+/// against the canvas composition.
+pub(crate) fn element_device_affine(
+    obj: &crate::types::ObjectData,
+    canvas_width: f32,
+    canvas_height: f32,
+) -> [f32; 6] {
+    let (x, y, angle, sx, sy) =
+        crate::transform::extract_transform_for_canvas(obj, canvas_width, canvas_height);
+    let mut affine = [1.0, 0.0, 0.0, 1.0, x, y];
+    if angle.abs() > 0.01 {
+        let radians = angle.to_radians();
+        let (sin, cos) = (radians.sin(), radians.cos());
+        affine = concat_affine(affine, [cos, sin, -sin, cos, 0.0, 0.0]);
+    }
+    if (sx - 1.0).abs() > 0.001 || (sy - 1.0).abs() > 0.001 {
+        affine = concat_affine(affine, [sx, 0.0, 0.0, sy, 0.0, 0.0]);
+    }
+    affine
+}
+
+/// Scales an affine by a uniform factor, the way `Canvas::scale` composes.
+pub(crate) fn scale_affine(affine: [f32; 6], factor: f32) -> [f32; 6] {
+    concat_affine(affine, [factor, 0.0, 0.0, factor, 0.0, 0.0])
+}
+
+/// `base * local` for affine matrices, with the translation terms folded in the
+/// same order the canvas concatenation uses.
+fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
+    [
+        base[0] * local[0] + base[2] * local[1],
+        base[1] * local[0] + base[3] * local[1],
+        base[0] * local[2] + base[2] * local[3],
+        base[1] * local[2] + base[3] * local[3],
+        base[0] * local[4] + (base[2] * local[5] + base[4]),
+        base[1] * local[4] + (base[3] * local[5] + base[5]),
+    ]
+}
+
 #[cfg(feature = "skia-core")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_element_on_canvas_observed(
@@ -381,4 +425,105 @@ pub(crate) fn draw_element_on_canvas_observed(
 
     canvas.restore();
     observation_timings
+}
+
+#[cfg(all(test, feature = "skia-core"))]
+mod tests {
+    use crate::types::{ObjectData, Quaternion, Vec3};
+
+    fn object(position: (f32, f32), rotation: &Quaternion, scale: (f32, f32)) -> ObjectData {
+        ObjectData {
+            layer: 0,
+            lock: false,
+            position: Vec3 {
+                x: position.0,
+                y: position.1,
+                z: 0.0,
+            },
+            rotation: Quaternion {
+                w: rotation.w,
+                x: rotation.x,
+                y: rotation.y,
+                z: rotation.z,
+            },
+            scale: Vec3 {
+                x: scale.0,
+                y: scale.1,
+                z: 1.0,
+            },
+            visible: true,
+        }
+    }
+
+    /// The canvas-free element transform must equal the canvas composition it
+    /// replaces, bit for bit, including the thresholds that skip a rotation or
+    /// a scale entirely.
+    #[test]
+    fn the_element_affine_matches_the_canvas_transform_stack() {
+        let identity = Quaternion {
+            w: 1.0,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        // 30 degrees about Z, and a tiny rotation below the skip threshold.
+        let rotated = Quaternion {
+            w: 0.9659258,
+            x: 0.0,
+            y: 0.0,
+            z: 0.258819,
+        };
+        let barely = Quaternion {
+            w: 0.99999996,
+            x: 0.0,
+            y: 0.0,
+            z: 0.00002,
+        };
+        let cases = [
+            object((0.0, 0.0), &identity, (1.0, 1.0)),
+            object((120.5, -80.25), &identity, (1.0, 1.0)),
+            object((120.5, -80.25), &identity, (1.5, 0.75)),
+            object((-33.0, 44.0), &rotated, (1.0, 1.0)),
+            object((-33.0, 44.0), &rotated, (2.25, 1.125)),
+            object((7.5, 9.5), &barely, (1.0005, 0.9995)),
+            object((7.5, 9.5), &barely, (3.0, 3.0)),
+        ];
+        let (canvas_width, canvas_height) = (
+            crate::transform::CANVAS_WIDTH as f32,
+            crate::transform::CANVAS_HEIGHT as f32,
+        );
+        for (index, obj) in cases.iter().enumerate() {
+            let (x, y, angle, sx, sy) =
+                crate::transform::extract_transform_for_canvas(obj, canvas_width, canvas_height);
+
+            let mut surface = skia_safe::surfaces::null((64, 64)).expect("null surface");
+            let canvas = surface.canvas();
+            canvas.translate(skia_safe::Point::new(x, y));
+            if angle.abs() > 0.01 {
+                canvas.rotate(angle, None);
+            }
+            if (sx - 1.0).abs() > 0.001 || (sy - 1.0).abs() > 0.001 {
+                canvas.scale((sx, sy));
+            }
+            let expected = canvas
+                .local_to_device_as_3x3()
+                .to_affine()
+                .expect("affine canvas transform");
+
+            let actual = super::element_device_affine(obj, canvas_width, canvas_height);
+            assert_eq!(actual, expected, "case {index}");
+
+            // The text path scales again on top; that must compose the same way.
+            canvas.scale((crate::text::TEXT_SCALE, crate::text::TEXT_SCALE));
+            let expected_scaled = canvas
+                .local_to_device_as_3x3()
+                .to_affine()
+                .expect("affine canvas transform");
+            assert_eq!(
+                super::scale_affine(actual, crate::text::TEXT_SCALE),
+                expected_scaled,
+                "case {index} scaled"
+            );
+        }
+    }
 }
