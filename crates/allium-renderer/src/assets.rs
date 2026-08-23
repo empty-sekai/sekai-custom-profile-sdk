@@ -11,7 +11,7 @@
 //! every (value, alpha) pair.
 
 use std::path::PathBuf;
-#[cfg(not(feature = "skia-core"))]
+#[cfg(not(feature = "skia-oracle"))]
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -57,7 +57,7 @@ fn normalize_disk_key(key: &str) -> std::borrow::Cow<'_, str> {
 /// compositor a wrong-coloured surface it cannot distinguish from authored
 /// content. Anything else is refused with a logged reason rather than decoded
 /// partially or replaced by a blank.
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn decode_asset(key: &str, encoded: &[u8]) -> Option<skia_safe::Image> {
     if !crate::codec::png::is_png(encoded) {
         tracing::warn!(
@@ -106,7 +106,7 @@ fn decode_asset(key: &str, encoded: &[u8]) -> Option<skia_safe::Image> {
 }
 
 /// 统一字节预算的 LRU 缓存，只存解码后的 Image。
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 struct ImageLru {
     cache: LruCache<String, skia_safe::Image>,
     current_bytes: usize,
@@ -115,7 +115,7 @@ struct ImageLru {
     disk_cache_dir: Option<PathBuf>,
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 impl ImageLru {
     fn new(max_bytes: usize) -> Self {
         Self {
@@ -215,7 +215,7 @@ impl ImageLru {
 }
 
 /// 非 skia 构建的占位缓存。
-#[cfg(not(feature = "skia-core"))]
+#[cfg(not(feature = "skia-oracle"))]
 struct ByteLru {
     cache: LruCache<String, Arc<Vec<u8>>>,
     current_bytes: usize,
@@ -223,7 +223,7 @@ struct ByteLru {
     disk_cache_dir: Option<PathBuf>,
 }
 
-#[cfg(not(feature = "skia-core"))]
+#[cfg(not(feature = "skia-oracle"))]
 impl ByteLru {
     fn new(max_bytes: usize) -> Self {
         Self {
@@ -302,21 +302,21 @@ impl ByteLru {
 /// 常驻池（pinned）不受预算约束。
 pub struct AssetStore {
     /// 解码 Image 缓存（字节预算驱动驱逐）
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     cache: Mutex<ImageLru>,
     /// 原始字节缓存（非 skia 构建降级）
-    #[cfg(not(feature = "skia-core"))]
+    #[cfg(not(feature = "skia-oracle"))]
     cache: Mutex<ByteLru>,
     /// Keys pinned as static assets. Independent of how (or whether) they were
     /// decoded, so resource resolution can consult it in any build.
     pinned_static_keys: Mutex<BTreeSet<String>>,
     /// 静态素材常驻池（不走 LRU，启动时预解码，不占预算）
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
     /// Missing image identities observed since the last audit drain. This is
     /// populated only on a real lookup miss and is therefore off the hit path.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     missing_image_keys: Mutex<BTreeSet<String>>,
 }
 
@@ -327,7 +327,7 @@ impl AssetStore {
     /// rather than a conversion. Reading it back as non-premultiplied and
     /// multiplying by alpha again would produce the same bytes but lose precision
     /// on the way through.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
         let image = self.get_image(key)?;
         let width = u32::try_from(image.width()).ok()?;
@@ -355,7 +355,7 @@ impl AssetStore {
     /// 创建素材存储
     ///
     /// `max_mb` 为总缓存预算（MB），所有 Image 共享此额度。
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ImageLru::new(max_mb * 1024 * 1024)),
@@ -366,7 +366,7 @@ impl AssetStore {
         }
     }
 
-    #[cfg(not(feature = "skia-core"))]
+    #[cfg(not(feature = "skia-oracle"))]
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ByteLru::new(max_mb * 1024 * 1024)),
@@ -381,7 +381,7 @@ impl AssetStore {
     /// through the engine's own codec and premultiplies with the same rounding
     /// the backend-backed path uses. Non-PNG payloads are refused rather than
     /// guessed at.
-    #[cfg(not(feature = "skia-core"))]
+    #[cfg(not(feature = "skia-oracle"))]
     pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
         let encoded = self.get(key)?;
         if !crate::codec::png::is_png(&encoded) {
@@ -413,7 +413,7 @@ impl AssetStore {
 
     /// 检查 key 是否存在于缓存或磁盘中。
     pub fn contains(&self, key: &str) -> bool {
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         if self
             .pinned_images
             .lock()
@@ -436,7 +436,7 @@ impl AssetStore {
     }
 
     /// 将素材放入缓存（立即解码为 Image，原始字节写磁盘）。
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn put(&self, key: String, data: Vec<u8>) {
         self.shape_sdf_identities
             .lock()
@@ -453,7 +453,7 @@ impl AssetStore {
     }
 
     /// 将素材放入缓存（非 skia 构建降级：只存原始字节）。
-    #[cfg(not(feature = "skia-core"))]
+    #[cfg(not(feature = "skia-oracle"))]
     pub fn put(&self, key: String, data: Vec<u8>) {
         self.cache
             .lock()
@@ -462,7 +462,7 @@ impl AssetStore {
     }
 
     /// 从缓存获取原始字节（仅非 skia 构建使用）。
-    #[cfg(not(feature = "skia-core"))]
+    #[cfg(not(feature = "skia-oracle"))]
     pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         self.cache
             .lock()
@@ -479,7 +479,7 @@ impl AssetStore {
             std::fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败: {e}", dir.display()))?;
         Self::walk_static_dir_recursive(dir, entries, &mut count, &mut keys_and_data)?;
 
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let decoded = self.pre_decode_static(&keys_and_data);
             tracing::info!(loaded = count, decoded, "静态素材预解码完成");
@@ -526,7 +526,7 @@ impl AssetStore {
     /// 获取解码后的 Skia Image。
     ///
     /// 查找顺序：常驻池 → LRU 缓存 → 磁盘回退（重新解码）。
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn get_image(&self, key: &str) -> Option<skia_safe::Image> {
         self.get_image_with_audit(key, true)
     }
@@ -534,12 +534,12 @@ impl AssetStore {
     /// Looks up an intentionally optional recipe candidate without emitting a
     /// repair miss. Use this only when the recipe has an explicit fallback or
     /// omission contract for the key.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn get_image_optional(&self, key: &str) -> Option<skia_safe::Image> {
         self.get_image_with_audit(key, false)
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     fn get_image_with_audit(&self, key: &str, record_missing: bool) -> Option<skia_safe::Image> {
         // 1. 常驻池
         {
@@ -574,7 +574,7 @@ impl AssetStore {
     /// offline object builder uses this for structured repair input; request
     /// rendering continues to follow the recipe's existing optional/fallback
     /// behavior.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub fn take_missing_image_keys(&self) -> Vec<String> {
         let mut missing = self
             .missing_image_keys
@@ -583,7 +583,7 @@ impl AssetStore {
         std::mem::take(&mut *missing).into_iter().collect()
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     pub(crate) fn shape_sdf_source_identity(
         &self,
         key: &str,
@@ -640,7 +640,7 @@ impl AssetStore {
         &self,
         key: &str,
     ) -> Result<ShapeSdfSourceIdentity, ShapeSourceIdentityError> {
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let image = self
                 .get_image(key)
@@ -648,7 +648,7 @@ impl AssetStore {
             self.shape_sdf_source_identity(key, &image)
                 .ok_or(ShapeSourceIdentityError::Unreadable)
         }
-        #[cfg(not(feature = "skia-core"))]
+        #[cfg(not(feature = "skia-oracle"))]
         {
             if let Some(identity) = self
                 .shape_sdf_identities
@@ -670,7 +670,21 @@ impl AssetStore {
                 i32::try_from(decoded.height).map_err(|_| ShapeSourceIdentityError::Unreadable)?;
             let mut hasher = Sha256::new();
             for pixel in decoded.pixels.chunks_exact(4) {
-                hasher.update([pixel[0], pixel[3]]);
+                // The atlas builder reads its sources through a premultiplied
+                // decode and an unpremultiplied readback, so translucent
+                // samples lose precision on the round trip. Both halves are
+                // pinned bit-exact against that pipeline, so composing them
+                // reproduces the recorded identity from the straight samples.
+                let alpha = pixel[3];
+                let red = match alpha {
+                    0 => 0,
+                    u8::MAX => pixel[0],
+                    _ => crate::codec::unpremultiply_channel_like_skia(
+                        crate::codec::premultiply_channel(pixel[0], alpha),
+                        alpha,
+                    ),
+                };
+                hasher.update([red, alpha]);
             }
             let identity = ShapeSdfSourceIdentity {
                 width,
@@ -688,7 +702,7 @@ impl AssetStore {
     /// 将已加载的静态素材预解码并移入常驻池。
     ///
     /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     fn pre_decode_static(&self, keys_and_data: &[(String, Vec<u8>)]) -> usize {
         let mut identities = self
             .shape_sdf_identities

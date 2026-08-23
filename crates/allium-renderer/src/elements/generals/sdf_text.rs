@@ -1,14 +1,9 @@
 use super::layout;
 use crate::masterdata::MasterData;
-#[cfg(feature = "skia-core")]
-use skia_safe::{Canvas, Color4f, Point};
-
 use crate::text::{
     capture_text_sdf_with_placement, wrap_rich_text_to_width_with_atlases, TextRenderPlacement,
     TextSdfCaptureError, TextSdfCaptureTimings, TEXT_SCALE,
 };
-#[cfg(feature = "skia-core")]
-use crate::text::{draw_text_with_placement, wrap_rich_text_to_width};
 use crate::types::{ObjectData, Quaternion, TextElement, Vec3};
 
 #[derive(Clone, Copy)]
@@ -20,8 +15,8 @@ pub(super) enum SdfTextAlign {
 
 pub(crate) struct GeneralSdfTextSpec {
     pub element: TextElement,
-    /// Element-centre translation `(x, y)` the canvas draw path applies.
-    #[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+    /// Element-centre translation `(x, y)` in canvas coordinates.
+    #[allow(dead_code)]
     pub(super) origin: [f32; 2],
     pub(super) render_placement: TextRenderPlacement,
 }
@@ -200,96 +195,4 @@ pub(super) fn build_general_sdf_text_with_font(
             baseline: Some(font_size * 0.35 / TEXT_SCALE),
         },
     }
-}
-
-#[cfg(feature = "skia-core")]
-pub(super) fn draw_general_sdf_text_wrapped(
-    canvas: &Canvas,
-    text: &str,
-    layout: &layout::ElementLayout,
-    md: &MasterData,
-    color: Color4f,
-    align: SdfTextAlign,
-    font_size: f32,
-    line_spacing: f32,
-    render_baseline: Option<f32>,
-) {
-    draw_general_sdf_text_impl(
-        canvas,
-        text,
-        layout,
-        md,
-        color,
-        align,
-        font_size,
-        line_spacing,
-        true,
-        1,
-        render_baseline,
-    );
-}
-
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn draw_general_sdf_text_with_font(
-    canvas: &Canvas,
-    text: &str,
-    layout: &layout::ElementLayout,
-    md: &MasterData,
-    color: Color4f,
-    align: SdfTextAlign,
-    font_size: f32,
-    line_spacing: f32,
-    font_id: i32,
-) {
-    draw_general_sdf_text_impl(
-        canvas,
-        text,
-        layout,
-        md,
-        color,
-        align,
-        font_size,
-        line_spacing,
-        false,
-        font_id,
-        None,
-    );
-}
-
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-fn draw_general_sdf_text_impl(
-    canvas: &Canvas,
-    text: &str,
-    layout: &layout::ElementLayout,
-    md: &MasterData,
-    color: Color4f,
-    align: SdfTextAlign,
-    font_size: f32,
-    line_spacing: f32,
-    wrap: bool,
-    font_id: i32,
-    render_baseline: Option<f32>,
-) {
-    let mut spec = build_general_sdf_text_with_font(
-        text,
-        layout,
-        [color.r, color.g, color.b, color.a],
-        align,
-        font_size,
-        line_spacing,
-        font_id,
-    );
-    if wrap {
-        if let Some(wrapped) = wrap_rich_text_to_width(&spec.element, md, layout.w) {
-            spec.element.text = wrapped;
-        }
-        spec.render_placement.baseline = render_baseline;
-    }
-    canvas.save();
-    canvas.translate(Point::new(spec.origin[0], spec.origin[1]));
-    canvas.scale((TEXT_SCALE, TEXT_SCALE));
-    draw_text_with_placement(canvas, &spec.element, md, spec.render_placement);
-    canvas.restore();
 }

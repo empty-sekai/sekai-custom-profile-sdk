@@ -1015,25 +1015,12 @@ fn rasterize_animation_groups(
     ),
     String,
 > {
-    use crate::profile_backend::{
-        ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor,
-        PROFILE_RENDER_CONTRACT_LEGACY_SKIA,
-    };
+    use crate::profile_backend::{ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor};
 
     let Some(config) = backend else {
-        #[cfg(not(feature = "skia-core"))]
-        {
-            return Err(
-                "animation without a backend config uses the legacy layer raster,                  which requires the raster backend"
-                    .into(),
-            );
-        }
-        #[cfg(feature = "skia-core")]
-        {
-            let (layers, bytes, scratch) =
-                rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-            return Ok((layers, bytes, scratch, None));
-        }
+        return Err(
+            "animation rendering requires a profile backend config selecting SDF executors".into(),
+        );
     };
     let started = std::time::Instant::now();
     let selection = config
@@ -1065,20 +1052,11 @@ fn rasterize_animation_groups(
             forbid_legacy_elements,
         )?
     } else {
-        #[cfg(not(feature = "skia-core"))]
-        {
-            let _ = (md, assets);
-            return Err("the legacy animation layer raster requires the raster backend".into());
-        }
-        #[cfg(feature = "skia-core")]
-        {
-            let (layers, bytes, scratch) =
-                rasterize_animation_groups_legacy(card, profile, md, assets, groups)?;
-            telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-            telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-            telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
-            (layers, bytes, scratch)
-        }
+        let _ = (md, assets);
+        return Err(
+            "the animation backend selection resolved to the retired legacy layer raster;              request SDF executors"
+                .into(),
+        );
     };
     telemetry.bytes.layer_cache_bytes = bytes as u64;
     telemetry.bytes.scratch_peak_bytes = scratch as u64;
@@ -1116,44 +1094,6 @@ fn rasterize_animation_groups_ordered(
             &mut layer_raster_bytes,
             &mut scratch_peak_bytes,
             *dynamic_layer_id,
-            crate::renderer::CroppedLayerRaster {
-                pixels: output.pixels,
-                x: output.x,
-                y: output.y,
-                width: output.width,
-                height: output.height,
-                scratch_peak_bytes: output.scratch_peak_bytes,
-            },
-        )?;
-    }
-    Ok((layers, layer_raster_bytes, scratch_peak_bytes))
-}
-
-#[cfg(feature = "skia-core")]
-fn rasterize_animation_groups_legacy(
-    card: &CustomProfileCard,
-    profile: Option<&crate::profile::ProfileData>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    groups: &[AnimationRasterGroup],
-) -> Result<(Vec<RasterLayer>, usize, usize), String> {
-    let mut layers = Vec::with_capacity(groups.len());
-    let mut layer_raster_bytes = 0usize;
-    let mut scratch_peak_bytes = 0usize;
-    for (dynamic_layer_id, members) in groups {
-        let layer_card = grouped_layer_card(card, members);
-        let output = crate::renderer::render_element_layer_cropped_animation_raster(
-            &layer_card,
-            md,
-            assets,
-            profile,
-            animation_group_uses_dynamic_bounds(*dynamic_layer_id),
-        )?;
-        push_animation_raster(
-            &mut layers,
-            &mut layer_raster_bytes,
-            &mut scratch_peak_bytes,
-            *dynamic_layer_id,
             output,
         )?;
     }
@@ -1165,7 +1105,7 @@ fn push_animation_raster(
     layer_raster_bytes: &mut usize,
     scratch_peak_bytes: &mut usize,
     dynamic_layer_id: Option<allium_renderer_core::LayerId>,
-    output: crate::renderer::CroppedLayerRaster,
+    output: crate::renderer::OrderedLayerRaster,
 ) -> Result<(), String> {
     if output.width == 0 || output.height == 0 {
         return Ok(());
@@ -4519,109 +4459,6 @@ mod tests {
         redraw_full_frame(&mut oracle, 8, 4, &layers, &after);
 
         assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
-    }
-
-    /// The frame blit replaces `Canvas::draw_image_rect` with nearest sampling,
-    /// no anti-aliasing and source-over. The reference draw stays as the oracle
-    /// across integer, fractional, upscaled, downscaled and partly off-canvas
-    /// placements, blending a translucent source onto a noisy premultiplied
-    /// ground.
-    #[cfg(feature = "skia-core")]
-    #[test]
-    fn the_frame_blit_matches_the_reference_draw() {
-        let mut state = 0xDEAD_BEEF_CAFE_BABEu64;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let (source_width, source_height) = (13u32, 7u32);
-        // Valid premultiplied noise: every channel at or below alpha.
-        let source: Vec<u8> = (0..source_width * source_height)
-            .flat_map(|_| {
-                let value = next();
-                let alpha = (value >> 24) as u8;
-                [
-                    (value as u8).min(alpha),
-                    ((value >> 8) as u8).min(alpha),
-                    ((value >> 16) as u8).min(alpha),
-                    alpha,
-                ]
-            })
-            .collect();
-        let (canvas_width, canvas_height) = (40u32, 30u32);
-        let placements = [
-            (3.0f32, 4.0f32, 13.0f32, 7.0f32),
-            (3.5, 4.25, 13.0, 7.0),
-            (2.0, 3.0, 26.0, 14.0),
-            (1.0, 2.0, 6.5, 3.5),
-            (0.7, 1.3, 9.1, 5.6),
-            (-2.5, -1.5, 20.0, 10.0),
-            (5.25, 6.75, 19.5, 10.5),
-        ];
-        for (x, y, width, height) in placements {
-            let ground: Vec<u8> = (0..canvas_width * canvas_height)
-                .flat_map(|_| {
-                    let value = next();
-                    let alpha = (value >> 32) as u8;
-                    [
-                        ((value >> 4) as u8).min(alpha),
-                        ((value >> 12) as u8).min(alpha),
-                        ((value >> 20) as u8).min(alpha),
-                        alpha,
-                    ]
-                })
-                .collect();
-
-            let mut actual = ground.clone();
-            blit_layer(
-                &mut actual,
-                canvas_width,
-                canvas_height,
-                &source,
-                source_width,
-                source_height,
-                FrameRect::from_xywh(x, y, width, height),
-                PixelRect::full(canvas_width, canvas_height),
-            );
-
-            let mut expected = ground;
-            let info = skia_safe::ImageInfo::new(
-                (canvas_width as i32, canvas_height as i32),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Premul,
-                None,
-            );
-            let mut surface = skia_safe::surfaces::wrap_pixels(
-                &info,
-                expected.as_mut_slice(),
-                Some(canvas_width as usize * 4),
-                None,
-            )
-            .unwrap();
-            let source_info = skia_safe::ImageInfo::new(
-                (source_width as i32, source_height as i32),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Premul,
-                None,
-            );
-            let image = skia_safe::images::raster_from_data(
-                &source_info,
-                skia_safe::Data::new_copy(&source),
-                source_width as usize * 4,
-            )
-            .unwrap();
-            surface.canvas().draw_image_rect(
-                &image,
-                None,
-                skia_safe::Rect::from_xywh(x, y, width, height),
-                &skia_safe::Paint::default(),
-            );
-            drop(surface);
-
-            assert_eq!(actual, expected, "placement {x},{y} {width}x{height}");
-        }
     }
 
     #[test]

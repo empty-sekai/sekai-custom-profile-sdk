@@ -1125,7 +1125,7 @@ fn asset_size(
     if let Some(metadata) = timed_resource_metadata(resources, namespace, key) {
         return Some((metadata.width as f32, metadata.height as f32));
     }
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     if let Some(image) = resources.assets.and_then(|assets| assets.get_image(key)) {
         return Some((image.width() as f32, image.height() as f32));
     }

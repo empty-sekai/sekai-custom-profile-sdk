@@ -27,7 +27,7 @@ const DEFAULT_RUNTIME_SCALE_X: f32 = 1.0;
 const DEFAULT_RUNTIME_SCALE_Y: f32 = 1.0;
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub(crate) struct TmpShaderParams {
     pub(crate) uv2_y: f32,
     pub(crate) pixel_scale: f32,

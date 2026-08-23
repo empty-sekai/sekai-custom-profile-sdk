@@ -13,8 +13,8 @@ use crate::text::measure::{
 };
 use crate::text::richtext::{parse_rich_segments, Indent, InlineAlign, LineIndent, TextSegment};
 use crate::types::TextElement;
-#[cfg(feature = "skia-core")]
-use skia_safe::{Canvas, Color4f, Matrix, Paint, PaintStyle, Point, Rect};
+#[cfg(feature = "skia-oracle")]
+use skia_safe::Matrix;
 
 /// TMP FontAsset 全局缩放因子 (m_FaceInfo.m_Scale)。
 pub const TEXT_SCALE: f32 = 2.0;
@@ -547,7 +547,8 @@ fn capture_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
 /// 退化等价：skew_x=0 时为 `T·R·S`；当 scale_x=1 或 rotate_deg=0 其一为平凡，
 /// `R·S = S·R`，与旧 canvas 链 `T·S·R` 逐字节一致——剪切偏差仅在 scale 与 rotate
 /// 同时非平凡时出现，正是 #4 要修的复合。
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
+#[allow(dead_code)]
 fn glyph_local_matrix(op: &DrawCharOp) -> Matrix {
     let mut m = Matrix::new_identity();
     m.pre_translate((op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y));
@@ -613,94 +614,8 @@ fn glyph_quad_corners(op: &DrawCharOp) -> [(f32, f32); 4] {
     out
 }
 
-#[cfg(feature = "skia-core")]
-fn execute_draw_ops_skia(
-    canvas: &Canvas,
-    draw_ops: &[DrawCharOp],
-    resolved_font_family: Option<&str>,
-    captured_font_family: Option<&str>,
-    mut observer: Option<&mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>)>,
-    render_glyphs: bool,
-    capture_base: Option<&skia_safe::M44>,
-) -> u32 {
-    let mut sdf_face_fallback_count = 0u32;
-    for op in draw_ops {
-        if op.ch.chars().all(char::is_whitespace) {
-            continue;
-        }
-        if !render_glyphs {
-            if let Some(observer) = observer.as_deref_mut() {
-                let result = capture_base
-                    .ok_or(TextSdfCaptureError::PerspectiveTransform)
-                    .and_then(|base| {
-                        resolve_text_sdf_glyph_from_matrix(base, op, captured_font_family)
-                    });
-                observer(result);
-            }
-            continue;
-        }
-        canvas.save();
-        // This matrix is also consumed by the debug geometry path. Do not
-        // reconstruct it in an executor-specific layout implementation.
-        canvas.concat(&glyph_local_matrix(op));
-        if let Some(observer) = observer.as_deref_mut() {
-            observer(resolve_text_sdf_glyph(canvas, op, captured_font_family));
-        }
-        if let Some(ref sdf_p) = op.sdf_params {
-            let fc = skia_safe::Color4f::new(op.face[0], op.face[1], op.face[2], op.face[3]);
-            crate::sdf::rasterize::render_char_sdf(
-                canvas,
-                &op.ch,
-                Point::new(-op.pivot_x, -op.pivot_y),
-                op.font_size,
-                resolved_font_family,
-                op.mesh_carrier,
-                op.scale_x,
-                fc,
-                sdf_p,
-            );
-        } else {
-            let fc = skia_safe::Color4f::new(op.face[0], op.face[1], op.face[2], op.face[3]);
-            let rendered = crate::sdf::rasterize::render_char_face_from_outline(
-                canvas,
-                &op.ch,
-                Point::new(-op.pivot_x, -op.pivot_y),
-                op.font_size,
-                resolved_font_family,
-                op.mesh_carrier,
-                op.scale_x,
-                fc,
-            );
-            if !rendered {
-                // No outline means no glyph. Another engine would place it at a
-                // pivot this path never computed, so it is counted and skipped.
-                sdf_face_fallback_count += 1;
-                tracing::debug!(
-                    text = %op.ch,
-                    font_family = resolved_font_family.unwrap_or("<none>"),
-                    "no outline available for glyph face; skipped"
-                );
-            }
-        }
-        canvas.restore();
-    }
-    sdf_face_fallback_count
-}
-
-#[cfg(feature = "skia-core")]
-fn resolve_text_sdf_glyph(
-    canvas: &Canvas,
-    op: &DrawCharOp,
-    resolved_font_family: Option<&str>,
-) -> Result<ResolvedTextSdfGlyph, TextSdfCaptureError> {
-    let affine = canvas
-        .local_to_device_as_3x3()
-        .to_affine()
-        .ok_or(TextSdfCaptureError::PerspectiveTransform)?;
-    resolve_text_sdf_glyph_from_affine(affine, op, resolved_font_family)
-}
-
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
+#[allow(dead_code)]
 fn resolve_text_sdf_glyph_from_matrix(
     base: &skia_safe::M44,
     op: &DrawCharOp,
@@ -770,16 +685,16 @@ fn resolve_text_sdf_glyph_from_affine(
 }
 
 /// One decoration draw a layout run produced alongside its glyph stream. The
-/// SDF capture paths ignore decorations — only the legacy canvas renderer
-/// draws them — so they carry plain geometry and colour, no backend types.
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+/// SDF paths do not render decorations yet; the layout still records them so
+/// the TMP semantics stay captured for the renderer that will.
+#[allow(dead_code)]
 struct TextDecorationOp {
     /// Straight (non-premultiplied) RGBA in unit range.
     rgba: [f32; 4],
     kind: TextDecorationKind,
 }
 
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[allow(dead_code)]
 enum TextDecorationKind {
     /// `<mark>` background rectangle.
     MarkRect {
@@ -803,122 +718,9 @@ enum TextDecorationKind {
 struct TextLayoutRun {
     font_family: Option<String>,
     draw_ops: Vec<DrawCharOp>,
-    #[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+    #[allow(dead_code)]
     decorations: Vec<TextDecorationOp>,
     timings: TextSdfCaptureTimings,
-}
-
-/// Draws a completed layout run — decorations first, then glyphs, the same
-/// order the layout historically issued them — through the legacy canvas path.
-#[cfg(feature = "skia-core")]
-fn draw_text_layout_on_canvas(
-    canvas: &Canvas,
-    run: &TextLayoutRun,
-    observer: Option<&mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>)>,
-    render_glyphs: bool,
-    capture_base: Option<&skia_safe::M44>,
-) {
-    for decoration in &run.decorations {
-        let mut paint = Paint::default();
-        paint.set_color4f(
-            Color4f::new(
-                decoration.rgba[0],
-                decoration.rgba[1],
-                decoration.rgba[2],
-                decoration.rgba[3],
-            ),
-            None,
-        );
-        paint.set_anti_alias(true);
-        match decoration.kind {
-            TextDecorationKind::MarkRect {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                paint.set_style(PaintStyle::Fill);
-                canvas.draw_rect(Rect::from_xywh(x, y, width, height), &paint);
-            }
-            TextDecorationKind::Line {
-                x0,
-                x1,
-                y,
-                stroke_width,
-            } => {
-                paint.set_style(PaintStyle::Stroke);
-                paint.set_stroke_width(stroke_width);
-                canvas.draw_line(Point::new(x0, y), Point::new(x1, y), &paint);
-            }
-        }
-    }
-    let sdf_face_fallback_count = execute_draw_ops_skia(
-        canvas,
-        &run.draw_ops,
-        run.font_family.as_deref(),
-        run.font_family.as_deref(),
-        observer,
-        render_glyphs,
-        capture_base,
-    );
-    // SDF 字形回退汇总：每文本元素最多一条 WARN（而非每字形一条），避免大量缺字形时刷屏。
-    if sdf_face_fallback_count > 0 {
-        tracing::warn!(
-            count = sdf_face_fallback_count,
-            font_family = run.font_family.as_deref().unwrap_or("<none>"),
-            "SDF 字形回退到纯文本绘制"
-        );
-    }
-}
-
-/// 绘制自定义名片文本（逐段排版 + 描边 + 富文本标签支持）。
-#[cfg(feature = "skia-core")]
-pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
-    let run = layout_text_ops(text, md, None, None, None, false);
-    draw_text_layout_on_canvas(canvas, &run, None, true, None);
-}
-
-/// Draws text with a post-layout translation to an external render anchor. TMP
-/// layout itself remains on the normal path.
-#[cfg(feature = "skia-core")]
-pub fn draw_text_with_placement(
-    canvas: &Canvas,
-    text: &TextElement,
-    md: &MasterData,
-    placement: TextRenderPlacement,
-) {
-    let run = layout_text_ops(text, md, Some(placement), None, None, false);
-    draw_text_layout_on_canvas(canvas, &run, None, true, None);
-}
-
-#[cfg(feature = "skia-core")]
-pub(crate) fn draw_text_observed(
-    canvas: &Canvas,
-    text: &TextElement,
-    md: &MasterData,
-    observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
-) {
-    let run = layout_text_ops(text, md, None, None, None, false);
-    draw_text_layout_on_canvas(canvas, &run, Some(observer), true, None);
-}
-
-/// Resolves the exact completed TMP glyph stream without invoking the legacy
-/// per-glyph bitmap rasterizer. The observer receives the same affine/material
-/// recipe as `draw_text_observed`; only pixel generation is suppressed.
-#[cfg(feature = "skia-core")]
-pub(crate) fn capture_text_sdf(
-    canvas: &Canvas,
-    text: &TextElement,
-    md: &MasterData,
-    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
-) -> TextSdfCaptureTimings {
-    let mut run = layout_text_ops(text, md, None, atlases, None, true);
-    let emit_started = Some(std::time::Instant::now());
-    let base = canvas.local_to_device();
-    draw_text_layout_on_canvas(canvas, &run, Some(observer), false, Some(&base));
-    run.timings.emit_ns = capture_elapsed_ns(emit_started);
-    run.timings
 }
 
 /// Captures the element-path TMP layout (no post-layout placement) against a
@@ -2297,7 +2099,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn direct_capture_matrix_matches_canvas_concat_recipe() {
         use skia_safe::Point;
@@ -2335,8 +2137,13 @@ mod tests {
 
         canvas.save();
         canvas.concat(&super::glyph_local_matrix(&op));
+        let canvas_affine = canvas
+            .local_to_device_as_3x3()
+            .to_affine()
+            .expect("canvas affine");
         let canvas_capture =
-            super::resolve_text_sdf_glyph(canvas, &op, Some("test-font")).expect("canvas capture");
+            super::resolve_text_sdf_glyph_from_affine(canvas_affine, &op, Some("test-font"))
+                .expect("canvas capture");
         canvas.restore();
         let direct_capture =
             super::resolve_text_sdf_glyph_from_matrix(&base, &op, Some("test-font"))
@@ -2348,7 +2155,7 @@ mod tests {
     /// The canvas-free affine base must resolve exactly the glyph the M44
     /// canvas route resolves, including under rotation, non-uniform scale and
     /// fractional translation.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn affine_capture_base_matches_the_canvas_matrix_route() {
         let bases: [[f32; 6]; 4] = [
@@ -2388,7 +2195,7 @@ mod tests {
     /// The pure-affine glyph transform must equal the SkMatrix chain bit for
     /// bit on every composition the layout can produce: plain, rotated,
     /// scaled, italic-skewed, and all of those combined.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn glyph_local_affine_matches_the_skia_matrix_chain() {
         let mut case = 0u32;

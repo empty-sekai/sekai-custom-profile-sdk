@@ -1,7 +1,7 @@
 //! 卡面合成公共工具。
 
 /// object-fit: cover 的源矩形计算。
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn cover_crop_rect(src_w: f32, src_h: f32, dst_w: f32, dst_h: f32) -> (f32, f32, f32, f32) {
     let img_ratio = src_w / src_h;
     let dst_ratio = dst_w / dst_h;
@@ -15,7 +15,7 @@ pub fn cover_crop_rect(src_w: f32, src_h: f32, dst_w: f32, dst_h: f32) -> (f32, 
 }
 
 /// 稀有度后缀映射。
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn rarity_suffix(rarity: &str) -> &str {
     if rarity == "rarity_birthday" {
         "bd"
@@ -25,7 +25,7 @@ pub fn rarity_suffix(rarity: &str) -> &str {
 }
 
 /// 稀有度对应的星级数量。
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn rarity_count(rarity: &str) -> usize {
     if rarity == "rarity_birthday" {
         1
@@ -39,7 +39,7 @@ pub fn rarity_count(rarity: &str) -> usize {
 }
 
 /// 星图 key 映射。
-#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
+#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn star_icon_key(rarity: &str, trained: bool) -> &'static str {
     if rarity == "rarity_birthday" {
         "card/rarity_birthday"
@@ -50,7 +50,7 @@ pub fn star_icon_key(rarity: &str, trained: bool) -> &'static str {
     }
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn draw_repeated_image(
     canvas: &skia_safe::Canvas,
     image: &skia_safe::Image,
@@ -64,7 +64,7 @@ fn draw_repeated_image(
 }
 
 /// 横排星级绘制。
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 pub fn draw_stars_horizontal(
     canvas: &skia_safe::Canvas,
     star_img: &skia_safe::Image,
@@ -79,7 +79,7 @@ pub fn draw_stars_horizontal(
 }
 
 /// 竖排星级绘制（从底部填充）。
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 pub fn draw_stars_vertical(
     canvas: &skia_safe::Canvas,
     star_img: &skia_safe::Image,

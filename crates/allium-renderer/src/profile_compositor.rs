@@ -1698,7 +1698,7 @@ pub fn visible_scene_device_bounds(
 /// Validation-only Skia implementation of the same image command subset.
 /// It is intentionally separate from the scalar oracle and is never selected
 /// by the production backend.
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 pub fn render_image_scene_skia_reference(
     scene: &ResolvedProfileScene,
     store: &MappedRenderObjectStore,
@@ -1948,7 +1948,7 @@ pub fn render_image_scene_skia_reference(
     })
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn skia_blend_mode(blend_mode: BlendMode) -> skia_safe::BlendMode {
     match blend_mode {
         BlendMode::SrcOver => skia_safe::BlendMode::SrcOver,
@@ -1961,17 +1961,17 @@ fn skia_blend_mode(blend_mode: BlendMode) -> skia_safe::BlendMode {
     }
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn object_width(image: &skia_safe::Image) -> f32 {
     image.width() as f32
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn object_height(image: &skia_safe::Image) -> f32 {
     image.height() as f32
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 fn uses_implicit_full_source(uv: Rect, metadata: &BTreeMap<String, ParameterValue>) -> bool {
     let full = uv.x.to_bits() == 0.0f32.to_bits()
         && uv.y.to_bits() == 0.0f32.to_bits()
@@ -1983,7 +1983,7 @@ fn uses_implicit_full_source(uv: Rect, metadata: &BTreeMap<String, ParameterValu
     )
 }
 
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 pub fn encode_profile_compositor_png(
     pixels: &[u8],
     width: u32,
@@ -3383,7 +3383,7 @@ fn elapsed_ns(started: Instant) -> u64 {
 
 // The compositor's tests compare against the raster-backend oracle, so they run
 // with that backend available.
-#[cfg(all(test, feature = "skia-core"))]
+#[cfg(all(test, feature = "skia-oracle"))]
 mod tests {
     use allium_renderer_core::profile_scene::{
         ComponentControlSource, ComponentControlState, ResolvedProfileScene,
@@ -3739,7 +3739,7 @@ mod tests {
     /// The dependency-free digit raster must also blend exactly like the Skia
     /// draw over content that is already on the page, not just over
     /// transparency.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn live_master_progress_blends_exactly_over_existing_content() {
         use skia_safe::{
@@ -4017,7 +4017,7 @@ mod tests {
             &[0, 0, 255, 255, 255, 255, 255, 255]
         );
         assert_eq!(output.stats.sampled_fragment_count, 2);
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference = render_image_scene_skia_reference(
                 &scene(
@@ -4236,7 +4236,7 @@ mod tests {
         assert_eq!(output.pixels, vec![255, 0, 0, 255, 0, 0, 0, 0]);
         assert_eq!(output.stats.isolation_count, 1);
         assert_eq!(output.stats.maximum_isolation_depth, 1);
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference_commands = vec![
                 composite_command("begin-ref", layer_id, CompositeOperation::BeginIsolation),
@@ -4328,7 +4328,7 @@ mod tests {
         )
         .expect("unclipped");
         assert_eq!(output.pixels, unclipped.pixels);
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference =
                 render_image_scene_skia_reference(&scene(layer, vec![clipped]), &store, 2, 1)
@@ -4427,7 +4427,7 @@ mod tests {
                 .expect("partial mask");
         // round(255 * 128 / 255) on every channel, alpha included.
         assert_eq!(output.pixels, vec![128, 128, 128, 128]);
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference =
                 render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 1, 1)
@@ -4815,7 +4815,7 @@ mod tests {
             let scalar =
                 render_image_scene_scalar(&scene(layer.clone(), commands.clone()), &store, 1, 1)
                     .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
-            #[cfg(feature = "skia-core")]
+            #[cfg(feature = "skia-oracle")]
             {
                 let reference =
                     render_image_scene_skia_reference(&scene(layer, commands), &store, 1, 1)
@@ -4874,7 +4874,7 @@ mod tests {
         let output =
             render_image_scene_scalar(&scene(layer.clone(), vec![command.clone()]), &store, 1, 1)
                 .expect("partial axis-aligned clip");
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference =
                 render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 1, 1)
@@ -4889,7 +4889,7 @@ mod tests {
     /// edge, so every pixel Skia leaves partially covered differs. This pins
     /// the divergence so a future coverage implementation must revisit it
     /// deliberately; nothing in the byte-exact page corpus reaches this path.
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn ellipse_image_clip_differs_from_the_antialiased_reference_only_at_edges() {
         if !packet_simd_available() {
@@ -5011,7 +5011,7 @@ mod tests {
                 .expect("SIMD ellipse clip");
         assert_eq!(simd.pixels, output.pixels);
         assert_eq!(&output.pixels[0..4], &[0, 0, 0, 0]);
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             let reference =
                 render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 4, 4)

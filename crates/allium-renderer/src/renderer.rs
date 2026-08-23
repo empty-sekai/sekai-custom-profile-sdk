@@ -2,7 +2,7 @@
 
 use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, MasterDataProvider};
-use crate::types::{CustomProfileCard, UserCustomProfileCard};
+use crate::types::CustomProfileCard;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
@@ -81,7 +81,6 @@ impl CustomProfileRenderer {
         self
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn with_sdf_atlases(self, atlases: Arc<crate::sdf::atlas::MappedSdfAtlasSet>) -> Self {
         self.sdf_atlases.store(atlases);
         self
@@ -92,7 +91,6 @@ impl CustomProfileRenderer {
     /// Codepoints missing from the declared font's atlas are generated from the
     /// fallback face and published into the atlas set, so layout and rendering
     /// stay on FreeType instead of substituting another engine's metrics.
-    #[cfg(feature = "skia-core")]
     pub fn with_profile_fallback_sdf_cache(
         mut self,
         cache: Arc<crate::sdf::fallback_cache::PersistentFallbackSdfCache>,
@@ -199,7 +197,6 @@ impl CustomProfileRenderer {
 
     /// Builds one canonical server-side General base from an already resolved
     /// semantic scene for the standalone resource-pipeline builder.
-    #[cfg(feature = "skia-core")]
     pub fn build_general_base_objects(
         &self,
         scene: &allium_renderer_core::profile_scene::ResolvedProfileScene,
@@ -212,7 +209,6 @@ impl CustomProfileRenderer {
         self.build_general_base_objects_for_store(scene, authored_index, store)
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn build_general_base_objects_for_store(
         &self,
         scene: &allium_renderer_core::profile_scene::ResolvedProfileScene,
@@ -278,7 +274,6 @@ impl CustomProfileRenderer {
     }
 
     /// immutable atlas identities actually installed in this process.
-    #[cfg(feature = "skia-core")]
     pub fn profile_backend_cache_identity(
         &self,
         config: &crate::profile_backend::ProfileBackendConfig,
@@ -287,7 +282,6 @@ impl CustomProfileRenderer {
         self.profile_backend_cache_identity_for_generation(config, &generation)
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn profile_backend_cache_identity_for_generation(
         &self,
         config: &crate::profile_backend::ProfileBackendConfig,
@@ -315,29 +309,6 @@ impl CustomProfileRenderer {
         }
         let identity = hex::encode(digest.finalize());
         Ok(format!("profile-backend-{}", &identity[..16]))
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn prewarm_profile_fallback(
-        &self,
-        card: &CustomProfileCard,
-        md: &MasterData,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<(), String> {
-        if self.profile_fallback_sdf_cache.is_none() {
-            return Ok(());
-        }
-        let scene = crate::semantic_resolve::resolve_card_commands_with_profile(
-            card,
-            md,
-            "profile-fallback-prewarm",
-            profile,
-            "und",
-            self.assets.as_deref(),
-        )
-        .map_err(|error| format!("fallback prewarm could not resolve the card: {error}"))?;
-        self.ensure_profile_fallback_for_scenes(std::iter::once(&scene), md)?;
-        Ok(())
     }
 
     /// Generates any codepoints the declared fonts' atlases lack, from the
@@ -452,190 +423,6 @@ impl CustomProfileRenderer {
         self.snapshot()
     }
 
-    #[cfg(feature = "skia-core")]
-    pub fn render_page(&self, card: &CustomProfileCard) -> Result<Vec<u8>, String> {
-        self.render_page_with_profile(card, None)
-    }
-
-    #[cfg(feature = "skia-core")]
-    pub fn render_page_with_profile(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        self.prewarm_profile_fallback(card, &md, profile)?;
-        render_card(card, &md, asset_ref, profile)
-    }
-
-    #[cfg(feature = "skia-core")]
-    pub fn render_page_png_with_profile(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        self.prewarm_profile_fallback(card, &md, profile)?;
-        render_card_png(card, &md, asset_ref, profile)
-    }
-
-    #[cfg(feature = "skia-core")]
-    pub fn render_page_png_transparent_with_profile(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        self.prewarm_profile_fallback(card, &md, profile)?;
-        render_card_png_transparent(card, &md, asset_ref, profile)
-    }
-
-    #[cfg(feature = "skia-core")]
-    pub fn render_element_layer_cropped(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        webp_quality: u32,
-    ) -> Result<CroppedLayerOutput, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        render_element_layer_cropped(card, &md, asset_ref, profile, webp_quality)
-    }
-
-    /// Renders one immutable standard-honor variant as a tightly sized WebP.
-    /// Live-master progress is player state and is not baked into this output.
-    #[cfg(feature = "skia-core")]
-    pub fn render_static_honor_artwork(
-        &self,
-        honor_id: i32,
-        honor_level: i32,
-        full_size: bool,
-        webp_quality: u32,
-    ) -> Result<HonorArtworkOutput, String> {
-        let md = self.snapshot();
-        let fallback_assets = AssetStore::new(1);
-        let assets = self.assets.as_deref().unwrap_or(&fallback_assets);
-        encode_honor_artwork(full_size, webp_quality, |canvas| {
-            crate::elements::honor::render_static_honor(
-                canvas,
-                honor_id,
-                honor_level,
-                full_size,
-                &md,
-                assets,
-            );
-        })
-    }
-
-    /// Renders one fully specified bonds-honor variant as a tightly sized WebP.
-    #[cfg(feature = "skia-core")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_bonds_honor_artwork(
-        &self,
-        honor_id: i32,
-        honor_level: i32,
-        full_size: bool,
-        word_id: i64,
-        inverse: bool,
-        use_unit_virtual_singer: bool,
-        webp_quality: u32,
-    ) -> Result<HonorArtworkOutput, String> {
-        let md = self.snapshot();
-        let fallback_assets = AssetStore::new(1);
-        let assets = self.assets.as_deref().unwrap_or(&fallback_assets);
-        encode_honor_artwork(full_size, webp_quality, |canvas| {
-            crate::elements::honor::render_bonds_honor(
-                canvas,
-                honor_id,
-                honor_level,
-                full_size,
-                word_id,
-                inverse,
-                use_unit_virtual_singer,
-                &md,
-                assets,
-            );
-        })
-    }
-
-    /// 批量分层裁剪渲染（统一原语）：见自由函数 `render_all_layers_cropped` 的注释。
-    #[cfg(feature = "skia-core")]
-    pub fn render_all_layers_cropped(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        webp_quality: u32,
-        include_properties: bool,
-    ) -> Result<Vec<LayerCrop>, String> {
-        let md = self.snapshot();
-        let asset_ref = self.assets.as_deref();
-        render_all_layers_cropped(
-            card,
-            &md,
-            asset_ref,
-            profile,
-            webp_quality,
-            include_properties,
-        )
-    }
-
-    #[cfg(feature = "skia-core")]
-    pub fn render_by_seq(
-        &self,
-        cards: &[UserCustomProfileCard],
-        page: u32,
-    ) -> Result<Vec<u8>, String> {
-        let card = cards
-            .iter()
-            .find(|c| c.seq == page as i32)
-            .ok_or_else(|| format!("未找到第 {page} 页名片"))?;
-        self.render_page(&card.custom_profile_card)
-    }
-
-    #[cfg(not(feature = "skia-core"))]
-    pub fn render_page(&self, _card: &CustomProfileCard) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(not(feature = "skia-core"))]
-    pub fn render_page_with_profile(
-        &self,
-        _card: &CustomProfileCard,
-        _profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(not(feature = "skia-core"))]
-    pub fn render_page_png_with_profile(
-        &self,
-        _card: &CustomProfileCard,
-        _profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(not(feature = "skia-core"))]
-    pub fn render_page_png_transparent_with_profile(
-        &self,
-        _card: &CustomProfileCard,
-        _profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
-    #[cfg(not(feature = "skia-core"))]
-    pub fn render_by_seq(
-        &self,
-        _cards: &[UserCustomProfileCard],
-        _page: u32,
-    ) -> Result<Vec<u8>, String> {
-        Err("Skia 渲染未启用，请使用 --features skia 编译".into())
-    }
-
     /// 获取 MasterData 快照。
     pub fn masterdata(&self) -> MasterData {
         self.snapshot()
@@ -712,7 +499,6 @@ impl CustomProfileRenderer {
     /// Decode and validate the fixed game Shape sources before the worker is
     /// declared ready. This keeps source RG8 hashing out of the first unseen
     /// profile request while preserving the atlas/source identity gate.
-    #[cfg(feature = "skia-core")]
     pub fn prewarm_profile_backend_resources(&self) -> Result<ProfileBackendPrewarmReport, String> {
         let started = std::time::Instant::now();
         let mut report = ProfileBackendPrewarmReport::default();
@@ -722,17 +508,11 @@ impl CustomProfileRenderer {
                 .as_deref()
                 .ok_or_else(|| "Shape SDF atlas is installed without an AssetStore".to_string())?;
             for entry in &atlas.manifest().shapes {
-                let image = assets.get_image(&entry.asset_key).ok_or_else(|| {
-                    format!(
-                        "Shape SDF prewarm source is unavailable: {}",
-                        entry.asset_key
-                    )
-                })?;
                 let identity = assets
-                    .shape_sdf_source_identity(&entry.asset_key, &image)
-                    .ok_or_else(|| {
+                    .shape_sdf_source_identity_for_key(&entry.asset_key)
+                    .map_err(|error| {
                         format!(
-                            "Shape SDF prewarm could not read source pixels: {}",
+                            "Shape SDF prewarm could not resolve source {}: {error:?}",
                             entry.asset_key
                         )
                     })?;
@@ -827,28 +607,10 @@ impl CustomProfileRenderer {
         let surface_init_started = std::time::Instant::now();
         let width = crate::transform::CANVAS_WIDTH as u32;
         let height = crate::transform::CANVAS_HEIGHT as u32;
-        let row_bytes = width as usize * 4;
-        let info = skia_safe::ImageInfo::new(
-            (width as i32, height as i32),
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Premul,
-            None,
-        );
         let mut rgba = self.take_profile_rgba_scratch(profile_surface_bytes, [255; 4]);
-        {
-            let mut surface =
-                skia_safe::surfaces::wrap_pixels(&info, rgba.as_mut_slice(), Some(row_bytes), None)
-                    .ok_or_else(|| "profile surface prewarm failed".to_string())?;
-            let mut capture = skia_safe::surfaces::null((width as i32, height as i32))
-                .ok_or_else(|| "profile capture surface prewarm failed".to_string())?;
-            surface
-                .canvas()
-                .clear(skia_safe::Color::from_argb(255, 255, 255, 255));
-            surface.canvas().save();
-            surface.canvas().restore();
-            capture.canvas().save();
-            capture.canvas().restore();
-        }
+        // Touch every page of the page-sized scratch so the first request does
+        // not pay the faults.
+        rgba.fill(255);
         self.recycle_profile_rgba_scratch(rgba);
         report.profile_surface_init_ns = elapsed_ns(surface_init_started);
         #[cfg(feature = "jpeg-turbo")]
@@ -887,7 +649,6 @@ impl CustomProfileRenderer {
     /// Executes only asset-backed Shape elements through the typed RG8 scalar
     /// oracle. This is a comparison primitive, not a production surface: any
     /// missing resource, asset, identity or affine transform fails closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_shape_sdf_scalar_oracle(
         &self,
         card: &CustomProfileCard,
@@ -898,7 +659,6 @@ impl CustomProfileRenderer {
 
     /// Executes Shape commands with the Turin AVX-512 FP32 tile candidate.
     /// Unsupported CPUs and non-swizzled atlases fail closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_shape_sdf_simd_candidate(
         &self,
         card: &CustomProfileCard,
@@ -909,7 +669,6 @@ impl CustomProfileRenderer {
 
     /// Executes the ordered Text+Shape layer through the scalar FP32 oracle.
     /// Missing atlas entries and unsupported transforms fail closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_sdf_layer_scalar_f32_candidate(
         &self,
         card: &CustomProfileCard,
@@ -920,7 +679,6 @@ impl CustomProfileRenderer {
 
     /// Executes the exact same ordered Text+Shape plan through the Turin
     /// AVX-512 FP32 executor. Unsupported CPUs fail closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_sdf_layer_simd_candidate(
         &self,
         card: &CustomProfileCard,
@@ -929,7 +687,6 @@ impl CustomProfileRenderer {
         self.render_sdf_layer_candidate(card, profile, SdfLayerCandidateExecutor::SimdF32)
     }
 
-    #[cfg(feature = "skia-core")]
     fn render_sdf_layer_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1027,7 +784,6 @@ impl CustomProfileRenderer {
     /// Renders a complete card while replacing every contiguous Text/Shape
     /// run with the scalar FP32 SDF oracle. Non-SDF elements continue through
     /// the existing Skia raster path at their authored positions.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_sdf_scalar_f32_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1048,7 +804,6 @@ impl CustomProfileRenderer {
 
     /// Formal mixed path used by the first opt-in stage: Text uses the scalar
     /// atlas oracle while Shape and all other elements remain on legacy Skia.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_text_sdf_scalar_f32_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1067,32 +822,8 @@ impl CustomProfileRenderer {
         )
     }
 
-    /// Diagnostic control for the formal backend surface: every element stays
-    /// on legacy Skia, but the destination is the same tight RGBA8888 surface
-    /// used by scalar/SIMD SDF execution. This separates surface-format
-    /// rounding from atlas/sampler differences without changing production.
-    #[cfg(feature = "skia-core")]
-    pub fn render_full_card_rgba8888_legacy_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            None,
-            None,
-            32,
-            32,
-            false,
-            false,
-            [255, 255, 255, 255],
-        )
-    }
-
     /// Renders the same ordered full-card plan through the Turin AVX-512
     /// executor. Unsupported CPUs and missing atlas entries fail closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_sdf_simd_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1111,32 +842,9 @@ impl CustomProfileRenderer {
         )
     }
 
-    /// Transparent RGBA8888 control used by isolated Shape corpus analysis.
-    /// It bypasses PNG encode/decode while retaining the exact legacy draw
-    /// implementation and explicit candidate surface format.
-    #[cfg(feature = "skia-core")]
-    pub fn render_full_card_rgba8888_legacy_transparent_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            None,
-            None,
-            32,
-            32,
-            false,
-            false,
-            [0, 0, 0, 0],
-        )
-    }
-
     /// Production-shape-preserving Text-only Turin candidate. Shape and all
     /// non-Text elements remain on legacy Skia so the approved Text oracle can
     /// be inherited independently from the still-unapproved Shape backend.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_text_sdf_simd_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1156,7 +864,6 @@ impl CustomProfileRenderer {
     }
 
     /// Transparent counterpart used to quantify alpha coverage and bounds.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_sdf_scalar_f32_transparent_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1175,7 +882,6 @@ impl CustomProfileRenderer {
         )
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_text_sdf_scalar_f32_transparent_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1195,7 +901,6 @@ impl CustomProfileRenderer {
     }
 
     /// Transparent AVX-512 counterpart. Unsupported CPUs still fail closed.
-    #[cfg(feature = "skia-core")]
     pub fn render_full_card_sdf_simd_transparent_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1664,77 +1369,11 @@ impl CustomProfileRenderer {
                                 profile_command_kind(&element)
                             ));
                         }
-                        #[cfg(not(feature = "skia-core"))]
-                        {
-                            let _ = (&fallback_assets, last_element_was_legacy);
-                            return Err(format!(
-                                "legacy element path requires a raster backend; {:?} element has no authored identity",
-                                profile_command_kind(&element)
-                            ));
-                        }
-                        #[cfg(feature = "skia-core")]
-                        {
-                            if !last_element_was_legacy {
-                                aggregate.legacy_run_count =
-                                    aggregate.legacy_run_count.saturating_add(1);
-                            }
-                            last_element_was_legacy = true;
-                            let draw_started = std::time::Instant::now();
-                            let info = skia_safe::ImageInfo::new(
-                                (width as i32, height as i32),
-                                skia_safe::ColorType::RGBA8888,
-                                skia_safe::AlphaType::Premul,
-                                None,
-                            );
-                            // A wrapped surface is a handle over the same buffer;
-                            // it exists only for the duration of this legacy draw.
-                            let mut surface = skia_safe::surfaces::wrap_pixels(
-                                &info,
-                                rgba.as_mut_slice(),
-                                Some(row_bytes),
-                                None,
-                            )
-                            .ok_or_else(|| {
-                                "failed to create ordered SDF RGBA raster surface".to_string()
-                            })?;
-                            if spec.canvas_origin_x != 0.0 || spec.canvas_origin_y != 0.0 {
-                                surface.canvas().translate(skia_safe::Point::new(
-                                    spec.canvas_origin_x,
-                                    spec.canvas_origin_y,
-                                ));
-                            }
-                            crate::elements::draw_element_on_canvas(
-                                surface.canvas(),
-                                &element,
-                                md,
-                                assets,
-                                profile,
-                                &fallback_assets,
-                                spec.canvas_width as f32,
-                                spec.canvas_height as f32,
-                            );
-                            aggregate.legacy_element_count =
-                                aggregate.legacy_element_count.saturating_add(1);
-                            match profile_command_kind(&element) {
-                                crate::profile_backend::ProfileCommandKind::Text => {
-                                    aggregate.legacy_text_count =
-                                        aggregate.legacy_text_count.saturating_add(1);
-                                }
-                                crate::profile_backend::ProfileCommandKind::Shape => {
-                                    aggregate.legacy_shape_count =
-                                        aggregate.legacy_shape_count.saturating_add(1);
-                                }
-                                crate::profile_backend::ProfileCommandKind::Image
-                                | crate::profile_backend::ProfileCommandKind::Composite => {
-                                    aggregate.legacy_image_count =
-                                        aggregate.legacy_image_count.saturating_add(1);
-                                }
-                            }
-                            aggregate.timings.legacy_draw_ns = aggregate
-                                .timings
-                                .legacy_draw_ns
-                                .saturating_add(elapsed_ns(draw_started));
-                        }
+                        let _ = (&fallback_assets, last_element_was_legacy);
+                        return Err(format!(
+                            "the legacy element renderer was retired; {:?} element has no authored identity",
+                            profile_command_kind(&element)
+                        ));
                     }
                 }
             }
@@ -1816,7 +1455,6 @@ impl CustomProfileRenderer {
         })
     }
 
-    #[cfg(feature = "skia-core")]
     fn render_shape_sdf_candidate(
         &self,
         card: &CustomProfileCard,
@@ -1926,14 +1564,13 @@ impl CustomProfileRenderer {
         crate::profile_backend::ProfileBackendRenderError,
     > {
         use crate::profile_backend::{
-            BackendFallbackCode, BackendFallbackPolicy, ProfileBackendRenderError,
-            ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor,
+            ProfileBackendRenderError, ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor,
             PROFILE_RENDER_CONTRACT_LEGACY_SKIA, PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
         };
 
         let total_started = std::time::Instant::now();
         let selection = config.resolve(self.profile_backend_capabilities())?;
-        let collect_telemetry = config.collect_telemetry;
+        let _collect_telemetry = config.collect_telemetry;
         let actual_text = selection.text_sdf;
         let actual_shape = selection.shape_sdf;
         let mut telemetry = ProfileRenderTelemetry::new(
@@ -2193,19 +1830,8 @@ impl CustomProfileRenderer {
 
                     let encode_started = std::time::Instant::now();
                     let encoded: Result<Vec<u8>, String> = match config.jpeg_encoder {
-                        #[cfg(feature = "skia-core")]
                         crate::profile_backend::ProfileJpegEncoder::Skia => {
-                            encode_premultiplied_rgba(
-                                &output.rgba,
-                                output.width,
-                                output.height,
-                                skia_safe::EncodedImageFormat::JPEG,
-                                90,
-                            )
-                        }
-                        #[cfg(not(feature = "skia-core"))]
-                        crate::profile_backend::ProfileJpegEncoder::Skia => {
-                            Err("the Skia JPEG encoder requires the raster backend".to_string())
+                            Err("the Skia JPEG encoder was retired; use libjpeg-turbo".to_string())
                         }
                         #[cfg(feature = "jpeg-turbo")]
                         crate::profile_backend::ProfileJpegEncoder::LibJpegTurbo => {
@@ -2245,80 +1871,26 @@ impl CustomProfileRenderer {
                                 (rgba_len as u64).saturating_add(encoded.len() as u64);
                             encoded
                         }
-                        #[cfg(feature = "skia-core")]
-                        Err(error) if config.fallback_policy == BackendFallbackPolicy::Page => {
-                            telemetry.record_fallback(
-                                BackendFallbackCode::EncoderRuntimeFailure,
-                                "jpeg-encoder",
-                                error,
-                                None,
-                                None,
-                            );
-                            telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-                            telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-                            telemetry.actual_jpeg_encoder =
-                                crate::profile_backend::ProfileJpegEncoder::Skia;
-                            telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
-                            self.render_legacy_backend_page(
-                                card,
-                                profile,
-                                &config,
-                                collect_telemetry.then_some(&mut telemetry),
-                            )?
-                        }
+
                         Err(error) => return Err(ProfileBackendRenderError::Render(error)),
                     }
                 }
                 Err(error) if error.contains("profile compositor is missing render object") => {
                     return Err(ProfileBackendRenderError::Render(error));
                 }
-                #[cfg(feature = "skia-core")]
-                Err(error) if config.fallback_policy == BackendFallbackPolicy::Page => {
-                    telemetry.record_fallback(
-                        BackendFallbackCode::ExecutorRuntimeFailure,
-                        "ordered-sdf-runs",
-                        error,
-                        None,
-                        None,
-                    );
-                    telemetry.actual_text_sdf = TextSdfExecutor::LegacySkia;
-                    telemetry.actual_shape_sdf = ShapeSdfExecutor::Skia;
-                    telemetry.actual_jpeg_encoder =
-                        crate::profile_backend::ProfileJpegEncoder::Skia;
-                    telemetry.render_contract = PROFILE_RENDER_CONTRACT_LEGACY_SKIA.into();
-                    self.render_legacy_backend_page(
-                        card,
-                        profile,
-                        &config,
-                        collect_telemetry.then_some(&mut telemetry),
-                    )?
-                }
+
                 Err(error) => return Err(ProfileBackendRenderError::Render(error)),
             }
         } else {
-            #[cfg(not(feature = "skia-core"))]
-            {
-                return Err(ProfileBackendRenderError::Render(
-                    "the legacy page path requires the raster backend".into(),
-                ));
-            }
-            #[cfg(feature = "skia-core")]
-            {
-                telemetry.actual_jpeg_encoder = crate::profile_backend::ProfileJpegEncoder::Skia;
-                self.render_legacy_backend_page(
-                    card,
-                    profile,
-                    &config,
-                    collect_telemetry.then_some(&mut telemetry),
-                )?
-            }
+            return Err(ProfileBackendRenderError::Render(
+                "the legacy page renderer was retired; select SDF executors".into(),
+            ));
         };
         telemetry.timings.total_ns = elapsed_ns(total_started);
         telemetry.fallback_glyph_cache = fallback_glyph_cache;
         Ok(crate::profile_backend::ProfileBackendRenderOutput { encoded, telemetry })
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn render_profile_batch_with_backend<'a>(
         &self,
         batch_key: &str,
@@ -2341,7 +1913,6 @@ impl CustomProfileRenderer {
         )
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn render_profile_batch_with_backend_generation<'a>(
         &self,
         batch_key: &str,
@@ -2459,59 +2030,7 @@ impl CustomProfileRenderer {
         })
     }
 
-    #[cfg(feature = "skia-core")]
-    fn render_legacy_backend_page(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        config: &crate::profile_backend::ProfileBackendConfig,
-        mut telemetry: Option<&mut crate::profile_backend::ProfileRenderTelemetry>,
-    ) -> Result<Vec<u8>, crate::profile_backend::ProfileBackendRenderError> {
-        let sdf_atlases = self.sdf_atlases.load_full();
-        let shadow_plan = (config.collect_telemetry
-            && (!sdf_atlases.is_empty() || self.shape_sdf_atlas.is_some()))
-        .then_some(SdfShadowPlanConfig {
-            text_atlases: &sdf_atlases,
-            shape_atlas: self.shape_sdf_atlas.as_deref(),
-            tile_width: config.tile_width,
-            tile_height: config.tile_height,
-        });
-        if let Some(telemetry) = telemetry.as_deref_mut() {
-            telemetry.surface_identity = crate::profile_backend::ProfileSurfaceIdentity {
-                pixel_format: "skia-n32".into(),
-                alpha_type: "premultiplied".into(),
-                color_space: "none".into(),
-            };
-            if shadow_plan.is_some() {
-                record_profile_atlas_identities(
-                    telemetry,
-                    (!sdf_atlases.is_empty()).then_some(sdf_atlases.as_ref()),
-                    self.shape_sdf_atlas.as_deref(),
-                    "shadow-plan-input",
-                );
-            } else {
-                telemetry.atlas_identities.clear();
-            }
-        }
-        let md = self.snapshot();
-        render_card_encoded_sized(
-            card,
-            &md,
-            self.assets.as_deref(),
-            profile,
-            skia_safe::Color::WHITE,
-            skia_safe::EncodedImageFormat::JPEG,
-            90,
-            crate::transform::CANVAS_WIDTH as u32,
-            crate::transform::CANVAS_HEIGHT as u32,
-            shadow_plan,
-            telemetry,
-        )
-        .map_err(crate::profile_backend::ProfileBackendRenderError::Render)
-    }
-
     /// Builds the v0.2 text scene dump without changing or replacing the production pixel path.
-    #[cfg(feature = "skia-core")]
     pub fn dump_text_scene(
         &self,
         card: &CustomProfileCard,
@@ -2541,7 +2060,6 @@ impl CustomProfileRenderer {
     }
 
     /// Builds the v0.2 full authored-layer semantic scene without changing the pixel path.
-    #[cfg(feature = "skia-core")]
     pub fn dump_semantic_scene(
         &self,
         card: &CustomProfileCard,
@@ -2552,7 +2070,6 @@ impl CustomProfileRenderer {
         self.dump_semantic_scene_with_profile(card, None, document_key, region, region, tick)
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn dump_semantic_scene_with_profile(
         &self,
         card: &CustomProfileCard,
@@ -2647,376 +2164,6 @@ impl CustomProfileRenderer {
     }
 }
 
-#[cfg(feature = "skia-core")]
-fn render_card_encoded(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    clear_color: skia_safe::Color,
-    format: skia_safe::EncodedImageFormat,
-    quality: u32,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded_sized(
-        card,
-        md,
-        assets,
-        profile,
-        clear_color,
-        format,
-        quality,
-        crate::transform::CANVAS_WIDTH as u32,
-        crate::transform::CANVAS_HEIGHT as u32,
-        None,
-        None,
-    )
-}
-
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-fn render_card_encoded_sized(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    clear_color: skia_safe::Color,
-    format: skia_safe::EncodedImageFormat,
-    quality: u32,
-    canvas_width: u32,
-    canvas_height: u32,
-    shadow_plan: Option<SdfShadowPlanConfig<'_>>,
-    mut telemetry: Option<&mut crate::profile_backend::ProfileRenderTelemetry>,
-) -> Result<Vec<u8>, String> {
-    use skia_safe::surfaces;
-
-    let total_started = std::time::Instant::now();
-    let surface_started = std::time::Instant::now();
-    let mut surface = surfaces::raster_n32_premul((canvas_width as i32, canvas_height as i32))
-        .ok_or("创建 Skia Surface 失败")?;
-    if let Some(telemetry) = telemetry.as_deref_mut() {
-        telemetry.timings.surface_create_ns = elapsed_ns(surface_started);
-    }
-
-    let canvas = surface.canvas();
-    let clear_started = std::time::Instant::now();
-    canvas.clear(clear_color);
-    if let Some(telemetry) = telemetry.as_deref_mut() {
-        telemetry.timings.surface_clear_ns = elapsed_ns(clear_started);
-    }
-
-    let plan_started = std::time::Instant::now();
-    let elements = crate::elements::flatten_and_sort(card);
-    let text_count = elements
-        .iter()
-        .filter(|e| matches!(e, crate::elements::RenderElement::Text(_)))
-        .count();
-    tracing::debug!(
-        total = elements.len(),
-        text_count,
-        "interpret: 名片元素统计"
-    );
-    if let Some(telemetry) = telemetry.as_deref_mut() {
-        telemetry.timings.plan_build_ns = elapsed_ns(plan_started);
-        telemetry.bytes.plan_bytes = std::mem::size_of_val(elements.as_slice()) as u64;
-        telemetry.work.page_count = 1;
-    }
-
-    // 循环外一次性构造共享上下文，避免每个元素重建（#29）。
-    let fallback_assets = crate::assets::AssetStore::new(1);
-    let mut last_kind = None;
-    let mut observed_glyph_count = 0u64;
-    let mut text_capture_error_count = 0u64;
-    let mut shape_capture_error_count = 0u64;
-    let mut captured_sdf_primitives = Vec::new();
-    for elem in &elements {
-        if !elem.visible() {
-            continue;
-        }
-        let kind = profile_command_kind(elem);
-        let command_started = std::time::Instant::now();
-        if telemetry.is_some() && matches!(elem, crate::elements::RenderElement::Text(_)) {
-            let mut observer = |result: Result<
-                crate::text::ResolvedTextSdfGlyph,
-                crate::text::TextSdfCaptureError,
-            >| match result {
-                Ok(glyph) => {
-                    observed_glyph_count =
-                        observed_glyph_count.saturating_add(glyph.text.chars().count() as u64);
-                    captured_sdf_primitives.push(CapturedSdfPrimitive::Text(glyph));
-                }
-                Err(_) => text_capture_error_count = text_capture_error_count.saturating_add(1),
-            };
-            crate::elements::draw_element_on_canvas_observed(
-                canvas,
-                elem,
-                md,
-                assets,
-                profile,
-                &fallback_assets,
-                canvas_width as f32,
-                canvas_height as f32,
-                None,
-                crate::elements::SdfObservationMode::RenderAndObserve,
-                Some(&mut observer),
-                None,
-            );
-        } else if telemetry.is_some() && matches!(elem, crate::elements::RenderElement::Shape(_)) {
-            let mut observer = |result: Result<
-                crate::elements::shape::ResolvedShapeSdfCommand,
-                crate::elements::shape::ShapeSdfCaptureError,
-            >| match result {
-                Ok(shape) => {
-                    captured_sdf_primitives.push(CapturedSdfPrimitive::Shape(shape));
-                }
-                Err(_) => shape_capture_error_count = shape_capture_error_count.saturating_add(1),
-            };
-            crate::elements::draw_element_on_canvas_observed(
-                canvas,
-                elem,
-                md,
-                assets,
-                profile,
-                &fallback_assets,
-                canvas_width as f32,
-                canvas_height as f32,
-                None,
-                crate::elements::SdfObservationMode::RenderAndObserve,
-                None,
-                Some(&mut observer),
-            );
-        } else {
-            crate::elements::draw_element_on_canvas(
-                canvas,
-                elem,
-                md,
-                assets,
-                profile,
-                &fallback_assets,
-                canvas_width as f32,
-                canvas_height as f32,
-            );
-        }
-        if let Some(telemetry) = telemetry.as_deref_mut() {
-            let command_ns = elapsed_ns(command_started);
-            telemetry.work.command_count = telemetry.work.command_count.saturating_add(1);
-            if last_kind != Some(kind) {
-                telemetry.work.element_run_count =
-                    telemetry.work.element_run_count.saturating_add(1);
-                last_kind = Some(kind);
-            }
-            match kind {
-                crate::profile_backend::ProfileCommandKind::Text => {
-                    telemetry.work.text_command_count =
-                        telemetry.work.text_command_count.saturating_add(1);
-                    telemetry.timings.text_sdf_ns =
-                        telemetry.timings.text_sdf_ns.saturating_add(command_ns);
-                }
-                crate::profile_backend::ProfileCommandKind::Shape => {
-                    telemetry.work.shape_command_count =
-                        telemetry.work.shape_command_count.saturating_add(1);
-                    telemetry.work.shape_count = telemetry.work.shape_count.saturating_add(1);
-                    telemetry.timings.shape_sdf_ns =
-                        telemetry.timings.shape_sdf_ns.saturating_add(command_ns);
-                }
-                crate::profile_backend::ProfileCommandKind::Image => {
-                    telemetry.work.image_command_count =
-                        telemetry.work.image_command_count.saturating_add(1);
-                    telemetry.timings.image_draw_ns =
-                        telemetry.timings.image_draw_ns.saturating_add(command_ns);
-                }
-                crate::profile_backend::ProfileCommandKind::Composite => {
-                    telemetry.work.composite_command_count =
-                        telemetry.work.composite_command_count.saturating_add(1);
-                    telemetry.timings.composite_ns =
-                        telemetry.timings.composite_ns.saturating_add(command_ns);
-                }
-            }
-            record_command_telemetry(telemetry, kind, command_ns);
-        }
-    }
-    if let Some(telemetry) = telemetry.as_deref_mut() {
-        telemetry.work.glyph_count = observed_glyph_count;
-    }
-    if text_capture_error_count > 0 {
-        tracing::debug!(
-            text_capture_error_count,
-            "text SDF shadow command capture skipped non-affine transforms"
-        );
-    }
-    if shape_capture_error_count > 0 {
-        tracing::debug!(
-            shape_capture_error_count,
-            "Shape SDF shadow command capture used explicit legacy fallbacks"
-        );
-    }
-    if let (Some(shadow_plan), Some(telemetry)) = (shadow_plan, telemetry.as_deref_mut()) {
-        let tile_binning_started = std::time::Instant::now();
-        let source = crate::sdf::tile::MixedSdfAtlasSource::new(
-            shadow_plan.text_atlases,
-            shadow_plan.shape_atlas,
-        );
-        let commands = source
-            .as_ref()
-            .map_err(|error| error.to_string())
-            .and_then(|source| {
-                map_captured_sdf_commands(
-                    &captured_sdf_primitives,
-                    shadow_plan.text_atlases,
-                    shadow_plan.shape_atlas,
-                    source,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            });
-        match commands {
-            Ok(commands) => {
-                let grid = crate::sdf::tile::TileGrid {
-                    canvas_width,
-                    canvas_height,
-                    tile_width: shadow_plan.tile_width,
-                    tile_height: shadow_plan.tile_height,
-                };
-                let source = source.expect("mixed atlas source was validated above");
-                match crate::sdf::tile::SdfTilePlan::build(grid, &commands, &source) {
-                    Ok(plan) => {
-                        telemetry.atlas_contract = Some(
-                            match (
-                                shadow_plan.text_atlases.is_empty(),
-                                shadow_plan.shape_atlas.is_some(),
-                            ) {
-                                (false, true) => crate::sdf::tile::MIXED_SDF_ATLAS_CONTRACT,
-                                (true, true) => {
-                                    crate::sdf::shape_atlas::SHAPE_ATLAS_MANIFEST_SCHEMA
-                                }
-                                _ => crate::sdf::atlas::ATLAS_SET_CONTRACT,
-                            }
-                            .into(),
-                        );
-                        telemetry.bytes.atlas_mapped_bytes =
-                            shadow_plan.text_atlases.mapped_bytes().saturating_add(
-                                shadow_plan
-                                    .shape_atlas
-                                    .map_or(0, |atlas| atlas.mapped_bytes()),
-                            );
-                        telemetry.caches.atlas.hits = telemetry
-                            .caches
-                            .atlas
-                            .hits
-                            .saturating_add(commands.len() as u64);
-                        telemetry.record_sdf_plan(
-                            plan.stats(),
-                            plan.resident_bytes(),
-                            plan.span_bytes(),
-                        );
-                    }
-                    Err(error) => {
-                        telemetry.caches.plan.misses =
-                            telemetry.caches.plan.misses.saturating_add(1);
-                        tracing::debug!(error = %error, "mixed SDF shadow tile plan was rejected");
-                    }
-                }
-            }
-            Err(error) => {
-                telemetry.caches.atlas.misses = telemetry.caches.atlas.misses.saturating_add(1);
-                tracing::debug!(error = %error, "mixed SDF shadow command mapping was rejected");
-            }
-        }
-        telemetry.timings.tile_binning_ns = telemetry
-            .timings
-            .tile_binning_ns
-            .saturating_add(elapsed_ns(tile_binning_started));
-    }
-
-    let encode_started = std::time::Instant::now();
-    let encoded = encode_surface(&mut surface, canvas_width, canvas_height, format, quality)?;
-    if let Some(telemetry) = telemetry.as_deref_mut() {
-        telemetry.timings.encode_ns = elapsed_ns(encode_started);
-        telemetry.timings.total_ns = elapsed_ns(total_started);
-        telemetry.bytes.encoded_output_bytes = encoded.len() as u64;
-    }
-    Ok(encoded)
-}
-
-#[cfg(feature = "skia-core")]
-pub fn render_card(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded(
-        card,
-        md,
-        assets,
-        profile,
-        skia_safe::Color::WHITE,
-        skia_safe::EncodedImageFormat::JPEG,
-        90,
-    )
-}
-
-#[cfg(feature = "skia-core")]
-pub fn render_card_png(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded(
-        card,
-        md,
-        assets,
-        profile,
-        skia_safe::Color::WHITE,
-        skia_safe::EncodedImageFormat::PNG,
-        100,
-    )
-}
-
-#[cfg(feature = "skia-core")]
-pub fn render_card_png_transparent(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-) -> Result<Vec<u8>, String> {
-    render_card_encoded(
-        card,
-        md,
-        assets,
-        profile,
-        skia_safe::Color::TRANSPARENT,
-        skia_safe::EncodedImageFormat::PNG,
-        100,
-    )
-}
-
-/// 裁剪后的图层渲染结果。
-#[cfg(feature = "skia-core")]
-pub struct CroppedLayerOutput {
-    pub data: Vec<u8>,
-    /// Signed so a layer whose opaque bounds start outside the canvas keeps its
-    /// true origin instead of clamping to zero.
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub dynamic: Option<LayerDynamic>,
-}
-
-#[cfg(feature = "animation-export")]
-pub(crate) struct CroppedLayerRaster {
-    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
-    pub pixels: Vec<u8>,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub scratch_peak_bytes: usize,
-}
-
 #[cfg(feature = "animation-export")]
 #[derive(Default)]
 struct AnimationCanvasExpansion {
@@ -3066,90 +2213,6 @@ fn animation_canvas_expansion(
     }
 }
 
-/// Encoded pre-generated honor artwork and its exact game dimensions.
-#[cfg(feature = "skia-core")]
-pub struct HonorArtworkOutput {
-    pub data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[cfg(feature = "skia-core")]
-fn encode_honor_artwork(
-    full_size: bool,
-    webp_quality: u32,
-    draw: impl FnOnce(&skia_safe::Canvas),
-) -> Result<HonorArtworkOutput, String> {
-    use skia_safe::surfaces;
-
-    let width = if full_size { 380 } else { 180 };
-    let height = 80;
-    let mut surface = surfaces::raster_n32_premul((width, height))
-        .ok_or("failed to create honor artwork surface")?;
-    let canvas = surface.canvas();
-    canvas.clear(skia_safe::Color::TRANSPARENT);
-    canvas.save();
-    canvas.translate((width as f32 / 2.0, height as f32 / 2.0));
-    draw(canvas);
-    canvas.restore();
-    let image = surface.image_snapshot();
-    let data = image
-        .encode(
-            None,
-            skia_safe::EncodedImageFormat::WEBP,
-            Some(webp_quality.min(100)),
-        )
-        .ok_or("failed to encode honor artwork as WebP")?
-        .as_bytes()
-        .to_vec();
-    if data.is_empty() {
-        return Err("honor artwork encoder returned no bytes".into());
-    }
-    Ok(HonorArtworkOutput {
-        data,
-        width: width as u32,
-        height: height as u32,
-    })
-}
-
-/// 渲染单个元素到透明画布，裁剪到不透明像素的紧凑边界，编码为 WebP。
-#[cfg(feature = "skia-core")]
-pub fn render_element_layer_cropped(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    webp_quality: u32,
-) -> Result<CroppedLayerOutput, String> {
-    render_element_layer_cropped_impl(card, md, assets, profile, webp_quality, true)
-}
-
-#[cfg(all(feature = "animation-export", feature = "skia-core"))]
-pub(crate) fn render_element_layer_cropped_animation_raster(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    include_dynamic_bounds: bool,
-) -> Result<CroppedLayerRaster, String> {
-    let raster = render_element_layer_cropped_raster_impl(
-        card,
-        md,
-        assets,
-        profile,
-        include_dynamic_bounds,
-    )?;
-    Ok(CroppedLayerRaster {
-        pixels: raster.pixels,
-        x: raster.x,
-        y: raster.y,
-        width: raster.width,
-        height: raster.height,
-        #[cfg(feature = "animation-export")]
-        scratch_peak_bytes: raster.scratch_peak_bytes,
-    })
-}
-
 /// 扫描像素缓冲区，找到所有 alpha > 0 像素的最小包围矩形。
 fn find_opaque_bounds(
     pixels: &[u8],
@@ -3178,378 +2241,6 @@ fn find_opaque_bounds(
 // 后续可在不破坏逐字节一致性的前提下做内部优化（单画布复用等）。
 // ─────────────────────────────────────────────────────────────────────────
 
-/// 单层裁剪输出（含元数据 + WebP 字节）。
-#[cfg(feature = "skia-core")]
-pub struct LayerCrop {
-    /// 元素在 layer 升序中的位置（0-based）。
-    pub z: usize,
-    /// 元素类型 "text" / "shape" / "card_member" / ...。
-    pub element_type: String,
-    /// 原始可见性（调用方可自行覆盖，本字段记录数据源标记）。
-    pub original_visible: bool,
-    /// 裁剪后的 WebP 字节（与 `render_element_layer_cropped` 同编码）。
-    pub data: Vec<u8>,
-    /// 裁剪框（原画布坐标系）。完全透明时全 0。
-    ///
-    /// 有符号：不透明包围盒可能起始于画布之外，此时不应钳到 0。
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    /// 可选元素属性（include_properties=true 时填充）。
-    pub properties: Option<serde_json::Value>,
-}
-
-/// 单层定位：layer 升序后的 (元素类型, 在该类型数组内的下标, 原始可见性)。
-#[cfg(feature = "skia-core")]
-struct ElementPos {
-    etype: &'static str,
-    idx: usize,
-    original_visible: bool,
-}
-
-/// 收集所有元素的定位信息，按 layer 升序稳定排序。
-///
-/// 与 `elements::flatten_and_sort` 同 push 顺序、同 `sort_by_key(layer)`；
-/// `z` 编号 = 本函数返回向量的下标。
-#[cfg(feature = "skia-core")]
-fn collect_element_positions(card: &CustomProfileCard) -> Vec<ElementPos> {
-    let mut raw: Vec<(i32, ElementPos)> = Vec::new();
-    for (i, e) in card.texts.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "text",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.shapes.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "shape",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.card_members.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "card_member",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.stamps.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "stamp",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.others.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "other",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.bonds_honors.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "bonds_honor",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.honors.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "honor",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.collections.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "collection",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.generals.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "general",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.stand_members.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "stand_member",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.general_backgrounds.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "general_background",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    for (i, e) in card.story_backgrounds.iter().enumerate() {
-        raw.push((
-            e.object_data.layer,
-            ElementPos {
-                etype: "story_background",
-                idx: i,
-                original_visible: e.object_data.visible,
-            },
-        ));
-    }
-    raw.sort_by_key(|(layer, _)| *layer);
-    raw.into_iter().map(|(_, p)| p).collect()
-}
-
-/// 把所有元素置不可见，再单独打开目标元素 —— 给单层渲染用的临时 card。
-#[cfg(feature = "skia-core")]
-fn make_single_element_card(base: &CustomProfileCard, pos: &ElementPos) -> CustomProfileCard {
-    let mut card = base.clone();
-    for e in &mut card.texts {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.shapes {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.card_members {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.stamps {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.others {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.bonds_honors {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.honors {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.collections {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.generals {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.stand_members {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.general_backgrounds {
-        e.object_data.visible = false;
-    }
-    for e in &mut card.story_backgrounds {
-        e.object_data.visible = false;
-    }
-    match pos.etype {
-        "text" => card.texts[pos.idx].object_data.visible = true,
-        "shape" => card.shapes[pos.idx].object_data.visible = true,
-        "card_member" => card.card_members[pos.idx].object_data.visible = true,
-        "stamp" => card.stamps[pos.idx].object_data.visible = true,
-        "other" => card.others[pos.idx].object_data.visible = true,
-        "bonds_honor" => card.bonds_honors[pos.idx].object_data.visible = true,
-        "honor" => card.honors[pos.idx].object_data.visible = true,
-        "collection" => card.collections[pos.idx].object_data.visible = true,
-        "general" => card.generals[pos.idx].object_data.visible = true,
-        "stand_member" => card.stand_members[pos.idx].object_data.visible = true,
-        "general_background" => card.general_backgrounds[pos.idx].object_data.visible = true,
-        "story_background" => card.story_backgrounds[pos.idx].object_data.visible = true,
-        _ => {}
-    }
-    card
-}
-
-/// 提取元素属性：字体名、颜色 hex、文本内容等。
-#[cfg(feature = "skia-core")]
-fn extract_element_properties(
-    card: &CustomProfileCard,
-    etype: &str,
-    idx: usize,
-    md: &MasterData,
-) -> Option<serde_json::Value> {
-    use serde_json::json;
-
-    fn color_hex(md: &MasterData, id: i32) -> String {
-        md.resolve_color(id)
-            .map(|c| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a))
-            .unwrap_or_else(|| format!("color#{id}"))
-    }
-    fn font_name(md: &MasterData, id: i32) -> String {
-        md.resolve_font(id).unwrap_or_else(|| format!("font#{id}"))
-    }
-
-    match etype {
-        "text" => {
-            let e = card.texts.get(idx)?;
-            Some(json!({
-                "text": e.text,
-                "font": font_name(md, e.font_id),
-                "font_id": e.font_id,
-                "size": e.size,
-                "color": color_hex(md, e.color_id),
-                "color_id": e.color_id,
-                "outline_color": color_hex(md, e.outline_color_id),
-                "outline_size": e.outline_size,
-                "line_spacing": e.line_spacing,
-                "text_type": e.text_type,
-            }))
-        }
-        "shape" => {
-            let e = card.shapes.get(idx)?;
-            Some(json!({
-                "id": e.id,
-                "color": color_hex(md, e.color_id),
-                "color_id": e.color_id,
-                "alpha": e.alpha,
-                "outline_color": color_hex(md, e.outline_color_id),
-                "outline_alpha": e.outline_alpha,
-                "outline_size": e.outline_size,
-            }))
-        }
-        "card_member" => {
-            let e = card.card_members.get(idx)?;
-            Some(json!({
-                "id": e.id,
-                "member_type": e.member_type,
-                "show_master_rank": e.show_master_rank,
-                "use_after_special_training": e.use_after_special_training,
-            }))
-        }
-        "stamp" => Some(json!({ "id": card.stamps.get(idx)?.id })),
-        "other" => Some(json!({ "id": card.others.get(idx)?.id })),
-        "bonds_honor" => {
-            let e = card.bonds_honors.get(idx)?;
-            Some(json!({
-                "id": e.id,
-                "word_id": e.word_id,
-                "honor_level": e.honor_level,
-                "full_size": e.full_size,
-                "inverse": e.inverse,
-            }))
-        }
-        "honor" => {
-            let e = card.honors.get(idx)?;
-            Some(json!({
-                "id": e.id,
-                "honor_level": e.honor_level,
-                "full_size": e.full_size,
-            }))
-        }
-        "collection" => {
-            let e = card.collections.get(idx)?;
-            Some(json!({
-                "id": e.id,
-                "target_id": e.target_id,
-            }))
-        }
-        "general" => {
-            let e = card.generals.get(idx)?;
-            Some(json!({ "general_type": e.general_type }))
-        }
-        "stand_member" => Some(json!({ "id": card.stand_members.get(idx)?.id })),
-        "general_background" => Some(json!({ "id": card.general_backgrounds.get(idx)?.id })),
-        "story_background" => Some(json!({ "id": card.story_backgrounds.get(idx)?.id })),
-        _ => None,
-    }
-}
-
-/// 批量分层裁剪渲染：把名片所有元素（按 layer 升序）逐个渲成裁剪后的 WebP。
-///
-/// 输出向量的下标 = 元素的 z 序号。仅 `original_visible=true` 的元素生成 WebP，
-/// 其它元素仍出现在结果中（data 为空、rect 全 0），便于调用方完整重建图层列表。
-///
-/// `include_properties=true` 时为每层填充 `properties`（字体名/颜色 hex/文本等）。
-/// 不需要属性时关掉省一遍 md 查询。
-#[cfg(feature = "skia-core")]
-pub fn render_all_layers_cropped(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    webp_quality: u32,
-    include_properties: bool,
-) -> Result<Vec<LayerCrop>, String> {
-    let positions = collect_element_positions(card);
-    let mut out = Vec::with_capacity(positions.len());
-
-    for (z, pos) in positions.iter().enumerate() {
-        let properties = if include_properties {
-            extract_element_properties(card, pos.etype, pos.idx, md)
-        } else {
-            None
-        };
-
-        if !pos.original_visible {
-            out.push(LayerCrop {
-                z,
-                element_type: pos.etype.to_string(),
-                original_visible: false,
-                data: Vec::new(),
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-                properties,
-            });
-            continue;
-        }
-
-        let layer_card = make_single_element_card(card, pos);
-        let rendered =
-            render_element_layer_cropped(&layer_card, md, assets, profile, webp_quality)?;
-        out.push(LayerCrop {
-            z,
-            element_type: pos.etype.to_string(),
-            original_visible: true,
-            data: rendered.data,
-            x: rendered.x,
-            y: rendered.y,
-            width: rendered.width,
-            height: rendered.height,
-            properties,
-        });
-    }
-    Ok(out)
-}
-
 /// Runtime probe for the Turin AVX-512 SDF tile executor.
 fn turin_sdf_simd_available() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -3565,7 +2256,6 @@ fn turin_sdf_simd_available() -> bool {
     }
 }
 
-#[cfg(feature = "skia-core")]
 pub struct ShapeSdfExecutionOutput {
     /// Premultiplied row-major RGBA8.
     pub rgba: Vec<u8>,
@@ -3578,14 +2268,12 @@ pub struct ShapeSdfExecutionOutput {
     pub span_bytes: u64,
 }
 
-#[cfg(feature = "skia-core")]
 pub type ShapeSdfScalarOracleOutput = ShapeSdfExecutionOutput;
 
 /// Timings for the SDF-only layer candidate. Capture runs through the same
 /// ordered element draw path as the legacy renderer; mapping, binning and
 /// execution are reported separately so a server benchmark can distinguish
 /// layout/capture cost from the Turin executor itself.
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SdfLayerExecutionTimings {
     pub capture_ns: u64,
@@ -3598,7 +2286,6 @@ pub struct SdfLayerExecutionTimings {
 /// Ordered Text+Shape SDF layer output. This deliberately excludes images and
 /// other Skia-only elements; it is a numerical/performance comparison surface
 /// for the shared SDF backend, not a complete card renderer.
-#[cfg(feature = "skia-core")]
 pub struct SdfLayerExecutionOutput {
     /// Premultiplied row-major RGBA8, quantized once after FP32 tile blending.
     pub rgba: Vec<u8>,
@@ -3665,7 +2352,6 @@ pub struct FullCardSdfExecutionOutput {
     pub timings: FullCardSdfExecutionTimings,
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct ProfileBackendPrewarmReport {
     pub shape_source_count: u64,
@@ -3770,14 +2456,12 @@ pub struct FullCardSdfExecutionTimings {
     pub total_ns: u64,
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Copy)]
 enum ShapeSdfCandidateExecutor {
     ScalarRgba8,
     SimdF32,
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Copy)]
 pub(crate) enum SdfLayerCandidateExecutor {
     ScalarF32,
@@ -3841,8 +2525,8 @@ fn record_profile_atlas_identities(
     }
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct SdfShadowPlanConfig<'a> {
     text_atlases: &'a crate::sdf::atlas::MappedSdfAtlasSet,
     shape_atlas: Option<&'a crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
@@ -5094,88 +3778,6 @@ fn elapsed_ns(started: std::time::Instant) -> u64 {
     started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
-/// Encodes a rendered surface without asking Skia to do it.
-///
-/// The surface is read back as premultiplied RGBA8 — the form both encoders
-/// consume — and handed to the dependency-free PNG codec or to libjpeg-turbo.
-/// PNG is lossless, so the encoded bytes differ from Skia's compressor output
-/// while the decoded pixels are identical; JPEG is the encoder production already
-/// selects.
-#[cfg(feature = "skia-core")]
-fn encode_surface(
-    surface: &mut skia_safe::Surface,
-    canvas_width: u32,
-    canvas_height: u32,
-    format: skia_safe::EncodedImageFormat,
-    quality: u32,
-) -> Result<Vec<u8>, String> {
-    let row_bytes = (canvas_width as usize)
-        .checked_mul(4)
-        .ok_or_else(|| "surface row size overflowed".to_string())?;
-    let mut pixels = vec![
-        0u8;
-        row_bytes
-            .checked_mul(canvas_height as usize)
-            .ok_or_else(|| "surface size overflowed".to_string())?
-    ];
-    let info = skia_safe::ImageInfo::new(
-        (canvas_width as i32, canvas_height as i32),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Premul,
-        None,
-    );
-    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
-        return Err("读取渲染表面像素失败".into());
-    }
-    encode_premultiplied_rgba(&pixels, canvas_width, canvas_height, format, quality)
-}
-
-#[cfg(feature = "skia-core")]
-fn encode_premultiplied_rgba(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    format: skia_safe::EncodedImageFormat,
-    quality: u32,
-) -> Result<Vec<u8>, String> {
-    let row_bytes = width as usize * 4;
-    let expected = row_bytes
-        .checked_mul(height as usize)
-        .ok_or_else(|| "RGBA encode dimensions overflow".to_string())?;
-    if rgba.len() != expected {
-        return Err(format!(
-            "RGBA encode length mismatch: expected {expected}, got {}",
-            rgba.len()
-        ));
-    }
-    match format {
-        skia_safe::EncodedImageFormat::PNG => {
-            // PNG stores non-premultiplied samples, so the premultiplication the
-            // compositor applied is divided back out the same way a decode
-            // recovers it: re-decoding reproduces the premultiplied surface.
-            let mut samples = rgba.to_vec();
-            for pixel in samples.chunks_exact_mut(4) {
-                let alpha = pixel[3];
-                if alpha != 0 && alpha != u8::MAX {
-                    for channel in 0..3 {
-                        pixel[channel] =
-                            crate::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
-                    }
-                }
-            }
-            crate::codec::png::encode_rgba(width, height, &samples)
-                .map_err(|error| format!("PNG 编码失败: {error}"))
-        }
-        #[cfg(feature = "jpeg-turbo")]
-        skia_safe::EncodedImageFormat::JPEG => {
-            // JPEG carries no alpha, so a premultiplied surface is already the
-            // composited result over its own background.
-            crate::jpeg_turbo::encode_rgba(rgba, width, height, quality)
-        }
-        other => Err(format!("不支持的编码格式: {other:?}")),
-    }
-}
-
 fn render_authored_image_into_pixels(
     pixels: &mut [u8],
     scene: &allium_renderer_core::profile_scene::ResolvedProfileScene,
@@ -5311,7 +3913,7 @@ fn profile_command_kind(
     }
 }
 
-#[cfg(feature = "skia-core")]
+#[allow(dead_code)]
 fn record_command_telemetry(
     telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
     kind: crate::profile_backend::ProfileCommandKind,
@@ -5353,140 +3955,6 @@ pub struct LayerDynamicFrame {
     pub frame: u32,
     pub dx: f32,
     pub dy: f32,
-}
-
-#[cfg(feature = "skia-core")]
-fn render_element_layer_cropped_impl(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    webp_quality: u32,
-    include_dynamic_metadata: bool,
-) -> Result<CroppedLayerOutput, String> {
-    let raster = render_element_layer_cropped_raster_impl(
-        card,
-        md,
-        assets,
-        profile,
-        include_dynamic_metadata,
-    )?;
-    // The cropped layer is emitted as lossless PNG through the engine's own
-    // codec. `quality` has no effect on a lossless format and is accepted only
-    // so the call shape stays stable for callers that still pass one.
-    let _ = webp_quality;
-    if raster.width == 0 || raster.height == 0 {
-        return Err("图层裁剪结果为空".to_string());
-    }
-    let mut samples = raster.pixels.clone();
-    for pixel in samples.chunks_exact_mut(4) {
-        let alpha = pixel[3];
-        if alpha != 0 && alpha != u8::MAX {
-            for channel in 0..3 {
-                pixel[channel] =
-                    crate::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
-            }
-        }
-    }
-    let data = crate::codec::png::encode_rgba(raster.width, raster.height, &samples)
-        .map_err(|error| format!("PNG 编码失败: {error}"))?;
-    Ok(CroppedLayerOutput {
-        data,
-        x: raster.x,
-        y: raster.y,
-        width: raster.width,
-        height: raster.height,
-        dynamic: raster.dynamic,
-    })
-}
-
-struct CroppedLayerRasterWithMetadata {
-    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
-    pixels: Vec<u8>,
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    dynamic: Option<LayerDynamic>,
-    /// Peak scratch bytes held while producing this raster. Only the animation
-    /// window renderer consumes it, to budget retained surfaces.
-    #[cfg(feature = "animation-export")]
-    scratch_peak_bytes: usize,
-}
-
-#[cfg(feature = "skia-core")]
-fn render_element_layer_cropped_raster_impl(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    include_dynamic_metadata: bool,
-) -> Result<CroppedLayerRasterWithMetadata, String> {
-    let w = crate::transform::CANVAS_WIDTH as i32;
-    let h = crate::transform::CANVAS_HEIGHT as i32;
-
-    let elements = crate::elements::flatten_and_sort(card);
-    let dynamic = include_dynamic_metadata
-        .then(|| layer_dynamic_for_elements(&elements, md))
-        .flatten();
-    let visible_count = elements.iter().filter(|e| e.visible()).count();
-    tracing::debug!(
-        total = elements.len(),
-        visible = visible_count,
-        "图层元素扁平化完成"
-    );
-    // 循环外一次性构造共享上下文，避免每个元素重建（#29）。
-    let fallback_assets = crate::assets::AssetStore::new(1);
-
-    let expansion = dynamic
-        .as_ref()
-        .map(dynamic_canvas_expansion)
-        .unwrap_or_default();
-    let surface_w = w + expansion.left + expansion.right;
-    let surface_h = h + expansion.top + expansion.bottom;
-
-    let pixels = render_layer_pixels(
-        &elements,
-        md,
-        assets,
-        profile,
-        &fallback_assets,
-        surface_w,
-        surface_h,
-        (w, h),
-        (expansion.left as f32, expansion.top as f32),
-    )?;
-    let row_bytes = surface_w as usize * 4;
-    let (bx, by, bw, bh) = opaque_bounds_for_pixels(&pixels, surface_w, surface_h, row_bytes)?;
-    tracing::debug!(bx, by, bw, bh, "像素包围盒扫描完成");
-
-    if bw == 0 || bh == 0 {
-        return Ok(CroppedLayerRasterWithMetadata {
-            pixels: Vec::new(),
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            dynamic: None,
-            #[cfg(feature = "animation-export")]
-            scratch_peak_bytes: surface_w as usize * surface_h as usize * 4 * 2,
-        });
-    }
-
-    let cropped = crop_pixels_lossless(&pixels, row_bytes, bx, by, bw, bh)?;
-    #[cfg(feature = "animation-export")]
-    let cropped_bytes = bw as usize * bh as usize * 4;
-    Ok(CroppedLayerRasterWithMetadata {
-        pixels: cropped,
-        x: bx as i32 - expansion.left,
-        y: by as i32 - expansion.top,
-        width: bw,
-        height: bh,
-        dynamic,
-        #[cfg(feature = "animation-export")]
-        scratch_peak_bytes: (surface_w as usize * surface_h as usize * 4 * 2)
-            .saturating_add(cropped_bytes),
-    })
 }
 
 /// Premultiplied RGBA8 layer raster produced by the ordered SDF path,
@@ -5674,62 +4142,6 @@ fn layer_dynamic_for_elements(
     })
 }
 
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-/// Renders the element layer into a caller-owned premultiplied RGBA8 buffer.
-///
-/// The buffer is the surface's own storage, so the pixels are available without
-/// a snapshot or a readback.
-fn render_layer_pixels(
-    elements: &[crate::elements::RenderElement<'_>],
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    fallback_assets: &AssetStore,
-    surface_w: i32,
-    surface_h: i32,
-    canvas_size: (i32, i32),
-    canvas_origin: (f32, f32),
-) -> Result<Vec<u8>, String> {
-    let row_bytes = surface_w as usize * 4;
-    let mut pixels = vec![0u8; row_bytes * surface_h as usize];
-    let info = skia_safe::ImageInfo::new(
-        (surface_w, surface_h),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Premul,
-        None,
-    );
-    let mut surface =
-        skia_safe::surfaces::wrap_pixels(&info, pixels.as_mut_slice(), Some(row_bytes), None)
-            .ok_or("创建 Skia Surface 失败")?;
-    let canvas = surface.canvas();
-    canvas.clear(skia_safe::Color::TRANSPARENT);
-    canvas.save();
-    if canvas_origin.0 != 0.0 || canvas_origin.1 != 0.0 {
-        canvas.translate(skia_safe::Point::new(canvas_origin.0, canvas_origin.1));
-    }
-
-    for elem in elements {
-        if !elem.visible() {
-            continue;
-        }
-        crate::elements::draw_element_on_canvas(
-            canvas,
-            elem,
-            md,
-            assets,
-            profile,
-            fallback_assets,
-            canvas_size.0 as f32,
-            canvas_size.1 as f32,
-        );
-    }
-
-    canvas.restore();
-    drop(surface);
-    Ok(pixels)
-}
-
 #[derive(Default)]
 struct CanvasExpansion {
     left: i32,
@@ -5878,11 +4290,11 @@ unsafe fn find_opaque_bounds_avx512(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     use super::*;
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     use crate::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     use crate::types::{
         BondsHonorEntry, BondsHonorWordEntry, CardEntry, CustomProfileCard, HonorEntry, ObjectData,
         Quaternion, StampElement, TextElement, Vec3,
@@ -5890,10 +4302,10 @@ mod tests {
 
     /// 全部返回 None 的 MasterData provider，模拟"无素材"环境。
     /// 此环境可能触发渲染 panic（Issue #5 根因）。
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     struct NullProvider;
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     impl MasterDataProvider for NullProvider {
         fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
             None
@@ -5936,7 +4348,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     fn default_object_data(layer: i32, visible: bool) -> ObjectData {
         ObjectData {
             layer,
@@ -5963,7 +4375,7 @@ mod tests {
 
     /// Issue #5 用户 7493593928021629747 的简单名片结构：
     /// 4 个 invisible shapes + 4 个 visible stamps + 4 个 invisible texts = 12 层
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     fn issue5_simple_card() -> CustomProfileCard {
         CustomProfileCard {
             shapes: vec![
@@ -6078,331 +4490,5 @@ mod tests {
             general_backgrounds: vec![],
             story_backgrounds: vec![],
         }
-    }
-
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn static_honor_artwork_uses_exact_game_dimensions() {
-        fn assert_webp_dimensions(output: HonorArtworkOutput, width: i32, height: i32) {
-            let image = skia_safe::Image::from_encoded(skia_safe::Data::new_copy(&output.data))
-                .expect("honor artwork should decode as WebP");
-            assert_eq!(output.width, width as u32);
-            assert_eq!(output.height, height as u32);
-            assert_eq!(image.width(), width);
-            assert_eq!(image.height(), height);
-        }
-
-        let renderer = CustomProfileRenderer::new(Arc::new(NullProvider));
-        let main = renderer
-            .render_static_honor_artwork(1, 1, true, 90)
-            .expect("main honor artwork should encode without masterdata");
-        assert_webp_dimensions(main, 380, 80);
-
-        let sub = renderer
-            .render_static_honor_artwork(1, 1, false, 90)
-            .expect("sub honor artwork should encode without masterdata");
-        assert_webp_dimensions(sub, 180, 80);
-    }
-
-    /// 测试 1: 在无素材环境下，render_element_layer_cropped 对 stamp 层不 panic。
-    /// 修复前：stamp 渲染会 unwrap 缺失素材 → panic → 整个 spawn_blocking 崩溃
-    /// 修复后：stamp 渲染返回 Err 或 draw_image_placeholder，不 panic
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn stamp_layer_render_no_panic_without_assets() {
-        let provider = Arc::new(NullProvider);
-        let md = MasterData::new(provider);
-        let assets = AssetStore::new(8);
-
-        let card = issue5_simple_card();
-
-        // 对每个 stamp 层单独渲染
-        for (z, _stamp) in card.stamps.iter().enumerate() {
-            let mut layer_card = card.clone();
-            // 设置所有元素为不可见
-            for s in &mut layer_card.shapes {
-                s.object_data.visible = false;
-            }
-            for s in &mut layer_card.stamps {
-                s.object_data.visible = false;
-            }
-            for t in &mut layer_card.texts {
-                t.object_data.visible = false;
-            }
-            // 只设置当前 stamp 可见
-            layer_card.stamps[z].object_data.visible = true;
-
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                render_element_layer_cropped(&layer_card, &md, Some(&assets), None, 80)
-            }));
-
-            match result {
-                Ok(Ok(output)) => {
-                    // 成功渲染（可能是 placeholder）— 正常路径
-                    assert!(!output.data.is_empty(), "stamp z={z} 应有输出数据");
-                }
-                Ok(Err(_error)) => {
-                    // 渲染返回错误 — 安全路径，不 panic
-                    // 这是修复后的行为：Err 会被记录，发送空占位
-                }
-                Err(panic_info) => {
-                    // 如果到达这里，说明 catch_unwind 捕获了 panic
-                    // 修复后的 handler 层会处理这种情况
-                    panic!(
-                        "stamp z={z} 渲染 panic（应该已被 .expect 替换修复）：{:?}",
-                        panic_info
-                    );
-                }
-            }
-        }
-    }
-
-    /// 测试 2: 模拟 handler 层的 catch_unwind + channel 模式。
-    /// 验证当单个元素 panic 时，其他元素仍能正常处理。
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn catch_unwind_isolates_single_layer_panic() {
-        let provider = Arc::new(NullProvider);
-        let md = MasterData::new(provider);
-        let assets = AssetStore::new(8);
-        let card = issue5_simple_card();
-
-        // 模拟 handler 中的 channel + catch_unwind 模式
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, String, Vec<u8>)>();
-
-        // 在同步上下文中模拟 spawn_blocking 逻辑
-        let positions: Vec<(usize, &StampElement)> = card.stamps.iter().enumerate().collect();
-        let total_layers = positions.len();
-
-        for (z, _stamp) in &positions {
-            let mut layer_card = card.clone();
-            for s in &mut layer_card.shapes {
-                s.object_data.visible = false;
-            }
-            for s in &mut layer_card.stamps {
-                s.object_data.visible = false;
-            }
-            for t in &mut layer_card.texts {
-                t.object_data.visible = false;
-            }
-            layer_card.stamps[*z].object_data.visible = true;
-
-            // 核心：catch_unwind 隔离单个元素渲染
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                render_element_layer_cropped(&layer_card, &md, Some(&assets), None, 80)
-            }));
-
-            match result {
-                Ok(Ok(output)) => {
-                    let _ = tx.send((*z, "stamp".to_string(), output.data));
-                }
-                Ok(Err(_error)) => {
-                    // 渲染失败 — 发送空占位（修复后的行为）
-                    let _ = tx.send((*z, "stamp".to_string(), Vec::new()));
-                }
-                Err(_panic_info) => {
-                    // panic 被捕获 — 发送空占位（修复后的行为）
-                    let _ = tx.send((*z, "stamp".to_string(), Vec::new()));
-                }
-            }
-        }
-        drop(tx); // 关闭 sender
-
-        // 验证接收端收到了所有层的消息
-        let received: Vec<_> = rx.iter().collect();
-        assert_eq!(
-            received.len(),
-            total_layers,
-            "应收到 {} 层消息，实际收到 {} — 修复前 panic 会导致后续层全部丢失",
-            total_layers,
-            received.len()
-        );
-
-        // 验证 z-index 顺序
-        for (i, (z, etype, data)) in received.iter().enumerate() {
-            assert_eq!(*z, i, "层 z={} 应在第 {} 位", z, i);
-            assert_eq!(etype, "stamp");
-            // data 可能有内容（placeholder）或为空（渲染失败），但必须存在
-            let _ = data; // 不检查数据内容，只确认消息到达
-        }
-    }
-
-    /// 测试 3: 验证修复后的行为：catch_unwind 阻止 panic 传播，所有层都到达 receiver。
-    #[test]
-    fn catch_unwind_prevents_channel_drop() {
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, String, Vec<u8>)>();
-
-        // 模拟修复后的行为：每个元素用 catch_unwind 包裹
-        for z in 0..4 {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if z == 1 {
-                    panic!("simulated render panic at layer 1");
-                }
-                vec![1, 2, 3] // 模拟渲染输出
-            }));
-
-            match result {
-                Ok(data) => {
-                    let _ = tx.send((z, "element".to_string(), data));
-                }
-                Err(_panic_info) => {
-                    // panic 被捕获 → 发送空占位
-                    let _ = tx.send((z, "element".to_string(), Vec::new()));
-                }
-            }
-        }
-        drop(tx);
-
-        let received: Vec<_> = rx.iter().collect();
-        assert_eq!(
-            received.len(),
-            4,
-            "修复后：所有 4 层都应到达，实际收到 {} 层",
-            received.len()
-        );
-
-        // 验证 panic 层（z=1）收到了空占位
-        let panicked_layer = received.iter().find(|(z, _, _)| *z == 1).unwrap();
-        assert!(panicked_layer.2.is_empty(), "panic 层应为空数据占位");
-
-        // 验证正常层有数据
-        let normal_layer = received.iter().find(|(z, _, _)| *z == 0).unwrap();
-        assert!(!normal_layer.2.is_empty(), "正常层应有渲染数据");
-    }
-
-    /// 测试 5: 回归测试 — read_pixels 使用 AlphaType::Unpremul（Issue #7）。
-    /// 修复前 AlphaType::Premul 导致 read_pixels 对 N32 raster surface 返回 false，
-    /// 所有图层 width=0 height=0 url=""。
-    /// 修复后使用 Unpremul（与 shape.rs 一致），read_pixels 成功返回像素数据。
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn read_pixels_unpremul_succeeds_on_raster_surface() {
-        use skia_safe::{surfaces, AlphaType, ColorType, ImageInfo};
-
-        let w = 64i32;
-        let h = 64i32;
-        let mut surface = surfaces::raster_n32_premul((w, h)).expect("创建 raster surface 失败");
-
-        let canvas = surface.canvas();
-        canvas.clear(skia_safe::Color::TRANSPARENT);
-
-        // 画一个红色矩形，确保 surface 有非透明像素
-        let mut paint = skia_safe::Paint::default();
-        paint.set_color(skia_safe::Color::from_argb(255, 255, 0, 0));
-        canvas.draw_rect(skia_safe::Rect::from_xywh(10.0, 10.0, 40.0, 40.0), &paint);
-
-        let image = surface.image_snapshot();
-
-        // 使用 AlphaType::Unpremul 读取像素（修复后的方式）
-        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
-        let row_bytes = w as usize * 4;
-        let mut pixel_buf = vec![0u8; row_bytes * h as usize];
-        let success = image.read_pixels(
-            &info,
-            &mut pixel_buf,
-            row_bytes,
-            skia_safe::IPoint::new(0, 0),
-            skia_safe::image::CachingHint::Allow,
-        );
-
-        assert!(success, "read_pixels with AlphaType::Unpremul 应成功");
-
-        // 验证像素数据非全零（红色矩形区域应有非零 alpha）
-        let nonzero: usize = pixel_buf.iter().filter(|&&b| b != 0).count();
-        assert!(nonzero > 0, "像素缓冲区应有非零字节，实际全部为 0");
-
-        // 验证 find_opaque_bounds 能找到正确的包围盒
-        let (bx, by, bw, bh) = find_opaque_bounds(&pixel_buf, w as u32, h as u32, row_bytes);
-        assert!(
-            bw > 0 && bh > 0,
-            "find_opaque_bounds 应找到非零包围盒，实际 ({bx},{by},{bw},{bh})"
-        );
-    }
-
-    /// 测试 4: 验证 render_element_layer_cropped 返回裁剪后的编码结果。
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn layer_cropped_with_real_card_structure() {
-        let provider = Arc::new(NullProvider);
-        let md = MasterData::new(provider);
-        let assets = AssetStore::new(8);
-        let card = issue5_simple_card();
-
-        let mut layer_card = card.clone();
-        for s in &mut layer_card.shapes {
-            s.object_data.visible = false;
-        }
-        for s in &mut layer_card.stamps {
-            s.object_data.visible = false;
-        }
-        for t in &mut layer_card.texts {
-            t.object_data.visible = false;
-        }
-        layer_card.shapes[0].object_data.visible = true;
-
-        let result = render_element_layer_cropped(&layer_card, &md, Some(&assets), None, 80);
-        match result {
-            Ok(output) => {
-                assert!(!output.data.is_empty(), "应有 WebP 输出");
-                // 裁剪后尺寸应小于等于画布尺寸
-                assert!(output.width <= crate::transform::CANVAS_WIDTH as u32);
-                assert!(output.height <= crate::transform::CANVAS_HEIGHT as u32);
-            }
-            Err(e) => {
-                let _ = e;
-            }
-        }
-    }
-
-    /// 关键回归：批量原语 `render_all_layers_cropped` 的每层输出，必须与
-    /// 单方法 `render_element_layer_cropped` 在「make_single_element_card 单独打开该层」
-    /// 下的输出**逐字节一致**。任何不破坏此性质的内部优化（单画布复用等）都应保留
-    /// 此测试通过。
-    #[test]
-    #[cfg(feature = "skia-core")]
-    fn batch_layers_match_single_method_byte_for_byte() {
-        let provider = Arc::new(NullProvider);
-        let md = MasterData::new(provider);
-        let assets = AssetStore::new(8);
-        let card = issue5_simple_card();
-
-        // 批量原语
-        let batch = render_all_layers_cropped(&card, &md, Some(&assets), None, 80, false)
-            .expect("batch render OK");
-
-        // 逐层对照：每个 original_visible=true 的元素，用相同的"单独打开它"的 card
-        // 调单方法，结果应逐字节相等。
-        let positions = collect_element_positions(&card);
-        assert_eq!(batch.len(), positions.len(), "批量结果数 == 元素总数");
-
-        let mut compared_visible = 0;
-        for (z, pos) in positions.iter().enumerate() {
-            let layer = &batch[z];
-            assert_eq!(layer.z, z);
-            assert_eq!(layer.element_type, pos.etype);
-            assert_eq!(layer.original_visible, pos.original_visible);
-
-            if !pos.original_visible {
-                assert!(layer.data.is_empty(), "不可见层 data 应为空");
-                assert_eq!((layer.x, layer.y, layer.width, layer.height), (0, 0, 0, 0));
-                continue;
-            }
-
-            let single_card = make_single_element_card(&card, pos);
-            let single = render_element_layer_cropped(&single_card, &md, Some(&assets), None, 80)
-                .expect("single render OK");
-
-            assert_eq!(
-                layer.data, single.data,
-                "z={z} ({}): WebP 字节不一致",
-                pos.etype
-            );
-            assert_eq!(layer.x, single.x);
-            assert_eq!(layer.y, single.y);
-            assert_eq!(layer.width, single.width);
-            assert_eq!(layer.height, single.height);
-            compared_visible += 1;
-        }
-        assert!(compared_visible > 0, "至少应有一个可见层参与对照");
     }
 }

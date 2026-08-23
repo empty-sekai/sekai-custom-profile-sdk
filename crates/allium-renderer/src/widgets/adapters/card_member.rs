@@ -6,9 +6,6 @@ use crate::types::CardMemberElement;
 use crate::widgets::card_util::{rarity_count, rarity_suffix, star_icon_key};
 use crate::widgets::Widget;
 
-#[cfg(feature = "skia-core")]
-use crate::elements::image::{draw_card_member_cropped, draw_card_member_small, CardBadgeData};
-
 #[derive(Clone)]
 struct CardMemberBadgeData {
     rarity: String,
@@ -76,49 +73,13 @@ impl Widget for CardMemberWidget {
         if self.member_type == 1 {
             return (312.0, 512.0);
         }
-        #[cfg(feature = "skia-core")]
+        #[cfg(feature = "skia-oracle")]
         {
             if let Some(image) = _ctx.assets.get_image(&self.asset_key) {
                 return (image.width() as f32, image.height() as f32);
             }
         }
         (156.0, 156.0)
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        if self.member_type == 1 {
-            draw_card_member_cropped(
-                canvas,
-                Some(ctx.assets),
-                &self.asset_key,
-                self.id,
-                self.badge.clone().map(|badge| CardBadgeData {
-                    rarity: badge.rarity,
-                    attr: badge.attr,
-                    master_rank: badge.master_rank,
-                    trained: badge.trained,
-                    level: badge.level,
-                }),
-            );
-        } else {
-            draw_card_member_small(
-                canvas,
-                Some(ctx.assets),
-                &self.asset_key,
-                self.id,
-                self.badge.clone().map(|badge| CardBadgeData {
-                    rarity: badge.rarity,
-                    attr: badge.attr,
-                    master_rank: badge.master_rank,
-                    trained: badge.trained,
-                    level: badge.level,
-                }),
-            );
-        }
-        canvas.restore();
     }
 
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {

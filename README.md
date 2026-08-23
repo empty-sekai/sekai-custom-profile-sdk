@@ -148,12 +148,11 @@ layer 显隐复用当前动态 timeline、layout cache、glyph atlas 与图片�
 
 ## Native renderer
 
-native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供；`skia` feature 启用 native production preset。不启用 `skia` 时 CLI 仍可构建并通过 profile backend 渲染（`--backend native`，需安装文本/图形 SDF atlas 与 render-object store；JPEG 输出另需 `allium-renderer/jpeg-turbo`），需要 legacy 渲染器的请求会带原因显式失败。
+native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供。渲染不依赖 Skia：页面经 profile backend 与 ordered SDF 管线产出，文本/图形元素需要安装对应的 SDF atlas 与 render-object store（由自带的 `build-sdf-atlas` / `build-shape-sdf-atlas` / `build-render-object-store` 工具生成）。`skia-oracle` feature 只提供参考合成器与对拍测试。
 
 ```sh
 cargo test --workspace --all-features
-# 默认构建不含 Skia；下面的 legacy 单页渲染需要 `skia` feature。
-cargo run --release --bin render-card --features skia -- \
+cargo run --release --bin render-card -- \
   --masterdata ./masterdata \
   --card ./card.json \
   --profile ./profile.json \
@@ -163,14 +162,6 @@ cargo run --release --bin render-card --features skia -- \
   -o output.png
 ```
 
-离线资源目录可以复用 `--serve` 常驻进程的 `render_honor` NDJSON 方法，直接输出游戏
-`380×80` main 或 `180×80` sub WebP，而无需先渲染并扫描整张 1830×812 名片。普通称号的
-静态输出不会烘焙玩家 Live Master 进度；羁绊称号必须显式提供等级、字样、左右顺序和
-虚拟歌手变体。缺失任何必需素材时请求显式失败，不会发布透明占位图。
-
-```json
-{"id":1,"method":"render_honor","params":{"kind":"normal","honorId":6030,"honorLevel":7,"fullSize":true,"quality":90,"output":"./6030.webp"}}
-```
 
 `--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical

@@ -19,10 +19,6 @@ pub trait Widget: Send + Sync {
     /// 测量图元所需的宽高（不执行绘制）。
     fn measure(&self, ctx: &RenderContext<'_>) -> (f32, f32);
 
-    /// 在 canvas 的 `(x, y)` 位置绘制图元。
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>);
-
     /// 枚举该节点依赖的素材 key。
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
         Vec::new()

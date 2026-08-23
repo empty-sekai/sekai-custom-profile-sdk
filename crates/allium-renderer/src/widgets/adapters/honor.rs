@@ -4,9 +4,6 @@ use crate::context::RenderContext;
 use crate::types::{BondsHonorElement, HonorElement};
 use crate::widgets::Widget;
 
-#[cfg(feature = "skia-core")]
-use crate::elements::honor::{render_bonds_honor, render_honor};
-
 /// 普通称号元素 Widget adapter。
 pub struct HonorWidget {
     honor_id: i32,
@@ -36,25 +33,6 @@ impl Widget for HonorWidget {
         } else {
             (180.0, 80.0)
         }
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        let Some(masterdata) = ctx.masterdata else {
-            return;
-        };
-        canvas.save();
-        canvas.translate((x, y));
-        render_honor(
-            canvas,
-            self.honor_id,
-            self.honor_level,
-            self.full_size,
-            masterdata,
-            ctx.assets,
-            ctx.profile,
-        );
-        canvas.restore();
     }
 
     fn asset_keys(&self, ctx: &RenderContext<'_>) -> Vec<String> {
@@ -98,27 +76,6 @@ impl Widget for BondsHonorWidget {
         } else {
             (180.0, 80.0)
         }
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        let Some(masterdata) = ctx.masterdata else {
-            return;
-        };
-        canvas.save();
-        canvas.translate((x, y));
-        render_bonds_honor(
-            canvas,
-            self.bonds_honor_id,
-            self.honor_level,
-            self.full_size,
-            self.word_id,
-            self.inverse,
-            self.use_unit_virtual_singer,
-            masterdata,
-            ctx.assets,
-        );
-        canvas.restore();
     }
 
     fn asset_keys(&self, ctx: &RenderContext<'_>) -> Vec<String> {

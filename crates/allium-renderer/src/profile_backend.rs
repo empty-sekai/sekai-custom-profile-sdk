@@ -945,7 +945,6 @@ pub struct ProfileBackendRenderOutput {
 }
 
 /// Batch output; carries a compiled profile, which the semantic resolver builds.
-#[cfg(feature = "skia-core")]
 pub struct ProfileBackendBatchRenderOutput {
     pub compiled: crate::compiled_profile::CompiledProfileBatch,
     pub prepared_render_objects: Option<crate::compiled_profile::PreparedRenderObjectBatch>,
@@ -1217,7 +1216,7 @@ mod tests {
         assert!(resolved.fallbacks.is_empty());
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn shadow_plan_does_not_claim_commands_were_executed() {
         let mut telemetry = ProfileRenderTelemetry::new(
@@ -1248,7 +1247,7 @@ mod tests {
         assert_eq!(telemetry.commands[0].command_count, 0);
     }
 
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     #[test]
     fn sdf_stats_accumulate_without_losing_command_kind() {
         let mut telemetry = ProfileRenderTelemetry::new(

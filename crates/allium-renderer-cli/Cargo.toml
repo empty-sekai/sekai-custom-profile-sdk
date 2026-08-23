@@ -10,13 +10,10 @@ name = "render-card"
 path = "src/main.rs"
 
 [features]
-# The default build carries no Skia: it renders through the profile backend
-# (`--backend native` plus installed atlases and a render-object store, with
-# `allium-renderer/jpeg-turbo` for JPEG output), and requests that need the
-# legacy renderer fail closed with the reason. The `skia` feature adds the
-# legacy element renderer and is what the released binaries ship with.
-default = []
-skia = ["allium-renderer/skia"]
+# The renderer carries no Skia. Pages render through the profile backend and
+# the ordered SDF candidates; JPEG output needs `jpeg-turbo`.
+default = ["jpeg-turbo"]
+jpeg-turbo = ["allium-renderer/jpeg-turbo"]
 
 [dependencies]
 allium-renderer = { path = "../allium-renderer" }

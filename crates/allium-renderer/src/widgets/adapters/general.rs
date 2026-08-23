@@ -5,11 +5,6 @@ use crate::context::RenderContext;
 use crate::types::GeneralElement;
 use crate::widgets::Widget;
 
-#[cfg(feature = "skia-core")]
-use crate::elements::generals::draw_general;
-#[cfg(feature = "skia-core")]
-use crate::elements::image::draw_image_placeholder;
-
 /// General 面板元素 Widget adapter。
 pub struct GeneralWidget {
     general_type: i32,
@@ -46,30 +41,6 @@ impl Widget for GeneralWidget {
 
     fn measure(&self, _ctx: &RenderContext<'_>) -> (f32, f32) {
         profile_general_natural_size(self.general_type)
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        let (width, height) = self.measure(ctx);
-        canvas.save();
-        if self.origin_centered {
-            canvas.translate((x, y));
-        } else {
-            canvas.translate((x + width / 2.0, y + height / 2.0));
-        }
-        match (ctx.profile, ctx.masterdata) {
-            (Some(profile), Some(masterdata)) => {
-                draw_general(
-                    canvas,
-                    self.general_type,
-                    profile,
-                    masterdata,
-                    Some(ctx.assets),
-                );
-            }
-            _ => draw_image_placeholder(canvas, "General", self.general_type),
-        }
-        canvas.restore();
     }
 
     fn asset_keys(&self, ctx: &RenderContext<'_>) -> Vec<String> {

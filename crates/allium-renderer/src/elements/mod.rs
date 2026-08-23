@@ -1,12 +1,9 @@
 //! 场景元素渲染模块。
 
 pub mod generals;
-#[cfg(feature = "skia-core")]
-pub mod honor;
-#[cfg(feature = "skia-core")]
-pub mod image;
-pub mod shape;
-
+/// Offline baking renderer for honor artwork: the render-object store builder
+/// bakes composited honor objects through it. No render entry point reaches
+/// this code.
 /// Builds a Skia face from font bytes the caller supplied.
 ///
 /// The element draw path still rasterizes a few labels through Skia, but it
@@ -18,7 +15,7 @@ pub mod shape;
 ///
 /// Returns `None` when the family is not available, so callers skip the label
 /// rather than draw it in an unrelated typeface.
-#[cfg(feature = "skia-core")]
+#[cfg(feature = "skia-oracle")]
 pub(crate) fn bundled_typeface(family: &str) -> Option<skia_safe::Typeface> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -45,6 +42,15 @@ pub(crate) fn bundled_typeface(family: &str) -> Option<skia_safe::Typeface> {
     }
     resolved
 }
+
+#[cfg(feature = "skia-oracle")]
+pub mod honor;
+/// Offline baking renderer for image elements, serving the same store-builder
+/// role as `honor`.
+#[cfg(feature = "skia-oracle")]
+pub mod image;
+pub mod shape;
+
 use crate::types::*;
 
 /// 扁平化后的渲染元素（统一不同类型以便排序）。
@@ -146,64 +152,6 @@ pub fn flatten_and_sort(card: &CustomProfileCard) -> Vec<RenderElement<'_>> {
 
     elements.sort_by_key(|e| e.layer());
     elements
-}
-
-#[cfg(feature = "skia-core")]
-pub fn draw_element(
-    canvas: &skia_safe::Canvas,
-    elem: &RenderElement<'_>,
-    md: &crate::masterdata::MasterData,
-    assets: Option<&crate::assets::AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-) {
-    // 单次调用便利包装：自行构造共享上下文。批量渲染请用 draw_element_on_canvas
-    // 并在循环外复用 fallback_assets。
-    let fallback_assets = crate::assets::AssetStore::new(1);
-    draw_element_on_canvas(
-        canvas,
-        elem,
-        md,
-        assets,
-        profile,
-        &fallback_assets,
-        crate::transform::CANVAS_WIDTH,
-        crate::transform::CANVAS_HEIGHT,
-    );
-}
-
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-pub fn draw_element_on_canvas(
-    canvas: &skia_safe::Canvas,
-    elem: &RenderElement<'_>,
-    md: &crate::masterdata::MasterData,
-    assets: Option<&crate::assets::AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    fallback_assets: &crate::assets::AssetStore,
-    canvas_width: f32,
-    canvas_height: f32,
-) {
-    draw_element_on_canvas_observed(
-        canvas,
-        elem,
-        md,
-        assets,
-        profile,
-        fallback_assets,
-        canvas_width,
-        canvas_height,
-        None,
-        SdfObservationMode::RenderAndObserve,
-        None,
-        None,
-    );
-}
-
-#[cfg(feature = "skia-core")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SdfObservationMode {
-    RenderAndObserve,
-    ObserveOnly,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -310,174 +258,7 @@ fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
     ]
 }
 
-#[cfg(feature = "skia-core")]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_element_on_canvas_observed(
-    canvas: &skia_safe::Canvas,
-    elem: &RenderElement<'_>,
-    md: &crate::masterdata::MasterData,
-    assets: Option<&crate::assets::AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    fallback_assets: &crate::assets::AssetStore,
-    canvas_width: f32,
-    canvas_height: f32,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    observation_mode: SdfObservationMode,
-    text_observer: Option<
-        &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, crate::text::TextSdfCaptureError>),
-    >,
-    shape_observer: Option<
-        &mut dyn FnMut(
-            Result<
-                crate::elements::shape::ResolvedShapeSdfCommand,
-                crate::elements::shape::ShapeSdfCaptureError,
-            >,
-        ),
-    >,
-) -> SdfObservationTimings {
-    use crate::context::RenderContext;
-    use crate::elements::shape::{capture_shape_sdf, draw_shape, draw_shape_observed};
-    use crate::text::{capture_text_sdf, draw_text, TEXT_SCALE};
-    use crate::transform;
-    use crate::widgets::adapters::card_member::CardMemberWidget;
-    use crate::widgets::adapters::general::GeneralWidget;
-    use crate::widgets::adapters::honor::{BondsHonorWidget, HonorWidget};
-    use crate::widgets::adapters::simple_asset::{
-        CollectionWidget, GeneralBgWidget, OtherWidget, StampWidget, StandMemberWidget,
-        StoryBgWidget,
-    };
-    use crate::widgets::Widget;
-    use skia_safe::Point;
-
-    let mut observation_timings = SdfObservationTimings::default();
-
-    let obj = elem.object_data();
-    let (x, y, angle, sx, sy) =
-        transform::extract_transform_for_canvas(obj, canvas_width, canvas_height);
-
-    canvas.save();
-    canvas.translate(Point::new(x, y));
-    if angle.abs() > 0.01 {
-        canvas.rotate(angle, None);
-    }
-    if (sx - 1.0).abs() > 0.001 || (sy - 1.0).abs() > 0.001 {
-        canvas.scale((sx, sy));
-    }
-
-    match elem {
-        RenderElement::Text(e) => {
-            tracing::debug!(
-                x = x, y = y, angle = angle, sx = sx, sy = sy,
-                text = %e.text.chars().take(20).collect::<String>(),
-                "Text 元素坐标"
-            );
-            canvas.scale((TEXT_SCALE, TEXT_SCALE));
-            if let Some(observer) = text_observer {
-                match observation_mode {
-                    SdfObservationMode::RenderAndObserve => {
-                        crate::text::draw_text_observed(canvas, e, md, observer)
-                    }
-                    SdfObservationMode::ObserveOnly => {
-                        observation_timings.text_capture =
-                            capture_text_sdf(canvas, e, md, text_atlases, observer)
-                    }
-                }
-            } else {
-                draw_text(canvas, e, md);
-            }
-        }
-        RenderElement::Shape(e) => {
-            if let Some(observer) = shape_observer {
-                match observation_mode {
-                    SdfObservationMode::RenderAndObserve => {
-                        draw_shape_observed(canvas, e, md, assets, Some(observer))
-                    }
-                    SdfObservationMode::ObserveOnly => {
-                        capture_shape_sdf(canvas, e, md, assets, observer)
-                    }
-                }
-            } else {
-                draw_shape(canvas, e, md, assets);
-            }
-        }
-        RenderElement::CardMember(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(profile) = profile {
-                ctx = ctx.with_profile(profile);
-            }
-            if let Some(widget) = CardMemberWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-        RenderElement::Stamp(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            StampWidget::from_element(e, &ctx).draw(canvas, 0.0, 0.0, &ctx);
-        }
-        RenderElement::Other(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(widget) = OtherWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-        RenderElement::BondsHonor(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            BondsHonorWidget::from_element(e).draw(canvas, 0.0, 0.0, &ctx);
-        }
-        RenderElement::Honor(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(profile) = profile {
-                ctx = ctx.with_profile(profile);
-            }
-            HonorWidget::from_element(e).draw(canvas, 0.0, 0.0, &ctx);
-        }
-        RenderElement::Collection(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(widget) = CollectionWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-        RenderElement::General(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let mut ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(profile) = profile {
-                ctx = ctx.with_profile(profile);
-            }
-            GeneralWidget::from_element(e).draw(canvas, 0.0, 0.0, &ctx);
-        }
-        RenderElement::StandMember(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(widget) = StandMemberWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-        RenderElement::GeneralBackground(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(widget) = GeneralBgWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-        RenderElement::StoryBackground(e) => {
-            let asset_store = assets.unwrap_or(fallback_assets);
-            let ctx = RenderContext::new(asset_store).with_masterdata(md);
-            if let Some(widget) = StoryBgWidget::from_element(e, &ctx) {
-                widget.draw(canvas, 0.0, 0.0, &ctx);
-            }
-        }
-    }
-
-    canvas.restore();
-    observation_timings
-}
-
-#[cfg(all(test, feature = "skia-core"))]
+#[cfg(all(test, feature = "skia-oracle"))]
 mod tests {
     use crate::types::{ObjectData, Quaternion, Vec3};
 

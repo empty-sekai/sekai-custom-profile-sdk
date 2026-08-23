@@ -261,14 +261,59 @@ fn render_with_format(
     profile: Option<&ProfileData>,
     format: &str,
 ) -> Result<Vec<u8>, String> {
-    match format {
-        "jpeg" | "jpg" => renderer.render_page_with_profile(card, profile),
-        "png" => renderer.render_page_png_with_profile(card, profile),
-        "png-transparent" | "png_transparent" => {
-            renderer.render_page_png_transparent_with_profile(card, profile)
+    #[cfg(target_arch = "x86_64")]
+    let simd = std::arch::is_x86_feature_detected!("avx512f")
+        && std::arch::is_x86_feature_detected!("avx512bw");
+    #[cfg(not(target_arch = "x86_64"))]
+    let simd = false;
+    let render = |transparent: bool| match (transparent, simd) {
+        (false, true) => renderer.render_full_card_sdf_simd_candidate(card, profile),
+        (false, false) => renderer.render_full_card_sdf_scalar_f32_candidate(card, profile),
+        (true, true) => renderer.render_full_card_sdf_simd_transparent_candidate(card, profile),
+        (true, false) => {
+            renderer.render_full_card_sdf_scalar_f32_transparent_candidate(card, profile)
         }
+    };
+    match format {
+        "jpeg" | "jpg" => {
+            #[cfg(feature = "jpeg-turbo")]
+            {
+                let output = render(false)?;
+                allium_renderer::jpeg_turbo::encode_rgba(
+                    &output.rgba,
+                    output.width,
+                    output.height,
+                    90,
+                )
+            }
+            #[cfg(not(feature = "jpeg-turbo"))]
+            {
+                Err("JPEG 输出需要 jpeg-turbo feature".to_string())
+            }
+        }
+        "png" => encode_candidate_png(render(false)?),
+        "png-transparent" | "png_transparent" => encode_candidate_png(render(true)?),
         other => Err(format!("不支持的格式: {other}")),
     }
+}
+
+/// PNG stores straight RGBA, so the candidate's premultiplication is divided
+/// back out with the engine's own rounding before encoding.
+fn encode_candidate_png(
+    output: allium_renderer::renderer::FullCardSdfExecutionOutput,
+) -> Result<Vec<u8>, String> {
+    let mut samples = output.rgba;
+    for pixel in samples.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha != 0 && alpha != u8::MAX {
+            for channel in 0..3 {
+                pixel[channel] =
+                    allium_renderer::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
+            }
+        }
+    }
+    allium_renderer::codec::png::encode_rgba(output.width, output.height, &samples)
+        .map_err(|error| format!("PNG 编码失败: {error}"))
 }
 
 /// 收集名片所需但 AssetStore 中缺失的素材 key。

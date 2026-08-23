@@ -39,24 +39,13 @@ allium-renderer-host = { path = "../allium-renderer-host" }
 tempfile = "3"
 
 [package.metadata.docs.rs]
-features = ["skia"]
+features = ["jpeg-turbo"]
 
 [features]
 default = []
-# Internal implementation gate for all Skia rendering code.
-# Enable `skia` (complete native preset) or `skia-minimal`, not this feature directly.
-skia-core = ["dep:skia-safe"]
-# Native production preset matching the feature combination shipped by skia-binaries.
-skia = [
-    "skia-core",
-    "parallel",
-    "skia-safe/textlayout",
-    "skia-safe/svg",
-    "skia-safe/vulkan",
-    "skia-safe/webp",
-]
-# Minimal Skia feature set for non-browser experiments; no GPU, text layout, or SVG.
-skia-minimal = ["skia-core", "skia-safe/webp"]
+# Skia as a comparison oracle: the reference compositor and the parity tests
+# that pin the native pipeline against it. Rendering never requires it.
+skia-oracle = ["dep:skia-safe"]
 # Bundled FreeType C sources for hosts without pkg-config.
 bundled-freetype = ["freetype-rs/bundled"]
 # Vendored libjpeg-turbo plus the raw-YUV encoder used by profile backends.
@@ -67,11 +56,7 @@ parallel = ["dep:rayon"]
 # when a backend config selects SDF executors; the legacy layer raster
 # additionally needs a `skia` preset.
 animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
-dev = ["skia", "dep:tracing-subscriber"]
-
-[[example]]
-name = "bench_render"
-required-features = ["dev"]
+dev = ["skia-oracle", "parallel", "dep:tracing-subscriber"]
 
 [[example]]
 name = "compare_sdf"
@@ -107,16 +92,6 @@ path = "tools/dump_outline_sdf.rs"
 required-features = ["dev"]
 
 [[bin]]
-name = "render-task043-layer"
-path = "tools/render_task043_layer.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "render-profile"
-path = "tools/render_profile.rs"
-required-features = ["dev"]
-
-[[bin]]
 name = "skia-unpremul-table"
 path = "tools/skia_unpremul_table.rs"
 required-features = ["dev"]
@@ -137,5 +112,5 @@ path = "tools/build_render_object_store.rs"
 required-features = ["dev"]
 
 [[example]]
-name = "layer_parity"
-required-features = ["dev"]
+name = "ordered_pages"
+

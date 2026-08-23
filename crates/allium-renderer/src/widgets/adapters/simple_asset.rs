@@ -1,8 +1,6 @@
 //! 通用图片类元素 adapter。
 
 use crate::context::RenderContext;
-#[cfg(feature = "skia-core")]
-use crate::elements::image::draw_asset_image;
 use crate::types::{
     CollectionElement, GeneralBackgroundElement, OtherElement, StampElement, StandMemberElement,
     StoryBackgroundElement,
@@ -40,14 +38,6 @@ impl Widget for StampWidget {
         image_size(ctx, &self.asset_key)
     }
 
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(canvas, Some(ctx.assets), &self.asset_key, "Stamp", self.id);
-        canvas.restore();
-    }
-
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
         vec![self.asset_key.clone()]
     }
@@ -81,14 +71,6 @@ impl Widget for OtherWidget {
 
     fn measure(&self, ctx: &RenderContext<'_>) -> (f32, f32) {
         image_size(ctx, &self.asset_key)
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(canvas, Some(ctx.assets), &self.asset_key, "Other", self.id);
-        canvas.restore();
     }
 
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
@@ -126,20 +108,6 @@ impl Widget for CollectionWidget {
         image_size(ctx, &self.asset_key)
     }
 
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(
-            canvas,
-            Some(ctx.assets),
-            &self.asset_key,
-            "Collection",
-            self.id,
-        );
-        canvas.restore();
-    }
-
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
         vec![self.asset_key.clone()]
     }
@@ -173,20 +141,6 @@ impl Widget for StandMemberWidget {
 
     fn measure(&self, ctx: &RenderContext<'_>) -> (f32, f32) {
         image_size(ctx, &self.asset_key)
-    }
-
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(
-            canvas,
-            Some(ctx.assets),
-            &self.asset_key,
-            "StandMember",
-            self.id,
-        );
-        canvas.restore();
     }
 
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
@@ -224,20 +178,6 @@ impl Widget for GeneralBgWidget {
         image_size(ctx, &self.asset_key)
     }
 
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(
-            canvas,
-            Some(ctx.assets),
-            &self.asset_key,
-            "GeneralBg",
-            self.id,
-        );
-        canvas.restore();
-    }
-
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
         vec![self.asset_key.clone()]
     }
@@ -273,27 +213,13 @@ impl Widget for StoryBgWidget {
         image_size(ctx, &self.asset_key)
     }
 
-    #[cfg(feature = "skia-core")]
-    fn draw(&self, canvas: &skia_safe::Canvas, x: f32, y: f32, ctx: &RenderContext<'_>) {
-        canvas.save();
-        canvas.translate((x, y));
-        draw_asset_image(
-            canvas,
-            Some(ctx.assets),
-            &self.asset_key,
-            "StoryBg",
-            self.id,
-        );
-        canvas.restore();
-    }
-
     fn asset_keys(&self, _ctx: &RenderContext<'_>) -> Vec<String> {
         vec![self.asset_key.clone()]
     }
 }
 
 fn image_size(_ctx: &RenderContext<'_>, _asset_key: &str) -> (f32, f32) {
-    #[cfg(feature = "skia-core")]
+    #[cfg(feature = "skia-oracle")]
     {
         if let Some(image) = _ctx.assets.get_image(_asset_key) {
             return (image.width() as f32, image.height() as f32);

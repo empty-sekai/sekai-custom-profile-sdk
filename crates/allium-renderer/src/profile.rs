@@ -569,6 +569,7 @@ impl ProfileData {
     /// Converts the production profile model into the backend-neutral model
     /// consumed by the shared semantic resolver. The production parser remains
     /// authoritative until the raw-profile parity corpus is complete.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn to_core_profile(&self) -> allium_renderer_core::profile_data::ProfileData {
         use allium_renderer_core::profile_data as core;
 
@@ -666,6 +667,7 @@ impl ProfileData {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn music_stats_to_core(
     value: &MusicDifficultyStats,
 ) -> allium_renderer_core::profile_data::MusicDifficultyStats {
