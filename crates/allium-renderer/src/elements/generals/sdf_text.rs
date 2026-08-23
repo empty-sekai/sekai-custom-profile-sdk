@@ -79,6 +79,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
     font_id: i32,
     max_width: Option<f32>,
     render_placement: TextRenderPlacement,
+    outline: Option<crate::text::TextOutlineOverride>,
     md: &MasterData,
     atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
     observer: &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, TextSdfCaptureError>),
@@ -109,6 +110,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
         md,
         Some(atlases),
         spec.render_placement,
+        outline,
         observer,
     );
     canvas.restore();

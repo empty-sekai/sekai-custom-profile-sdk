@@ -1411,9 +1411,11 @@ fn render_image_commands_into(
                 opacity,
                 clip,
             } => {
-                if control_state.translate_y.to_bits() != 0.0f32.to_bits() {
-                    return unsupported(&command.role, "scroll-translated composite");
-                }
+                // A group inside scrolled content translates as a unit: its
+                // recorded extent and its merge clip follow the same offset the
+                // member commands apply to themselves.
+                let mut translated_matrix = command.matrix;
+                translated_matrix[5] += control_state.translate_y;
                 stats.composite_command_count = stats.composite_command_count.saturating_add(1);
                 validate_composite_command(&command.role, *opacity, clip.as_ref())?;
                 match operation {
@@ -1421,7 +1423,7 @@ fn render_image_commands_into(
                     CompositeOperation::BeginIsolation => {
                         let bounds = composition_bounds(
                             command.bounds,
-                            compose_matrix(layer.matrix, command.matrix),
+                            compose_matrix(layer.matrix, translated_matrix),
                             width,
                             height,
                         );
@@ -1458,7 +1460,7 @@ fn render_image_commands_into(
                                 .map(|clip| {
                                     axis_aligned_command_clip(
                                         clip,
-                                        compose_matrix(layer.matrix, command.matrix),
+                                        compose_matrix(layer.matrix, translated_matrix),
                                     )
                                 })
                                 .transpose()
@@ -2263,9 +2265,12 @@ fn append_semantic_text_draws(
     else {
         unreachable!("semantic text renderer received non-text command");
     };
-    if *outline_size != 0.0 || outline_color.iter().any(|value| *value != 0.0) {
-        return unsupported(&command.role, "semantic text outline");
-    }
+    // The payload carries the outline already resolved to RGBA; a zero width
+    // means no outline regardless of color, matching the element path.
+    let outline_override = (*outline_size > 0.0).then(|| crate::text::TextOutlineOverride {
+        rgba: *outline_color,
+        size: *outline_size,
+    });
     let font_id = match font_role {
         FontRole::RegionFontId(font_id) => *font_id,
     };
@@ -2353,6 +2358,7 @@ fn append_semantic_text_draws(
             anchor_x: placement.anchor_x,
             baseline: placement.baseline,
         },
+        outline_override,
         context.md,
         context.text_atlases,
         &mut observer,
@@ -4468,6 +4474,138 @@ mod tests {
         let output = render_image_scene_scalar(&scene(layer, commands), &store, 2, 1)
             .expect("clipped group");
         assert_eq!(output.pixels, vec![255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    /// A group inside scrolled content translates as a unit: its recorded
+    /// extent and its merge clip follow the scroll offset together with the
+    /// member commands, so the merged pixels land at the scrolled position.
+    #[test]
+    fn a_scrolled_group_translates_its_extent_and_clip_with_the_content() {
+        let (_temp, store) = store(vec![("texture:assets/white", 1, 1, vec![255; 4])]);
+        let layer_id = StableId::derive("layer", b"scrolled-group");
+        let control_id = StableId::derive("control", b"scrolled-group");
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let row1 = Rect {
+            x: 0.0,
+            y: 1.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut begin = composite_command("begin", layer_id, CompositeOperation::BeginIsolation);
+        begin.bounds = row1;
+        let mut end = composite_command("end", layer_id, CompositeOperation::EndIsolation);
+        if let SemanticCommandPayload::Composite { clip, .. } = &mut end.payload {
+            // The clip covers the authored row; after the scroll it must cover
+            // the translated row instead.
+            *clip = Some([[0.0, 1.0], [1.0, 1.0], [1.0, 2.0], [0.0, 2.0]]);
+        }
+        let mut fill = image_command("fill", layer_id, "white", row1, unit, BlendMode::SrcOver);
+        for command in [&mut begin, &mut fill, &mut end] {
+            command
+                .control_bindings
+                .push(CommandControlBinding::ScrollContent { control_id });
+        }
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let mut scene = scene(layer, vec![begin, fill, end]);
+        scene.controls.push(ComponentControlSource {
+            id: control_id,
+            layer_id,
+            role: "scroll".into(),
+            state: ComponentControlState::Scroll {
+                offset: 1.0,
+                min: 0.0,
+                max: 2.0,
+                viewport_extent: 1.0,
+                content_extent: 3.0,
+                step: 1.0,
+            },
+        });
+
+        let scalar =
+            render_image_scene_scalar(&scene, &store, 1, 3).expect("scrolled group scalar");
+        assert_eq!(
+            scalar.pixels,
+            vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0],
+            "the merged pixel must follow the scroll to row 0"
+        );
+        if packet_simd_available() {
+            let simd = render_image_scene_simd(&scene, &store, 1, 3).expect("scrolled group simd");
+            assert_eq!(simd.pixels, scalar.pixels, "simd must match scalar");
+        }
+    }
+
+    /// Tint multiplies each premultiplied channel by its factor and the whole
+    /// pixel by the tint alpha, quantized per channel. The expected bytes here
+    /// are literal, so any drift in the formula fails loudly, and the SIMD
+    /// executor must agree with the scalar one byte for byte.
+    #[test]
+    fn image_tint_scales_premultiplied_channels_and_matches_across_executors() {
+        // Premultiplied source pixels chosen to exercise rounding in every
+        // channel: full white, a mid gray, an already-translucent pixel, and
+        // a near-black one.
+        let source: Vec<u8> = vec![
+            255, 255, 255, 255, //
+            128, 128, 128, 255, //
+            100, 60, 20, 128, //
+            3, 2, 1, 9,
+        ];
+        let tint = [0.5f32, 0.25, 1.0, 0.8];
+        let expected: Vec<u8> = source
+            .chunks_exact(4)
+            .flat_map(|pixel| {
+                let scale = |value: u8, factor: f32| {
+                    (f32::from(value) / 255.0 * factor * tint[3])
+                        .clamp(0.0, 1.0)
+                        .mul_add(255.0, 0.0)
+                        .round() as u8
+                };
+                [
+                    scale(pixel[0], tint[0]),
+                    scale(pixel[1], tint[1]),
+                    scale(pixel[2], tint[2]),
+                    scale(pixel[3], 1.0),
+                ]
+            })
+            .collect();
+
+        let (_temp, store) = store(vec![("texture:assets/tinted", 4, 1, source)]);
+        let layer_id = StableId::derive("layer", b"tint");
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 1.0,
+        };
+        let mut command = image_command(
+            "tinted",
+            layer_id,
+            "tinted",
+            bounds,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            BlendMode::SrcOver,
+        );
+        if let SemanticCommandPayload::Image { tint: target, .. } = &mut command.payload {
+            *target = tint;
+        }
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let scene = scene(layer, vec![command]);
+
+        let scalar = render_image_scene_scalar(&scene, &store, 4, 1).expect("tinted scalar");
+        assert_eq!(scalar.pixels, expected, "tint semantics are pinned");
+        if packet_simd_available() {
+            let simd = render_image_scene_simd(&scene, &store, 4, 1).expect("tinted simd");
+            assert_eq!(simd.pixels, scalar.pixels, "simd must match scalar");
+        }
     }
 
     /// A fully transparent group contributes nothing, and a fully opaque one is

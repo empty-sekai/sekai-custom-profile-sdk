@@ -757,7 +757,7 @@ fn resolve_text_sdf_glyph_from_affine(
 /// 绘制自定义名片文本（逐段排版 + 描边 + 富文本标签支持）。
 #[cfg(feature = "skia-core")]
 pub fn draw_text(canvas: &Canvas, text: &TextElement, md: &MasterData) {
-    let _ = draw_text_with_placement_policy(canvas, text, md, None, None, true, None);
+    let _ = draw_text_with_placement_policy(canvas, text, md, None, None, true, None, None);
 }
 
 /// Draws text with a post-layout translation to an external render anchor. TMP
@@ -769,7 +769,8 @@ pub fn draw_text_with_placement(
     md: &MasterData,
     placement: TextRenderPlacement,
 ) {
-    let _ = draw_text_with_placement_policy(canvas, text, md, Some(placement), None, true, None);
+    let _ =
+        draw_text_with_placement_policy(canvas, text, md, Some(placement), None, true, None, None);
 }
 
 #[cfg(feature = "skia-core")]
@@ -779,7 +780,8 @@ pub(crate) fn draw_text_observed(
     md: &MasterData,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) {
-    let _ = draw_text_with_placement_policy(canvas, text, md, None, Some(observer), true, None);
+    let _ =
+        draw_text_with_placement_policy(canvas, text, md, None, Some(observer), true, None, None);
 }
 
 /// Resolves the exact completed TMP glyph stream without invoking the legacy
@@ -793,7 +795,7 @@ pub(crate) fn capture_text_sdf(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> TextSdfCaptureTimings {
-    draw_text_with_placement_policy(canvas, text, md, None, Some(observer), false, atlases)
+    draw_text_with_placement_policy(canvas, text, md, None, Some(observer), false, atlases, None)
 }
 
 /// Captures the production region-font-only TMP layout with the same
@@ -807,6 +809,7 @@ pub(crate) fn capture_text_sdf_with_placement(
     md: &MasterData,
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     placement: TextRenderPlacement,
+    outline_override: Option<TextOutlineOverride>,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> TextSdfCaptureTimings {
     draw_text_with_placement_policy(
@@ -817,7 +820,47 @@ pub(crate) fn capture_text_sdf_with_placement(
         Some(observer),
         false,
         atlases,
+        outline_override,
     )
+}
+
+/// Outline recipe supplied directly as RGBA for callers that resolved the
+/// document color table before reaching the capture. Without it the outline
+/// comes from the element's `outline_color_id` through the region color table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TextOutlineOverride {
+    /// Straight (non-premultiplied) RGBA in unit range.
+    pub rgba: [f32; 4],
+    /// TMP outline width fraction, same units as `TextElement::outline_size`.
+    pub size: f32,
+}
+
+#[cfg(feature = "skia-core")]
+fn resolve_outline_params(
+    outline_override: Option<TextOutlineOverride>,
+    text: &TextElement,
+    md: &MasterData,
+    font_size: f32,
+) -> Option<crate::sdf::rasterize::SdfOutlineParams> {
+    if let Some(outline) = outline_override {
+        return Some(crate::sdf::rasterize::SdfOutlineParams {
+            outline_r: outline.rgba[0],
+            outline_g: outline.rgba[1],
+            outline_b: outline.rgba[2],
+            outline_a: outline.rgba[3],
+            outline_size: outline.size,
+            font_size,
+        });
+    }
+    md.resolve_color(text.outline_color_id)
+        .map(|oc| crate::sdf::rasterize::SdfOutlineParams {
+            outline_r: oc.r as f32 / 255.0,
+            outline_g: oc.g as f32 / 255.0,
+            outline_b: oc.b as f32 / 255.0,
+            outline_a: oc.a as f32 / 255.0,
+            outline_size: text.outline_size,
+            font_size,
+        })
 }
 
 #[cfg(feature = "skia-core")]
@@ -829,6 +872,7 @@ fn draw_text_with_placement_policy(
     observer: Option<&mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>)>,
     render_glyphs: bool,
     capture_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    outline_override: Option<TextOutlineOverride>,
 ) -> TextSdfCaptureTimings {
     let capture_timing_enabled = !render_glyphs && observer.is_some();
     let rich_parse_started = capture_timing_enabled.then(std::time::Instant::now);
@@ -1269,7 +1313,7 @@ fn draw_text_with_placement_policy(
     let total_h_tmp = effective_max_asc - effective_min_des;
     let _total_h = total_h_tmp / TEXT_SCALE;
     let anchor_base = (effective_max_asc + effective_min_des) / (2.0 * TEXT_SCALE);
-    let has_outline = text.outline_size > 0.0;
+    let has_outline = outline_override.map_or(text.outline_size > 0.0, |o| o.size > 0.0);
     let max_rw = rect_widths.iter().cloned().fold(0.0f32, f32::max);
     const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
     let box_w = max_rw + PAD_ORIGINAL;
@@ -1605,16 +1649,7 @@ fn draw_text_with_placement_policy(
                     font_size: render_size,
                     face: fp.clone(),
                     sdf_params: if has_outline {
-                        md.resolve_color(text.outline_color_id).map(|oc| {
-                            crate::sdf::rasterize::SdfOutlineParams {
-                                outline_r: oc.r as f32 / 255.0,
-                                outline_g: oc.g as f32 / 255.0,
-                                outline_b: oc.b as f32 / 255.0,
-                                outline_a: oc.a as f32 / 255.0,
-                                outline_size: text.outline_size,
-                                font_size: render_size,
-                            }
-                        })
+                        resolve_outline_params(outline_override, text, md, render_size)
                     } else {
                         None
                     },
@@ -1690,16 +1725,7 @@ fn draw_text_with_placement_policy(
                 font_size: base_size,
                 face: fp,
                 sdf_params: if has_outline {
-                    md.resolve_color(text.outline_color_id).map(|oc| {
-                        crate::sdf::rasterize::SdfOutlineParams {
-                            outline_r: oc.r as f32 / 255.0,
-                            outline_g: oc.g as f32 / 255.0,
-                            outline_b: oc.b as f32 / 255.0,
-                            outline_a: oc.a as f32 / 255.0,
-                            outline_size: text.outline_size,
-                            font_size: base_size,
-                        }
-                    })
+                    resolve_outline_params(outline_override, text, md, base_size)
                 } else {
                     None
                 },
@@ -1871,6 +1897,154 @@ fn static_line_indent_terminal_x(
 #[cfg(test)]
 mod tests {
     use super::effective_vertex_alpha;
+
+    /// A capture given the outline as resolved RGBA must produce exactly the
+    /// glyph stream the color-table route produces for the same color, and a
+    /// zero-width override must disable the outline entirely.
+    #[cfg(feature = "skia-core")]
+    #[test]
+    fn outline_override_matches_the_color_table_route() {
+        use std::sync::Arc;
+
+        use crate::masterdata::{MasterData, MasterDataProvider, ResolvedColor};
+        use crate::types::{ObjectData, Quaternion, TextElement, Vec3};
+
+        struct OutlineProvider;
+        impl MasterDataProvider for OutlineProvider {
+            fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+                None
+            }
+            fn get_card(&self, _: i32) -> Option<crate::types::CardEntry> {
+                None
+            }
+            fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor> {
+                (color_id == 7).then_some(ResolvedColor {
+                    r: 204,
+                    g: 51,
+                    b: 25,
+                    a: 230,
+                })
+            }
+            fn resolve_font(&self, _: i32) -> Option<String> {
+                Some("FZLanTingHei-DB-GBK".into())
+            }
+            fn resolve_stamp(&self, _: i32) -> Option<String> {
+                None
+            }
+            fn resolve_resource(&self, _: &str, _: i32) -> Option<crate::masterdata::ResourceInfo> {
+                None
+            }
+            fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {
+                None
+            }
+            fn get_bonds_honor(&self, _: i32) -> Option<crate::types::BondsHonorEntry> {
+                None
+            }
+            fn get_bonds_honor_word(&self, _: i64) -> Option<crate::types::BondsHonorWordEntry> {
+                None
+            }
+            fn get_honor(&self, _: i32) -> Option<crate::types::HonorEntry> {
+                None
+            }
+            fn resolve_unit_vs_sd(&self, _: i32, _: i32) -> i32 {
+                0
+            }
+            fn font_count(&self) -> usize {
+                1
+            }
+            fn color_count(&self) -> usize {
+                1
+            }
+        }
+
+        if crate::sdf::outline::load_font_bytes_for_family("FZLanTingHei-DB-GBK").is_none() {
+            eprintln!("skipping: FONT_DIR does not provide the test family");
+            return;
+        }
+
+        let element = |outline_size: f32| TextElement {
+            object_data: ObjectData {
+                layer: 0,
+                lock: false,
+                position: Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                rotation: Quaternion {
+                    w: 1.0,
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                scale: Vec3 {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 1.0,
+                },
+                visible: true,
+            },
+            color_id: 7,
+            font_id: 1,
+            line_spacing: 0.0,
+            outline_color_id: 7,
+            outline_size,
+            size: 24.0,
+            text: "AB7".into(),
+            text_type: 2,
+        };
+        let capture = |text: &TextElement, outline: Option<super::TextOutlineOverride>| {
+            let mut surface = skia_safe::surfaces::null((256, 256)).expect("null surface");
+            let mut glyphs = Vec::new();
+            let mut observer =
+                |result: Result<super::ResolvedTextSdfGlyph, super::TextSdfCaptureError>| {
+                    glyphs.push(result.expect("captured glyph"));
+                };
+            let md = MasterData::new(Arc::new(OutlineProvider));
+            super::draw_text_with_placement_policy(
+                surface.canvas(),
+                text,
+                &md,
+                None,
+                Some(&mut observer),
+                false,
+                None,
+                outline,
+            );
+            glyphs
+        };
+
+        let table_route = capture(&element(0.4), None);
+        assert!(!table_route.is_empty(), "capture must produce glyphs");
+        let override_route = capture(
+            &element(0.0),
+            Some(super::TextOutlineOverride {
+                rgba: [204.0 / 255.0, 51.0 / 255.0, 25.0 / 255.0, 230.0 / 255.0],
+                size: 0.4,
+            }),
+        );
+        assert_eq!(
+            override_route, table_route,
+            "the override must reproduce the color-table glyph stream"
+        );
+
+        let disabled = capture(
+            &element(0.4),
+            Some(super::TextOutlineOverride {
+                rgba: [1.0; 4],
+                size: 0.0,
+            }),
+        );
+        let plain = capture(&element(0.0), None);
+        assert_eq!(
+            disabled, plain,
+            "a zero-width override must disable the outline"
+        );
+        assert_ne!(
+            table_route, plain,
+            "the outline must actually change the glyph materials"
+        );
+    }
 
     #[cfg(feature = "skia-core")]
     #[test]
