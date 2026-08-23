@@ -34,7 +34,6 @@ pub mod jpeg_turbo;
 pub mod masterdata;
 pub mod profile;
 pub mod profile_backend;
-#[cfg(feature = "skia-core")]
 pub mod profile_compositor;
 pub mod region;
 pub mod render_object;

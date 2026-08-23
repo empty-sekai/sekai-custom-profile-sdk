@@ -368,6 +368,34 @@ impl AssetStore {
         }
     }
 
+    /// Returns the asset as premultiplied RGBA8, tightly packed.
+    ///
+    /// Without a raster backend the store keeps encoded bytes, so this decodes
+    /// through the engine's own codec and premultiplies with the same rounding
+    /// the backend-backed path uses. Non-PNG payloads are refused rather than
+    /// guessed at.
+    #[cfg(not(feature = "skia-core"))]
+    pub fn get_premultiplied_rgba(&self, key: &str) -> Option<(u32, u32, Vec<u8>)> {
+        let encoded = self.get(key)?;
+        if !crate::codec::png::is_png(&encoded) {
+            tracing::warn!(
+                asset_key = key,
+                bytes = encoded.len(),
+                "asset is not a PNG; refusing to decode it"
+            );
+            return None;
+        }
+        let decoded = crate::codec::png::decode(&encoded).ok()?;
+        let mut pixels = decoded.pixels;
+        for pixel in pixels.chunks_exact_mut(4) {
+            let alpha = pixel[3];
+            for channel in 0..3 {
+                pixel[channel] = crate::codec::premultiply_channel(pixel[channel], alpha);
+            }
+        }
+        Some((decoded.width, decoded.height, pixels))
+    }
+
     /// 设置磁盘缓存目录（S3 下载的资源持久化到磁盘，重启不丢失）
     pub fn set_disk_cache_dir(&mut self, dir: std::path::PathBuf) {
         self.cache
