@@ -1522,7 +1522,7 @@ fn render_live_master_progress_text(
 /// The result deliberately does not intersect command clips: animation layers
 /// need a safe source raster before their per-frame transform is applied, and
 /// a small guard covers filter/SDF fringes outside authored command bounds.
-pub(crate) fn visible_scene_device_bounds(
+pub fn visible_scene_device_bounds(
     scene: &ResolvedProfileScene,
     guard: f32,
 ) -> Result<Option<(i32, i32, u32, u32)>, ProfileCompositorError> {

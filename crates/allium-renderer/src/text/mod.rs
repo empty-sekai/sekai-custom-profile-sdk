@@ -507,7 +507,7 @@ impl ResolvedTextSdfGlyph {
         }
     }
 
-    fn to_sdf_command_from_manifest(
+    pub(crate) fn to_sdf_command_from_manifest(
         &self,
         atlas_set: u16,
         glyph: &crate::sdf::atlas::SdfAtlasGlyphManifest,
