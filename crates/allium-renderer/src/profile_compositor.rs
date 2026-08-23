@@ -1430,11 +1430,28 @@ fn render_image_commands_into(
                                 .last_mut()
                                 .map(|target| target.pixels.as_mut_slice())
                                 .unwrap_or(destination);
+                            // The group's opacity and clip are declared on the
+                            // command that ends it, and apply to the merge.
+                            let device_clip = clip
+                                .as_ref()
+                                .map(|clip| {
+                                    axis_aligned_command_clip(
+                                        clip,
+                                        compose_matrix(layer.matrix, command.matrix),
+                                    )
+                                })
+                                .transpose()
+                                .map_err(|()| ProfileCompositorError::UnsupportedFeature {
+                                    role: command.role.clone(),
+                                    feature: "rotated composite clip".into(),
+                                })?;
                             composite_isolation(
                                 parent,
                                 &child.pixels,
                                 width,
                                 child.bounds,
+                                *opacity,
+                                device_clip,
                                 executor,
                             );
                         }
@@ -1739,7 +1756,7 @@ pub fn render_image_scene_skia_reference(
                     }
                 }
                 let mut paint = Paint::default();
-                paint.set_blend_mode(skia_blend_mode(command.blend_mode, &command.role)?);
+                paint.set_blend_mode(skia_blend_mode(command.blend_mode));
                 let source = SkiaRect::from_xywh(
                     uv.x * object_width(image),
                     uv.y * object_height(image),
@@ -1811,18 +1828,16 @@ pub fn render_image_scene_skia_reference(
 }
 
 #[cfg(feature = "skia-core")]
-fn skia_blend_mode(
-    blend_mode: BlendMode,
-    role: &str,
-) -> Result<skia_safe::BlendMode, ProfileCompositorError> {
-    Ok(match blend_mode {
+fn skia_blend_mode(blend_mode: BlendMode) -> skia_safe::BlendMode {
+    match blend_mode {
         BlendMode::SrcOver => skia_safe::BlendMode::SrcOver,
         BlendMode::SrcIn => skia_safe::BlendMode::SrcIn,
         BlendMode::DstIn => skia_safe::BlendMode::DstIn,
-        BlendMode::Multiply | BlendMode::Screen | BlendMode::Add => {
-            return unsupported(role, &format!("blend mode {blend_mode:?}"));
-        }
-    })
+        BlendMode::Multiply => skia_safe::BlendMode::Multiply,
+        BlendMode::Screen => skia_safe::BlendMode::Screen,
+        // `Add` saturates each channel, which is Skia's `Plus`.
+        BlendMode::Add => skia_safe::BlendMode::Plus,
+    }
 }
 
 #[cfg(feature = "skia-core")]
@@ -1977,6 +1992,24 @@ fn axis_aligned_command_clip(
     })
 }
 
+/// Narrows composition bounds to a device-space clip.
+///
+/// The clip edges are rounded outward so a partially covered pixel is kept; the
+/// group's own coverage decides how much of it shows. Returns `None` when the
+/// intersection is empty.
+fn intersect_bounds_with_clip(
+    bounds: CompositionBounds,
+    clip: AxisAlignedClip,
+    canvas_width: u32,
+) -> Option<CompositionBounds> {
+    let clamp = |value: f32, limit: u32| value.clamp(0.0, limit as f32) as u32;
+    let x0 = bounds.x0.max(clamp(clip.min_x.floor(), canvas_width));
+    let x1 = bounds.x1.min(clamp(clip.max_x.ceil(), canvas_width));
+    let y0 = bounds.y0.max(clamp(clip.min_y.floor(), u32::MAX));
+    let y1 = bounds.y1.min(clamp(clip.max_y.ceil(), u32::MAX));
+    (x0 < x1 && y0 < y1).then_some(CompositionBounds { x0, y0, x1, y1 })
+}
+
 fn command_clip_contains_bounds(clip: AxisAlignedClip, bounds: Rect, matrix: Matrix2d) -> bool {
     const EPSILON: f32 = 1.0e-4;
     let corners = [
@@ -2041,11 +2074,13 @@ fn validate_composite_command(
     opacity: f32,
     clip: Option<&allium_renderer_core::Quad>,
 ) -> Result<(), ProfileCompositorError> {
-    if clip.is_some() {
-        return unsupported(role, "composite clip");
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(ProfileCompositorError::InvalidGeometry { role: role.into() });
     }
-    if opacity.to_bits() != 1.0f32.to_bits() {
-        return unsupported(role, "composite opacity");
+    if let Some(clip) = clip {
+        if !clip.iter().flatten().all(|value| value.is_finite()) {
+            return Err(ProfileCompositorError::InvalidGeometry { role: role.into() });
+        }
     }
     Ok(())
 }
@@ -2499,13 +2534,6 @@ fn raster_image_command(
     if bounds.width == 0.0 || bounds.height == 0.0 {
         return Ok(RasterImageStats::default());
     }
-    if !matches!(
-        blend_mode,
-        BlendMode::SrcOver | BlendMode::SrcIn | BlendMode::DstIn
-    ) {
-        return unsupported(role, &format!("blend mode {blend_mode:?}"));
-    }
-
     let inverse = invert_matrix(matrix)
         .ok_or_else(|| ProfileCompositorError::InvalidGeometry { role: role.into() })?;
     let corners = [
@@ -2964,7 +2992,34 @@ fn blend_pixel(destination: &mut [u8], source: [u8; 4], blend_mode: BlendMode) {
         BlendMode::DstIn => {
             std::array::from_fn(|channel| mul_div_255_round(destination[channel], source[3]))
         }
-        BlendMode::Multiply | BlendMode::Screen | BlendMode::Add => return,
+        // The separable modes below are written for premultiplied input, so the
+        // same expression applies to alpha as to the colour channels. For
+        // Multiply and Screen that yields `Sa + Da - Sa*Da`, the coverage union
+        // both modes are defined to produce.
+        BlendMode::Multiply => std::array::from_fn(|channel| {
+            let source_channel = source[channel];
+            let destination_channel = destination[channel];
+            let product = mul_div_255_round(source_channel, destination_channel);
+            let source_outside = mul_div_255_round(source_channel, u8::MAX - destination[3]);
+            let destination_outside = mul_div_255_round(destination_channel, u8::MAX - source[3]);
+            u16::from(product)
+                .saturating_add(u16::from(source_outside))
+                .saturating_add(u16::from(destination_outside))
+                .min(u16::from(u8::MAX)) as u8
+        }),
+        BlendMode::Screen => std::array::from_fn(|channel| {
+            let sum = u16::from(source[channel]).saturating_add(u16::from(destination[channel]));
+            sum.saturating_sub(u16::from(mul_div_255_round(
+                source[channel],
+                destination[channel],
+            )))
+            .min(u16::from(u8::MAX)) as u8
+        }),
+        BlendMode::Add => std::array::from_fn(|channel| {
+            u16::from(source[channel])
+                .saturating_add(u16::from(destination[channel]))
+                .min(u16::from(u8::MAX)) as u8
+        }),
     };
     destination.copy_from_slice(&output);
 }
@@ -3029,19 +3084,70 @@ fn clear_composition_bounds(pixels: &mut [u8], canvas_width: u32, bounds: Compos
     }
 }
 
+/// Merges an isolated group into its parent.
+///
+/// `opacity` scales the group as a whole, which is why it is applied here rather
+/// than per command: scaling each command instead would let overlapping strokes
+/// within the group show through one another. The group is premultiplied, so the
+/// scale applies to all four channels.
+///
+/// `clip` restricts the merge to a device-space rectangle. Rows and columns
+/// outside it are skipped rather than blended with zero coverage, so an
+/// unclipped merge keeps its original packet stride.
 fn composite_isolation(
     parent: &mut [u8],
     child: &[u8],
     canvas_width: u32,
     bounds: CompositionBounds,
+    opacity: f32,
+    clip: Option<AxisAlignedClip>,
     executor: ImageExecutor,
 ) {
+    let bounds = match clip {
+        Some(clip) => match intersect_bounds_with_clip(bounds, clip, canvas_width) {
+            Some(clipped) => clipped,
+            None => return,
+        },
+        None => bounds,
+    };
+    // Anything below half a quantisation step contributes nothing.
+    let opaque = opacity >= 1.0;
+    let scale = if opaque {
+        u8::MAX
+    } else if opacity <= 0.0 {
+        return;
+    } else {
+        let quantized = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        if quantized == 0 {
+            return;
+        }
+        quantized
+    };
     let row_bytes = canvas_width as usize * 4;
     for y in bounds.y0..bounds.y1 {
         let row = y as usize * row_bytes;
         let mut x = bounds.x0;
         while x < bounds.x1 {
             let packet = (bounds.x1 - x).min(16);
+            if !opaque {
+                // A scaled group cannot use the packet blender, which reads the
+                // source straight from memory.
+                for lane in 0..packet {
+                    let pixel_offset = row + (x + lane) as usize * 4;
+                    let source = &child[pixel_offset..pixel_offset + 4];
+                    let scaled: [u8; 4] =
+                        std::array::from_fn(|channel| mul_div_255_round(source[channel], scale));
+                    if scaled[3] != 0 {
+                        blend_pixel(
+                            &mut parent[pixel_offset..pixel_offset + 4],
+                            scaled,
+                            BlendMode::SrcOver,
+                        );
+                    }
+                }
+                x += packet;
+                continue;
+            }
             let offset = row + x as usize * 4;
             #[cfg(target_arch = "x86_64")]
             if executor == ImageExecutor::Simd {
@@ -3972,6 +4078,155 @@ mod tests {
                 render_image_scene_skia_reference(&scene(layer, vec![clipped]), &store, 2, 1)
                     .expect("Skia reference");
             assert_eq!(output.pixels, reference.pixels);
+        }
+    }
+
+    /// A group's opacity applies to the merged result, not to each command
+    /// inside it: two overlapping opaque commands in a half-opacity group must
+    /// not show through one another.
+    #[test]
+    fn group_opacity_applies_to_the_merged_group_not_each_command() {
+        let (_temp, store) = store(vec![("texture:assets/white", 1, 1, vec![255; 4])]);
+        let layer_id = StableId::derive("layer", b"opacity");
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut end = composite_command("end", layer_id, CompositeOperation::EndIsolation);
+        if let SemanticCommandPayload::Composite { opacity, .. } = &mut end.payload {
+            *opacity = 0.5;
+        }
+        let commands = vec![
+            composite_command("begin", layer_id, CompositeOperation::BeginIsolation),
+            image_command("first", layer_id, "white", unit, unit, BlendMode::SrcOver),
+            image_command("second", layer_id, "white", unit, unit, BlendMode::SrcOver),
+            end,
+        ];
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let output = render_image_scene_scalar(&scene(layer, commands), &store, 1, 1)
+            .expect("half-opacity group");
+        // Two opaque whites inside the group still merge as one opaque white,
+        // scaled once: 128, not 191 (which is what scaling each would give).
+        assert_eq!(output.pixels, vec![128, 128, 128, 128]);
+    }
+
+    /// A group clip restricts where the merge lands. The clip covers the left
+    /// column only, so the right column keeps the background.
+    #[test]
+    fn group_clip_restricts_the_merge_to_its_rectangle() {
+        let (_temp, store) = store(vec![("texture:assets/white", 2, 1, vec![255; 8])]);
+        let layer_id = StableId::derive("layer", b"group-clip");
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        };
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let mut end = composite_command("end", layer_id, CompositeOperation::EndIsolation);
+        if let SemanticCommandPayload::Composite { clip, .. } = &mut end.payload {
+            *clip = Some([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        }
+        let commands = vec![
+            composite_command("begin", layer_id, CompositeOperation::BeginIsolation),
+            image_command("fill", layer_id, "white", bounds, unit, BlendMode::SrcOver),
+            end,
+        ];
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let output = render_image_scene_scalar(&scene(layer, commands), &store, 2, 1)
+            .expect("clipped group");
+        assert_eq!(output.pixels, vec![255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    /// A fully transparent group contributes nothing, and a fully opaque one is
+    /// identical to having declared no opacity at all.
+    #[test]
+    fn group_opacity_endpoints_are_exact() {
+        let (_temp, store) = store(vec![("texture:assets/white", 1, 1, vec![255; 4])]);
+        let unit = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        for (opacity, expected) in [(0.0f32, vec![0, 0, 0, 0]), (1.0, vec![255; 4])] {
+            let layer_id = StableId::derive("layer", b"endpoints");
+            let mut end = composite_command("end", layer_id, CompositeOperation::EndIsolation);
+            if let SemanticCommandPayload::Composite {
+                opacity: declared, ..
+            } = &mut end.payload
+            {
+                *declared = opacity;
+            }
+            let commands = vec![
+                composite_command("begin", layer_id, CompositeOperation::BeginIsolation),
+                image_command("fill", layer_id, "white", unit, unit, BlendMode::SrcOver),
+                end,
+            ];
+            let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let output = render_image_scene_scalar(&scene(layer, commands), &store, 1, 1)
+                .unwrap_or_else(|error| panic!("opacity {opacity}: {error}"));
+            assert_eq!(output.pixels, expected, "opacity {opacity}");
+        }
+    }
+
+    /// Multiply, Screen and Add are separable modes the command contract has
+    /// always declared. They are checked against Skia over semi-transparent
+    /// input, where a formula written for non-premultiplied colour would differ.
+    #[test]
+    fn separable_blend_modes_match_skia_over_semi_transparent_pixels() {
+        // The store requires strictly increasing keys.
+        let (_temp, store) = store(vec![
+            ("texture:assets/over", 1, 1, vec![64, 200, 128, 144]),
+            ("texture:assets/under", 1, 1, vec![160, 96, 32, 200]),
+        ]);
+        for blend_mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::Add] {
+            let layer_id = StableId::derive("layer", b"separable");
+            let unit = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            };
+            let commands = vec![
+                image_command("under", layer_id, "under", unit, unit, BlendMode::SrcOver),
+                image_command("over", layer_id, "over", unit, unit, blend_mode),
+            ];
+            let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            let scalar =
+                render_image_scene_scalar(&scene(layer.clone(), commands.clone()), &store, 1, 1)
+                    .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
+            #[cfg(feature = "skia-core")]
+            {
+                let reference =
+                    render_image_scene_skia_reference(&scene(layer, commands), &store, 1, 1)
+                        .unwrap_or_else(|error| panic!("{blend_mode:?} reference: {error}"));
+                assert_eq!(scalar.pixels, reference.pixels, "{blend_mode:?}");
+            }
+        }
+    }
+
+    /// Blending is defined on premultiplied input, so a fully transparent source
+    /// must leave the destination untouched for every mode except `Add`, which
+    /// is a saturating sum and therefore also leaves it unchanged.
+    #[test]
+    fn a_transparent_source_leaves_the_destination_unchanged() {
+        for blend_mode in [
+            BlendMode::SrcOver,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Add,
+        ] {
+            let mut destination = [17u8, 34, 51, 68];
+            blend_pixel(&mut destination, [0, 0, 0, 0], blend_mode);
+            assert_eq!(destination, [17, 34, 51, 68], "{blend_mode:?}");
         }
     }
 
