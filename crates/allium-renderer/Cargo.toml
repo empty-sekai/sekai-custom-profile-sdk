@@ -115,3 +115,18 @@ required-features = ["dev"]
 name = "skia-unpremul-table"
 path = "tools/skia_unpremul_table.rs"
 required-features = ["dev"]
+
+[[bin]]
+name = "build-sdf-atlas"
+path = "tools/build_sdf_atlas.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "build-shape-sdf-atlas"
+path = "tools/build_shape_sdf_atlas.rs"
+required-features = ["dev"]
+
+[[bin]]
+name = "build-render-object-store"
+path = "tools/build_render_object_store.rs"
+required-features = ["dev"]
