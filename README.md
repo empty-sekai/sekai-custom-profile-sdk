@@ -152,7 +152,8 @@ native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资�
 
 ```sh
 cargo test --workspace --all-features
-cargo run --release --bin render-card -- \
+# 默认构建不含 Skia；下面的 legacy 单页渲染需要 `skia` feature。
+cargo run --release --bin render-card --features skia -- \
   --masterdata ./masterdata \
   --card ./card.json \
   --profile ./profile.json \

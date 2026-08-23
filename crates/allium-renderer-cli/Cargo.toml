@@ -10,12 +10,12 @@ name = "render-card"
 path = "src/main.rs"
 
 [features]
-# Skia is the production default and carries the legacy element renderer.
-# Without it (`--no-default-features`) the binary still builds and renders
-# through the profile backend (`--backend native` plus installed atlases and a
-# render-object store, with `allium-renderer/jpeg-turbo` for JPEG output);
-# requests that need the legacy renderer fail closed with the reason.
-default = ["skia"]
+# The default build carries no Skia: it renders through the profile backend
+# (`--backend native` plus installed atlases and a render-object store, with
+# `allium-renderer/jpeg-turbo` for JPEG output), and requests that need the
+# legacy renderer fail closed with the reason. The `skia` feature adds the
+# legacy element renderer and is what the released binaries ship with.
+default = []
 skia = ["allium-renderer/skia"]
 
 [dependencies]

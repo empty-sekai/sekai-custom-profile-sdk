@@ -42,6 +42,26 @@ jobs:
       - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
       - run: cargo test --workspace --all-features
 
+  # -- 1b. The default build carries no Skia. -------------------------
+  # Only FreeType (and pkg-config) is required: the engine, the profile
+  # backend and the render-card binary all build and test without the Skia
+  # toolchain.
+  test-no-skia:
+    name: test (no skia)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             libfreetype6-dev pkg-config
+
+      - run: cargo test -p allium-renderer --no-default-features
+      - run: cargo build -p allium-renderer-cli
+
   # -- 2. Native render-card binaries. -------------------------------
   # Native GitHub runners avoid pretending that a compile-only target is a
   # distributable renderer: every archive below contains a Skia-enabled binary.
@@ -93,7 +113,7 @@ jobs:
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build render-card
-        run: cargo build --release -p allium-renderer-cli --target ${{ matrix.target }}
+        run: cargo build --release -p allium-renderer-cli --features skia --target ${{ matrix.target }}
 
       - name: Archive Unix binary
         if: runner.os != 'Windows'
@@ -139,7 +159,7 @@ jobs:
 
       - name: Build and archive render-card
         run: |
-          cargo build --release -p allium-renderer-cli --target "${TARGET}"
+          cargo build --release -p allium-renderer-cli --features skia --target "${TARGET}"
           tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" render-card
 
       - name: Upload artifact

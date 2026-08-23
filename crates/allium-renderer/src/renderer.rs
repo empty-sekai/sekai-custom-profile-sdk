@@ -851,32 +851,35 @@ impl CustomProfileRenderer {
         }
         self.recycle_profile_rgba_scratch(rgba);
         report.profile_surface_init_ns = elapsed_ns(surface_init_started);
-        let jpeg_probe = crate::jpeg_turbo::encode_rgba(&[255u8; 8 * 8 * 4], 8, 8, 90)
-            .map_err(|error| format!("JPEG encoder prewarm failed: {error}"))?;
-        report.jpeg_encoder_prewarm_bytes = jpeg_probe.len() as u64;
-        let mut rgba = self.take_profile_rgba_scratch(profile_surface_bytes, [255; 4]);
-        rgba.fill(255);
-        let mut yuv_scratch = self.take_jpeg_yuv420_scratch();
-        let yuv_scratch_len = crate::jpeg_turbo::yuv420_scratch_len(width, height)?;
-        yuv_scratch.resize(yuv_scratch_len, 0);
-        yuv_scratch.fill(0xa5);
-        yuv_scratch.fill(0);
-        let yuv_probe = crate::jpeg_turbo::encode_rgba_avx512_yuv420_with_scratch(
-            &rgba,
-            width,
-            height,
-            90,
-            &mut yuv_scratch,
-        );
-        self.recycle_profile_rgba_scratch(rgba);
-        match yuv_probe {
-            Ok(encoded) => report.jpeg_yuv420_prewarm_bytes = encoded.len() as u64,
-            Err(error) if error == "AVX-512 JPEG YUV420 is unavailable" => {}
-            Err(error) => return Err(format!("JPEG raw YUV420 prewarm failed: {error}")),
+        #[cfg(feature = "jpeg-turbo")]
+        {
+            let jpeg_probe = crate::jpeg_turbo::encode_rgba(&[255u8; 8 * 8 * 4], 8, 8, 90)
+                .map_err(|error| format!("JPEG encoder prewarm failed: {error}"))?;
+            report.jpeg_encoder_prewarm_bytes = jpeg_probe.len() as u64;
+            let mut rgba = self.take_profile_rgba_scratch(profile_surface_bytes, [255; 4]);
+            rgba.fill(255);
+            let mut yuv_scratch = self.take_jpeg_yuv420_scratch();
+            let yuv_scratch_len = crate::jpeg_turbo::yuv420_scratch_len(width, height)?;
+            yuv_scratch.resize(yuv_scratch_len, 0);
+            yuv_scratch.fill(0xa5);
+            yuv_scratch.fill(0);
+            let yuv_probe = crate::jpeg_turbo::encode_rgba_avx512_yuv420_with_scratch(
+                &rgba,
+                width,
+                height,
+                90,
+                &mut yuv_scratch,
+            );
+            self.recycle_profile_rgba_scratch(rgba);
+            match yuv_probe {
+                Ok(encoded) => report.jpeg_yuv420_prewarm_bytes = encoded.len() as u64,
+                Err(error) if error == "AVX-512 JPEG YUV420 is unavailable" => {}
+                Err(error) => return Err(format!("JPEG raw YUV420 prewarm failed: {error}")),
+            }
+            report.jpeg_yuv420_scratch_bytes = yuv_scratch_len as u64;
+            report.jpeg_yuv420_scratch_page_touch_count = yuv_scratch_len.div_ceil(4096) as u64;
+            self.recycle_jpeg_yuv420_scratch(yuv_scratch);
         }
-        report.jpeg_yuv420_scratch_bytes = yuv_scratch_len as u64;
-        report.jpeg_yuv420_scratch_page_touch_count = yuv_scratch_len.div_ceil(4096) as u64;
-        self.recycle_jpeg_yuv420_scratch(yuv_scratch);
         report.elapsed_ns = elapsed_ns(started);
         Ok(report)
     }
@@ -5163,6 +5166,7 @@ fn encode_premultiplied_rgba(
             crate::codec::png::encode_rgba(width, height, &samples)
                 .map_err(|error| format!("PNG 编码失败: {error}"))
         }
+        #[cfg(feature = "jpeg-turbo")]
         skia_safe::EncodedImageFormat::JPEG => {
             // JPEG carries no alpha, so a premultiplied surface is already the
             // composited result over its own background.
