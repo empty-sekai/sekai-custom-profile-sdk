@@ -225,46 +225,56 @@ fn handle_render_honor(
         ));
     }
 
-    let artwork = match kind {
-        "normal" => {
-            renderer.render_static_honor_artwork(honor_id, honor_level, full_size, quality)?
+    #[cfg(not(feature = "skia"))]
+    {
+        let _ = (honor_level, full_size, quality);
+        return Err(format!(
+            "render_honor kind={kind} requires the skia feature"
+        ));
+    }
+    #[cfg(feature = "skia")]
+    {
+        let artwork = match kind {
+            "normal" => {
+                renderer.render_static_honor_artwork(honor_id, honor_level, full_size, quality)?
+            }
+            "bonds" => renderer.render_bonds_honor_artwork(
+                honor_id,
+                honor_level,
+                full_size,
+                params.get("wordId").and_then(Value::as_i64).unwrap_or(0),
+                params
+                    .get("inverse")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                params
+                    .get("useUnitVirtualSinger")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                quality,
+            )?,
+            _ => unreachable!("honor_card rejects unknown kinds"),
+        };
+        if let Some(path) = output {
+            std::fs::write(path, &artwork.data)
+                .map_err(|error| format!("write honor artwork {path} failed: {error}"))?;
         }
-        "bonds" => renderer.render_bonds_honor_artwork(
-            honor_id,
-            honor_level,
-            full_size,
-            params.get("wordId").and_then(Value::as_i64).unwrap_or(0),
-            params
-                .get("inverse")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            params
-                .get("useUnitVirtualSinger")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            quality,
-        )?,
-        _ => unreachable!("honor_card rejects unknown kinds"),
-    };
-    if let Some(path) = output {
-        std::fs::write(path, &artwork.data)
-            .map_err(|error| format!("write honor artwork {path} failed: {error}"))?;
+        let mut result = json!({
+            "bytes": artwork.data.len(),
+            "contentType": "image/webp",
+            "height": artwork.height,
+            "kind": kind,
+            "missingAssets": [],
+            "width": artwork.width,
+        });
+        if let Some(path) = output {
+            result["path"] = json!(path);
+        }
+        if inline {
+            result["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&artwork.data));
+        }
+        Ok(result)
     }
-    let mut result = json!({
-        "bytes": artwork.data.len(),
-        "contentType": "image/webp",
-        "height": artwork.height,
-        "kind": kind,
-        "missingAssets": [],
-        "width": artwork.width,
-    });
-    if let Some(path) = output {
-        result["path"] = json!(path);
-    }
-    if inline {
-        result["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&artwork.data));
-    }
-    Ok(result)
 }
 
 fn write_result(stdout: &std::io::Stdout, id: Value, result: Result<Value, String>) {

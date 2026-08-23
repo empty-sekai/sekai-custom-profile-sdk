@@ -715,7 +715,6 @@ pub struct ProfileRenderTelemetry {
     pub caches: ProfileRenderCaches,
     pub commands: Vec<CommandTelemetry>,
     pub fallbacks: Vec<BackendFallbackEvent>,
-    #[cfg(feature = "skia-core")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_glyph_cache: Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>,
 }
@@ -741,7 +740,6 @@ impl ProfileRenderTelemetry {
             caches: ProfileRenderCaches::default(),
             commands: Vec::new(),
             fallbacks: Vec::new(),
-            #[cfg(feature = "skia-core")]
             fallback_glyph_cache: None,
         }
     }
@@ -770,7 +768,6 @@ impl ProfileRenderTelemetry {
         self.fallbacks.extend(selection.fallbacks);
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn record_sdf_plan(
         &mut self,
         stats: crate::sdf::tile::SdfPlanStats,
@@ -800,7 +797,6 @@ impl ProfileRenderTelemetry {
         );
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn record_sdf_execution(&mut self, stats: crate::sdf::tile::SdfExecutionStats) {
         self.work.blended_fragments = self
             .work
@@ -851,7 +847,6 @@ impl ProfileRenderTelemetry {
     /// Records commands that were actually executed by the SDF backend. This
     /// is deliberately separate from `record_sdf_plan`: the legacy renderer
     /// may build a shadow plan for telemetry without executing those commands.
-    #[cfg(feature = "skia-core")]
     pub fn record_executed_sdf_commands(
         &mut self,
         text_element_count: u64,
@@ -878,7 +873,6 @@ impl ProfileRenderTelemetry {
         shape.command_count = shape.command_count.saturating_add(shape_element_count);
     }
 
-    #[cfg(feature = "skia-core")]
     pub fn record_legacy_commands(
         &mut self,
         kind: ProfileCommandKind,
@@ -915,7 +909,6 @@ impl ProfileRenderTelemetry {
         command.cpu_ns = command.cpu_ns.saturating_add(cpu_ns);
     }
 
-    #[cfg(feature = "skia-core")]
     fn record_sdf_command_plan(&mut self, kind: ProfileCommandKind, covered_fragments: u64) {
         if covered_fragments == 0 {
             return;
@@ -924,7 +917,6 @@ impl ProfileRenderTelemetry {
         command.covered_fragments = command.covered_fragments.saturating_add(covered_fragments);
     }
 
-    #[cfg(feature = "skia-core")]
     fn record_sdf_command_execution(&mut self, kind: ProfileCommandKind, blended_fragments: u64) {
         if blended_fragments == 0 {
             return;
@@ -933,7 +925,6 @@ impl ProfileRenderTelemetry {
         command.blended_fragments = command.blended_fragments.saturating_add(blended_fragments);
     }
 
-    #[cfg(feature = "skia-core")]
     fn command_telemetry_mut(&mut self, kind: ProfileCommandKind) -> &mut CommandTelemetry {
         if let Some(index) = self.commands.iter().position(|entry| entry.kind == kind) {
             return &mut self.commands[index];
