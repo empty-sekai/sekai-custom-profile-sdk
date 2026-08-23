@@ -69,6 +69,10 @@ key 命中内嵌静态清单（引擎自带的边框/图标/遮罩等）走 --st
 struct Args {
     masterdata: Option<PathBuf>,
     masterdata_url: Option<String>,
+    text_atlases: Vec<PathBuf>,
+    shape_atlas: Option<PathBuf>,
+    render_objects: Option<PathBuf>,
+    backend: Option<String>,
     card: Option<PathBuf>,
     page: Option<i32>,
     profile: Option<PathBuf>,
@@ -86,6 +90,10 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         masterdata: None,
+        text_atlases: Vec::new(),
+        shape_atlas: None,
+        render_objects: None,
+        backend: None,
         masterdata_url: None,
         card: None,
         page: None,
@@ -118,6 +126,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--profile" => args.profile = Some(PathBuf::from(take("--profile")?)),
             "--assets-dir" => args.assets_dir = Some(PathBuf::from(take("--assets-dir")?)),
+            "--text-atlas" => args.text_atlases.push(PathBuf::from(take("--text-atlas")?)),
+            "--shape-atlas" => args.shape_atlas = Some(PathBuf::from(take("--shape-atlas")?)),
+            "--render-objects" => {
+                args.render_objects = Some(PathBuf::from(take("--render-objects")?));
+            }
+            "--backend" => args.backend = Some(take("--backend")?),
             "--assets-url" => args.assets_url = Some(take("--assets-url")?),
             "--asset-url-layout" => {
                 args.asset_url_layout = fetch::AssetUrlLayout::parse(&take("--asset-url-layout")?)?
@@ -354,7 +368,48 @@ fn main() -> ExitCode {
         }
     }
 
-    let renderer = CustomProfileRenderer::new(Arc::new(provider)).with_assets(Arc::clone(&assets));
+    let mut renderer =
+        CustomProfileRenderer::new(Arc::new(provider)).with_assets(Arc::clone(&assets));
+    for manifest in &args.text_atlases {
+        let atlas = match allium_renderer::sdf::atlas::MappedSdfAtlas::open(manifest) {
+            Ok(atlas) => Arc::new(atlas),
+            Err(err) => {
+                eprintln!("打开文本 SDF atlas {} 失败: {err}", manifest.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        renderer = match renderer.with_sdf_atlas(atlas) {
+            Ok(renderer) => renderer,
+            Err(err) => {
+                eprintln!("安装文本 SDF atlas {} 失败: {err}", manifest.display());
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+    if let Some(manifest) = &args.shape_atlas {
+        let atlas = match allium_renderer::sdf::shape_atlas::MappedShapeSdfAtlas::open(manifest) {
+            Ok(atlas) => Arc::new(atlas),
+            Err(err) => {
+                eprintln!("打开 Shape SDF atlas {} 失败: {err}", manifest.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        renderer = renderer.with_shape_sdf_atlas(atlas);
+    }
+    if let Some(manifest) = &args.render_objects {
+        let store = match allium_renderer::render_object::MappedRenderObjectStore::open(manifest) {
+            Ok(store) => Arc::new(store),
+            Err(err) => {
+                eprintln!(
+                    "打开 render-object store {} 失败: {err}",
+                    manifest.display()
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        renderer = renderer.with_render_object_store(store);
+    }
+    let renderer = renderer;
 
     if args.serve {
         let asset_urls = serve::AssetUrls {
@@ -420,6 +475,47 @@ fn main() -> ExitCode {
     let missing_assets = missing_asset_keys(&renderer, &card, &assets);
     if !missing_assets.is_empty() {
         tracing::warn!(count = missing_assets.len(), keys = ?missing_assets, "缺失素材");
+    }
+
+    if let Some(backend) = &args.backend {
+        use allium_renderer::profile_backend::{
+            BackendFallbackPolicy, ProfileBackendConfig, ProfileJpegEncoder, ProfileSurfaceBackend,
+            ShapeSdfExecutor, TextSdfExecutor,
+        };
+        let surface = match backend.as_str() {
+            "skia" => ProfileSurfaceBackend::SkiaRasterCpu,
+            "native" => ProfileSurfaceBackend::NativeRasterCpu,
+            other => {
+                eprintln!("未知 backend surface: {other}（可选 skia / native）");
+                return ExitCode::from(2);
+            }
+        };
+        let config = ProfileBackendConfig {
+            surface,
+            text_sdf: TextSdfExecutor::Simd,
+            shape_sdf: ShapeSdfExecutor::Simd,
+            jpeg_encoder: ProfileJpegEncoder::LibJpegTurbo,
+            fallback_policy: BackendFallbackPolicy::FailClosed,
+            ..ProfileBackendConfig::default()
+        };
+        return match renderer.render_page_with_backend(&card, profile.as_ref(), config) {
+            Ok(rendered) => {
+                if let Err(err) = std::fs::write(output, &rendered.encoded) {
+                    eprintln!("写出失败: {err}");
+                    return ExitCode::FAILURE;
+                }
+                tracing::info!(
+                    bytes = rendered.encoded.len(),
+                    surface = ?rendered.telemetry.actual_surface,
+                    "backend 渲染完成"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("backend 渲染失败: {err}");
+                ExitCode::FAILURE
+            }
+        };
     }
 
     match render_with_format(&renderer, &card, profile.as_ref(), &args.format) {

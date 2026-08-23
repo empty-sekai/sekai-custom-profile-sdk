@@ -1656,6 +1656,11 @@ impl CustomProfileRenderer {
                             spec.surface_height,
                             spec.canvas_origin_x,
                             spec.canvas_origin_y,
+                            // The image compositor follows the page's executor
+                            // choice so a scalar host runs a scalar pipeline.
+                            text_executor
+                                .or(shape_executor)
+                                .unwrap_or(FullCardSdfCandidateExecutor::SimdF32),
                         )?;
                         aggregate.software_image_count =
                             aggregate.software_image_count.saturating_add(1);
@@ -5240,6 +5245,7 @@ fn render_authored_image_into_surface(
     height: u32,
     canvas_origin_x: f32,
     canvas_origin_y: f32,
+    image_executor: FullCardSdfCandidateExecutor,
 ) -> Result<crate::profile_compositor::ProfileCompositorStats, String> {
     surface.notify_content_will_change(skia_safe::surface::ContentChangeMode::Retain);
     let mut pixmap = surface
@@ -5276,18 +5282,36 @@ fn render_authored_image_into_surface(
     } else {
         scene
     };
-    crate::profile_compositor::render_authored_profile_into_simd(
-        scene,
-        store,
-        text_atlases,
-        md,
-        assets,
-        authored_kind,
-        authored_index,
-        pixels,
-        width,
-        height,
-    )
+    match image_executor {
+        FullCardSdfCandidateExecutor::SimdF32 => {
+            crate::profile_compositor::render_authored_profile_into_simd(
+                scene,
+                store,
+                text_atlases,
+                md,
+                assets,
+                authored_kind,
+                authored_index,
+                pixels,
+                width,
+                height,
+            )
+        }
+        FullCardSdfCandidateExecutor::ScalarF32 => {
+            crate::profile_compositor::render_authored_profile_into_scalar(
+                scene,
+                store,
+                text_atlases,
+                md,
+                assets,
+                authored_kind,
+                authored_index,
+                pixels,
+                width,
+                height,
+            )
+        }
+    }
     .map_err(|error| error.to_string())
 }
 

@@ -310,6 +310,66 @@ pub fn render_authored_profile_into_simd(
     #[cfg(not(target_arch = "x86_64"))]
     return unsupported("profile-compositor", "x86_64 packet executor");
 
+    #[allow(unreachable_code)]
+    render_authored_profile_into(
+        scene,
+        store,
+        text_atlases,
+        md,
+        assets,
+        authored_kind,
+        authored_index,
+        destination,
+        width,
+        height,
+        ImageExecutor::Simd,
+    )
+}
+
+/// Scalar-executor twin of [`render_authored_profile_into_simd`], for hosts
+/// without the packet instruction set. Byte-equal output; slower.
+#[allow(clippy::too_many_arguments)]
+pub fn render_authored_profile_into_scalar(
+    scene: &ResolvedProfileScene,
+    store: &MappedRenderObjectStore,
+    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
+    authored_kind: AuthoredElementKind,
+    authored_index: u32,
+    destination: &mut [u8],
+    width: u32,
+    height: u32,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+    render_authored_profile_into(
+        scene,
+        store,
+        text_atlases,
+        md,
+        assets,
+        authored_kind,
+        authored_index,
+        destination,
+        width,
+        height,
+        ImageExecutor::Scalar,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_authored_profile_into(
+    scene: &ResolvedProfileScene,
+    store: &MappedRenderObjectStore,
+    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
+    authored_kind: AuthoredElementKind,
+    authored_index: u32,
+    destination: &mut [u8],
+    width: u32,
+    height: u32,
+    executor: ImageExecutor,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     let layer_ids = scene
         .layers
         .iter()
@@ -348,7 +408,7 @@ pub fn render_authored_profile_into_simd(
         store,
         width,
         height,
-        ImageExecutor::Simd,
+        executor,
         destination,
         Some(&layer_ids),
         semantic,
