@@ -4028,18 +4028,12 @@ impl CustomProfileRenderer {
         let md = self.snapshot();
         let w = crate::transform::CANVAS_WIDTH as i32;
         let h = crate::transform::CANVAS_HEIGHT as i32;
+        let elements = crate::elements::flatten_and_sort(card);
         let dynamic = if include_dynamic_bounds {
-            let elements = crate::elements::flatten_and_sort(card);
             layer_dynamic_for_elements(&elements, &md)
         } else {
             None
         };
-        let expansion = dynamic
-            .as_ref()
-            .map(dynamic_canvas_expansion)
-            .unwrap_or_default();
-        let surface_w = w + expansion.left + expansion.right;
-        let surface_h = h + expansion.top + expansion.bottom;
         let text_executor = match text_sdf {
             crate::profile_backend::TextSdfExecutor::LegacySkia => None,
             crate::profile_backend::TextSdfExecutor::Simd => {
@@ -4061,6 +4055,12 @@ impl CustomProfileRenderer {
                 return Err("shape executor Auto must be resolved by the caller".into());
             }
         };
+        let expansion = dynamic
+            .as_ref()
+            .map(dynamic_canvas_expansion)
+            .unwrap_or_default();
+        let surface_w = w + expansion.left + expansion.right;
+        let surface_h = h + expansion.top + expansion.bottom;
         let spec = OrderedSdfSurfaceSpec {
             surface_width: u32::try_from(surface_w)
                 .map_err(|_| "layer surface width overflow".to_string())?,
@@ -4321,6 +4321,68 @@ unsafe fn find_opaque_bounds_avx512(
         (0, 0, 0, 0)
     } else {
         (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    }
+}
+
+#[cfg(test)]
+mod expansion_tests {
+    use super::{dynamic_canvas_expansion, LayerDynamic, LayerDynamicFrame};
+
+    fn line_indent(offsets: &[(f32, f32)]) -> LayerDynamic {
+        LayerDynamic::TmpLineIndent {
+            fps: 60,
+            looped: false,
+            frames: offsets
+                .iter()
+                .enumerate()
+                .map(|(index, &(dx, dy))| LayerDynamicFrame {
+                    frame: index as u32,
+                    dx,
+                    dy,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn expansion_covers_travel_that_only_enters_the_canvas_later() {
+        // The layer sits outside the canvas at frame 0 and travels inward. An
+        // expansion derived from the frame-0 position alone would crop the
+        // content away before it ever becomes visible.
+        let expansion =
+            dynamic_canvas_expansion(&line_indent(&[(0.0, 0.0), (-400.0, 0.0), (-900.0, 0.0)]));
+        assert!(
+            expansion.right >= 900,
+            "travel toward the canvas must widen the surface, got {}",
+            expansion.right,
+        );
+    }
+
+    #[test]
+    fn expansion_covers_travel_that_only_crosses_the_canvas_midway() {
+        // Both endpoints sit far on the same side of the canvas while the path
+        // between them crosses it. Sampling only the first and last frame would
+        // report no travel at all and blank every frame in between.
+        let expansion =
+            dynamic_canvas_expansion(&line_indent(&[(0.0, 0.0), (-1200.0, 0.0), (-40.0, 0.0)]));
+        assert!(
+            expansion.right >= 1200,
+            "a midway crossing must widen the surface, got {}",
+            expansion.right,
+        );
+    }
+
+    #[test]
+    fn expansion_covers_both_travel_directions_and_axes() {
+        let expansion = dynamic_canvas_expansion(&line_indent(&[
+            (0.0, 0.0),
+            (300.0, -700.0),
+            (-500.0, 250.0),
+        ]));
+        assert!(expansion.left >= 300, "left {}", expansion.left);
+        assert!(expansion.right >= 500, "right {}", expansion.right);
+        assert!(expansion.top >= 250, "top {}", expansion.top);
+        assert!(expansion.bottom >= 700, "bottom {}", expansion.bottom);
     }
 }
 

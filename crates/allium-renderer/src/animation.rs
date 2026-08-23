@@ -236,14 +236,11 @@ pub fn resolve_preset(
         maximum_ticks: seconds * 60,
         maximum_long_edge: edge,
         output_budget_bytes: output_mib * 1024 * 1024,
-        // MP4 streams frames directly into libx264 and the service serializes
-        // animation exports globally. Bitmap formats still need a strict
-        // retained-frame budget, but MP4 must not inherit that 64 MiB GIF cap.
-        export_memory_budget_bytes: if format == AnimationFormat::Mp4 {
-            usize::MAX
-        } else {
-            memory_mib * 1024 * 1024
-        },
+        // MP4 streams frames directly into libx264, so it does not retain a
+        // frame set. It still shares the same export-owned working-set budget:
+        // oversized source layers are rendered through bounded viewport
+        // windows instead of materializing a multi-gigabyte offscreen raster.
+        export_memory_budget_bytes: memory_mib * 1024 * 1024,
         budget_step: 0,
         gif_quality: 80,
         h264: H264EncoderConfig {
@@ -4349,8 +4346,8 @@ mod tests {
         let gif = resolve_preset("qq", Some(AnimationFormat::Gif)).unwrap();
         assert_eq!(gif.export_memory_budget_bytes, 64 * 1024 * 1024);
         let mp4 = resolve_preset("qq", Some(AnimationFormat::Mp4)).unwrap();
-        assert_eq!(mp4.export_memory_budget_bytes, usize::MAX);
-        assert!(animation_peak_export_bytes(1_115_785_640, 0) <= mp4.export_memory_budget_bytes);
+        assert_eq!(mp4.export_memory_budget_bytes, 64 * 1024 * 1024);
+        assert!(animation_peak_export_bytes(1_115_785_640, 0) > mp4.export_memory_budget_bytes);
     }
 
     #[test]
@@ -4797,6 +4794,84 @@ mod tests {
             "unchanged middle pixel stays transparent"
         );
         assert_eq!(&delta.buffer[8..12], &red);
+    }
+
+    #[test]
+    fn gif_artifact_keeps_an_initially_off_canvas_dynamic_layer_and_erases_its_old_position() {
+        // A dynamic layer that starts fully outside the canvas, travels across
+        // it, and leaves on the other side. Frame 0 must stay blank, frame 1
+        // must show the layer, and frame 2 must erase the position it left —
+        // the dirty-region composite has to repaint vacated pixels, not just
+        // the ones the layer now covers.
+        let layers = vec![RasterLayer {
+            dynamic_layer_id: Some(allium_renderer_core::StableId(7)),
+            pixels: [255, 0, 0, 255].repeat(2),
+            x: 0.0,
+            y: 0.0,
+            width: 2,
+            height: 1,
+        }];
+        let state = |x: f32| {
+            let destination = FrameRect::from_xywh(x, 0.0, 2.0, 1.0);
+            LayerFrameState {
+                visible: true,
+                destination,
+                pixel_bounds: pixel_bounds_for_destination(destination, 4, 1),
+            }
+        };
+        let states = [state(-4.0), state(1.0), state(5.0)];
+        assert!(states[0].pixel_bounds.is_empty());
+        assert!(!states[1].pixel_bounds.is_empty());
+        assert!(states[2].pixel_bounds.is_empty());
+
+        let spec = AnimationEncodeSpec {
+            width: 4,
+            height: 1,
+            fps: 20,
+            frame_count: states.len() as u32,
+            looped: false,
+            output_budget_bytes: 1_000_000,
+            gif_quality: 80,
+        };
+        let mut compositor = AnimationFrameCompositor::new(4, 1, 1.0).unwrap();
+        let mut rgba = vec![0; 4 * 4];
+        let encoded = encode_rgba_frames(AnimationFormat::Gif, &spec, |index| {
+            compositor
+                .composite_states(index, &layers, vec![states[index as usize]], &mut rgba)
+                .unwrap();
+            Ok(rgba.clone())
+        })
+        .unwrap();
+
+        let mut options = gif::DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = options.read_info(Cursor::new(&encoded.data)).unwrap();
+        let white = [255, 255, 255, 255];
+        let red = [255, 0, 0, 255];
+        let mut canvas = white.repeat(4);
+        let mut decoded = Vec::new();
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            for y in 0..usize::from(frame.height) {
+                for x in 0..usize::from(frame.width) {
+                    let source = (y * usize::from(frame.width) + x) * 4;
+                    if frame.buffer[source + 3] == 0 {
+                        continue;
+                    }
+                    let destination =
+                        ((usize::from(frame.top) + y) * 4 + usize::from(frame.left) + x) * 4;
+                    canvas[destination..destination + 4]
+                        .copy_from_slice(&frame.buffer[source..source + 4]);
+                }
+            }
+            decoded.push(canvas.clone());
+        }
+
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], white.repeat(4));
+        assert_eq!(&decoded[1][4..8], &red);
+        assert_eq!(&decoded[1][8..12], &red);
+        assert_eq!(&decoded[2][4..8], &white);
+        assert_eq!(&decoded[2][8..12], &white);
     }
 
     #[test]
