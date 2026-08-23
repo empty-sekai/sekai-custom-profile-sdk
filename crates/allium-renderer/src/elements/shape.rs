@@ -3,7 +3,9 @@ use crate::masterdata::{MasterData, ResolvedColor};
 use crate::sdf::shape::ShapeSdfMaterial;
 use crate::sdf::tile::{Affine2, Point2, SdfCommandBuildError, SdfDrawCommand};
 use crate::types::ShapeElement;
+#[cfg(feature = "skia-core")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "skia-core")]
 use skia_safe::{Canvas, Color4f, Paint, PaintStyle, Rect};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,6 +107,7 @@ pub(crate) enum ShapeSdfCaptureError {
     ReadPixels { asset_key: String },
 }
 
+#[cfg_attr(not(feature = "skia-core"), allow(dead_code))]
 fn sdf_mask_alpha(red: u8, source_alpha: u8, threshold: f32) -> u8 {
     let threshold = threshold * 255.0;
     let sharp = 1.5_f32;
@@ -121,7 +124,7 @@ fn resolve_shape_sdf_command(
     height: i32,
     face_color: ResolvedColor,
     outline_color: ResolvedColor,
-    dst: Rect,
+    dst_ltrb: [f32; 4],
     source_rg8_sha256: String,
 ) -> Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError> {
     let source_size = [
@@ -152,10 +155,10 @@ fn resolve_shape_sdf_command(
         translate_y: affine[5],
     };
     let quad = [
-        Point2::new(dst.left, dst.top),
-        Point2::new(dst.right, dst.top),
-        Point2::new(dst.right, dst.bottom),
-        Point2::new(dst.left, dst.bottom),
+        Point2::new(dst_ltrb[0], dst_ltrb[1]),
+        Point2::new(dst_ltrb[2], dst_ltrb[1]),
+        Point2::new(dst_ltrb[2], dst_ltrb[3]),
+        Point2::new(dst_ltrb[0], dst_ltrb[3]),
     ]
     .map(|point| local_to_device.map_point(point));
     let rgb = |color: ResolvedColor| {
@@ -255,6 +258,7 @@ mod tests {
 }
 
 /// 绘制图形元素。
+#[cfg(feature = "skia-core")]
 pub fn draw_shape(
     canvas: &Canvas,
     shape: &ShapeElement,
@@ -264,6 +268,7 @@ pub fn draw_shape(
     draw_shape_observed(canvas, shape, md, assets, None);
 }
 
+#[cfg(feature = "skia-core")]
 pub(crate) fn draw_shape_observed(
     canvas: &Canvas,
     shape: &ShapeElement,
@@ -271,9 +276,10 @@ pub(crate) fn draw_shape_observed(
     assets: Option<&AssetStore>,
     observer: Option<&mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>)>,
 ) {
-    draw_shape_with_observer(canvas, shape, md, assets, observer, true);
+    draw_shape_with_observer(canvas, shape, md, assets, observer);
 }
 
+#[cfg(feature = "skia-core")]
 pub(crate) fn capture_shape_sdf(
     canvas: &Canvas,
     shape: &ShapeElement,
@@ -289,7 +295,8 @@ pub(crate) fn capture_shape_sdf(
 }
 
 /// Resolves a shape's SDF command with the device transform supplied directly,
-/// so the capture needs no canvas.
+/// so the capture needs no canvas — and no raster backend: the source identity
+/// comes from the asset store's decoded-identity cache.
 pub(crate) fn capture_shape_sdf_from_affine(
     affine: [f32; 6],
     shape: &ShapeElement,
@@ -297,41 +304,90 @@ pub(crate) fn capture_shape_sdf_from_affine(
     assets: Option<&AssetStore>,
     observer: &mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>),
 ) {
-    shape_with_observer(None, affine, shape, md, assets, Some(observer), false);
+    let color = md.resolve_color(shape.color_id).unwrap_or(ResolvedColor {
+        r: 128,
+        g: 128,
+        b: 128,
+        a: 255,
+    });
+    let outline_color = md
+        .resolve_color(shape.outline_color_id)
+        .unwrap_or(ResolvedColor {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        });
+    let shape_info = md.resolve_resource("shape", shape.id);
+    let has_resource_identity = shape_info.is_some();
+    let file_name = shape_info
+        .as_ref()
+        .map(|r| r.file_name.as_str())
+        .unwrap_or("square");
+    let asset_key = format!("custom_profile/shape/{file_name}");
+    let identity = assets
+        .ok_or(crate::assets::ShapeSourceIdentityError::Missing)
+        .and_then(|store| store.shape_sdf_source_identity_for_key(&asset_key));
+    let captured = match identity {
+        Ok(identity) => {
+            if !has_resource_identity {
+                Err(ShapeSdfCaptureError::MissingResource { shape_id: shape.id })
+            } else {
+                let sprite_w = identity.width as f32;
+                let sprite_h = identity.height as f32;
+                // The historical draw rect: from_xywh(-w/2, -h/2, w, h).
+                let left = -sprite_w / 2.0;
+                let top = -sprite_h / 2.0;
+                resolve_shape_sdf_command(
+                    affine,
+                    shape,
+                    &asset_key,
+                    identity.width,
+                    identity.height,
+                    color,
+                    outline_color,
+                    [left, top, left + sprite_w, top + sprite_h],
+                    identity.rg8_sha256,
+                )
+            }
+        }
+        Err(crate::assets::ShapeSourceIdentityError::Unreadable) => {
+            Err(ShapeSdfCaptureError::ReadPixels { asset_key })
+        }
+        Err(crate::assets::ShapeSourceIdentityError::Missing) => {
+            if has_resource_identity {
+                Err(ShapeSdfCaptureError::MissingAsset { asset_key })
+            } else {
+                Err(ShapeSdfCaptureError::MissingResource { shape_id: shape.id })
+            }
+        }
+    };
+    observer(captured);
 }
 
+#[cfg(feature = "skia-core")]
 fn draw_shape_with_observer(
     canvas: &Canvas,
     shape: &ShapeElement,
     md: &MasterData,
     assets: Option<&AssetStore>,
     observer: Option<&mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>)>,
-    render_pixels: bool,
 ) {
     let affine = canvas
         .local_to_device_as_3x3()
         .to_affine()
         .unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-    shape_with_observer(
-        Some(canvas),
-        affine,
-        shape,
-        md,
-        assets,
-        observer,
-        render_pixels,
-    );
+    shape_with_observer(canvas, affine, shape, md, assets, observer);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "skia-core")]
 fn shape_with_observer(
-    canvas: Option<&Canvas>,
+    canvas: &Canvas,
     device_affine: [f32; 6],
     shape: &ShapeElement,
     md: &MasterData,
     assets: Option<&AssetStore>,
     mut observer: Option<&mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>)>,
-    render_pixels: bool,
 ) {
     let mut fill_paint = Paint::default();
     fill_paint.set_style(PaintStyle::Fill);
@@ -402,34 +458,6 @@ fn shape_with_observer(
         let face_sdf_threshold = 0.5 + shape.outline_size * 0.2375;
         let outline_sdf_threshold = (1.0_f32 - outer_fill_ratio * 0.75).min(0.5);
 
-        if !render_pixels {
-            if let Some(observer) = observer.as_deref_mut() {
-                let captured = if !has_resource_identity {
-                    Err(ShapeSdfCaptureError::MissingResource { shape_id: shape.id })
-                } else if let Some(identity) =
-                    asset_store.shape_sdf_source_identity(&asset_key, &mask_img)
-                {
-                    resolve_shape_sdf_command(
-                        device_affine,
-                        shape,
-                        &asset_key,
-                        identity.width,
-                        identity.height,
-                        color,
-                        outline_color,
-                        dst,
-                        identity.rg8_sha256,
-                    )
-                } else {
-                    Err(ShapeSdfCaptureError::ReadPixels {
-                        asset_key: asset_key.clone(),
-                    })
-                };
-                observer(captured);
-            }
-            return;
-        }
-
         let info = mask_img.image_info();
         let w = info.width() as usize;
         let h = info.height() as usize;
@@ -472,7 +500,7 @@ fn shape_with_observer(
                     mask_img.height(),
                     color,
                     outline_color,
-                    dst,
+                    [dst.left, dst.top, dst.right, dst.bottom],
                     hex::encode(hasher.finalize()),
                 )
             };
@@ -500,12 +528,6 @@ fn shape_with_observer(
             )
         };
 
-        let canvas = match canvas {
-            Some(canvas) => canvas,
-            // Only the legacy draw path asks for pixels, and it always supplies
-            // a canvas; a capture-only call has nothing left to do here.
-            None => return,
-        };
         if shape.outline_size > 0.01 {
             if let (Some(ol_mask), Some(face_mask)) = (
                 make_sdf_mask(outline_sdf_threshold),
@@ -554,15 +576,6 @@ fn shape_with_observer(
             Err(ShapeSdfCaptureError::MissingResource { shape_id: shape.id })
         });
     }
-    if !render_pixels {
-        return;
-    }
-    let canvas = match canvas {
-        Some(canvas) => canvas,
-        // Same as above: pixels are only requested by the legacy draw path.
-        None => return,
-    };
-
     let outline_thickness = shape.outline_size * rect_size * 0.05;
     let stroke_paint = outline_color_paint.as_ref().map(|p| {
         let mut sp = p.clone();

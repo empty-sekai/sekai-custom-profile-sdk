@@ -921,6 +921,33 @@ pub(crate) fn capture_text_sdf(
     run.timings
 }
 
+/// Captures the element-path TMP layout (no post-layout placement) against a
+/// device transform supplied directly as an affine. The canvas route resolves
+/// the same glyph stream through an M44 local-to-device, and the two
+/// resolutions are pinned bit-equal.
+pub(crate) fn capture_text_sdf_from_affine(
+    base_affine: [f32; 6],
+    text: &TextElement,
+    md: &MasterData,
+    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
+) -> TextSdfCaptureTimings {
+    let mut run = layout_text_ops(text, md, None, atlases, None, true);
+    let emit_started = Some(std::time::Instant::now());
+    for op in &run.draw_ops {
+        if op.ch.chars().all(char::is_whitespace) {
+            continue;
+        }
+        observer(resolve_text_sdf_glyph_from_base_affine(
+            base_affine,
+            op,
+            run.font_family.as_deref(),
+        ));
+    }
+    run.timings.emit_ns = capture_elapsed_ns(emit_started);
+    run.timings
+}
+
 /// Captures the production region-font-only TMP layout with the same
 /// post-layout placement used by General components. Pixel generation stays
 /// disabled; the observer receives the completed glyph operations for the SDF

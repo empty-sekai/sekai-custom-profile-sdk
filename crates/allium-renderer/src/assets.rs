@@ -17,18 +17,25 @@ use std::sync::Mutex;
 
 use lru::LruCache;
 
-#[cfg(feature = "skia-core")]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-#[cfg(feature = "skia-core")]
 use std::collections::HashMap;
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ShapeSdfSourceIdentity {
     pub width: i32,
     pub height: i32,
     pub rg8_sha256: String,
+}
+
+/// Why a shape's decoded source identity could not be resolved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShapeSourceIdentityError {
+    /// The asset is not cached (or, with a raster backend, failed to decode
+    /// into the image cache).
+    Missing,
+    /// The asset is cached but its pixels could not be read.
+    Unreadable,
 }
 
 /// 将缓存 key 规范化为磁盘文件名（`/` → `__`）。
@@ -306,7 +313,6 @@ pub struct AssetStore {
     /// 静态素材常驻池（不走 LRU，启动时预解码，不占预算）
     #[cfg(feature = "skia-core")]
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
-    #[cfg(feature = "skia-core")]
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
     /// Missing image identities observed since the last audit drain. This is
     /// populated only on a real lookup miss and is therefore off the hit path.
@@ -365,6 +371,7 @@ impl AssetStore {
         Self {
             cache: Mutex::new(ByteLru::new(max_mb * 1024 * 1024)),
             pinned_static_keys: Mutex::new(BTreeSet::new()),
+            shape_sdf_identities: Mutex::new(HashMap::new()),
         }
     }
 
@@ -622,6 +629,60 @@ impl AssetStore {
         };
         identities.insert(key.to_string(), identity.clone());
         Some(identity)
+    }
+
+    /// Resolves the decoded source identity for a shape asset key, whichever
+    /// decode path this build carries. With a raster backend the identity is
+    /// read from the cached image exactly as before; without one the cached
+    /// PNG bytes decode through the engine's own codec, whose straight RGBA is
+    /// the same stream the atlas builder hashes.
+    pub(crate) fn shape_sdf_source_identity_for_key(
+        &self,
+        key: &str,
+    ) -> Result<ShapeSdfSourceIdentity, ShapeSourceIdentityError> {
+        #[cfg(feature = "skia-core")]
+        {
+            let image = self
+                .get_image(key)
+                .ok_or(ShapeSourceIdentityError::Missing)?;
+            self.shape_sdf_source_identity(key, &image)
+                .ok_or(ShapeSourceIdentityError::Unreadable)
+        }
+        #[cfg(not(feature = "skia-core"))]
+        {
+            if let Some(identity) = self
+                .shape_sdf_identities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(key)
+            {
+                return Ok(identity.clone());
+            }
+            let encoded = self.get(key).ok_or(ShapeSourceIdentityError::Missing)?;
+            if !crate::codec::png::is_png(&encoded) {
+                return Err(ShapeSourceIdentityError::Missing);
+            }
+            let decoded = crate::codec::png::decode(&encoded)
+                .map_err(|_| ShapeSourceIdentityError::Missing)?;
+            let width =
+                i32::try_from(decoded.width).map_err(|_| ShapeSourceIdentityError::Unreadable)?;
+            let height =
+                i32::try_from(decoded.height).map_err(|_| ShapeSourceIdentityError::Unreadable)?;
+            let mut hasher = Sha256::new();
+            for pixel in decoded.pixels.chunks_exact(4) {
+                hasher.update([pixel[0], pixel[3]]);
+            }
+            let identity = ShapeSdfSourceIdentity {
+                width,
+                height,
+                rg8_sha256: hex::encode(hasher.finalize()),
+            };
+            self.shape_sdf_identities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key.to_string(), identity.clone());
+            Ok(identity)
+        }
     }
 
     /// 将已加载的静态素材预解码并移入常驻池。

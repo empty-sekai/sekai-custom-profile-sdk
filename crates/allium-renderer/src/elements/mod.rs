@@ -5,7 +5,6 @@ pub mod generals;
 pub mod honor;
 #[cfg(feature = "skia-core")]
 pub mod image;
-#[cfg(feature = "skia-core")]
 pub mod shape;
 
 /// Builds a Skia face from font bytes the caller supplied.
@@ -207,10 +206,64 @@ pub(crate) enum SdfObservationMode {
     ObserveOnly,
 }
 
-#[cfg(feature = "skia-core")]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SdfObservationTimings {
     pub text_capture: crate::text::TextSdfCaptureTimings,
+}
+
+/// Canvas-free capture of one element's SDF command stream. Only Text and
+/// Shape elements produce SDF primitives; the ordered path routes every other
+/// element kind through the image compositor before reaching here. The device
+/// transform composes the surface origin with the element transform exactly as
+/// the canvas stack does, and the parity tests pin both compositions.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn capture_element_sdf(
+    elem: &RenderElement<'_>,
+    md: &crate::masterdata::MasterData,
+    assets: Option<&crate::assets::AssetStore>,
+    canvas_width: f32,
+    canvas_height: f32,
+    origin: [f32; 2],
+    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    text_observer: Option<
+        &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, crate::text::TextSdfCaptureError>),
+    >,
+    shape_observer: Option<
+        &mut dyn FnMut(
+            Result<
+                crate::elements::shape::ResolvedShapeSdfCommand,
+                crate::elements::shape::ShapeSdfCaptureError,
+            >,
+        ),
+    >,
+) -> SdfObservationTimings {
+    let mut observation_timings = SdfObservationTimings::default();
+    let device = concat_affine(
+        [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]],
+        element_device_affine(elem.object_data(), canvas_width, canvas_height),
+    );
+    match elem {
+        RenderElement::Text(e) => {
+            if let Some(observer) = text_observer {
+                observation_timings.text_capture = crate::text::capture_text_sdf_from_affine(
+                    scale_affine(device, crate::text::TEXT_SCALE),
+                    e,
+                    md,
+                    text_atlases,
+                    observer,
+                );
+            }
+        }
+        RenderElement::Shape(e) => {
+            if let Some(observer) = shape_observer {
+                crate::elements::shape::capture_shape_sdf_from_affine(
+                    device, e, md, assets, observer,
+                );
+            }
+        }
+        _ => {}
+    }
+    observation_timings
 }
 
 /// Device transform an element's own drawing sits under, as an affine in
