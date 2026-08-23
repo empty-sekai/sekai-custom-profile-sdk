@@ -377,6 +377,68 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
 }
 
 /// Encodes non-premultiplied RGBA8 as an 8-bit RGBA, non-interlaced PNG.
+/// Stores every row unfiltered.
+///
+/// Rendered pages carry wide flat regions and rows that repeat their predecessor
+/// exactly, and DEFLATE matches those across rows at a distance of one stride.
+/// Filtering rewrites each row into residuals, which can break that match — so
+/// for this kind of content leaving the bytes alone is often the smaller of the
+/// two, and [`encode_rgba`] tries both.
+fn store_scanlines(height: u32, pixels: &[u8], stride: usize) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((stride + 1) * height as usize);
+    for y in 0..height as usize {
+        raw.push(0);
+        raw.extend_from_slice(&pixels[y * stride..(y + 1) * stride]);
+    }
+    raw
+}
+
+/// Applies the PNG filter that leaves each row's residual closest to zero.
+///
+/// The choice is per row, using libpng's minimum-sum-of-absolute-differences
+/// heuristic. This is a pure size decision — every filter is exactly reversible,
+/// so the decoded pixels do not depend on it.
+fn filter_scanlines(height: u32, pixels: &[u8], stride: usize) -> Vec<u8> {
+    const BPP: usize = 4;
+    let mut raw = Vec::with_capacity((stride + 1) * height as usize);
+    let mut previous = vec![0u8; stride];
+    // One scratch row per filter, reused across the image.
+    let mut candidates = [
+        vec![0u8; stride],
+        vec![0u8; stride],
+        vec![0u8; stride],
+        vec![0u8; stride],
+        vec![0u8; stride],
+    ];
+    for y in 0..height as usize {
+        let row = &pixels[y * stride..(y + 1) * stride];
+        for x in 0..stride {
+            let current = row[x];
+            let left = if x >= BPP { row[x - BPP] } else { 0 };
+            let up = previous[x];
+            let up_left = if x >= BPP { previous[x - BPP] } else { 0 };
+            candidates[0][x] = current;
+            candidates[1][x] = current.wrapping_sub(left);
+            candidates[2][x] = current.wrapping_sub(up);
+            candidates[3][x] = current.wrapping_sub(((u16::from(left) + u16::from(up)) / 2) as u8);
+            candidates[4][x] = current.wrapping_sub(paeth(left, up, up_left));
+        }
+        let best = (0..candidates.len())
+            .min_by_key(|index| {
+                candidates[*index]
+                    .iter()
+                    // Residuals are read as signed, so 0xFF is a distance of 1.
+                    .map(|byte| u64::from(byte.wrapping_add(128).abs_diff(128)))
+                    .sum::<u64>()
+            })
+            .expect("five filter candidates");
+        raw.push(best as u8);
+        raw.extend_from_slice(&candidates[best]);
+        previous.copy_from_slice(row);
+    }
+    raw
+}
+
 pub fn encode_rgba(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::Format("zero-sized image"));
@@ -393,16 +455,29 @@ pub fn encode_rgba(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, Co
         ));
     }
 
-    // Filter type 0 for every row: the compositor's output is already
-    // byte-identical to its source, and a fixed filter keeps encoding
-    // deterministic and cheap.
-    let mut raw = Vec::with_capacity(needed + height as usize);
-    for y in 0..height as usize {
-        raw.push(0);
-        raw.extend_from_slice(&pixels[y * stride..(y + 1) * stride]);
-    }
+    // Neither filtering strategy dominates: which one wins depends on how much of
+    // the page repeats row to row. Compressing both and keeping the smaller costs
+    // one extra DEFLATE pass and removes the guess. The two passes are
+    // independent, so they run concurrently when a pool is available; the
+    // selected bytes are identical either way.
+    #[cfg(feature = "parallel")]
+    let (stored, filtered) = rayon::join(
+        || zlib_compress(&store_scanlines(height, pixels, stride)),
+        || zlib_compress(&filter_scanlines(height, pixels, stride)),
+    );
+    #[cfg(not(feature = "parallel"))]
+    let (stored, filtered) = (
+        zlib_compress(&store_scanlines(height, pixels, stride)),
+        zlib_compress(&filter_scanlines(height, pixels, stride)),
+    );
+    let (stored, filtered) = (stored?, filtered?);
+    let compressed = if filtered.len() < stored.len() {
+        filtered
+    } else {
+        stored
+    };
 
-    let mut out = Vec::with_capacity(needed / 2 + 128);
+    let mut out = Vec::with_capacity(compressed.len() + 128);
     out.extend_from_slice(&SIGNATURE);
 
     let mut ihdr = Vec::with_capacity(13);
@@ -410,7 +485,7 @@ pub fn encode_rgba(width: u32, height: u32, pixels: &[u8]) -> Result<Vec<u8>, Co
     ihdr.extend_from_slice(&height.to_be_bytes());
     ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
     chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", &zlib_compress(&raw)?);
+    chunk(&mut out, b"IDAT", &compressed);
     chunk(&mut out, b"IEND", &[]);
     Ok(out)
 }
@@ -450,6 +525,64 @@ mod tests {
         let pixels = vec![1, 2, 3, 4];
         let encoded = encode_rgba(1, 1, &pixels).expect("encode");
         assert_eq!(decode(&encoded).expect("decode").pixels, pixels);
+    }
+
+    /// A horizontal ramp is cheapest under Sub; a row repeating the one above is
+    /// cheapest under Up. The encoder has to pick per row rather than settling on
+    /// one filter for the image.
+    #[test]
+    fn the_chosen_filter_follows_the_row_content() {
+        let (w, h) = (64u32, 3u32);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                // Rows 0 and 1 are the same ramp; row 2 is flat.
+                let value = if y < 2 { (x * 3) as u8 } else { 200 };
+                pixels.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let stride = (w * 4) as usize;
+        let raw = filter_scanlines(h, &pixels, stride);
+        let filters: Vec<u8> = (0..h as usize).map(|y| raw[y * (stride + 1)]).collect();
+        assert_eq!(filters[0], 1, "a horizontal ramp is cheapest under Sub");
+        assert_eq!(
+            filters[1], 2,
+            "repeating the row above is cheapest under Up"
+        );
+        assert_ne!(filters[1], filters[2], "the choice must follow the content");
+        assert_eq!(
+            decode(&encode_rgba(w, h, &pixels).expect("encode"))
+                .expect("decode")
+                .pixels,
+            pixels
+        );
+    }
+
+    /// The encoder commits to whichever strategy compresses smaller, so its IDAT
+    /// can never be larger than either one alone.
+    #[test]
+    fn the_encoder_keeps_the_smaller_of_the_two_strategies() {
+        let stride_of = |w: u32| (w * 4) as usize;
+        // A gradient favours filtering; rows that repeat favour storing.
+        let mut repeating = Vec::new();
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let value = ((x * 7 + (y / 16) * 31) % 256) as u8;
+                repeating.extend_from_slice(&[value, value.wrapping_mul(3), value, 255]);
+            }
+        }
+        for (w, h, pixels) in [(256u32, 256u32, gradient(256, 256)), (64, 64, repeating)] {
+            let stored = zlib_compress(&store_scanlines(h, &pixels, stride_of(w)))
+                .expect("compress")
+                .len();
+            let filtered = zlib_compress(&filter_scanlines(h, &pixels, stride_of(w)))
+                .expect("compress")
+                .len();
+            let encoded = encode_rgba(w, h, &pixels).expect("encode");
+            // Signature (8) + IHDR chunk (25) + IDAT overhead (12) + IEND (12).
+            assert_eq!(encoded.len(), stored.min(filtered) + 57);
+            assert_eq!(decode(&encoded).expect("decode").pixels, pixels);
+        }
     }
 
     #[test]
