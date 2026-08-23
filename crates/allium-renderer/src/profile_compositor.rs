@@ -4734,6 +4734,91 @@ mod tests {
         }
     }
 
+    /// The recipes declare avatar ellipse clips anti-aliased, and Skia's
+    /// anti-aliased scan conversion produces fractional edge coverage of the
+    /// quad-approximated oval. The native compositor currently renders a hard
+    /// edge, so every pixel Skia leaves partially covered differs. This pins
+    /// the divergence so a future coverage implementation must revisit it
+    /// deliberately; nothing in the byte-exact page corpus reaches this path.
+    #[cfg(feature = "skia-core")]
+    #[test]
+    fn ellipse_image_clip_differs_from_the_antialiased_reference_only_at_edges() {
+        if !packet_simd_available() {
+            return;
+        }
+        use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo, Paint, Rect as SkRect};
+
+        let (_temp, store) = store(vec![(
+            "texture:assets/pixel",
+            1,
+            1,
+            vec![255, 255, 255, 255],
+        )]);
+        let layer_id = StableId::derive("layer", b"ellipse-aa-clip");
+        let mut command = image_command(
+            "ellipse",
+            layer_id,
+            "pixel",
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+            },
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            BlendMode::SrcOver,
+        );
+        let SemanticCommandPayload::Image { clip, .. } = &mut command.payload else {
+            unreachable!("image command helper must create an image payload");
+        };
+        *clip = Some(allium_renderer_core::ImageClip::Ellipse);
+        let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let output = render_image_scene_scalar(&scene(layer, vec![command]), &store, 8, 8)
+            .expect("ellipse clip");
+
+        // Anti-aliased oval clip, exactly as apply_general_clips issues it.
+        let mut surface = surfaces::raster_n32_premul((8, 8)).expect("surface");
+        let canvas = surface.canvas();
+        canvas.clear(Color::TRANSPARENT);
+        let mut builder = skia_safe::PathBuilder::new();
+        builder.add_oval(SkRect::from_xywh(0.0, 0.0, 8.0, 8.0), None, None);
+        canvas.clip_path(&builder.detach(), skia_safe::ClipOp::Intersect, true);
+        let mut paint = Paint::default();
+        paint.set_color(Color::WHITE);
+        paint.set_anti_alias(false);
+        canvas.draw_rect(SkRect::from_xywh(0.0, 0.0, 8.0, 8.0), &paint);
+        let info = ImageInfo::new((8, 8), ColorType::RGBA8888, AlphaType::Premul, None);
+        let mut reference = vec![0u8; 8 * 8 * 4];
+        surface.read_pixels(&info, &mut reference, 32, (0, 0));
+
+        let mut interior_diffs = 0usize;
+        let mut edge_diffs = 0usize;
+        for (actual, expected) in output.pixels.chunks_exact(4).zip(reference.chunks_exact(4)) {
+            if actual == expected {
+                continue;
+            }
+            // A partially covered reference pixel is an anti-aliased edge.
+            if expected[3] > 0 && expected[3] < 255 {
+                edge_diffs += 1;
+            } else {
+                interior_diffs += 1;
+            }
+        }
+        assert_eq!(
+            interior_diffs, 0,
+            "fully covered and fully clipped pixels must already agree"
+        );
+        assert!(
+            edge_diffs > 0,
+            "the divergence is real; if this reaches zero the hard edge was replaced"
+        );
+    }
+
     #[test]
     fn ellipse_image_clip_has_only_the_known_skia_edge_tie_difference() {
         if !packet_simd_available() {

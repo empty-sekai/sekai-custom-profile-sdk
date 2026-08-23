@@ -24,6 +24,10 @@ pub enum ProfileSurfaceBackend {
     SkiaRasterCpu,
     SkiaOpenGlLlvmPipe,
     SkiaVulkanLavaPipe,
+    /// Dependency-free RGBA raster: every element renders through the software
+    /// image path and the SDF executors; a page that would need a legacy
+    /// element draw is rejected instead of silently degrading.
+    NativeRasterCpu,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,6 +121,10 @@ pub struct ProfileBackendCapabilities {
     pub skia_raster_cpu: bool,
     pub skia_opengl_llvmpipe: bool,
     pub skia_vulkan_lavapipe: bool,
+    /// True only when the runtime resources the native surface consumes are
+    /// installed: the SIMD packet executor, both SDF atlas kinds, and the
+    /// pre-decoded render-object store.
+    pub native_raster_cpu: bool,
     pub text_legacy_skia: bool,
     pub text_simd: bool,
     pub text_scalar_oracle: bool,
@@ -132,6 +140,7 @@ impl ProfileBackendCapabilities {
             skia_raster_cpu: true,
             skia_opengl_llvmpipe: false,
             skia_vulkan_lavapipe: false,
+            native_raster_cpu: false,
             text_legacy_skia: true,
             text_simd: false,
             text_scalar_oracle: false,
@@ -215,6 +224,22 @@ impl ProfileBackendConfig {
                 &mut resolved.fallbacks,
             )?;
             resolved.surface = ProfileSurfaceBackend::SkiaRasterCpu;
+        } else if self.surface == ProfileSurfaceBackend::NativeRasterCpu
+            && (self.text_sdf == TextSdfExecutor::LegacySkia
+                || self.shape_sdf == ShapeSdfExecutor::Skia)
+        {
+            // The native surface has no legacy element path to hand text or
+            // shape work to, so it is only selectable together with the SDF
+            // executors.
+            resolve_unavailable(
+                self.fallback_policy,
+                capabilities.skia_raster_cpu,
+                "surface",
+                "native-surface-requires-sdf-executors",
+                BackendFallbackCode::SurfaceUnavailable,
+                &mut resolved.fallbacks,
+            )?;
+            resolved.surface = ProfileSurfaceBackend::SkiaRasterCpu;
         }
         if !text_available(self.text_sdf, capabilities) {
             resolve_unavailable(
@@ -256,6 +281,7 @@ fn surface_available(
         ProfileSurfaceBackend::SkiaRasterCpu => capabilities.skia_raster_cpu,
         ProfileSurfaceBackend::SkiaOpenGlLlvmPipe => capabilities.skia_opengl_llvmpipe,
         ProfileSurfaceBackend::SkiaVulkanLavaPipe => capabilities.skia_vulkan_lavapipe,
+        ProfileSurfaceBackend::NativeRasterCpu => capabilities.native_raster_cpu,
     }
 }
 
@@ -1012,6 +1038,110 @@ mod tests {
         assert!(resolved.fallbacks.is_empty());
     }
 
+    fn native_capabilities() -> ProfileBackendCapabilities {
+        ProfileBackendCapabilities {
+            native_raster_cpu: true,
+            text_simd: true,
+            shape_simd: true,
+            ..ProfileBackendCapabilities::legacy_skia_only()
+        }
+    }
+
+    #[test]
+    fn native_surface_resolves_when_its_resources_are_installed() {
+        let config = ProfileBackendConfig {
+            surface: ProfileSurfaceBackend::NativeRasterCpu,
+            text_sdf: TextSdfExecutor::Simd,
+            shape_sdf: ShapeSdfExecutor::Simd,
+            fallback_policy: BackendFallbackPolicy::FailClosed,
+            ..ProfileBackendConfig::default()
+        };
+        let resolved = config
+            .resolve(native_capabilities())
+            .expect("native surface must resolve");
+        assert_eq!(resolved.surface, ProfileSurfaceBackend::NativeRasterCpu);
+        assert_eq!(resolved.text_sdf, TextSdfExecutor::Simd);
+        assert_eq!(resolved.shape_sdf, ShapeSdfExecutor::Simd);
+        assert!(resolved.fallbacks.is_empty());
+    }
+
+    /// The native surface has no legacy element path, so it cannot be paired
+    /// with a legacy text or shape executor: fail-closed rejects the request
+    /// and page policy falls the surface back.
+    #[test]
+    fn native_surface_requires_both_sdf_executors() {
+        for (text_sdf, shape_sdf) in [
+            (TextSdfExecutor::LegacySkia, ShapeSdfExecutor::Simd),
+            (TextSdfExecutor::Simd, ShapeSdfExecutor::Skia),
+        ] {
+            let config = ProfileBackendConfig {
+                surface: ProfileSurfaceBackend::NativeRasterCpu,
+                text_sdf,
+                shape_sdf,
+                fallback_policy: BackendFallbackPolicy::FailClosed,
+                ..ProfileBackendConfig::default()
+            };
+            assert_eq!(
+                config.resolve(native_capabilities()),
+                Err(ProfileBackendSelectionError::Unavailable {
+                    stage: "surface",
+                    reason: "native-surface-requires-sdf-executors",
+                }),
+            );
+            let page = ProfileBackendConfig {
+                fallback_policy: BackendFallbackPolicy::Page,
+                ..config
+            };
+            let resolved = page
+                .resolve(native_capabilities())
+                .expect("page policy must fall back");
+            assert_eq!(resolved.surface, ProfileSurfaceBackend::SkiaRasterCpu);
+            assert_eq!(
+                resolved.fallbacks[0].code,
+                BackendFallbackCode::SurfaceUnavailable
+            );
+        }
+    }
+
+    /// The capability bit is the only thing that can enable the native
+    /// surface; without it a fail-closed request is rejected outright.
+    #[test]
+    fn native_surface_fails_closed_without_its_capability() {
+        let config = ProfileBackendConfig {
+            surface: ProfileSurfaceBackend::NativeRasterCpu,
+            text_sdf: TextSdfExecutor::Simd,
+            shape_sdf: ShapeSdfExecutor::Simd,
+            fallback_policy: BackendFallbackPolicy::FailClosed,
+            ..ProfileBackendConfig::default()
+        };
+        let capabilities = ProfileBackendCapabilities {
+            native_raster_cpu: false,
+            text_simd: true,
+            shape_simd: true,
+            ..ProfileBackendCapabilities::legacy_skia_only()
+        };
+        assert_eq!(
+            config.resolve(capabilities),
+            Err(ProfileBackendSelectionError::Unavailable {
+                stage: "surface",
+                reason: "requested-surface-unavailable",
+            }),
+        );
+    }
+
+    #[test]
+    fn native_surface_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_value(ProfileSurfaceBackend::NativeRasterCpu).expect("serialize"),
+            serde_json::json!("native-raster-cpu")
+        );
+        assert_eq!(
+            serde_json::from_value::<ProfileSurfaceBackend>(serde_json::json!("native-raster-cpu"))
+                .expect("deserialize"),
+            ProfileSurfaceBackend::NativeRasterCpu
+        );
+    }
+
     #[test]
     fn unavailable_candidate_falls_back_whole_page_with_stable_codes() {
         let config = ProfileBackendConfig {
@@ -1082,6 +1212,7 @@ mod tests {
                 skia_raster_cpu: true,
                 skia_opengl_llvmpipe: false,
                 skia_vulkan_lavapipe: false,
+                native_raster_cpu: false,
                 text_legacy_skia: true,
                 text_simd: false,
                 text_scalar_oracle: false,

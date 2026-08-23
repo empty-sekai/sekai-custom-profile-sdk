@@ -158,6 +158,13 @@ impl CustomProfileRenderer {
             skia_raster_cpu: true,
             skia_opengl_llvmpipe: false,
             skia_vulkan_lavapipe: false,
+            // The native surface renders every element through the software
+            // image path, so it needs the packet executor, both atlas kinds,
+            // and the pre-decoded render-object store to all be installed.
+            native_raster_cpu: simd
+                && sdf_atlases_available
+                && self.shape_sdf_atlas.is_some()
+                && self.render_object_generations.is_some(),
             text_legacy_skia: true,
             text_simd: simd && sdf_atlases_available,
             text_scalar_oracle: sdf_atlases_available,
@@ -1261,6 +1268,7 @@ impl CustomProfileRenderer {
             pixel_occlusion_dry_run,
             pixel_occlusion_execute,
             clear_rgba,
+            false,
             None,
             generation.store(),
         )
@@ -1279,6 +1287,7 @@ impl CustomProfileRenderer {
         pixel_occlusion_dry_run: bool,
         pixel_occlusion_execute: bool,
         clear_rgba: [u8; 4],
+        forbid_legacy_elements: bool,
         pre_resolved_scene: Option<&allium_renderer_core::profile_scene::ResolvedProfileScene>,
         render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
     ) -> Result<FullCardSdfExecutionOutput, String> {
@@ -1293,7 +1302,8 @@ impl CustomProfileRenderer {
                 tile_height,
                 pixel_occlusion_dry_run,
                 pixel_occlusion_execute,
-                OrderedSdfSurfaceSpec::full_card(clear_rgba),
+                OrderedSdfSurfaceSpec::full_card(clear_rgba)
+                    .with_forbid_legacy_elements(forbid_legacy_elements),
                 &md,
                 self.assets.as_deref(),
                 pre_resolved_scene,
@@ -1706,6 +1716,12 @@ impl CustomProfileRenderer {
                             .image_composite_ns
                             .saturating_add(elapsed_ns(draw_started));
                     } else {
+                        if spec.forbid_legacy_elements {
+                            return Err(format!(
+                                "native surface requires the software image path; {:?} element has no authored identity",
+                                profile_command_kind(&element)
+                            ));
+                        }
                         if !last_element_was_legacy {
                             aggregate.legacy_run_count =
                                 aggregate.legacy_run_count.saturating_add(1);
@@ -1959,6 +1975,8 @@ impl CustomProfileRenderer {
                 PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS
             },
         );
+        let native_surface =
+            selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
         telemetry.apply_selection(selection);
 
         let text_executor = match actual_text {
@@ -2023,6 +2041,7 @@ impl CustomProfileRenderer {
                 config.pixel_occlusion_dry_run,
                 config.pixel_occlusion_execute,
                 [255, 255, 255, 255],
+                native_surface,
                 effective_scene,
                 render_object_store,
             ) {
@@ -3703,6 +3722,10 @@ struct OrderedSdfSurfaceSpec {
     canvas_origin_y: f32,
     clear_rgba: [u8; 4],
     prepare_direct_axis_shape: bool,
+    /// Native-surface discipline: an element that cannot take the software
+    /// image path fails the request instead of drawing through the legacy
+    /// element renderer.
+    forbid_legacy_elements: bool,
 }
 
 #[cfg(feature = "skia-core")]
@@ -3717,7 +3740,13 @@ impl OrderedSdfSurfaceSpec {
             canvas_origin_y: 0.0,
             clear_rgba,
             prepare_direct_axis_shape: true,
+            forbid_legacy_elements: false,
         }
+    }
+
+    fn with_forbid_legacy_elements(mut self, forbid: bool) -> Self {
+        self.forbid_legacy_elements = forbid;
+        self
     }
 }
 
