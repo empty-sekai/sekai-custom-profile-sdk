@@ -569,7 +569,6 @@ impl ProfileData {
     /// Converts the production profile model into the backend-neutral model
     /// consumed by the shared semantic resolver. The production parser remains
     /// authoritative until the raw-profile parity corpus is complete.
-    #[cfg(feature = "skia-core")]
     pub(crate) fn to_core_profile(&self) -> allium_renderer_core::profile_data::ProfileData {
         use allium_renderer_core::profile_data as core;
 
@@ -667,7 +666,6 @@ impl ProfileData {
     }
 }
 
-#[cfg(feature = "skia-core")]
 fn music_stats_to_core(
     value: &MusicDifficultyStats,
 ) -> allium_renderer_core::profile_data::MusicDifficultyStats {
@@ -702,7 +700,6 @@ mod interaction_profile_tests {
         assert_eq!(profile.challenge_ranks[1].character_id, 2);
     }
 
-    #[cfg(feature = "skia-core")]
     #[test]
     fn production_and_shared_profile_parsers_match_supported_fields() {
         let raw = serde_json::json!({
