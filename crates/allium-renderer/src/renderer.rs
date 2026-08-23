@@ -2916,15 +2916,7 @@ fn render_card_encoded_sized(
     }
 
     let encode_started = std::time::Instant::now();
-    let image = surface.image_snapshot();
-    let ctx: Option<&mut skia_safe::gpu::DirectContext> = None;
-    let data = image
-        .encode(ctx, format, Some(quality))
-        .ok_or_else(|| match format {
-            skia_safe::EncodedImageFormat::PNG => "PNG 编码失败".to_string(),
-            _ => "图片编码失败".to_string(),
-        })?;
-    let encoded = data.as_bytes().to_vec();
+    let encoded = encode_surface(&mut surface, canvas_width, canvas_height, format, quality)?;
     if let Some(telemetry) = telemetry.as_deref_mut() {
         telemetry.timings.encode_ns = elapsed_ns(encode_started);
         telemetry.timings.total_ns = elapsed_ns(total_started);
@@ -5120,6 +5112,42 @@ fn elapsed_ns(started: std::time::Instant) -> u64 {
     started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
+/// Encodes a rendered surface without asking Skia to do it.
+///
+/// The surface is read back as premultiplied RGBA8 — the form both encoders
+/// consume — and handed to the dependency-free PNG codec or to libjpeg-turbo.
+/// PNG is lossless, so the encoded bytes differ from Skia's compressor output
+/// while the decoded pixels are identical; JPEG is the encoder production already
+/// selects.
+#[cfg(feature = "skia-core")]
+fn encode_surface(
+    surface: &mut skia_safe::Surface,
+    canvas_width: u32,
+    canvas_height: u32,
+    format: skia_safe::EncodedImageFormat,
+    quality: u32,
+) -> Result<Vec<u8>, String> {
+    let row_bytes = (canvas_width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "surface row size overflowed".to_string())?;
+    let mut pixels = vec![
+        0u8;
+        row_bytes
+            .checked_mul(canvas_height as usize)
+            .ok_or_else(|| "surface size overflowed".to_string())?
+    ];
+    let info = skia_safe::ImageInfo::new(
+        (canvas_width as i32, canvas_height as i32),
+        skia_safe::ColorType::RGBA8888,
+        skia_safe::AlphaType::Premul,
+        None,
+    );
+    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
+        return Err("读取渲染表面像素失败".into());
+    }
+    encode_premultiplied_rgba(&pixels, canvas_width, canvas_height, format, quality)
+}
+
 #[cfg(feature = "skia-core")]
 fn encode_premultiplied_rgba(
     rgba: &[u8],
@@ -5138,20 +5166,31 @@ fn encode_premultiplied_rgba(
             rgba.len()
         ));
     }
-    let info = skia_safe::ImageInfo::new(
-        (width as i32, height as i32),
-        skia_safe::ColorType::RGBA8888,
-        skia_safe::AlphaType::Premul,
-        None,
-    );
-    let image =
-        skia_safe::images::raster_from_data(&info, skia_safe::Data::new_copy(rgba), row_bytes)
-            .ok_or_else(|| "failed to create Skia image from ordered SDF RGBA".to_string())?;
-    let ctx: Option<&mut skia_safe::gpu::DirectContext> = None;
-    let encoded = image
-        .encode(ctx, format, Some(quality))
-        .ok_or_else(|| "failed to encode ordered SDF image".to_string())?;
-    Ok(encoded.as_bytes().to_vec())
+    match format {
+        skia_safe::EncodedImageFormat::PNG => {
+            // PNG stores non-premultiplied samples, so the premultiplication the
+            // compositor applied is divided back out the same way a decode
+            // recovers it: re-decoding reproduces the premultiplied surface.
+            let mut samples = rgba.to_vec();
+            for pixel in samples.chunks_exact_mut(4) {
+                let alpha = pixel[3];
+                if alpha != 0 && alpha != u8::MAX {
+                    for channel in 0..3 {
+                        pixel[channel] =
+                            crate::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
+                    }
+                }
+            }
+            crate::codec::png::encode_rgba(width, height, &samples)
+                .map_err(|error| format!("PNG 编码失败: {error}"))
+        }
+        skia_safe::EncodedImageFormat::JPEG => {
+            // JPEG carries no alpha, so a premultiplied surface is already the
+            // composited result over its own background.
+            crate::jpeg_turbo::encode_rgba(rgba, width, height, quality)
+        }
+        other => Err(format!("不支持的编码格式: {other:?}")),
+    }
 }
 
 #[cfg(feature = "skia-core")]
