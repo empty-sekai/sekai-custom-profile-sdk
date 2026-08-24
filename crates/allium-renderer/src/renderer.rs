@@ -4059,6 +4059,20 @@ impl CustomProfileRenderer {
             .as_ref()
             .map(dynamic_canvas_expansion)
             .unwrap_or_default();
+        let tight_executor = tight_animation_sdf_executor(&elements, text_executor, shape_executor);
+        if let Some(executor) = tight_executor {
+            return self.render_animation_sdf_layer_tight(
+                card,
+                &md,
+                self.assets.as_deref(),
+                profile,
+                executor,
+                32,
+                32,
+                dynamic,
+                expansion,
+            );
+        }
         let surface_w = w + expansion.left + expansion.right;
         let surface_h = h + expansion.top + expansion.bottom;
         let spec = OrderedSdfSurfaceSpec {
@@ -4119,6 +4133,272 @@ impl CustomProfileRenderer {
         };
         self.recycle_profile_rgba_scratch(rgba);
         Ok(raster)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_animation_sdf_layer_tight(
+        &self,
+        card: &CustomProfileCard,
+        md: &MasterData,
+        assets: Option<&AssetStore>,
+        profile: Option<&crate::profile::ProfileData>,
+        executor: SdfLayerCandidateExecutor,
+        tile_width: u16,
+        tile_height: u16,
+        dynamic: Option<LayerDynamic>,
+        reachable: CanvasExpansion,
+    ) -> Result<OrderedLayerRaster, String> {
+        let sdf_atlases = self.sdf_atlases.load_full();
+        let captured = capture_sdf_primitives(
+            card,
+            md,
+            assets,
+            Some(&sdf_atlases),
+            profile,
+            crate::transform::CANVAS_WIDTH as u32,
+            crate::transform::CANVAS_HEIGHT as u32,
+            SdfCaptureKinds::TEXT_AND_SHAPE,
+        )?;
+
+        let base_source = crate::sdf::tile::MixedSdfAtlasSource::new(
+            &sdf_atlases,
+            self.shape_sdf_atlas.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut runtime_text_pages = Vec::new();
+        let mut realtime_edt_glyphs = Vec::new();
+        let mut realtime_edt_batch = crate::profile_backend::RealtimeEdtBatchTelemetry::default();
+        let prepared_batch = active_realtime_edt_batch();
+        let runtime_pages = self
+            .realtime_oversized_glyph_generation
+            .then_some(&mut runtime_text_pages);
+        let mut commands = map_captured_sdf_commands(
+            &captured.primitives,
+            &sdf_atlases,
+            self.shape_sdf_atlas.as_deref(),
+            &base_source,
+            runtime_pages,
+            Some(&mut realtime_edt_glyphs),
+            Some(&mut realtime_edt_batch),
+            None,
+        )?;
+
+        let empty = OrderedLayerRaster {
+            pixels: Vec::new(),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            dynamic: dynamic.clone(),
+            legacy_element_count: 0,
+            scratch_peak_bytes: 0,
+        };
+        let Some((content_x, content_y, content_w, content_h)) =
+            tight_sdf_command_bounds(&commands)
+        else {
+            return Ok(empty);
+        };
+        // Keep only the part of the content a frame can ever show. The layer's
+        // travel bounds the canvas positions it can occupy, so intersecting the
+        // command extent with the travelled canvas drops pixels no frame can
+        // reach while keeping every pixel some frame can.
+        let canvas_w = crate::transform::CANVAS_WIDTH as i32;
+        let canvas_h = crate::transform::CANVAS_HEIGHT as i32;
+        let left = content_x.max(-reachable.left);
+        let top = content_y.max(-reachable.top);
+        let right = content_x
+            .checked_add(i32::try_from(content_w).map_err(|_| "layer width overflow".to_string())?)
+            .ok_or_else(|| "layer right edge overflow".to_string())?
+            .min(canvas_w + reachable.right);
+        let bottom = content_y
+            .checked_add(i32::try_from(content_h).map_err(|_| "layer height overflow".to_string())?)
+            .ok_or_else(|| "layer bottom edge overflow".to_string())?
+            .min(canvas_h + reachable.bottom);
+        if right <= left || bottom <= top {
+            return Ok(empty);
+        }
+        let (origin_x, origin_y) = (left, top);
+        let width = u32::try_from(right - left).map_err(|_| "layer width overflow".to_string())?;
+        let height =
+            u32::try_from(bottom - top).map_err(|_| "layer height overflow".to_string())?;
+        let (surface_bytes, _) = animation_sdf_retained_surface_bytes(width, height)?;
+
+        shift_sdf_commands(&mut commands, -(origin_x as f32), -(origin_y as f32));
+        let runtime_pages = prepared_batch
+            .as_deref()
+            .map(|batch| batch.pages.as_slice())
+            .unwrap_or(runtime_text_pages.as_slice());
+        let source = crate::sdf::tile::MixedSdfAtlasSource::with_runtime_text(
+            &sdf_atlases,
+            self.shape_sdf_atlas.as_deref(),
+            runtime_pages,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let plan = crate::sdf::tile::SdfTilePlan::build_for_one_shot_dynamic_layer(
+            crate::sdf::tile::TileGrid {
+                canvas_width: width,
+                canvas_height: height,
+                tile_width,
+                tile_height,
+            },
+            &commands,
+            &source,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
+        match executor {
+            SdfLayerCandidateExecutor::ScalarF32 => plan
+                .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
+                .map_err(|error| error.to_string())?,
+            SdfLayerCandidateExecutor::SimdF32 => plan
+                .execute_simd(
+                    &source,
+                    [0, 0, 0, 0],
+                    &mut rgba,
+                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
+                )
+                .map_err(|error| error.to_string())?,
+        };
+
+        let (bx, by, bw, bh) =
+            opaque_bounds_for_pixels(&rgba, width as i32, height as i32, width as usize * 4)?;
+        if bw == 0 || bh == 0 {
+            self.recycle_profile_rgba_scratch(rgba);
+            return Ok(OrderedLayerRaster {
+                pixels: Vec::new(),
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                dynamic,
+                legacy_element_count: 0,
+                scratch_peak_bytes: surface_bytes,
+            });
+        }
+
+        let pixels = crop_pixels_lossless(&rgba, width as usize * 4, bx, by, bw, bh)?;
+        let scratch_peak_bytes = surface_bytes.saturating_add(pixels.len());
+        self.recycle_profile_rgba_scratch(rgba);
+        Ok(OrderedLayerRaster {
+            pixels,
+            x: origin_x + bx as i32,
+            y: origin_y + by as i32,
+            width: bw,
+            height: bh,
+            dynamic,
+            legacy_element_count: 0,
+            scratch_peak_bytes,
+        })
+    }
+}
+
+fn tight_animation_sdf_executor(
+    elements: &[crate::elements::RenderElement<'_>],
+    text_executor: Option<FullCardSdfCandidateExecutor>,
+    shape_executor: Option<FullCardSdfCandidateExecutor>,
+) -> Option<SdfLayerCandidateExecutor> {
+    let mut selected = None;
+    for element in elements.iter().filter(|element| element.visible()) {
+        let candidate = match element {
+            crate::elements::RenderElement::Text(_) => text_executor?,
+            crate::elements::RenderElement::Shape(_) => shape_executor?,
+            _ => return None,
+        };
+        if selected.is_some_and(|value| value != candidate) {
+            return None;
+        }
+        selected = Some(candidate);
+    }
+    selected.map(|value| match value {
+        FullCardSdfCandidateExecutor::ScalarF32 => SdfLayerCandidateExecutor::ScalarF32,
+        FullCardSdfCandidateExecutor::SimdF32 => SdfLayerCandidateExecutor::SimdF32,
+    })
+}
+
+fn tight_sdf_command_bounds(
+    commands: &[crate::sdf::tile::SdfDrawCommand],
+) -> Option<(i32, i32, u32, u32)> {
+    const GUARD: f32 = 2.0;
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for command in commands {
+        let mut command_min_x = command
+            .quad
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::INFINITY, f32::min);
+        let mut command_min_y = command
+            .quad
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::INFINITY, f32::min);
+        let mut command_max_x = command
+            .quad
+            .iter()
+            .map(|point| point.x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut command_max_y = command
+            .quad
+            .iter()
+            .map(|point| point.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+
+        if let Some(clip) = command.device_clip {
+            command_min_x = command_min_x.max(clip.min_x);
+            command_min_y = command_min_y.max(clip.min_y);
+            command_max_x = command_max_x.min(clip.max_x);
+            command_max_y = command_max_y.min(clip.max_y);
+        }
+
+        if command_min_x >= command_max_x || command_min_y >= command_max_y {
+            continue;
+        }
+
+        min_x = min_x.min(command_min_x);
+        min_y = min_y.min(command_min_y);
+        max_x = max_x.max(command_max_x);
+        max_y = max_y.max(command_max_y);
+    }
+
+    if ![min_x, min_y, max_x, max_y].into_iter().all(f32::is_finite) {
+        return None;
+    }
+
+    let origin_x = (min_x - GUARD).floor() as i32;
+    let origin_y = (min_y - GUARD).floor() as i32;
+    let right = (max_x + GUARD).ceil() as i32;
+    let bottom = (max_y + GUARD).ceil() as i32;
+    let width = u32::try_from(right.checked_sub(origin_x)?).ok()?;
+    let height = u32::try_from(bottom.checked_sub(origin_y)?).ok()?;
+    (width != 0 && height != 0).then_some((origin_x, origin_y, width, height))
+}
+
+fn animation_sdf_retained_surface_bytes(width: u32, height: u32) -> Result<(usize, usize), String> {
+    let surface_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "animation SDF layer surface byte length overflow".to_string())?;
+    Ok((surface_bytes, surface_bytes.saturating_mul(2)))
+}
+
+fn shift_sdf_commands(commands: &mut [crate::sdf::tile::SdfDrawCommand], dx: f32, dy: f32) {
+    for command in commands {
+        for point in &mut command.quad {
+            point.x += dx;
+            point.y += dy;
+        }
+        if let Some(clip) = &mut command.device_clip {
+            clip.min_x += dx;
+            clip.max_x += dx;
+            clip.min_y += dy;
+            clip.max_y += dy;
+        }
     }
 }
 
