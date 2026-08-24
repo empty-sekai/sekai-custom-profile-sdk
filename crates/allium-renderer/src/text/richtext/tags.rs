@@ -24,31 +24,48 @@ fn parse_hex_color(hex: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+fn tmp_hex_nibble(value: u8) -> u8 {
+    match value {
+        b'0'..=b'9' => value - b'0',
+        b'a'..=b'f' => value - b'a' + 10,
+        b'A'..=b'F' => value - b'A' + 10,
+        // TMP_TextUtilities.HexToInt returns 15 for an unrecognized nibble.
+        _ => 15,
+    }
+}
+
+fn tmp_hex_byte(high: u8, low: u8) -> u8 {
+    tmp_hex_nibble(high) * 16 + tmp_hex_nibble(low)
+}
+
 fn parse_hex_color_alpha(hex: &str) -> Option<(u8, u8, u8, Option<u8>)> {
-    match hex.len() {
+    // Indexed as bytes, matching how the tag length is measured: a multi-byte
+    // character inside the value would otherwise split mid-character.
+    let bytes = hex.as_bytes();
+    match bytes.len() {
         3 => Some((
-            u8::from_str_radix(&hex[0..1], 16).ok()? * 17,
-            u8::from_str_radix(&hex[1..2], 16).ok()? * 17,
-            u8::from_str_radix(&hex[2..3], 16).ok()? * 17,
+            tmp_hex_nibble(bytes[0]) * 17,
+            tmp_hex_nibble(bytes[1]) * 17,
+            tmp_hex_nibble(bytes[2]) * 17,
             None,
         )),
         4 => Some((
-            u8::from_str_radix(&hex[0..1], 16).ok()? * 17,
-            u8::from_str_radix(&hex[1..2], 16).ok()? * 17,
-            u8::from_str_radix(&hex[2..3], 16).ok()? * 17,
-            Some(u8::from_str_radix(&hex[3..4], 16).ok()? * 17),
+            tmp_hex_nibble(bytes[0]) * 17,
+            tmp_hex_nibble(bytes[1]) * 17,
+            tmp_hex_nibble(bytes[2]) * 17,
+            Some(tmp_hex_nibble(bytes[3]) * 17),
         )),
         6 => Some((
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            tmp_hex_byte(bytes[0], bytes[1]),
+            tmp_hex_byte(bytes[2], bytes[3]),
+            tmp_hex_byte(bytes[4], bytes[5]),
             None,
         )),
         8 => Some((
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-            Some(u8::from_str_radix(&hex[6..8], 16).ok()?),
+            tmp_hex_byte(bytes[0], bytes[1]),
+            tmp_hex_byte(bytes[2], bytes[3]),
+            tmp_hex_byte(bytes[4], bytes[5]),
+            Some(tmp_hex_byte(bytes[6], bytes[7])),
         )),
         _ => None,
     }

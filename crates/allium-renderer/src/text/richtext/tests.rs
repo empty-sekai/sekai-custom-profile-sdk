@@ -11,6 +11,24 @@ fn hash_color_without_alpha_resets_alpha_override() {
 }
 
 #[test]
+fn malformed_hash_color_uses_tmp_invalid_nibble_fallback() {
+    let segs = parse_rich_segments("<#FEF2EW>highlight");
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].color, Some((0xFE, 0xF2, 0xEF)));
+}
+
+#[test]
+fn hash_color_accepts_multi_byte_characters_without_splitting_them() {
+    // The tag value is measured in bytes, so a multi-byte character makes
+    // a value that is shorter than it looks. Indexing it as a string would
+    // cut the character in half.
+    for source in ["<#é1>a", "<#é12>b", "<#中文>c", "<color=#é1>d"] {
+        let segs = parse_rich_segments(source);
+        assert!(!segs.is_empty(), "{source:?} produced no segments");
+    }
+}
+
+#[test]
 fn smallcaps_tag_sets_flag_without_touching_plain_uppercase_mode() {
     let segs = parse_rich_segments("<smallcaps>abc</smallcaps>");
     assert_eq!(segs.len(), 1);

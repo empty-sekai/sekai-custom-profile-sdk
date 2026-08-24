@@ -4679,7 +4679,6 @@ mod tests {
     };
 
     /// 全部返回 None 的 MasterData provider，模拟"无素材"环境。
-    /// 此环境可能触发渲染 panic（Issue #5 根因）。
     #[cfg(feature = "skia-oracle")]
     struct NullProvider;
 
@@ -4751,7 +4750,7 @@ mod tests {
         }
     }
 
-    /// Issue #5 用户 7493593928021629747 的简单名片结构：
+    /// 最小名片结构：
     /// 4 个 invisible shapes + 4 个 visible stamps + 4 个 invisible texts = 12 层
     #[cfg(feature = "skia-oracle")]
     fn issue5_simple_card() -> CustomProfileCard {
