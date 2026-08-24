@@ -4272,32 +4272,28 @@ impl CustomProfileRenderer {
                 .map_err(|error| error.to_string())?,
         };
 
-        let (bx, by, bw, bh) =
-            opaque_bounds_for_pixels(&rgba, width as i32, height as i32, width as usize * 4)?;
-        if bw == 0 || bh == 0 {
-            self.recycle_profile_rgba_scratch(rgba);
-            return Ok(OrderedLayerRaster {
-                pixels: Vec::new(),
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-                dynamic,
-                legacy_element_count: 0,
-                scratch_peak_bytes: surface_bytes,
-            });
-        }
-
-        let pixels =
-            crop_pixels_lossless(&rgba, width as usize * 4, width, height, bx, by, bw, bh)?;
-        let scratch_peak_bytes = surface_bytes.saturating_add(pixels.len());
+        let pixels = crop_pixels_lossless(
+            &rgba,
+            width as usize * 4,
+            width,
+            height,
+            0,
+            0,
+            width,
+            height,
+        )?;
+        // The surface is already the intersection of the content bounds and
+        // the reachable canvas, so the full surface is the layer raster; the
+        // accounting matches the production backend (surface plus the full
+        // surface copy taken during the crop).
+        let scratch_peak_bytes = surface_bytes.saturating_mul(2);
         self.recycle_profile_rgba_scratch(rgba);
         Ok(OrderedLayerRaster {
             pixels,
-            x: origin_x + bx as i32,
-            y: origin_y + by as i32,
-            width: bw,
-            height: bh,
+            x: origin_x,
+            y: origin_y,
+            width,
+            height,
             dynamic,
             legacy_element_count: 0,
             scratch_peak_bytes,
