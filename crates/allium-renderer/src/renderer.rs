@@ -4121,7 +4121,16 @@ impl CustomProfileRenderer {
             }
         } else {
             OrderedLayerRaster {
-                pixels: crop_pixels_lossless(&rgba, row_bytes, bx, by, bw, bh)?,
+                pixels: crop_pixels_lossless(
+                    &rgba,
+                    row_bytes,
+                    surface_w as u32,
+                    surface_h as u32,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                )?,
                 x: bx as i32 - expansion.left,
                 y: by as i32 - expansion.top,
                 width: bw,
@@ -4279,7 +4288,8 @@ impl CustomProfileRenderer {
             });
         }
 
-        let pixels = crop_pixels_lossless(&rgba, width as usize * 4, bx, by, bw, bh)?;
+        let pixels =
+            crop_pixels_lossless(&rgba, width as usize * 4, width, height, bx, by, bw, bh)?;
         let scratch_peak_bytes = surface_bytes.saturating_add(pixels.len());
         self.recycle_profile_rgba_scratch(rgba);
         Ok(OrderedLayerRaster {
@@ -4406,15 +4416,40 @@ fn shift_sdf_commands(commands: &mut [crate::sdf::tile::SdfDrawCommand], dx: f32
 fn crop_pixels_lossless(
     pixels: &[u8],
     source_row_bytes: usize,
+    surface_width: u32,
+    surface_height: u32,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    let row_bytes = width as usize * 4;
+    let required_row_bytes = (surface_width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "layer surface row stride overflow".to_string())?;
+    if source_row_bytes < required_row_bytes {
+        return Err("layer surface row stride is shorter than one row".to_string());
+    }
+    let required_bytes = source_row_bytes
+        .checked_mul(surface_height as usize)
+        .ok_or_else(|| "layer surface byte length overflow".to_string())?;
+    if pixels.len() < required_bytes {
+        return Err("layer surface buffer is truncated".to_string());
+    }
+    let right = x
+        .checked_add(width)
+        .ok_or_else(|| "crop x overflow".to_string())?;
+    let bottom = y
+        .checked_add(height)
+        .ok_or_else(|| "crop y overflow".to_string())?;
+    if width == 0 || height == 0 || right > surface_width || bottom > surface_height {
+        return Err("crop rect is empty or outside the layer surface".to_string());
+    }
+    let row_bytes = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "crop row stride overflow".to_string())?;
     let start_of = |row: usize| (y as usize + row) * source_row_bytes + x as usize * 4;
     if pixels.len() < start_of(height as usize - 1) + row_bytes {
-        return Err("裁剪区域超出图层像素缓冲".to_string());
+        return Err("crop rect exceeds the layer pixel buffer".to_string());
     }
     let mut cropped = vec![0u8; row_bytes * height as usize];
     for row in 0..height as usize {
@@ -4503,7 +4538,7 @@ fn opaque_bounds_for_pixels(
     row_bytes: usize,
 ) -> Result<(u32, u32, u32, u32), String> {
     if pixels.len() < row_bytes * h as usize {
-        return Err("图层像素缓冲长度不足".to_string());
+        return Err("layer surface buffer is truncated".to_string());
     }
     Ok(find_opaque_bounds(pixels, w as u32, h as u32, row_bytes))
 }
@@ -4653,36 +4688,300 @@ mod expansion_tests {
     }
 
     #[test]
-    fn expansion_covers_both_travel_directions_and_axes() {
-        let expansion = dynamic_canvas_expansion(&line_indent(&[
-            (0.0, 0.0),
-            (300.0, -700.0),
-            (-500.0, 250.0),
-        ]));
-        assert!(expansion.left >= 300, "left {}", expansion.left);
-        assert!(expansion.right >= 500, "right {}", expansion.right);
-        assert!(expansion.top >= 250, "top {}", expansion.top);
-        assert!(expansion.bottom >= 700, "bottom {}", expansion.bottom);
+    fn dynamic_canvas_expansion_covers_the_complete_motion_range() {
+        let expansion = dynamic_canvas_expansion(&LayerDynamic::TmpLineIndent {
+            fps: 60,
+            looped: false,
+            frames: vec![
+                LayerDynamicFrame {
+                    frame: 0,
+                    dx: -6400.25,
+                    dy: 120.5,
+                },
+                LayerDynamicFrame {
+                    frame: 1,
+                    dx: 310.1,
+                    dy: -90.75,
+                },
+            ],
+        });
+        assert_eq!(expansion.left, 319);
+        assert_eq!(expansion.right, 6409);
+        assert_eq!(expansion.top, 129);
+        assert_eq!(expansion.bottom, 99);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "skia-oracle")]
     use super::*;
-    #[cfg(feature = "skia-oracle")]
     use crate::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
+    use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
     #[cfg(feature = "skia-oracle")]
     use crate::types::{
-        BondsHonorEntry, BondsHonorWordEntry, CardEntry, CustomProfileCard, HonorEntry, ObjectData,
-        Quaternion, StampElement, TextElement, Vec3,
+        CustomProfileCard, ObjectData, Quaternion, StampElement, TextElement, Vec3,
     };
 
-    /// 全部返回 None 的 MasterData provider，模拟"无素材"环境。
-    #[cfg(feature = "skia-oracle")]
+    fn magnification_command(
+        atlas_width: u32,
+        atlas_height: u32,
+        quad: [crate::sdf::tile::Point2; 4],
+    ) -> crate::sdf::tile::SdfDrawCommand {
+        crate::sdf::tile::SdfDrawCommand {
+            kind: crate::sdf::tile::SdfPrimitiveKind::Text,
+            atlas_set: 0,
+            atlas_page: 0,
+            atlas_rect: [0, 0, atlas_width, atlas_height],
+            quad,
+            device_clip: None,
+            material: crate::sdf::tile::SdfCommandMaterial::Text(
+                crate::sdf::tile::SdfMaterial::default(),
+            ),
+        }
+    }
+
+    #[test]
+    fn realtime_edt_threshold_uses_final_command_geometry() {
+        use crate::sdf::tile::Point2;
+
+        let exactly_three = magnification_command(
+            10,
+            20,
+            [
+                Point2::new(0.0, 0.0),
+                Point2::new(30.0, 0.0),
+                Point2::new(30.0, 60.0),
+                Point2::new(0.0, 60.0),
+            ],
+        );
+        let above_three = magnification_command(
+            10,
+            20,
+            [
+                Point2::new(0.0, 0.0),
+                Point2::new(30.1, 0.0),
+                Point2::new(30.1, 60.0),
+                Point2::new(0.0, 60.0),
+            ],
+        );
+        assert_eq!(sdf_command_device_magnification(&exactly_three), Some(3.0));
+        assert!(!(sdf_command_device_magnification(&exactly_three).unwrap() > 3.0));
+        assert!(sdf_command_device_magnification(&above_three).unwrap() > 3.0);
+    }
+
+    #[test]
+    fn final_command_magnification_handles_rotation_and_non_uniform_scale() {
+        use crate::sdf::tile::Point2;
+
+        let command = magnification_command(
+            10,
+            20,
+            [
+                Point2::new(5.0, 7.0),
+                Point2::new(5.0, 37.0),
+                Point2::new(-75.0, 37.0),
+                Point2::new(-75.0, 7.0),
+            ],
+        );
+        assert_eq!(sdf_command_device_magnification(&command), Some(4.0));
+    }
+
+    #[test]
+    fn realtime_edt_spread_preserves_the_atlas_logical_distance_range() {
+        assert_eq!(realtime_edt_sampling_spread(75.0, 6.0, 75.0), Some(6.0));
+        assert_eq!(realtime_edt_sampling_spread(75.0, 6.0, 300.0), Some(24.0));
+        assert_eq!(
+            realtime_edt_sampling_spread(75.0, 6.0, 4096.0),
+            Some(327.68)
+        );
+        assert_eq!(realtime_edt_sampling_spread(0.0, 6.0, 300.0), None);
+        assert_eq!(realtime_edt_sampling_spread(75.0, 0.0, 300.0), None);
+    }
+
+    #[test]
+    fn non_positive_resolved_text_size_is_an_invisible_sdf_operation() {
+        fn glyph(font_size: f32) -> crate::text::ResolvedTextSdfGlyph {
+            crate::text::ResolvedTextSdfGlyph {
+                text: "(".into(),
+                font_family: Some("test-family".into()),
+                baseline_origin: crate::sdf::tile::Point2::new(0.0, 0.0),
+                font_size,
+                local_to_device: crate::sdf::tile::Affine2::IDENTITY,
+                material: crate::sdf::tile::SdfMaterial::default(),
+            }
+        }
+
+        assert!(captured_text_sdf_glyph_is_invisible(&glyph(0.0)));
+        assert!(captured_text_sdf_glyph_is_invisible(&glyph(-147.636_35)));
+        assert!(!captured_text_sdf_glyph_is_invisible(&glyph(0.001)));
+        assert!(!captured_text_sdf_glyph_is_invisible(&glyph(f32::NAN)));
+    }
+
+    #[test]
+    fn realtime_edt_request_identity_deduplicates_only_exact_sampling_requests() {
+        use std::collections::BTreeSet;
+
+        let duplicate_a = realtime_edt_request_key("test-family", '(', 300.0, 24.0);
+        let duplicate_b = realtime_edt_request_key("test-family", '(', 300.0, 24.0);
+        let different_size = realtime_edt_request_key("test-family", '(', 300.001, 24.0);
+        let different_spread = realtime_edt_request_key("test-family", '(', 300.0, 24.001);
+        let different_font = realtime_edt_request_key("other-test-family", '(', 300.0, 24.0);
+
+        let unique = [
+            duplicate_a,
+            duplicate_b,
+            different_size,
+            different_spread,
+            different_font,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), 4);
+    }
+
+    #[test]
+    fn substituted_text_tier_preserves_primary_sample_grid() {
+        use crate::sdf::atlas::SdfAtlasGlyphManifest;
+        use crate::sdf::tile::{Point2, SdfCommandMaterial, SdfDrawCommand, SdfMaterial};
+
+        let primary_glyph = SdfAtlasGlyphManifest {
+            codepoint: 0x25a0,
+            page: 0,
+            rect: [0, 0, 73, 73],
+            plane_bearing: [7.5, 55.203_125],
+            plane_size: [60.0, 60.0],
+            plane_advance_x: 75.0,
+        };
+        let target_glyph = SdfAtlasGlyphManifest {
+            codepoint: 0x25a0,
+            page: 1,
+            rect: [0, 0, 217, 217],
+            plane_bearing: [22.5, 165.593_75],
+            plane_size: [180.0, 180.0],
+            plane_advance_x: 225.0,
+        };
+        let command = |atlas_set, atlas_page, atlas_rect| SdfDrawCommand {
+            kind: crate::sdf::tile::SdfPrimitiveKind::Text,
+            atlas_set,
+            atlas_page,
+            atlas_rect,
+            quad: [
+                Point2::new(0.0, 0.0),
+                Point2::new(144_000.0, 0.0),
+                Point2::new(144_000.0, 2_400.0),
+                Point2::new(0.0, 2_400.0),
+            ],
+            device_clip: None,
+            material: SdfCommandMaterial::Text(SdfMaterial::default()),
+        };
+        let primary_command = command(0, 0, primary_glyph.rect);
+        let target_command = command(1, 1, target_glyph.rect);
+        let primary_grid = TextSdfSamplingGrid::new(primary_command, &primary_glyph, 75.0, 6.0)
+            .expect("valid primary grid");
+        let aligned = align_substituted_text_sdf_command(
+            primary_grid,
+            target_command,
+            &target_glyph,
+            225.0,
+            18.0,
+        )
+        .expect("valid substituted grid");
+
+        let close = |actual: f32, expected: f32| {
+            assert!((actual - expected).abs() < 0.01, "{actual} != {expected}");
+        };
+        close(aligned.quad[0].x, 144_000.0 / 219.0);
+        close(aligned.quad[1].x, 144_000.0 * 218.0 / 219.0);
+        close(aligned.quad[0].y, 2_400.0 * 2.0 / 219.0);
+        close(aligned.quad[3].y, 2_400.0);
+        assert_eq!(aligned.atlas_set, 1);
+        assert_eq!(aligned.atlas_page, 1);
+        assert_eq!(aligned.atlas_rect, target_glyph.rect);
+    }
+
+    #[test]
+    fn lossless_crop_rejects_short_row_stride() {
+        let result = crop_pixels_lossless(&[0; 16], 12, 4, 1, 0, 0, 1, 1);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn lossless_crop_rejects_out_of_bounds_rect() {
+        let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 4, 0, 1, 1);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn lossless_crop_rejects_zero_sized_rect() {
+        let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 0, 0, 0, 1);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn direct_opaque_bounds_match_scalar_and_vector_paths() {
+        let surface_width = 4u32;
+        let surface_height = 3u32;
+        let row_bytes = 20usize;
+        let mut source = vec![0u8; row_bytes * surface_height as usize];
+        let samples = [
+            (1u32, 1u32, [10u8, 20, 30, 40]),
+            (2, 1, [50, 60, 70, 80]),
+            (1, 2, [90, 100, 110, 120]),
+            (2, 2, [130, 140, 150, 160]),
+        ];
+        for (x, y, rgba) in samples {
+            let offset = y as usize * row_bytes + x as usize * 4;
+            source[offset..offset + 4].copy_from_slice(&rgba);
+        }
+        assert_eq!(
+            find_opaque_bounds(&source, surface_width, surface_height, row_bytes),
+            (1, 1, 2, 2)
+        );
+        assert_eq!(
+            find_opaque_bounds_scalar(&source, surface_width, surface_height, row_bytes),
+            (1, 1, 2, 2)
+        );
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("bmi2")
+        {
+            assert_eq!(
+                unsafe {
+                    find_opaque_bounds_avx512(&source, surface_width, surface_height, row_bytes)
+                },
+                (1, 1, 2, 2)
+            );
+        }
+    }
+
+    #[test]
+    fn backend_cache_identity_is_stable_and_config_sensitive() {
+        use std::sync::Arc;
+
+        let renderer = CustomProfileRenderer::new(Arc::new(NullProvider));
+        let default = crate::profile_backend::ProfileBackendConfig::default();
+        let first = renderer
+            .profile_backend_cache_identity(&default)
+            .expect("default backend identity");
+        let repeated = renderer
+            .profile_backend_cache_identity(&default)
+            .expect("repeated backend identity");
+        let changed = renderer
+            .profile_backend_cache_identity(&crate::profile_backend::ProfileBackendConfig {
+                tile_width: 64,
+                ..default
+            })
+            .expect("changed backend identity");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, changed);
+        assert!(first.starts_with("profile-backend-"));
+    }
+
+    /// A provider with no optional master-data entries keeps renderer setup independent of assets.
     struct NullProvider;
 
-    #[cfg(feature = "skia-oracle")]
     impl MasterDataProvider for NullProvider {
         fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
             None
