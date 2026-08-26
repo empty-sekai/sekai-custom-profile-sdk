@@ -3992,6 +3992,22 @@ pub struct DeferredAnimationSdfLayer {
     pub dynamic: Option<LayerDynamic>,
 }
 
+/// One rasterized window of a deferred SDF animation layer: the pixels of a
+/// source-space sub-rectangle, regenerated from the retained commands.
+pub(crate) struct RenderedDeferredAnimationWindow {
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    pub(crate) pixels: Vec<u8>,
+    /// Window origin in canvas coordinates.
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// Peak transient bytes: the window surface plus the cropped copy.
+    pub(crate) scratch_peak_bytes: usize,
+    /// Execution telemetry for the window's SDF run.
+    pub(crate) execution: FullCardSdfExecutionOutput,
+}
+
 pub struct OrderedLayerRaster {
     /// Tight premultiplied RGBA8, `width * 4` bytes per row.
     pub pixels: Vec<u8>,
@@ -4360,6 +4376,126 @@ impl CustomProfileRenderer {
             legacy_element_count: 0,
             scratch_peak_bytes,
         }))
+    }
+
+    /// Rasterizes one source-space window of a deferred SDF animation layer
+    /// from its retained commands, returning the window's pixels.
+    ///
+    /// `x`/`y`/`width`/`height` select a sub-rectangle of the layer's bounds in
+    /// canvas coordinates. The commands are cloned and translated into that
+    /// window's origin before the plan is built, so the window is self-contained
+    /// and any frame can rasterize any window of the same layer.
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn render_deferred_animation_sdf_window(
+        &self,
+        layer: &DeferredAnimationSdfLayer,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<RenderedDeferredAnimationWindow, String> {
+        if width == 0 || height == 0 {
+            return Err("deferred animation SDF window must be non-empty".into());
+        }
+        let right = x
+            .checked_add(i32::try_from(width).map_err(|_| "deferred window width overflow")?)
+            .ok_or("deferred window right overflow")?;
+        let bottom = y
+            .checked_add(i32::try_from(height).map_err(|_| "deferred window height overflow")?)
+            .ok_or("deferred window bottom overflow")?;
+        let layer_right = layer
+            .x
+            .checked_add(i32::try_from(layer.width).map_err(|_| "deferred layer width overflow")?)
+            .ok_or("deferred layer right overflow")?;
+        let layer_bottom = layer
+            .y
+            .checked_add(i32::try_from(layer.height).map_err(|_| "deferred layer height overflow")?)
+            .ok_or("deferred layer bottom overflow")?;
+        if x < layer.x || y < layer.y || right > layer_right || bottom > layer_bottom {
+            return Err("deferred animation SDF window is outside the source layer".into());
+        }
+
+        let mut commands = layer.commands.clone();
+        shift_sdf_commands(&mut commands, -(x as f32), -(y as f32));
+        let source = crate::sdf::tile::MixedSdfAtlasSource::with_runtime_text(
+            &layer.text_atlases,
+            layer.shape_atlas.as_deref(),
+            &layer.runtime_text,
+        )
+        .map_err(|error| error.to_string())?;
+        let plan = crate::sdf::tile::SdfTilePlan::build_for_one_shot_dynamic_layer(
+            crate::sdf::tile::TileGrid {
+                canvas_width: width,
+                canvas_height: height,
+                tile_width: layer.tile_width,
+                tile_height: layer.tile_height,
+            },
+            &commands,
+            &source,
+        )
+        .map_err(|error| error.to_string())?;
+        let surface_bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| "deferred animation SDF surface byte length overflow".to_string())?;
+        let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
+        let execution_stats = match layer.executor {
+            SdfLayerCandidateExecutor::ScalarF32 => plan
+                .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
+                .map_err(|error| error.to_string())?,
+            SdfLayerCandidateExecutor::SimdF32 => plan
+                .execute_simd(
+                    &source,
+                    [0, 0, 0, 0],
+                    &mut rgba,
+                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
+                )
+                .map_err(|error| error.to_string())?,
+        };
+        let pixels = crop_pixels_lossless(
+            &rgba,
+            width as usize * 4,
+            width,
+            height,
+            0,
+            0,
+            width,
+            height,
+        )?;
+        self.recycle_profile_rgba_scratch(rgba);
+        let stats = plan.stats();
+        let mut execution = FullCardSdfExecutionOutput {
+            width,
+            height,
+            clear_rgba: [0, 0, 0, 0],
+            ..FullCardSdfExecutionOutput::default()
+        };
+        execution.sdf_run_count = 1;
+        execution.sdf_text_element_count = stats.text_command_count;
+        execution.sdf_shape_element_count = stats.shape_command_count;
+        execution.captured_text_count = stats.text_command_count;
+        execution.captured_shape_count = stats.shape_command_count;
+        execution.plan_stats = stats;
+        execution.execution_stats = execution_stats;
+        execution.atlas_mapped_bytes =
+            layer
+                .text_atlases
+                .mapped_bytes()
+                .saturating_add(layer.shape_atlas.as_deref().map_or(
+                    0,
+                    crate::sdf::shape_atlas::MappedShapeSdfAtlas::mapped_bytes,
+                ));
+        execution.plan_bytes = plan.resident_bytes();
+        execution.span_bytes = plan.span_bytes();
+        Ok(RenderedDeferredAnimationWindow {
+            pixels,
+            x,
+            y,
+            width,
+            height,
+            scratch_peak_bytes: surface_bytes.saturating_mul(2),
+            execution,
+        })
     }
 }
 
@@ -5035,6 +5171,127 @@ mod tests {
         assert_eq!(first, repeated);
         assert_ne!(first, changed);
         assert!(first.starts_with("profile-backend-"));
+    }
+
+    #[cfg(feature = "animation-export")]
+    #[test]
+    fn oversized_animation_sdf_surface_is_detected_before_plan_or_surface_build() {
+        let (surface_bytes, retained_peak_bytes) =
+            animation_sdf_retained_surface_bytes(46_290, 29_984).unwrap();
+        assert_eq!(surface_bytes, 5_551_837_440);
+        assert_eq!(retained_peak_bytes, 11_103_674_880);
+        assert!(retained_peak_bytes > 64 * 1024 * 1024);
+
+        let (_, ordinary_peak_bytes) = animation_sdf_retained_surface_bytes(1_830, 812).unwrap();
+        assert!(ordinary_peak_bytes < 64 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "animation-export")]
+    #[test]
+    fn deferred_animation_window_keeps_complete_source_across_viewport_changes() {
+        use sha2::Digest as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let page_path = root.path().join("page-000.r8swz");
+        let mut page = vec![0u8; crate::sdf::atlas::SWIZZLED_PAGE_HEADER_BYTES + 8 * 8];
+        page[..crate::sdf::atlas::SWIZZLED_PAGE_MAGIC.len()]
+            .copy_from_slice(crate::sdf::atlas::SWIZZLED_PAGE_MAGIC);
+        page[12..16].copy_from_slice(&crate::sdf::atlas::SWIZZLED_PAGE_VERSION.to_le_bytes());
+        page[16..20].copy_from_slice(&8u32.to_le_bytes());
+        page[20..24].copy_from_slice(&8u32.to_le_bytes());
+        page[24..28].copy_from_slice(&8u32.to_le_bytes());
+        page[28..32].copy_from_slice(&8u32.to_le_bytes());
+        page[crate::sdf::atlas::SWIZZLED_PAGE_HEADER_BYTES..].fill(128);
+        std::fs::write(&page_path, &page).unwrap();
+        let manifest = crate::sdf::atlas::SdfAtlasManifest {
+            schema: crate::sdf::atlas::ATLAS_MANIFEST_SCHEMA.into(),
+            generator_contract: "deferred-window-test".into(),
+            font_family: "deferred-window-test".into(),
+            font_sha256: "00".repeat(32),
+            point_size: 8.0,
+            spread: 1.0,
+            pages: vec![crate::sdf::atlas::SdfAtlasPageManifest {
+                file: "page-000.r8swz".into(),
+                width: 8,
+                height: 8,
+                file_sha256: hex::encode(sha2::Sha256::digest(&page)),
+            }],
+            glyphs: Vec::new(),
+            generation: crate::sdf::atlas::SdfAtlasGenerationReport {
+                cmap_codepoint_count: 0,
+                requested_codepoint_count: 0,
+                generated_glyph_count: 0,
+                failed_glyph_count: 0,
+                analytic_fallback_count: 0,
+                page_width: 8,
+                page_height: 8,
+                gutter: 0,
+                failures: Vec::new(),
+                analytic_fallback_codepoints: Vec::new(),
+            },
+        };
+        let manifest_path = root.path().join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let atlas =
+            std::sync::Arc::new(crate::sdf::atlas::MappedSdfAtlas::open(manifest_path).unwrap());
+        let mut atlases = crate::sdf::atlas::MappedSdfAtlasSet::new();
+        let atlas_set = atlases.insert(atlas).unwrap();
+        let command = crate::sdf::tile::SdfDrawCommand {
+            kind: crate::sdf::tile::SdfPrimitiveKind::Text,
+            atlas_set,
+            atlas_page: 0,
+            atlas_rect: [0, 0, 8, 8],
+            quad: [
+                crate::sdf::tile::Point2 { x: 0.0, y: 0.0 },
+                crate::sdf::tile::Point2 {
+                    x: 10_000.0,
+                    y: 0.0,
+                },
+                crate::sdf::tile::Point2 {
+                    x: 10_000.0,
+                    y: 10_000.0,
+                },
+                crate::sdf::tile::Point2 {
+                    x: 0.0,
+                    y: 10_000.0,
+                },
+            ],
+            device_clip: None,
+            material: crate::sdf::tile::SdfCommandMaterial::Text(
+                crate::sdf::tile::SdfMaterial::default(),
+            ),
+        };
+        let deferred = DeferredAnimationSdfLayer {
+            commands: vec![command],
+            text_atlases: std::sync::Arc::new(atlases),
+            shape_atlas: None,
+            runtime_text: Vec::new(),
+            executor: SdfLayerCandidateExecutor::ScalarF32,
+            tile_width: 32,
+            tile_height: 32,
+            x: 0,
+            y: 0,
+            width: 10_000,
+            height: 10_000,
+            dynamic: None,
+        };
+        let renderer = CustomProfileRenderer::new(std::sync::Arc::new(NullProvider));
+        let first = renderer
+            .render_deferred_animation_sdf_window(&deferred, 0, 0, 64, 64)
+            .unwrap();
+        let shifted = renderer
+            .render_deferred_animation_sdf_window(&deferred, 9_000, 9_000, 64, 64)
+            .unwrap();
+        let restored = renderer
+            .render_deferred_animation_sdf_window(&deferred, 0, 0, 64, 64)
+            .unwrap();
+
+        let first_rgba = first.pixels.clone();
+        assert!(first_rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert_eq!(shifted.pixels, first_rgba);
+        assert_eq!(restored.pixels, first_rgba);
+        assert_eq!(first.scratch_peak_bytes, 64 * 64 * 8);
+        assert!(first.execution.plan_stats.tile_count <= 4);
     }
 
     /// A provider with no optional master-data entries keeps renderer setup independent of assets.

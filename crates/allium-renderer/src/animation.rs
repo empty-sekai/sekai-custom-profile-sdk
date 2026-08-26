@@ -600,6 +600,248 @@ impl PixelRect {
     }
 }
 
+/// Source-space cache for deferred SDF layers. The cache stores only pixels
+/// that were actually requested by a dirty window; it never changes the
+/// layer's source bounds or visibility semantics.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DeferredSdfTileKey {
+    layer_index: usize,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+struct DeferredSdfTileCacheEntry {
+    pixels: Vec<u8>,
+    bytes: usize,
+}
+
+struct DeferredSdfTileCache {
+    budget_bytes: usize,
+    resident_bytes: usize,
+    peak_bytes: usize,
+    entries: std::collections::HashMap<DeferredSdfTileKey, DeferredSdfTileCacheEntry>,
+    order: std::collections::VecDeque<DeferredSdfTileKey>,
+}
+
+impl DeferredSdfTileCache {
+    const TILE_EDGE: i32 = 128;
+
+    fn new(budget_bytes: usize) -> Self {
+        Self {
+            budget_bytes,
+            resident_bytes: 0,
+            peak_bytes: 0,
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.budget_bytes != 0
+    }
+
+    fn get(&mut self, key: DeferredSdfTileKey) -> Option<Vec<u8>> {
+        let pixels = self.entries.get(&key)?.pixels.clone();
+        if let Some(index) = self.order.iter().position(|value| *value == key) {
+            self.order.remove(index);
+        }
+        self.order.push_back(key);
+        Some(pixels)
+    }
+
+    fn insert(&mut self, key: DeferredSdfTileKey, pixels: Vec<u8>) {
+        if !self.enabled() {
+            return;
+        }
+        let bytes = pixels.len();
+        if bytes == 0 || bytes > self.budget_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.bytes);
+            if let Some(index) = self.order.iter().position(|value| *value == key) {
+                self.order.remove(index);
+            }
+        }
+        while self.resident_bytes.saturating_add(bytes) > self.budget_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(entry.bytes);
+            }
+        }
+        if self.resident_bytes.saturating_add(bytes) > self.budget_bytes {
+            return;
+        }
+        self.resident_bytes = self.resident_bytes.saturating_add(bytes);
+        self.peak_bytes = self.peak_bytes.max(self.resident_bytes);
+        self.order.push_back(key);
+        self.entries
+            .insert(key, DeferredSdfTileCacheEntry { pixels, bytes });
+    }
+}
+
+/// Computes the source-space window of a deferred layer a dirty device rect
+/// needs, in layer coordinates, clamped to the layer's bounds. Returns `None`
+/// when the dirty rect cannot reach the layer.
+fn deferred_source_window(
+    layer: &RasterLayer,
+    state: &LayerFrameState,
+    dirty: PixelRect,
+    scale: f32,
+) -> Option<PixelRect> {
+    if scale <= 0.0 || !scale.is_finite() || dirty.is_empty() {
+        return None;
+    }
+    const GUARD: i32 = 2;
+    let dx = state.destination.left() / scale - layer.x;
+    let dy = state.destination.top() / scale - layer.y;
+    let layer_left = layer.x.floor() as i32;
+    let layer_top = layer.y.floor() as i32;
+    let layer_right = layer_left.checked_add(i32::try_from(layer.width).ok()?)?;
+    let layer_bottom = layer_top.checked_add(i32::try_from(layer.height).ok()?)?;
+    let left = ((dirty.left as f32 / scale - dx).floor() as i32 - GUARD).max(layer_left);
+    let top = ((dirty.top as f32 / scale - dy).floor() as i32 - GUARD).max(layer_top);
+    let right = ((dirty.right as f32 / scale - dx).ceil() as i32 + GUARD).min(layer_right);
+    let bottom = ((dirty.bottom as f32 / scale - dy).ceil() as i32 + GUARD).min(layer_bottom);
+    let window = PixelRect {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    (!window.is_empty()).then_some(window)
+}
+
+fn record_deferred_window_execution(
+    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    rendered: &crate::renderer::RenderedDeferredAnimationWindow,
+) {
+    if let Some(telemetry) = profile_backend.as_mut() {
+        telemetry.bytes.scratch_peak_bytes = telemetry
+            .bytes
+            .scratch_peak_bytes
+            .max(rendered.scratch_peak_bytes as u64);
+    }
+}
+
+/// Rasterizes one window of a deferred layer, serving tiles from the LRU cache
+/// when it is enabled and assembling them into a contiguous window buffer by
+/// exact sub-rectangle copy. When the cache is disabled the window is rendered
+/// whole.
+#[allow(clippy::too_many_arguments)]
+fn render_deferred_animation_window_cached(
+    renderer: &crate::renderer::CustomProfileRenderer,
+    layer: &crate::renderer::DeferredAnimationSdfLayer,
+    window: PixelRect,
+    layer_index: usize,
+    cache: &mut DeferredSdfTileCache,
+    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+) -> Result<crate::renderer::RenderedDeferredAnimationWindow, String> {
+    let width = u32::try_from(window.right - window.left)
+        .map_err(|_| "deferred animation window width overflow")?;
+    let height = u32::try_from(window.bottom - window.top)
+        .map_err(|_| "deferred animation window height overflow")?;
+    if !cache.enabled() {
+        let rendered = renderer.render_deferred_animation_sdf_window(
+            layer,
+            window.left,
+            window.top,
+            width,
+            height,
+        )?;
+        record_deferred_window_execution(profile_backend, &rendered);
+        return Ok(rendered);
+    }
+
+    let mut staging = vec![0u8; width as usize * height as usize * 4];
+    let layer_left = layer.x;
+    let layer_top = layer.y;
+    let layer_right = layer
+        .x
+        .checked_add(i32::try_from(layer.width).map_err(|_| "deferred layer width overflow")?)
+        .ok_or("deferred layer right overflow")?;
+    let layer_bottom = layer
+        .y
+        .checked_add(i32::try_from(layer.height).map_err(|_| "deferred layer height overflow")?)
+        .ok_or("deferred layer bottom overflow")?;
+    let edge = DeferredSdfTileCache::TILE_EDGE;
+    let mut tile_top = layer_top + (window.top - layer_top).div_euclid(edge) * edge;
+    let mut scratch_peak_bytes = width as usize * height as usize * 8;
+    while tile_top < window.bottom {
+        let tile_bottom = tile_top.saturating_add(edge).min(layer_bottom);
+        let mut tile_left = layer_left + (window.left - layer_left).div_euclid(edge) * edge;
+        while tile_left < window.right {
+            let tile_right = tile_left.saturating_add(edge).min(layer_right);
+            let key = DeferredSdfTileKey {
+                layer_index,
+                x: tile_left,
+                y: tile_top,
+                width: u32::try_from(tile_right - tile_left)
+                    .map_err(|_| "deferred cache tile width overflow")?,
+                height: u32::try_from(tile_bottom - tile_top)
+                    .map_err(|_| "deferred cache tile height overflow")?,
+            };
+            let cached = cache.get(key);
+            if let Some(telemetry) = profile_backend.as_mut() {
+                if cached.is_some() {
+                    telemetry.caches.layer.hits = telemetry.caches.layer.hits.saturating_add(1);
+                } else {
+                    telemetry.caches.layer.misses = telemetry.caches.layer.misses.saturating_add(1);
+                }
+            }
+            let pixels = if let Some(pixels) = cached {
+                pixels
+            } else {
+                let rendered = renderer.render_deferred_animation_sdf_window(
+                    layer, key.x, key.y, key.width, key.height,
+                )?;
+                scratch_peak_bytes = scratch_peak_bytes.max(rendered.scratch_peak_bytes);
+                record_deferred_window_execution(profile_backend, &rendered);
+                let pixels = rendered.pixels.clone();
+                cache.insert(key, pixels.clone());
+                pixels
+            };
+            let visible_left = tile_left.max(window.left);
+            let visible_top = tile_top.max(window.top);
+            let visible_right = tile_right.min(window.right);
+            let visible_bottom = tile_bottom.min(window.bottom);
+            let tile_width = (tile_right - tile_left) as usize;
+            let window_row_bytes = width as usize * 4;
+            let visible_width = (visible_right - visible_left) as usize;
+            let copy_bytes = visible_width * 4;
+            for y in visible_top..visible_bottom {
+                let source = (y - tile_top) as usize * tile_width * 4
+                    + (visible_left - tile_left) as usize * 4;
+                let destination = (y - window.top) as usize * window_row_bytes
+                    + (visible_left - window.left) as usize * 4;
+                staging[destination..destination + copy_bytes]
+                    .copy_from_slice(&pixels[source..source + copy_bytes]);
+            }
+            tile_left = tile_left.saturating_add(edge);
+        }
+        tile_top = tile_top.saturating_add(edge);
+    }
+
+    Ok(crate::renderer::RenderedDeferredAnimationWindow {
+        pixels: staging,
+        x: window.left,
+        y: window.top,
+        width,
+        height,
+        scratch_peak_bytes,
+        execution: crate::renderer::FullCardSdfExecutionOutput {
+            width,
+            height,
+            clear_rgba: [0, 0, 0, 0],
+            ..crate::renderer::FullCardSdfExecutionOutput::default()
+        },
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LayerFrameState {
     visible: bool,
@@ -617,6 +859,7 @@ struct FrameCompositeTelemetry {
     composite_ns: u64,
     readback_ns: u64,
     readback_bytes: u64,
+    deferred_cache_peak_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -626,7 +869,8 @@ enum FrameCompositeUpdate {
     Reused,
 }
 
-struct AnimationFrameCompositor {
+struct AnimationFrameCompositor<'a> {
+    renderer: Option<&'a crate::renderer::CustomProfileRenderer>,
     /// Premultiplied RGBA8 canvas the frames composite into.
     canvas: Vec<u8>,
     width: u32,
@@ -638,6 +882,8 @@ struct AnimationFrameCompositor {
     readback_scratch: Vec<u8>,
     changed_macroblock_flags: Vec<u8>,
     telemetry: FrameCompositeTelemetry,
+    profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+    deferred_cache: DeferredSdfTileCache,
 }
 
 #[derive(Default)]
@@ -816,6 +1062,20 @@ pub(crate) fn export_profile_animation(
     if !static_span.is_empty() {
         groups.push((None, static_span));
     }
+    let source_width = crate::transform::CANVAS_WIDTH as u32;
+    let source_height = crate::transform::CANVAS_HEIGHT as u32;
+    let scale = (preset.maximum_long_edge as f32 / source_width.max(source_height) as f32).min(1.0);
+    let content_width = (source_width as f32 * scale).round() as u32;
+    let content_height = (source_height as f32 * scale).round() as u32;
+    let (width, height) = if preset.preset == AnimationPreset::QqV2 {
+        (align_to_8(content_width), align_to_8(content_height))
+    } else {
+        (content_width, content_height)
+    };
+    let frame_bytes = width as usize * height as usize * 4;
+    let retained_layer_budget = preset
+        .export_memory_budget_bytes
+        .saturating_sub(frame_bytes.saturating_mul(2));
     let (layers, layer_raster_bytes, layer_scratch_peak_bytes, profile_backend) =
         rasterize_animation_groups(
             renderer,
@@ -828,19 +1088,9 @@ pub(crate) fn export_profile_animation(
             &groups,
             backend,
             render_object_store,
+            retained_layer_budget,
         )?;
 
-    let source_width = crate::transform::CANVAS_WIDTH as u32;
-    let source_height = crate::transform::CANVAS_HEIGHT as u32;
-    let scale = (preset.maximum_long_edge as f32 / source_width.max(source_height) as f32).min(1.0);
-    let content_width = (source_width as f32 * scale).round() as u32;
-    let content_height = (source_height as f32 * scale).round() as u32;
-    let (width, height) = if preset.preset == AnimationPreset::QqV2 {
-        (align_to_8(content_width), align_to_8(content_height))
-    } else {
-        (content_width, content_height)
-    };
-    let frame_bytes = width as usize * height as usize * 4;
     let base_peak_export_bytes = animation_peak_export_bytes(layer_raster_bytes, frame_bytes);
     if base_peak_export_bytes > preset.export_memory_budget_bytes {
         return Err(format!(
@@ -865,7 +1115,22 @@ pub(crate) fn export_profile_animation(
     };
     scene.advance_to_tick(0);
     let mut render_scene = scene;
-    let mut compositor = AnimationFrameCompositor::new(width, height, scale)?;
+    let deferred_cache_budget = if preset.format == AnimationFormat::Mp4 {
+        preset
+            .export_memory_budget_bytes
+            .saturating_sub(base_peak_export_bytes)
+            .saturating_sub(frame_bytes)
+    } else {
+        0
+    };
+    let mut compositor = AnimationFrameCompositor::new_for_export(
+        renderer,
+        width,
+        height,
+        scale,
+        profile_backend,
+        deferred_cache_budget,
+    )?;
     let encode_started = std::time::Instant::now();
     let (encoded, encode_telemetry) = if preset.format == AnimationFormat::Mp4 {
         validate_spec(&encode_spec)?;
@@ -900,6 +1165,13 @@ pub(crate) fn export_profile_animation(
     };
     let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
     let frame_telemetry = compositor.telemetry;
+    if let Some(telemetry) = compositor.profile_backend.as_mut() {
+        telemetry.bytes.layer_cache_bytes = telemetry
+            .bytes
+            .layer_cache_bytes
+            .saturating_add(compositor.deferred_cache.peak_bytes as u64);
+    }
+    let profile_backend = compositor.profile_backend.take();
     let core_telemetry = render_scene.dump().telemetry;
     Ok(ProfileAnimationExport {
         animated: true,
@@ -915,6 +1187,7 @@ pub(crate) fn export_profile_animation(
             layer_raster_bytes,
             layer_scratch_peak_bytes,
             peak_export_bytes: base_peak_export_bytes
+                .saturating_add(frame_telemetry.deferred_cache_peak_bytes)
                 .saturating_add(encode_telemetry.gif_retained_frame_bytes),
             render_ms,
             encode_ms,
@@ -1012,6 +1285,7 @@ fn rasterize_animation_groups(
     groups: &[AnimationRasterGroup],
     backend: Option<crate::profile_backend::ProfileBackendConfig>,
     _render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    retained_layer_budget: usize,
 ) -> Result<
     (
         Vec<RasterLayer>,
@@ -1055,6 +1329,7 @@ fn rasterize_animation_groups(
             selection.text_sdf,
             selection.shape_sdf,
             forbid_legacy_elements,
+            retained_layer_budget,
         )?
     } else {
         let _ = (md, assets);
@@ -1091,6 +1366,7 @@ fn rasterize_animation_groups_ordered(
     text_sdf: crate::profile_backend::TextSdfExecutor,
     shape_sdf: crate::profile_backend::ShapeSdfExecutor,
     forbid_legacy_elements: bool,
+    retained_layer_budget: usize,
 ) -> Result<(Vec<RasterLayer>, usize, usize), String> {
     let mut layers = Vec::with_capacity(groups.len());
     let mut layer_raster_bytes = 0usize;
@@ -1104,7 +1380,7 @@ fn rasterize_animation_groups_ordered(
             shape_sdf,
             animation_group_uses_dynamic_bounds(*dynamic_layer_id),
             forbid_legacy_elements,
-            usize::MAX,
+            retained_layer_budget.saturating_sub(layer_raster_bytes),
         )?;
         push_animation_raster(
             &mut layers,
@@ -1144,8 +1420,15 @@ fn push_animation_raster(
             Ok(())
         }
         crate::renderer::AnimationLayerRaster::DeferredSdf(layer) => {
-            let _ = layer;
-            Err("deferred animation layers are not composited yet".to_string())
+            layers.push(RasterLayer {
+                dynamic_layer_id,
+                x: layer.x as f32,
+                y: layer.y as f32,
+                width: layer.width,
+                height: layer.height,
+                content: RasterLayerContent::Deferred(layer),
+            });
+            Ok(())
         }
     }
 }
@@ -1235,13 +1518,43 @@ fn plan_ticks(
     ticks
 }
 
-impl AnimationFrameCompositor {
+impl<'a> AnimationFrameCompositor<'a> {
     fn new(width: u32, height: u32, scale: f32) -> Result<Self, String> {
+        Self::new_inner(None, width, height, scale, None, 0)
+    }
+
+    fn new_for_export(
+        renderer: &'a crate::renderer::CustomProfileRenderer,
+        width: u32,
+        height: u32,
+        scale: f32,
+        profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+        deferred_cache_budget: usize,
+    ) -> Result<Self, String> {
+        Self::new_inner(
+            Some(renderer),
+            width,
+            height,
+            scale,
+            profile_backend,
+            deferred_cache_budget,
+        )
+    }
+
+    fn new_inner(
+        renderer: Option<&'a crate::renderer::CustomProfileRenderer>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+        deferred_cache_budget: usize,
+    ) -> Result<Self, String> {
         let bytes = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or_else(|| "animation compositor canvas size overflow".to_string())?;
         Ok(Self {
+            renderer,
             canvas: vec![0; bytes],
             width,
             height,
@@ -1252,6 +1565,8 @@ impl AnimationFrameCompositor {
             readback_scratch: Vec::new(),
             changed_macroblock_flags: Vec::new(),
             telemetry: FrameCompositeTelemetry::default(),
+            profile_backend,
+            deferred_cache: DeferredSdfTileCache::new(deferred_cache_budget),
         })
     }
 
@@ -1295,7 +1610,17 @@ impl AnimationFrameCompositor {
             && self.previous_states.len() == states.len();
         let composite_started = std::time::Instant::now();
         let (mut update, dirty_regions) = if !sequential {
-            redraw_full_frame(&mut self.canvas, self.width, self.height, layers, &states);
+            redraw_full_frame(
+                self.renderer,
+                &mut self.profile_backend,
+                &mut self.canvas,
+                self.width,
+                self.height,
+                layers,
+                &states,
+                self.scale,
+                &mut self.deferred_cache,
+            )?;
             self.telemetry.full_composites = self.telemetry.full_composites.saturating_add(1);
             (FrameCompositeUpdate::Full, None)
         } else {
@@ -1317,13 +1642,17 @@ impl AnimationFrameCompositor {
             } else {
                 for region in &dirty.regions {
                     redraw_dirty_frame(
+                        self.renderer,
+                        &mut self.profile_backend,
                         &mut self.canvas,
                         self.width,
                         self.height,
                         layers,
                         &states,
                         *region,
-                    );
+                        self.scale,
+                        &mut self.deferred_cache,
+                    )?;
                 }
                 self.telemetry.dirty_composites = self.telemetry.dirty_composites.saturating_add(1);
                 self.telemetry.dirty_regions = self
@@ -1371,6 +1700,7 @@ impl AnimationFrameCompositor {
             .saturating_add(elapsed_ns(readback_started));
         self.telemetry.readback_bytes =
             self.telemetry.readback_bytes.saturating_add(readback_bytes);
+        self.telemetry.deferred_cache_peak_bytes = self.deferred_cache.peak_bytes;
         Ok(update)
     }
 }
@@ -1417,58 +1747,125 @@ fn pixel_bounds_for_destination(destination: FrameRect, width: u32, height: u32)
 }
 
 fn redraw_full_frame(
+    renderer: Option<&crate::renderer::CustomProfileRenderer>,
+    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
-) {
+    scale: f32,
+    deferred_cache: &mut DeferredSdfTileCache,
+) -> Result<(), String> {
     let full = PixelRect::full(width, height);
     fill_white(canvas, width, full);
-    draw_animation_layers(canvas, width, height, layers, states, full);
+    draw_animation_layers(
+        renderer,
+        profile_backend,
+        canvas,
+        width,
+        height,
+        layers,
+        states,
+        full,
+        scale,
+        deferred_cache,
+    )
 }
 
 fn redraw_dirty_frame(
+    renderer: Option<&crate::renderer::CustomProfileRenderer>,
+    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
     dirty: PixelRect,
-) {
+    scale: f32,
+    deferred_cache: &mut DeferredSdfTileCache,
+) -> Result<(), String> {
     fill_white(canvas, width, dirty);
-    draw_animation_layers(canvas, width, height, layers, states, dirty);
+    draw_animation_layers(
+        renderer,
+        profile_backend,
+        canvas,
+        width,
+        height,
+        layers,
+        states,
+        dirty,
+        scale,
+        deferred_cache,
+    )
 }
 
 fn draw_animation_layers(
+    renderer: Option<&crate::renderer::CustomProfileRenderer>,
+    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
     layers: &[RasterLayer],
     states: &[LayerFrameState],
     dirty: PixelRect,
-) {
-    for (layer, state) in layers.iter().zip(states) {
+    scale: f32,
+    deferred_cache: &mut DeferredSdfTileCache,
+) -> Result<(), String> {
+    for (layer_index, (layer, state)) in layers.iter().zip(states).enumerate() {
         if !state.visible || !state.pixel_bounds.intersects(dirty) {
             continue;
         }
-        blit_layer(
-            canvas,
-            width,
-            height,
-            match &layer.content {
-                RasterLayerContent::Pixels(pixels) => pixels,
-                // A deferred layer carries no pixels to blit. Reaching this
-                // arm needs the per-frame window path, which the retained
-                // budget does not yet hand out.
-                RasterLayerContent::Deferred(_) => continue,
-            },
-            layer.width,
-            layer.height,
-            state.destination,
-            dirty,
-        );
+        match &layer.content {
+            RasterLayerContent::Pixels(pixels) => {
+                blit_layer(
+                    canvas,
+                    width,
+                    height,
+                    pixels,
+                    layer.width,
+                    layer.height,
+                    state.destination,
+                    dirty,
+                );
+            }
+            RasterLayerContent::Deferred(deferred) => {
+                let renderer = renderer.ok_or_else(|| {
+                    "deferred animation layer requires an export renderer".to_string()
+                })?;
+                let Some(window) = deferred_source_window(layer, state, dirty, scale) else {
+                    continue;
+                };
+                let rendered = render_deferred_animation_window_cached(
+                    renderer,
+                    deferred,
+                    window,
+                    layer_index,
+                    deferred_cache,
+                    profile_backend,
+                )?;
+                let dx = state.destination.left() / scale - layer.x;
+                let dy = state.destination.top() / scale - layer.y;
+                let destination = FrameRect::from_xywh(
+                    (rendered.x as f32 + dx) * scale,
+                    (rendered.y as f32 + dy) * scale,
+                    rendered.width as f32 * scale,
+                    rendered.height as f32 * scale,
+                );
+                blit_layer(
+                    canvas,
+                    width,
+                    height,
+                    &rendered.pixels,
+                    rendered.width,
+                    rendered.height,
+                    destination,
+                    dirty,
+                );
+            }
+        }
     }
+    Ok(())
 }
 
 /// Copies the whole premultiplied canvas out as non-premultiplied RGBA, which is
@@ -1679,17 +2076,14 @@ fn composite_frame(
             layer.width as f32 * scale,
             layer.height as f32 * scale,
         );
+        let RasterLayerContent::Pixels(pixels) = &layer.content else {
+            return Err("deferred animation layers require the streaming compositor".to_string());
+        };
         blit_layer(
             &mut canvas,
             width,
             height,
-            match &layer.content {
-                RasterLayerContent::Pixels(pixels) => pixels,
-                // A deferred layer carries no pixels to blit. Reaching this
-                // arm needs the per-frame window path, which the retained
-                // budget does not yet hand out.
-                RasterLayerContent::Deferred(_) => continue,
-            },
+            pixels,
             layer.width,
             layer.height,
             destination,
@@ -4389,6 +4783,120 @@ mod tests {
     }
 
     #[test]
+    fn deferred_sdf_tile_cache_evicts_lru_entries_within_budget() {
+        fn rgba(color: [u8; 4]) -> Vec<u8> {
+            color.to_vec().repeat(4 * 4)
+        }
+
+        let key = |layer_index| DeferredSdfTileKey {
+            layer_index,
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        };
+        let mut cache = DeferredSdfTileCache::new(4 * 4 * 4 * 2);
+        cache.insert(key(1), rgba([255, 0, 0, 255]));
+        cache.insert(key(2), rgba([0, 255, 0, 255]));
+        assert!(cache.get(key(1)).is_some());
+        cache.insert(key(3), rgba([0, 0, 255, 255]));
+
+        assert!(cache.entries.contains_key(&key(1)));
+        assert!(!cache.entries.contains_key(&key(2)));
+        assert!(cache.entries.contains_key(&key(3)));
+        assert!(cache.resident_bytes <= cache.budget_bytes);
+        assert_eq!(cache.peak_bytes, cache.budget_bytes);
+    }
+
+    #[test]
+    fn deferred_source_window_tracks_translation_and_guard_pixels() {
+        let layer = RasterLayer {
+            dynamic_layer_id: None,
+            content: RasterLayerContent::Pixels(Vec::new()),
+            x: 100.0,
+            y: 200.0,
+            width: 100,
+            height: 50,
+        };
+        let state = LayerFrameState {
+            visible: true,
+            destination: FrameRect::from_xywh(120.0, 190.0, 100.0, 50.0),
+            pixel_bounds: PixelRect::default(),
+        };
+
+        assert_eq!(
+            deferred_source_window(
+                &layer,
+                &state,
+                PixelRect {
+                    left: 130,
+                    top: 210,
+                    right: 160,
+                    bottom: 230,
+                },
+                1.0,
+            ),
+            Some(PixelRect {
+                left: 108,
+                top: 218,
+                right: 142,
+                bottom: 242,
+            })
+        );
+    }
+
+    #[test]
+    fn deferred_source_window_clamps_fractional_scaled_viewport_to_layer() {
+        let layer = RasterLayer {
+            dynamic_layer_id: None,
+            content: RasterLayerContent::Pixels(Vec::new()),
+            x: 10.0,
+            y: 20.0,
+            width: 100,
+            height: 50,
+        };
+        let state = LayerFrameState {
+            visible: true,
+            destination: FrameRect::from_xywh(13.25, 17.5, 50.0, 25.0),
+            pixel_bounds: PixelRect::default(),
+        };
+
+        assert_eq!(
+            deferred_source_window(
+                &layer,
+                &state,
+                PixelRect {
+                    left: 5,
+                    top: 10,
+                    right: 30,
+                    bottom: 25,
+                },
+                0.5,
+            ),
+            Some(PixelRect {
+                left: 10,
+                top: 20,
+                right: 46,
+                bottom: 37,
+            })
+        );
+        assert_eq!(
+            deferred_source_window(
+                &layer,
+                &state,
+                PixelRect {
+                    left: 100,
+                    top: 100,
+                    right: 110,
+                    bottom: 110,
+                },
+                0.5,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn profile_animation_frame_starts_with_opaque_white_canvas() {
         let scene = allium_renderer_core::Scene::new(allium_renderer_core::SceneSource {
             scene_id: allium_renderer_core::StableId(1),
@@ -4489,11 +4997,45 @@ mod tests {
         let dirty = before[1].pixel_bounds.union(after[1].pixel_bounds);
 
         let mut incremental = vec![0u8; 8 * 4 * 4];
-        redraw_full_frame(&mut incremental, 8, 4, &layers, &before);
-        redraw_dirty_frame(&mut incremental, 8, 4, &layers, &after, dirty);
+        redraw_full_frame(
+            None,
+            &mut None,
+            &mut incremental,
+            8,
+            4,
+            &layers,
+            &before,
+            1.0,
+            &mut DeferredSdfTileCache::new(0),
+        )
+        .unwrap();
+        redraw_dirty_frame(
+            None,
+            &mut None,
+            &mut incremental,
+            8,
+            4,
+            &layers,
+            &after,
+            dirty,
+            1.0,
+            &mut DeferredSdfTileCache::new(0),
+        )
+        .unwrap();
 
         let mut oracle = vec![0u8; 8 * 4 * 4];
-        redraw_full_frame(&mut oracle, 8, 4, &layers, &after);
+        redraw_full_frame(
+            None,
+            &mut None,
+            &mut oracle,
+            8,
+            4,
+            &layers,
+            &after,
+            1.0,
+            &mut DeferredSdfTileCache::new(0),
+        )
+        .unwrap();
 
         assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
     }
