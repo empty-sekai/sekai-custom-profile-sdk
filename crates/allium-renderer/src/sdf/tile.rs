@@ -1564,6 +1564,7 @@ pub struct MixedSdfAtlasSource<'a> {
 
 /// Request-local high-resolution Text SDF page. It is never inserted into the
 /// immutable atlas registry or any process cache.
+#[derive(Clone)]
 pub(crate) struct RuntimeTextSdfPage {
     width: u32,
     height: u32,

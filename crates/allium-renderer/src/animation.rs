@@ -393,12 +393,21 @@ pub fn plan_page_execution(animated: bool, static_policy: &str) -> Result<PageEx
 
 struct RasterLayer {
     dynamic_layer_id: Option<allium_renderer_core::LayerId>,
-    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
-    pixels: Vec<u8>,
+    /// What the layer carries: retained pixels, or commands to produce them.
+    content: RasterLayerContent,
     x: f32,
     y: f32,
     width: u32,
     height: u32,
+}
+
+/// A layer's payload: pixels retained for the whole export, or the commands a
+/// per-frame window is rasterized from.
+enum RasterLayerContent {
+    /// Tight premultiplied RGBA8, `width * 4` bytes per row.
+    Pixels(Vec<u8>),
+    /// Commands in canvas coordinates, rasterized per frame.
+    Deferred(crate::renderer::DeferredAnimationSdfLayer),
 }
 
 /// Axis-aligned float rectangle in device space.
@@ -1095,6 +1104,7 @@ fn rasterize_animation_groups_ordered(
             shape_sdf,
             animation_group_uses_dynamic_bounds(*dynamic_layer_id),
             forbid_legacy_elements,
+            usize::MAX,
         )?;
         push_animation_raster(
             &mut layers,
@@ -1112,24 +1122,32 @@ fn push_animation_raster(
     layer_raster_bytes: &mut usize,
     scratch_peak_bytes: &mut usize,
     dynamic_layer_id: Option<allium_renderer_core::LayerId>,
-    output: crate::renderer::OrderedLayerRaster,
+    output: crate::renderer::AnimationLayerRaster,
 ) -> Result<(), String> {
-    if output.width == 0 || output.height == 0 {
-        return Ok(());
+    match output {
+        crate::renderer::AnimationLayerRaster::Ordered(output) => {
+            if output.width == 0 || output.height == 0 {
+                return Ok(());
+            }
+            *layer_raster_bytes = layer_raster_bytes
+                .checked_add(output.width as usize * output.height as usize * 4)
+                .ok_or_else(|| "animation layer raster byte overflow".to_string())?;
+            *scratch_peak_bytes = (*scratch_peak_bytes).max(output.scratch_peak_bytes);
+            layers.push(RasterLayer {
+                dynamic_layer_id,
+                content: RasterLayerContent::Pixels(output.pixels),
+                x: output.x as f32,
+                y: output.y as f32,
+                width: output.width,
+                height: output.height,
+            });
+            Ok(())
+        }
+        crate::renderer::AnimationLayerRaster::DeferredSdf(layer) => {
+            let _ = layer;
+            Err("deferred animation layers are not composited yet".to_string())
+        }
     }
-    *layer_raster_bytes = layer_raster_bytes
-        .checked_add(output.width as usize * output.height as usize * 4)
-        .ok_or_else(|| "animation layer raster byte overflow".to_string())?;
-    *scratch_peak_bytes = (*scratch_peak_bytes).max(output.scratch_peak_bytes);
-    layers.push(RasterLayer {
-        dynamic_layer_id,
-        pixels: output.pixels,
-        x: output.x as f32,
-        y: output.y as f32,
-        width: output.width,
-        height: output.height,
-    });
-    Ok(())
 }
 
 fn elapsed_ns(started: std::time::Instant) -> u64 {
@@ -1438,7 +1456,13 @@ fn draw_animation_layers(
             canvas,
             width,
             height,
-            &layer.pixels,
+            match &layer.content {
+                RasterLayerContent::Pixels(pixels) => pixels,
+                // A deferred layer carries no pixels to blit. Reaching this
+                // arm needs the per-frame window path, which the retained
+                // budget does not yet hand out.
+                RasterLayerContent::Deferred(_) => continue,
+            },
             layer.width,
             layer.height,
             state.destination,
@@ -1659,7 +1683,13 @@ fn composite_frame(
             &mut canvas,
             width,
             height,
-            &layer.pixels,
+            match &layer.content {
+                RasterLayerContent::Pixels(pixels) => pixels,
+                // A deferred layer carries no pixels to blit. Reaching this
+                // arm needs the per-frame window path, which the retained
+                // budget does not yet hand out.
+                RasterLayerContent::Deferred(_) => continue,
+            },
             layer.width,
             layer.height,
             destination,
@@ -4409,7 +4439,7 @@ mod tests {
     ) -> RasterLayer {
         RasterLayer {
             dynamic_layer_id,
-            pixels: rgba.repeat(width as usize * height as usize),
+            content: RasterLayerContent::Pixels(rgba.repeat(width as usize * height as usize)),
             x,
             y,
             width,
@@ -4805,7 +4835,7 @@ mod tests {
         // the ones the layer now covers.
         let layers = vec![RasterLayer {
             dynamic_layer_id: Some(allium_renderer_core::StableId(7)),
-            pixels: [255, 0, 0, 255].repeat(2),
+            content: RasterLayerContent::Pixels([255, 0, 0, 255].repeat(2)),
             x: 0.0,
             y: 0.0,
             width: 2,

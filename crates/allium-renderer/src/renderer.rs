@@ -3961,6 +3961,37 @@ pub struct LayerDynamicFrame {
 
 /// Premultiplied RGBA8 layer raster produced by the ordered SDF path,
 /// cropped to the tight non-transparent bounds.
+/// What a rasterized animation layer carries: either the pixels themselves,
+/// or the commands needed to produce them on demand.
+pub enum AnimationLayerRaster {
+    /// Pixels held for the whole export.
+    Ordered(OrderedLayerRaster),
+    /// Commands held instead of pixels, for a layer whose surface exceeds the
+    /// bytes an export may retain. Windows of it are rasterized per frame.
+    DeferredSdf(DeferredAnimationSdfLayer),
+}
+
+/// An animation layer kept as commands rather than pixels.
+///
+/// The commands are in canvas coordinates — un-shifted — so a window of any
+/// size can be rasterized from them by translating into that window's origin.
+pub struct DeferredAnimationSdfLayer {
+    pub(crate) commands: Vec<crate::sdf::tile::SdfDrawCommand>,
+    pub(crate) text_atlases: std::sync::Arc<crate::sdf::atlas::MappedSdfAtlasSet>,
+    pub(crate) shape_atlas: Option<std::sync::Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>>,
+    pub(crate) runtime_text: Vec<crate::sdf::tile::RuntimeTextSdfPage>,
+    pub(crate) executor: SdfLayerCandidateExecutor,
+    pub(crate) tile_width: u16,
+    pub(crate) tile_height: u16,
+    /// Layer bounds in canvas coordinates.
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// Dynamic timeline metadata for the layer, when requested and present.
+    pub dynamic: Option<LayerDynamic>,
+}
+
 pub struct OrderedLayerRaster {
     /// Tight premultiplied RGBA8, `width * 4` bytes per row.
     pub pixels: Vec<u8>,
@@ -4024,7 +4055,8 @@ impl CustomProfileRenderer {
         shape_sdf: crate::profile_backend::ShapeSdfExecutor,
         include_dynamic_bounds: bool,
         forbid_legacy_elements: bool,
-    ) -> Result<OrderedLayerRaster, String> {
+        maximum_retained_layer_bytes: usize,
+    ) -> Result<AnimationLayerRaster, String> {
         let md = self.snapshot();
         let w = crate::transform::CANVAS_WIDTH as i32;
         let h = crate::transform::CANVAS_HEIGHT as i32;
@@ -4071,6 +4103,7 @@ impl CustomProfileRenderer {
                 32,
                 dynamic,
                 expansion,
+                maximum_retained_layer_bytes,
             );
         }
         let surface_w = w + expansion.left + expansion.right;
@@ -4140,6 +4173,7 @@ impl CustomProfileRenderer {
                 scratch_peak_bytes: surface_bytes.saturating_add(bw as usize * bh as usize * 4),
             }
         };
+        let raster = AnimationLayerRaster::Ordered(raster);
         self.recycle_profile_rgba_scratch(rgba);
         Ok(raster)
     }
@@ -4156,7 +4190,8 @@ impl CustomProfileRenderer {
         tile_height: u16,
         dynamic: Option<LayerDynamic>,
         reachable: CanvasExpansion,
-    ) -> Result<OrderedLayerRaster, String> {
+        maximum_retained_layer_bytes: usize,
+    ) -> Result<AnimationLayerRaster, String> {
         let sdf_atlases = self.sdf_atlases.load_full();
         let captured = capture_sdf_primitives(
             card,
@@ -4193,7 +4228,7 @@ impl CustomProfileRenderer {
             None,
         )?;
 
-        let empty = OrderedLayerRaster {
+        let empty = AnimationLayerRaster::Ordered(OrderedLayerRaster {
             pixels: Vec::new(),
             x: 0,
             y: 0,
@@ -4202,7 +4237,7 @@ impl CustomProfileRenderer {
             dynamic: dynamic.clone(),
             legacy_element_count: 0,
             scratch_peak_bytes: 0,
-        };
+        });
         let Some((content_x, content_y, content_w, content_h)) =
             tight_sdf_command_bounds(&commands)
         else {
@@ -4231,7 +4266,34 @@ impl CustomProfileRenderer {
         let width = u32::try_from(right - left).map_err(|_| "layer width overflow".to_string())?;
         let height =
             u32::try_from(bottom - top).map_err(|_| "layer height overflow".to_string())?;
-        let (surface_bytes, _) = animation_sdf_retained_surface_bytes(width, height)?;
+        let (surface_bytes, retained_peak_bytes) =
+            animation_sdf_retained_surface_bytes(width, height)?;
+
+        // A layer whose surface would outlive the bytes this export may retain
+        // keeps its commands instead of its pixels; windows of it are
+        // rasterized per frame. The commands stay in canvas coordinates here,
+        // so any window origin can be applied later.
+        if retained_peak_bytes > maximum_retained_layer_bytes {
+            return Ok(AnimationLayerRaster::DeferredSdf(
+                DeferredAnimationSdfLayer {
+                    commands,
+                    text_atlases: sdf_atlases,
+                    shape_atlas: self.shape_sdf_atlas.clone(),
+                    runtime_text: prepared_batch
+                        .as_deref()
+                        .map(|batch| batch.pages.clone())
+                        .unwrap_or(runtime_text_pages),
+                    executor,
+                    tile_width,
+                    tile_height,
+                    x: origin_x,
+                    y: origin_y,
+                    width,
+                    height,
+                    dynamic,
+                },
+            ));
+        }
 
         shift_sdf_commands(&mut commands, -(origin_x as f32), -(origin_y as f32));
         let runtime_pages = prepared_batch
@@ -4288,7 +4350,7 @@ impl CustomProfileRenderer {
         // surface copy taken during the crop).
         let scratch_peak_bytes = surface_bytes.saturating_mul(2);
         self.recycle_profile_rgba_scratch(rgba);
-        Ok(OrderedLayerRaster {
+        Ok(AnimationLayerRaster::Ordered(OrderedLayerRaster {
             pixels,
             x: origin_x,
             y: origin_y,
@@ -4297,7 +4359,7 @@ impl CustomProfileRenderer {
             dynamic,
             legacy_element_count: 0,
             scratch_peak_bytes,
-        })
+        }))
     }
 }
 
