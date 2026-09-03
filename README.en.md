@@ -8,10 +8,10 @@ Rich text and layout follow a compatibility model for the Unity TextMesh Pro dat
 
 Rendering is one capability of the SDK. The repository contains two rendering adapters for different environments:
 
-- a native CPU/Skia renderer for servers, CLI tools, and offline jobs;
+- a native CPU renderer for servers, CLI tools, and offline jobs;
 - a browser WebGL2 renderer backed by Rust/WASM, FreeType, and glyph SDF atlases.
 
-Both adapters share a backend-independent Rust semantic core. The browser package uses a dedicated Rust/WASM and WebGL2 execution path, while the native adapter uses Rust and Skia.
+Both adapters share a backend-independent Rust semantic core. The browser package uses a dedicated Rust/WASM and WebGL2 execution path, while the native adapter uses its own Rust CPU raster path.
 
 ## Live demo
 
@@ -51,7 +51,7 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 | Crate | Responsibility |
 | --- | --- |
 | `allium-renderer-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
-| `allium-renderer` | Native CPU/Skia adapter and reusable native renderer components |
+| `allium-renderer` | Native CPU adapter and reusable native renderer components |
 | `allium-renderer-host` | Native host utilities and JSON masterdata provider |
 | `allium-renderer-cli` | `render-card` CLI and long-running NDJSON service mode |
 | `allium-renderer-wasm` | Minimal FreeType WASM, stateful worker protocol, WebGL2 runtime, caches, and Scene Workbench |
@@ -146,7 +146,7 @@ Layer visibility reuses the active dynamic timeline, layout cache, glyph atlas, 
 
 ## Native renderer
 
-The native adapter serves still-image, CLI, and application-specific scene workloads. Resource bytes and masterdata are always host-provided. Enable the `skia` feature for the native production preset.
+The native adapter serves still-image, CLI, and application-specific scene workloads. Resource bytes and masterdata are always host-provided. Rendering does not require Skia: pages come out of the profile backend and the ordered SDF pipeline, and text and shape elements need their SDF atlases and a render-object store installed, built with the bundled `build-sdf-atlas`, `build-shape-sdf-atlas`, and `build-render-object-store` tools. The `skia-oracle` feature only supplies the reference compositor and the parity tests.
 
 ```sh
 cargo test --workspace --all-features
@@ -200,7 +200,7 @@ optimization, offline catalog generation, and browser resolution retain identica
 
 ## Building and verification
 
-The project uses a pinned container toolchain for FreeType, Skia, and Emscripten targets.
+The project uses a pinned container toolchain for FreeType and Emscripten targets; the `skia-oracle` parity build additionally requires Skia.
 
 ```sh
 cargo test --workspace --all-features

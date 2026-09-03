@@ -8,10 +8,10 @@ Sekai Custom Profile SDK 是面向 Project SEKAI（PJSK）自定义名片的非�
 
 renderer 是 SDK 内的一项能力。仓库包含两个面向不同运行环境的渲染适配器：
 
-- native CPU/Skia renderer，适合服务端、CLI 与离线任务；
+- native CPU renderer，适合服务端、CLI 与离线任务；
 - browser WebGL2 renderer，使用 Rust/WASM、FreeType 与 SDF atlas 在浏览器中绘制和更新场景。
 
-两者共享与后端无关的 Rust semantic core。浏览器包采用独立的 Rust/WASM + WebGL2 执行路径，native adapter 采用 Rust + Skia 执行路径。
+两者共享与后端无关的 Rust semantic core。浏览器包采用独立的 Rust/WASM + WebGL2 执行路径，native adapter 采用 Rust 自有的 CPU 光栅执行路径。
 
 ## 在线演示
 
@@ -51,7 +51,7 @@ Rust/WASM 负责：
 | Crate | 职责 |
 | --- | --- |
 | `allium-renderer-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
-| `allium-renderer` | native CPU/Skia adapter 与可复用 native renderer 组件 |
+| `allium-renderer` | native CPU adapter 与可复用 native renderer 组件 |
 | `allium-renderer-host` | native host 工具和 JSON masterdata provider |
 | `allium-renderer-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
 | `allium-renderer-wasm` | minimal FreeType WASM、stateful worker protocol、WebGL2 runtime、缓存与 Scene Workbench |
@@ -190,7 +190,7 @@ cargo run --release --bin render-card -- \
 
 ## 构建与验证
 
-项目使用固定的 container toolchain 构建 FreeType、Skia 与 Emscripten 目标。
+项目使用固定的 container toolchain 构建 FreeType 与 Emscripten 目标；`skia-oracle` 对拍构建额外需要 Skia。
 
 ```sh
 cargo test --workspace --all-features
