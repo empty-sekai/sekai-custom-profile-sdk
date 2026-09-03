@@ -1283,7 +1283,7 @@ fn rasterize_animation_groups(
     profile: Option<&crate::profile::ProfileData>,
     md: &MasterData,
     assets: Option<&AssetStore>,
-    _resolved_scene: Option<&allium_renderer_core::profile_scene::ResolvedProfileScene>,
+    resolved_scene: Option<&allium_renderer_core::profile_scene::ResolvedProfileScene>,
     _dynamic_expansions: &std::collections::BTreeMap<allium_renderer_core::LayerId, [i32; 4]>,
     groups: &[AnimationRasterGroup],
     backend: Option<crate::profile_backend::ProfileBackendConfig>,
@@ -1312,6 +1312,12 @@ fn rasterize_animation_groups(
         crate::profile_backend::PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
     );
     telemetry.apply_selection(selection.clone());
+    if selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia {
+        telemetry.fallback_glyph_cache = match resolved_scene {
+            Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, md)?,
+            None => renderer.prepare_profile_fallback_for_animation_card(card, md)?,
+        };
+    }
     telemetry.work.page_count = 1;
     telemetry.work.dynamic_layer_count = groups
         .iter()

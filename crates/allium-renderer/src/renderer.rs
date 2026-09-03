@@ -372,6 +372,56 @@ impl CustomProfileRenderer {
         self.ensure_profile_fallback_codepoints(requested, cache, &atlases)
     }
 
+    /// Generates the fallback glyphs an animation export needs from a
+    /// resolved scene, installing the resulting atlas the same way a page
+    /// render does.
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn prepare_profile_fallback_for_animation_scene(
+        &self,
+        scene: &allium_renderer_core::profile_scene::ResolvedProfileScene,
+        md: &MasterData,
+    ) -> Result<Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>, String> {
+        if self.profile_fallback_sdf_cache.is_none() {
+            return Ok(None);
+        }
+        self.ensure_profile_fallback_for_scenes(std::iter::once(scene), md)
+    }
+
+    /// The same preparation for a card that resolved to no scene: the
+    /// codepoints come straight off the authored text elements.
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn prepare_profile_fallback_for_animation_card(
+        &self,
+        card: &CustomProfileCard,
+        md: &MasterData,
+    ) -> Result<Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>, String> {
+        use std::collections::BTreeSet;
+
+        let Some(cache) = self.profile_fallback_sdf_cache.as_deref() else {
+            return Ok(None);
+        };
+        let atlases = self.sdf_atlases.load_full();
+        let mut requested = BTreeSet::new();
+        for text in &card.texts {
+            let Some(primary_family) = md.resolve_font(text.font_id) else {
+                continue;
+            };
+            if primary_family == crate::sdf::atlas::PROFILE_TEXT_FALLBACK_FONT_FAMILY {
+                continue;
+            }
+            let Some((_, primary_atlas)) = atlases.atlas_for_font_family(&primary_family) else {
+                continue;
+            };
+            requested.extend(text.text.chars().filter_map(|ch| {
+                (!ch.is_whitespace()
+                    && !ch.is_control()
+                    && primary_atlas.glyph(u32::from(ch)).is_none())
+                .then_some(u32::from(ch))
+            }));
+        }
+        self.ensure_profile_fallback_codepoints(requested, cache, &atlases)
+    }
+
     fn ensure_profile_fallback_codepoints(
         &self,
         requested: std::collections::BTreeSet<u32>,
