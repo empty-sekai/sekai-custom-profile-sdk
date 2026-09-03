@@ -1,9 +1,11 @@
 [package]
 name = "allium-renderer-wasm"
-version = "0.3.2"
-edition = "2021"
-description = "Project SEKAI profile scene and minimal FreeType runtime for the Allium WebGL2 renderer"
-license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+description = "Project SEKAI profile scene and minimal FreeType runtime for the WebGL2 renderer"
+license.workspace = true
+repository.workspace = true
+# Shipped as the npm package, not a registry crate.
 publish = false
 
 [lib]
@@ -14,7 +16,7 @@ name = "allium_renderer_wasm"
 path = "src/main.rs"
 
 [dependencies]
-allium-renderer-core = { path = "../allium-renderer-core" }
+sekai-profile-renderer-core = { path = "../sekai-profile-renderer-core" }
 base64 = "0.22"
 freetype-rs = "0.38"
 libc = "0.2"

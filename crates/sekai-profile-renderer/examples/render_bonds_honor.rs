@@ -22,9 +22,7 @@ use sekai_profile_renderer::elements::honor::{render_bonds_honor, render_honor};
 use sekai_profile_renderer::masterdata::{
     MasterData, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
 };
-use sekai_profile_renderer::types::{
-    BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry,
-};
+use sekai_profile_renderer::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
 use skia_safe::{surfaces, Color, EncodedImageFormat, Point};
 
 /// 测试用 provider：按构造时给定的角色对返回羁绊条目，
@@ -125,7 +123,11 @@ fn render_one(out_dir: &Path, label: &str, cid1: i32, cid2: i32, rarity: &str, f
     });
     let md = MasterData::new(provider);
 
-    let (w, h) = if full_size { (380.0_f32, 80.0_f32) } else { (180.0_f32, 80.0_f32) };
+    let (w, h) = if full_size {
+        (380.0_f32, 80.0_f32)
+    } else {
+        (180.0_f32, 80.0_f32)
+    };
     // 留 padding 以观察是否有越界/错位
     let pad = 20.0_f32;
     let cw = (w + pad * 2.0) as i32;
@@ -192,11 +194,14 @@ fn render_one_std(
     });
     let md = MasterData::new(provider);
 
-    let (w, h) = if full_size { (380.0_f32, 80.0_f32) } else { (180.0_f32, 80.0_f32) };
+    let (w, h) = if full_size {
+        (380.0_f32, 80.0_f32)
+    } else {
+        (180.0_f32, 80.0_f32)
+    };
     let pad = 20.0_f32;
-    let mut surface =
-        surfaces::raster_n32_premul(((w + pad * 2.0) as i32, (h + pad * 2.0) as i32))
-            .expect("创建 surface 失败");
+    let mut surface = surfaces::raster_n32_premul(((w + pad * 2.0) as i32, (h + pad * 2.0) as i32))
+        .expect("创建 surface 失败");
     let canvas = surface.canvas();
     canvas.clear(Color::from_argb(255, 40, 40, 48));
     canvas.save();
@@ -223,19 +228,25 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let out_dir = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("tmp/bonds_probe/out"));
+    let out_dir = PathBuf::from(
+        args.get(1)
+            .map(String::as_str)
+            .unwrap_or("tmp/bonds_probe/out"),
+    );
     std::fs::create_dir_all(&out_dir).expect("创建输出目录失败");
 
     // 羁绊对照组：角色尺寸差异大
     let cases: &[(&str, i32, i32, &str)] = &[
-        ("hotaru_kanade", 3, 17, "middle"),  // 穗波 99×101 × 奏 160×136
-        ("ichika_mafuyu", 1, 18, "high"),    // 一歌 108×105 × 真冬 160×136
-        ("ichika_hotaru", 1, 3, "low"),      // 一歌 108×105 × 穗波 99×101
+        ("hotaru_kanade", 3, 17, "middle"), // 穗波 99×101 × 奏 160×136
+        ("ichika_mafuyu", 1, 18, "high"),   // 一歌 108×105 × 真冬 160×136
+        ("ichika_hotaru", 1, 3, "low"),     // 一歌 108×105 × 穗波 99×101
     ];
     for (label, c1, c2, rarity) in cases {
         for full_size in [true, false] {
             let size = if full_size { "main" } else { "sub" };
-            eprintln!("===== bonds case={label} size={size} cid1={c1} cid2={c2} rarity={rarity} =====");
+            eprintln!(
+                "===== bonds case={label} size={size} cid1={c1} cid2={c2} rarity={rarity} ====="
+            );
             render_one(&out_dir, label, *c1, *c2, rarity, full_size);
         }
     }

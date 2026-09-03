@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use allium_renderer_core::authoring_document::GameProfileDocument;
-use allium_renderer_core::authoring_session::{
+use sekai_profile_renderer_core::authoring_document::GameProfileDocument;
+use sekai_profile_renderer_core::authoring_session::{
     AuthoringCommand, AuthoringElementId, AuthoringSession,
 };
 use serde::{Deserialize, Serialize};

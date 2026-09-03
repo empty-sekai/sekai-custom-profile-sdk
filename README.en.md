@@ -50,10 +50,10 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 
 | Crate | Responsibility |
 | --- | --- |
-| `allium-renderer-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
-| `allium-renderer` | Native CPU adapter and reusable native renderer components |
-| `allium-renderer-host` | Native host utilities and JSON masterdata provider |
-| `allium-renderer-cli` | `render-card` CLI and long-running NDJSON service mode |
+| `sekai-profile-renderer-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
+| `sekai-profile-renderer` | Native CPU adapter and reusable native renderer components |
+| `sekai-profile-renderer-host` | Native host utilities and JSON masterdata provider |
+| `sekai-profile-card-cli` | `render-card` CLI and long-running NDJSON service mode |
 | `allium-renderer-wasm` | Minimal FreeType WASM, stateful worker protocol, WebGL2 runtime, caches, and Scene Workbench |
 
 ## Browser quick start
@@ -176,7 +176,7 @@ instead of producing a transparent placeholder.
 layout. That explicit mode reuses the shared core canonical mapping for
 `bonds_honor/character` and `bonds_honor/word` without changing renderer asset keys.
 
-Honor asset semantics have one source of truth in `allium-renderer-core`; native and WASM
+Honor asset semantics have one source of truth in `sekai-profile-renderer-core`; native and WASM
 backends must not infer them independently. CN `limitevent` `honor_top_*` entries without
 an explicit background use the shared `honor_bg_event_cheerteam` degree layer.
 `bondsHonorViewType` is composable and may contain both `reverse` and

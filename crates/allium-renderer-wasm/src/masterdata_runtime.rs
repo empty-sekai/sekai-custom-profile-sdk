@@ -1,14 +1,14 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use allium_renderer_core::masterdata::{JsonMasterData, PROFILE_MASTERDATA_TABLES};
-use allium_renderer_core::profile_data::ProfileData;
-use allium_renderer_core::profile_resolve::{
+use sekai_profile_renderer_core::masterdata::{JsonMasterData, PROFILE_MASTERDATA_TABLES};
+use sekai_profile_renderer_core::profile_data::ProfileData;
+use sekai_profile_renderer_core::profile_resolve::{
     compile_profile_scene, compile_profile_scene_with_localizations, prepare_profile,
     prepare_profile_with_localizations, ResourceAvailability, ResourceMetadata, ResourceMetric,
 };
-use allium_renderer_core::profile_source::CustomProfileCard;
-use allium_renderer_core::{LineIndentSource, ResourceKey};
+use sekai_profile_renderer_core::profile_source::CustomProfileCard;
+use sekai_profile_renderer_core::{LineIndentSource, ResourceKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -210,7 +210,7 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
         let locale = request.locale.as_deref().unwrap_or(&session.region);
         if request.demand_only {
             return serde_json::to_string(&serde_json::json!({
-                "localizationDemands": allium_renderer_core::locale::profile_localization_demands(
+                "localizationDemands": sekai_profile_renderer_core::locale::profile_localization_demands(
                     &request.card,
                     &session.region,
                     locale,

@@ -50,10 +50,10 @@ Rust/WASM 负责：
 
 | Crate | 职责 |
 | --- | --- |
-| `allium-renderer-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
-| `allium-renderer` | native CPU adapter 与可复用 native renderer 组件 |
-| `allium-renderer-host` | native host 工具和 JSON masterdata provider |
-| `allium-renderer-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
+| `sekai-profile-renderer-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
+| `sekai-profile-renderer` | native CPU adapter 与可复用 native renderer 组件 |
+| `sekai-profile-renderer-host` | native host 工具和 JSON masterdata provider |
+| `sekai-profile-card-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
 | `allium-renderer-wasm` | minimal FreeType WASM、stateful worker protocol、WebGL2 runtime、缓存与 Scene Workbench |
 
 ## 浏览器快速开始
@@ -167,7 +167,7 @@ cargo run --release --bin render-card -- \
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical
 映射解析 `bonds_honor/character` 与 `bonds_honor/word`，不改变 renderer asset key。
 
-称号的资源语义由 `allium-renderer-core` 单一维护，native 与 WASM 不得各自猜测：国服
+称号的资源语义由 `sekai-profile-renderer-core` 单一维护，native 与 WASM 不得各自猜测：国服
 `limitevent` 的 `honor_top_*` 在未显式指定背景时使用共享
 `honor_bg_event_cheerteam` degree 层；`bondsHonorViewType` 是可组合标志，字符串中可同时
 包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免服务端

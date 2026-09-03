@@ -1,0 +1,14 @@
+[package]
+name = "sekai-profile-renderer-core"
+version.workspace = true
+edition.workspace = true
+description = "Backend-independent core for the profile card renderer: scene, dynamic state, commands, dumps and caches"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bincode = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }

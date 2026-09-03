@@ -42,7 +42,9 @@ fn main() {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let family = args.next().unwrap_or_else(|| "FOT-RodinNTLGPro-DB".to_string());
+    let family = args
+        .next()
+        .unwrap_or_else(|| "FOT-RodinNTLGPro-DB".to_string());
     let chars = args.next().unwrap_or_else(|| "永和国A1".to_string());
     let supersample: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(2);
     let dump = std::env::var("DUMP").is_ok();
@@ -74,7 +76,8 @@ fn main() {
     let mut total_flat_max = 0.0f32;
 
     for ch in chars.chars() {
-        let Some((analytic, a_dur, edt, e_dur)) = benchmark_methods(&family, ch, supersample) else {
+        let Some((analytic, a_dur, edt, e_dur)) = benchmark_methods(&family, ch, supersample)
+        else {
             println!("{ch:<6} 生成失败");
             continue;
         };
@@ -83,7 +86,10 @@ fn main() {
         if !size_match {
             println!(
                 "{ch:<6} 尺寸不匹配! 解析={}x{} EDT={}x{}",
-                analytic.width(), analytic.height(), edt.width(), edt.height()
+                analytic.width(),
+                analytic.height(),
+                edt.width(),
+                edt.height()
             );
             continue;
         }

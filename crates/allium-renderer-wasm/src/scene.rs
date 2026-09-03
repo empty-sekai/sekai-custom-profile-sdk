@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use allium_renderer_core::{
+use sekai_profile_renderer_core::{
     AuthoredElementKind, BlendMode, GlyphSource, InteractionRegionSource, LayerId, LayerKind,
     LayerSource, LineIndentSource, Matrix2d, ParameterValue, Quad, Rect, RenderMaskOverride, Scene,
     SceneSource, SemanticCommandPayload, SemanticCommandSource, StableId,
@@ -22,7 +22,7 @@ struct SceneTable {
 struct CreateResponse {
     handle: u32,
     layer_bindings: Vec<LayerBinding>,
-    snapshot: allium_renderer_core::SceneSnapshot,
+    snapshot: sekai_profile_renderer_core::SceneSnapshot,
 }
 
 #[derive(Serialize)]
@@ -79,7 +79,7 @@ struct SceneCreateInput {
     #[serde(default)]
     interaction_regions: Vec<InteractionRegionCreateInput>,
     #[serde(default)]
-    component_controls: Vec<allium_renderer_core::profile_scene::ComponentControlSource>,
+    component_controls: Vec<sekai_profile_renderer_core::profile_scene::ComponentControlSource>,
 }
 
 #[derive(Deserialize)]
@@ -88,8 +88,8 @@ struct ResolvedProfileSceneCreateInput {
     document_key: String,
     #[serde(default = "default_region")]
     region: String,
-    card: allium_renderer_core::profile_source::CustomProfileCard,
-    snapshot: allium_renderer_core::profile_scene::ProfileResolveSnapshot,
+    card: sekai_profile_renderer_core::profile_source::CustomProfileCard,
+    snapshot: sekai_profile_renderer_core::profile_scene::ProfileResolveSnapshot,
 }
 
 fn default_region() -> String {
@@ -109,7 +109,7 @@ struct SemanticCommandCreateInput {
     #[serde(default)]
     clip: Option<Quad>,
     #[serde(default)]
-    control_bindings: Vec<allium_renderer_core::CommandControlBinding>,
+    control_bindings: Vec<sekai_profile_renderer_core::CommandControlBinding>,
     #[serde(default)]
     metadata: BTreeMap<String, ParameterValue>,
     payload: SemanticCommandPayload,
@@ -128,7 +128,7 @@ struct InteractionRegionCreateInput {
     #[serde(default)]
     clip: Option<Quad>,
     #[serde(default)]
-    control_bindings: Vec<allium_renderer_core::CommandControlBinding>,
+    control_bindings: Vec<sekai_profile_renderer_core::CommandControlBinding>,
     #[serde(default)]
     resolved_data: BTreeMap<String, ParameterValue>,
     #[serde(default)]
@@ -275,13 +275,19 @@ pub fn create(input: &str) -> Result<String, String> {
                 clip: command.clip,
                 control_bindings: command.control_bindings,
                 metadata: command.metadata,
-                numeric_text_runs: allium_renderer_core::tmp_text::numeric_text_runs(
+                numeric_text_runs: sekai_profile_renderer_core::tmp_text::numeric_text_runs(
                     match &command.payload {
                         SemanticCommandPayload::Text { source, .. } => match source {
-                            allium_renderer_core::TextSource::Authored { value }
-                            | allium_renderer_core::TextSource::ProfileField { value, .. }
-                            | allium_renderer_core::TextSource::MasterData { value, .. }
-                            | allium_renderer_core::TextSource::Localized { value, .. } => value,
+                            sekai_profile_renderer_core::TextSource::Authored { value }
+                            | sekai_profile_renderer_core::TextSource::ProfileField {
+                                value, ..
+                            }
+                            | sekai_profile_renderer_core::TextSource::MasterData {
+                                value, ..
+                            }
+                            | sekai_profile_renderer_core::TextSource::Localized {
+                                value, ..
+                            } => value,
                         },
                         _ => "",
                     },
@@ -345,7 +351,7 @@ pub fn create(input: &str) -> Result<String, String> {
 pub fn create_resolved_profile(input: &str) -> Result<String, String> {
     let input: ResolvedProfileSceneCreateInput = serde_json::from_str(input)
         .map_err(|error| format!("parse resolved profile scene failed: {error}"))?;
-    let resolved = allium_renderer_core::profile_scene::resolve_profile_scene(
+    let resolved = sekai_profile_renderer_core::profile_scene::resolve_profile_scene(
         &input.card,
         &input.document_key,
         &input.snapshot,
@@ -357,7 +363,7 @@ pub fn create_resolved_profile(input: &str) -> Result<String, String> {
 pub fn create_compiled_profile(
     document_key: &str,
     region: &str,
-    resolved: allium_renderer_core::profile_scene::ResolvedProfileScene,
+    resolved: sekai_profile_renderer_core::profile_scene::ResolvedProfileScene,
     static_final: bool,
 ) -> Result<String, String> {
     let layer_bindings = resolved
@@ -366,7 +372,7 @@ pub fn create_compiled_profile(
         .map(|layer| LayerBinding {
             source_key: format!(
                 "{}:{}",
-                allium_renderer_core::profile_scene::authored_kind_name(layer.authored_kind),
+                sekai_profile_renderer_core::profile_scene::authored_kind_name(layer.authored_kind),
                 layer.authored_index
             ),
             layer_id: layer.id,

@@ -13,9 +13,9 @@ use std::rc::Rc;
 use std::slice;
 use std::sync::Once;
 
-use allium_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
 use base64::Engine;
 use freetype::{face::LoadFlag, Library, RenderMode};
+use sekai_profile_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
 use serde::Serialize;
 use web_time::Instant;
 
@@ -616,8 +616,8 @@ struct LocaleResolveResponse {
 #[serde(rename_all = "camelCase")]
 struct ProfileResolveRequest {
     document_key: String,
-    card: allium_renderer_core::profile_source::CustomProfileCard,
-    snapshot: allium_renderer_core::profile_scene::ProfileResolveSnapshot,
+    card: sekai_profile_renderer_core::profile_source::CustomProfileCard,
+    snapshot: sekai_profile_renderer_core::profile_scene::ProfileResolveSnapshot,
 }
 
 #[no_mangle]
@@ -630,7 +630,7 @@ pub unsafe extern "C" fn sdf_renderer_core_resolve_locale_json(
         let request: LocaleResolveRequest =
             serde_json::from_str(input).map_err(|error| error.to_string())?;
         serde_json::to_string(&LocaleResolveResponse {
-            value: allium_renderer_core::locale::resolve(&request.region, &request.key),
+            value: sekai_profile_renderer_core::locale::resolve(&request.region, &request.key),
             region: request.region,
             key: request.key,
         })
@@ -647,7 +647,7 @@ pub unsafe extern "C" fn sdf_renderer_core_resolve_profile_json(
         let input = read_utf8_slice(input_json_ptr, input_json_len)?;
         let request: ProfileResolveRequest =
             serde_json::from_str(input).map_err(|error| error.to_string())?;
-        let resolved = allium_renderer_core::profile_scene::resolve_profile_scene(
+        let resolved = sekai_profile_renderer_core::profile_scene::resolve_profile_scene(
             &request.card,
             &request.document_key,
             &request.snapshot,

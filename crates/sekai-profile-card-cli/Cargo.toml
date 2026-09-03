@@ -1,0 +1,29 @@
+[package]
+name = "sekai-profile-card-cli"
+version.workspace = true
+edition.workspace = true
+description = "render-card: a CLI that renders Project SEKAI custom profile cards"
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "render-card"
+path = "src/main.rs"
+
+[features]
+# The renderer carries no Skia. Pages render through the profile backend and
+# the ordered SDF candidates; JPEG output needs `jpeg-turbo`.
+default = ["jpeg-turbo"]
+jpeg-turbo = ["sekai-profile-renderer/jpeg-turbo"]
+
+[dependencies]
+sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.5.0" }
+sekai-profile-renderer-host = { path = "../sekai-profile-renderer-host", version = "0.5.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+# Synchronous HTTP for fetching masterdata/assets from a URL prefix.
+# rustls TLS so https works without a system OpenSSL dependency.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }

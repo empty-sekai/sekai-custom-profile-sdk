@@ -18,79 +18,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "allium-renderer"
-version = "0.3.2"
-dependencies = [
- "allium-renderer-core",
- "allium-renderer-host",
- "arc-swap",
- "axum",
- "cc",
- "color_quant",
- "crc32fast",
- "flate2",
- "freetype-rs",
- "gif",
- "hex",
- "lru",
- "memmap2",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "skia-safe",
- "tempfile",
- "thiserror",
- "tracing",
- "tracing-subscriber",
- "ttf-parser",
- "turbojpeg-sys",
- "webp-animation",
-]
-
-[[package]]
-name = "allium-renderer-cli"
-version = "0.3.2"
-dependencies = [
- "allium-renderer",
- "allium-renderer-host",
- "base64",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
- "ureq",
-]
-
-[[package]]
-name = "allium-renderer-core"
-version = "0.3.2"
-dependencies = [
- "bincode",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "allium-renderer-host"
-version = "0.3.2"
-dependencies = [
- "allium-renderer",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "allium-renderer-wasm"
-version = "0.3.2"
+version = "0.5.0"
 dependencies = [
- "allium-renderer-core",
  "base64",
  "freetype-rs",
  "libc",
+ "sekai-profile-renderer-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1160,6 +1094,72 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "sekai-profile-card-cli"
+version = "0.5.0"
+dependencies = [
+ "base64",
+ "sekai-profile-renderer",
+ "sekai-profile-renderer-host",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "sekai-profile-renderer"
+version = "0.5.0"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "cc",
+ "color_quant",
+ "crc32fast",
+ "flate2",
+ "freetype-rs",
+ "gif",
+ "hex",
+ "lru",
+ "memmap2",
+ "rayon",
+ "sekai-profile-renderer-core",
+ "sekai-profile-renderer-host",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skia-safe",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "ttf-parser",
+ "turbojpeg-sys",
+ "webp-animation",
+]
+
+[[package]]
+name = "sekai-profile-renderer-core"
+version = "0.5.0"
+dependencies = [
+ "bincode",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "sekai-profile-renderer-host"
+version = "0.5.0"
+dependencies = [
+ "sekai-profile-renderer",
+ "serde",
+ "serde_json",
+ "tracing",
+]
 
 [[package]]
 name = "serde"

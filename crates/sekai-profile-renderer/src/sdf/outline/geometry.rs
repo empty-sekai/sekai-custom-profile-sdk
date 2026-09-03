@@ -1,3 +1,5 @@
+//! 轮廓几何计算。
+
 use std::slice;
 
 use freetype::ffi;
@@ -14,7 +16,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
     let tags = slice::from_raw_parts(outline.tags, outline.n_points as usize);
     let mut current_point_index = 0usize;
     let mut contours = Vec::with_capacity(contour_ends.len());
-
     for &last_point_index_in_contour in contour_ends {
         let last_point_index_in_contour = last_point_index_in_contour as usize;
         let (mut first_point, first_tag) = get_point(
@@ -38,7 +39,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
             };
             current_point_index = current_point_index.saturating_sub(1);
         }
-
         let mut contour = Vec::new();
         let mut current_pen = first_point;
         while current_point_index <= last_point_index_in_contour {
@@ -56,7 +56,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
                 current_pen = point0;
                 continue;
             }
-
             loop {
                 if current_point_index > last_point_index_in_contour {
                     contour.push(Segment::Quad(QuadSeg {
@@ -67,7 +66,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
                     current_pen = first_point;
                     break;
                 }
-
                 let (point1, tag1) = get_point(
                     &mut current_point_index,
                     points,
@@ -95,7 +93,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
                     current_pen = end;
                     break;
                 }
-
                 if (tag1 & FT_POINT_TAG_ON_CURVE) != 0 {
                     contour.push(Segment::Quad(QuadSeg {
                         p0: current_pen,
@@ -105,7 +102,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
                     current_pen = point1;
                     break;
                 }
-
                 let point_half = point0.lerp(point1, 0.5);
                 contour.push(Segment::Quad(QuadSeg {
                     p0: current_pen,
@@ -116,7 +112,6 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
                 point0 = point1;
             }
         }
-
         if !contour.is_empty() && !same_point(current_pen, first_point) {
             contour.push(Segment::Line(LineSeg {
                 p0: current_pen,
@@ -127,13 +122,12 @@ pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segm
             contours.push(contour);
         }
     }
-
     contours
 }
 unsafe fn get_point(
     current_point_index: &mut usize,
     point_positions: &[ffi::FT_Vector],
-    point_tags: &[i8],
+    point_tags: &[std::ffi::c_char],
     last_point_index_in_contour: usize,
 ) -> (Vec2, u8) {
     debug_assert!(*current_point_index <= last_point_index_in_contour);
