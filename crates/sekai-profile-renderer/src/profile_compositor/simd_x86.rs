@@ -436,6 +436,27 @@ unsafe fn blend_rgba8_vector(
         }
     }
 
+    // The separable modes are defined per channel with saturating adds and a
+    // union of both coverages, which the packet path does not model. Running
+    // them through the scalar blender for the active lanes keeps the two
+    // executors bit-identical by construction instead of by a second
+    // implementation of the same arithmetic.
+    if matches!(
+        blend_mode,
+        BlendMode::Multiply | BlendMode::Screen | BlendMode::Add
+    ) {
+        let mut lanes = [0u32; 16];
+        _mm512_storeu_si512(lanes.as_mut_ptr().cast(), source);
+        for (lane, packed_source) in lanes.iter().enumerate() {
+            if active & (1 << lane) == 0 {
+                continue;
+            }
+            let pixel = std::slice::from_raw_parts_mut(destination.add(lane * 4), 4);
+            super::blend_pixel(pixel, packed_source.to_le_bytes(), blend_mode);
+        }
+        return;
+    }
+
     let destination_pixels = _mm512_maskz_loadu_epi32(active, destination.cast());
     let destination_alpha =
         _mm512_and_si512(_mm512_srli_epi32::<24>(destination_pixels), byte_mask);
@@ -462,7 +483,9 @@ unsafe fn blend_rgba8_vector(
             ),
             BlendMode::SrcIn => mul_div_255_round(source_channel, destination_alpha),
             BlendMode::DstIn => mul_div_255_round(destination_channel, source_alpha),
-            BlendMode::Multiply | BlendMode::Screen | BlendMode::Add => return,
+            BlendMode::Multiply | BlendMode::Screen | BlendMode::Add => {
+                unreachable!("separable modes take the scalar lane path above")
+            }
         };
         packed = _mm512_or_si512(packed, _mm512_sllv_epi32(output, _mm512_set1_epi32(shift)));
     }

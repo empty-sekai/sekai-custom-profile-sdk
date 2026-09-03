@@ -4518,6 +4518,7 @@ mod tests {
     #[test]
     fn separable_blend_modes_simd_matches_scalar() {
         if !packet_simd_available() {
+            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
             return;
         }
         const WIDTH: u32 = 21;
@@ -4908,6 +4909,7 @@ mod tests {
     #[test]
     fn ellipse_image_clip_differs_from_the_antialiased_reference_only_at_edges() {
         if !packet_simd_available() {
+            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
             return;
         }
         use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo, Paint, Rect as SkRect};
@@ -4986,6 +4988,7 @@ mod tests {
     #[test]
     fn ellipse_image_clip_has_only_the_known_skia_edge_tie_difference() {
         if !packet_simd_available() {
+            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
             return;
         }
         let (_temp, store) = store(vec![(
@@ -5044,6 +5047,7 @@ mod tests {
     #[test]
     fn rounded_image_clip_simd_matches_scalar() {
         if !packet_simd_available() {
+            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
             return;
         }
         let (_temp, store) = store(vec![(
@@ -5087,6 +5091,7 @@ mod tests {
     #[test]
     fn scaled_translated_rounded_image_clip_simd_matches_scalar() {
         if !packet_simd_available() {
+            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
             return;
         }
         let (_temp, store) = store(vec![(
