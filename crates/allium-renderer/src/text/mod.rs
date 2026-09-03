@@ -394,6 +394,12 @@ struct DrawCharOp {
     y: f32,
     pivot_x: f32,
     pivot_y: f32,
+    /// SDF footprint 的半展，与 `pivot_*` 同坐标系：墨迹盒各边外扩 atlas spread
+    /// 后的一半，也就是光栅器实际采样的 atlas 矩形。footprint 绕墨迹中心对称，
+    /// 而 `glyph_local_affine` 的局部原点正是墨迹中心，故可直接作局部盒半展。
+    /// 无轮廓字形为 0——它不会被光栅化，footprint 也就不存在。
+    half_w: f32,
+    half_h: f32,
     shear_cx: f32,
     scale_x: f32,
     skew_x: f32,
@@ -599,13 +605,14 @@ fn glyph_local_affine(op: &DrawCharOp) -> [f32; 6] {
 }
 
 /// 计算字形 footprint 四角经 `glyph_local_matrix` 变换后的设备前坐标（TMP 等效坐标系，
-/// 乘 TEXT_SCALE）。footprint 取绕 glyph center 的 ±pivot 盒；刚性旋转下保持矩形，
+/// 乘 TEXT_SCALE）。footprint 取绕 glyph center 的 ±(size/2 + spread) 盒，即 atlas
+/// 矩形——`pivot` 是墨迹中心偏移而非半展，拿它当半展会系统性偏离；刚性旋转下保持矩形，
 /// 复合产生剪切时退化为平行四边形——四角即可直接量化剪切。
 /// 返回 [TL, TR, BR, BL] 各 (x, y)。
 fn glyph_quad_corners(op: &DrawCharOp) -> [(f32, f32); 4] {
     let m = glyph_local_affine(op);
-    // 字形相对其 center（绘制原点在 -pivot）的局部盒。center 在原点，半展为 pivot。
-    let (hx, hy) = (op.pivot_x.abs().max(1.0), op.pivot_y.abs().max(1.0));
+    // 字形相对其 center（绘制原点在 -pivot）的局部盒。center 在原点。
+    let (hx, hy) = (op.half_w, op.half_h);
     let local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)];
     let mut out = [(0.0f32, 0.0f32); 4];
     for (i, (lx, ly)) in local.iter().enumerate() {
@@ -1574,6 +1581,25 @@ fn layout_text_ops(
                             .map(|g| -(g.plane_bearing_y() - g.plane_height() / 2.0) * ft_scale)
                     });
                 let pivot_y = ft_pivot_y.unwrap_or(0.0);
+                // SDF footprint：墨迹盒各边外扩 spread，即 atlas 矩形。绕墨迹中心
+                // 对称，所以半展直接就是 (size/2 + spread)。
+                let ft_half_extents = atlas_metrics
+                    .map(|metrics| {
+                        (
+                            (metrics.width / 2.0 + metrics.spread) * ft_scale,
+                            (metrics.height / 2.0 + metrics.spread) * ft_scale,
+                        )
+                    })
+                    .or_else(|| {
+                        sdf_glyph.as_ref().map(|g| {
+                            let spread = sdf_outline::sampling_spread();
+                            (
+                                (g.plane_width() / 2.0 + spread) * ft_scale,
+                                (g.plane_height() / 2.0 + spread) * ft_scale,
+                            )
+                        })
+                    });
+                let (half_w, half_h) = ft_half_extents.unwrap_or((0.0, 0.0));
                 // TMP italic shear 公式（从源码 + Frida 5 字符验证推导）：
                 // midPoint = height/2 + TMP_SPREAD; center_shift = 0.35 * (bY - h - spread) * base_eS
                 // 等价于：shear_cx = 0.35 * (bearingY - height - spread) * ft_scale
@@ -1605,6 +1631,8 @@ fn layout_text_ops(
                     y: ly + baseline_shift,
                     pivot_x,
                     pivot_y,
+                    half_w,
+                    half_h,
                     shear_cx,
                     scale_x: effective_scale,
                     skew_x: if seg.italic { -0.21 } else { 0.0 },
@@ -1670,6 +1698,8 @@ fn layout_text_ops(
                 y: ly,
                 pivot_x: 0.0,
                 pivot_y: 0.0,
+                half_w: 0.0,
+                half_h: 0.0,
                 shear_cx: 0.0,
                 scale_x: global.scale,
                 skew_x: 0.0,
@@ -2127,6 +2157,8 @@ mod tests {
             y: -8.5,
             pivot_x: 4.75,
             pivot_y: -2.25,
+            half_w: 8.5,
+            half_h: 11.25,
             shear_cx: 1.5,
             scale_x: 1.35,
             skew_x: -0.21,
@@ -2187,6 +2219,8 @@ mod tests {
             y: -8.5,
             pivot_x: 4.75,
             pivot_y: -2.25,
+            half_w: 8.5,
+            half_h: 11.25,
             shear_cx: 1.5,
             scale_x: 1.35,
             skew_x: -0.21,
@@ -2224,6 +2258,8 @@ mod tests {
                         y: -8.5,
                         pivot_x: 4.75,
                         pivot_y: -2.25,
+                        half_w: 8.5,
+                        half_h: 11.25,
                         shear_cx: 1.5,
                         scale_x,
                         skew_x,
@@ -2251,6 +2287,53 @@ mod tests {
             }
         }
         assert_eq!(case, 36);
+    }
+
+    /// The debug footprint is the atlas rect the rasterizer samples: the glyph
+    /// ink box inflated by the sampling spread on every side, centred on the
+    /// ink centre. A `<scale>` tag stretches it along X only and a `<rotate>`
+    /// tag merely reorients it, so the pair of side lengths is a
+    /// rotation-invariant signature of the device footprint.
+    #[test]
+    fn glyph_quad_footprint_is_the_padded_ink_box_stretched_on_x_only() {
+        for rotate_deg in [0.0f32, 37.0, -218.4, 90.0] {
+            for scale_x in [1.0f32, 1.2, 6.0] {
+                let op = super::DrawCharOp {
+                    ch: "\u{25cf}".into(),
+                    x: 13.25,
+                    y: -8.5,
+                    pivot_x: 4.75,
+                    pivot_y: -2.25,
+                    half_w: 8.5,
+                    half_h: 11.25,
+                    shear_cx: 0.0,
+                    scale_x,
+                    skew_x: 0.0,
+                    rotate_deg,
+                    font_size: 24.0,
+                    face: [0.2, 0.4, 0.6, 1.0],
+                    sdf_params: None,
+                    mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
+                        24.0, false, 255,
+                    ),
+                };
+                let quad = super::glyph_quad_corners(&op);
+                let side = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1);
+                let mut got = [side(quad[0], quad[1]), side(quad[1], quad[2])];
+                let mut want = [
+                    2.0 * op.half_w * scale_x * super::TEXT_SCALE,
+                    2.0 * op.half_h * super::TEXT_SCALE,
+                ];
+                got.sort_by(|a, b| a.partial_cmp(b).expect("finite side"));
+                want.sort_by(|a, b| a.partial_cmp(b).expect("finite side"));
+                for (got, want) in got.iter().zip(want.iter()) {
+                    assert!(
+                        (got - want).abs() <= 1e-3,
+                        "rotate {rotate_deg} scale {scale_x}: got {got} want {want}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
