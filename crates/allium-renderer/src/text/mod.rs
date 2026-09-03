@@ -2313,9 +2313,7 @@ mod tests {
                     font_size: 24.0,
                     face: [0.2, 0.4, 0.6, 1.0],
                     sdf_params: None,
-                    mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
-                        24.0, false, 255,
-                    ),
+                    mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(24.0, false, 255),
                 };
                 let quad = super::glyph_quad_corners(&op);
                 let side = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1);

@@ -5272,10 +5272,7 @@ mod tests {
         fn get_bonds_honor(&self, _id: i32) -> Option<crate::types::BondsHonorEntry> {
             None
         }
-        fn get_bonds_honor_word(
-            &self,
-            _word_id: i64,
-        ) -> Option<crate::types::BondsHonorWordEntry> {
+        fn get_bonds_honor_word(&self, _word_id: i64) -> Option<crate::types::BondsHonorWordEntry> {
             None
         }
         fn get_honor(&self, _honor_id: i32) -> Option<crate::types::HonorEntry> {
@@ -5312,14 +5309,11 @@ mod tests {
             vec![0u8; crate::sdf::shape_atlas::SHAPE_PAGE_HEADER_BYTES + extent * extent * 2];
         let magic = crate::sdf::shape_atlas::SHAPE_PAGE_MAGIC;
         page[..magic.len()].copy_from_slice(magic);
-        page[12..16]
-            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_PAGE_VERSION.to_le_bytes());
+        page[12..16].copy_from_slice(&crate::sdf::shape_atlas::SHAPE_PAGE_VERSION.to_le_bytes());
         page[16..20].copy_from_slice(&TELEMETRY_SHAPE_EXTENT.to_le_bytes());
         page[20..24].copy_from_slice(&TELEMETRY_SHAPE_EXTENT.to_le_bytes());
-        page[24..28]
-            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_WIDTH.to_le_bytes());
-        page[28..32]
-            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_HEIGHT.to_le_bytes());
+        page[24..28].copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_WIDTH.to_le_bytes());
+        page[28..32].copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_HEIGHT.to_le_bytes());
         page[32..36].copy_from_slice(&crate::sdf::shape_atlas::SHAPE_CHANNELS.to_le_bytes());
         // Fully inside the shape everywhere, so the executor writes pixels.
         for texel in 0..extent * extent {
@@ -5400,11 +5394,10 @@ mod tests {
             identity.height,
             identity.rg8_sha256,
         );
-        let renderer = crate::renderer::CustomProfileRenderer::new(std::sync::Arc::new(
-            SingleShapeProvider,
-        ))
-        .with_assets(std::sync::Arc::clone(&assets))
-        .with_shape_sdf_atlas(atlas);
+        let renderer =
+            crate::renderer::CustomProfileRenderer::new(std::sync::Arc::new(SingleShapeProvider))
+                .with_assets(std::sync::Arc::clone(&assets))
+                .with_shape_sdf_atlas(atlas);
 
         let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
             "shapes": [{
