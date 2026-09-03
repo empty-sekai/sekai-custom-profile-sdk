@@ -794,6 +794,11 @@ mod tests {
 
     #[test]
     fn persistent_offline_face_matches_one_shot_generation() {
+        if resolve_font_path("FZLanTingHei-DB-GBK").is_none() {
+            eprintln!("skipping: FONT_DIR does not provide the test family");
+            return;
+        }
+
         let family = "FZLanTingHei-DB-GBK";
         let path = resolve_font_path(family).expect("test font must exist");
         let generator = OfflineAtlasGlyphGenerator::new(family).expect("offline generator");
@@ -816,6 +821,11 @@ mod tests {
 
     #[test]
     fn realtime_edt_parentheses_scale_the_source_grid_without_cache_reuse() {
+        if resolve_font_path("FZLanTingHei-DB-GBK").is_none() {
+            eprintln!("skipping: FONT_DIR does not provide the test family");
+            return;
+        }
+
         let family = "FZLanTingHei-DB-GBK";
         for ch in ['(', ')'] {
             let normal = generate_realtime_edt(family, ch, 75.0, 6.0, 2).expect("normal EDT");

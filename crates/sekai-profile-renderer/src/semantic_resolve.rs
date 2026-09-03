@@ -1646,6 +1646,13 @@ mod tests {
 
     #[test]
     fn page_without_generals_matches_full_profile_base_semantics() {
+        if crate::sdf::outline::load_font_bytes_for_family(crate::widgets::theme::fonts::PRIMARY)
+            .is_none()
+        {
+            eprintln!("skipping: FONT_DIR does not provide the test family");
+            return;
+        }
+
         let object = serde_json::json!({
             "layer": 3, "lock": false,
             "position": { "x": 12.0, "y": -7.0, "z": 0.0 },
