@@ -3663,6 +3663,15 @@ mod tests {
             surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Paint, PaintStyle, Point,
         };
 
+        if crate::sdf::outline::load_font_bytes_for_family(
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        )
+        .is_none()
+        {
+            eprintln!("skipping: FONT_DIR does not provide the progress face");
+            return;
+        }
+
         let layer_id = StableId(302);
         let mut command = SemanticCommandSource::profile_text(
             StableId(303),
@@ -3717,7 +3726,7 @@ mod tests {
         // so this compares the recipe rather than two font lookups.
         let typeface =
             crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
-                .expect("Live Master progress face; set FONT_DIR to the font directory");
+                .expect("the progress face is present, guarded above");
         let font = Font::new(typeface, Some(20.0));
         let text_width = font.measure_str("73", None).0;
         let mut paint = Paint::default();

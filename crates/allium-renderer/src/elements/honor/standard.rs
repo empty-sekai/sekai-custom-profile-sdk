@@ -332,6 +332,15 @@ mod tests {
 
     #[test]
     fn live_master_progress_uses_simple_text_pixels() {
+        if crate::sdf::outline::load_font_bytes_for_family(
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        )
+        .is_none()
+        {
+            eprintln!("skipping: FONT_DIR does not provide the progress face");
+            return;
+        }
+
         let mut surface = surfaces::raster_n32_premul((200, 80)).expect("surface");
         surface.canvas().clear(Color::TRANSPARENT);
 
