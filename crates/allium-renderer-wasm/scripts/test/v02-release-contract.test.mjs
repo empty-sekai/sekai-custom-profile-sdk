@@ -17,8 +17,13 @@ test("npm publishing is version-strict, idempotent, and uses trusted publishing"
     /if \[\[ "\$\{CURRENT_VERSION\}" != "\$\{VERSION\}" \]\]; then[\s\S]*?exit 1\s+fi/,
   );
   assert.match(workflow, /PACKAGE_NAME=.*package\.json/);
-  assert.match(workflow, /PUBLISHED_VERSION=.*npm view/);
-  assert.match(workflow, /is already published; skipping npm publish/);
+  // Idempotence is asserted on the end state: publishing may fail because the
+  // version is already on the registry, and that has to count as success so a
+  // re-pushed tag can finish the release.
+  assert.match(workflow, /if npm publish "\$@"; then/);
+  assert.match(workflow, /elif npm view .*version >\/dev\/null 2>&1; then/);
+  assert.match(workflow, /is already on the registry; nothing to publish/);
+  assert.match(workflow, /npm publish failed and .* is not on the registry/);
   assert.match(workflow, /id-token: write\s+# npm Trusted Publishing \(OIDC\)/);
   assert.doesNotMatch(workflow, /npm version --no-git-tag-version/);
   assert.doesNotMatch(workflow, /NODE_AUTH_TOKEN/);
