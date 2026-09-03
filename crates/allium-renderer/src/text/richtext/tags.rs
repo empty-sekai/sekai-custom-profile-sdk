@@ -85,6 +85,47 @@ fn parse_indent_value(raw: &str) -> Option<Indent> {
     parse_loose_f32(value).map(Indent::Pixels)
 }
 
+/// TextMesh Pro's numeric attribute reader. Digits and `.` accumulate, a `,`
+/// ends the scan, and every other character is skipped rather than treated as
+/// an error, so a value carrying no digits at all resolves to 0 and the tag is
+/// still applied. The attribute is refused only when the accumulated magnitude
+/// leaves the representable range.
+fn tmp_convert_to_float(raw: &str) -> Option<f32> {
+    let bytes = raw.as_bytes();
+    let mut index = 0usize;
+    let mut sign = 1.0f32;
+    match bytes.first() {
+        Some(b'+') => index = 1,
+        Some(b'-') => {
+            sign = -1.0;
+            index = 1;
+        }
+        _ => {}
+    }
+    let mut value = 0.0f32;
+    let mut is_integer = true;
+    let mut decimal_multiplier = 0.0f32;
+    while index < bytes.len() {
+        let c = bytes[index];
+        index += 1;
+        if c == b'.' {
+            is_integer = false;
+            decimal_multiplier = 0.1;
+        } else if c.is_ascii_digit() {
+            let digit = f32::from(c - b'0');
+            if is_integer {
+                value = value * 10.0 + digit * sign;
+            } else {
+                value += digit * decimal_multiplier * sign;
+                decimal_multiplier *= 0.1;
+            }
+        } else if c == b',' {
+            break;
+        }
+    }
+    (value <= 32767.0).then_some(value)
+}
+
 fn parse_loose_f32(raw: &str) -> Option<f32> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -278,7 +319,7 @@ impl RichTextParseState {
         }
         if let Some(v) = tl.strip_prefix("line-height=") {
             let v = v.trim_matches('#');
-            if let Some(n) = parse_loose_f32(v) {
+            if let Some(n) = tmp_convert_to_float(v) {
                 self.line_height_override = Some(n);
             }
             return true;
