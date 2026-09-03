@@ -1,8 +1,10 @@
-//! TMP 材质参数解析：从字号 / 粗体 / 顶点透明度与 outline 配方推导 SDF tile
-//! 执行器消费的 face / outline scale-bias。
+//! TMP material parameter resolution: derives the face and outline
+//! scale-bias the SDF tile executor consumes from font size, boldness,
+//! vertex alpha and the outline recipe.
 //!
-//! 这里只有纯计算与环境变量覆盖，不接触任何光栅后端；`sdf::rasterize` 的
-//! 逐字形位图路径与 tile 执行器共用同一份参数，保证两条路径逐字节同源。
+//! Pure computation plus environment-variable overrides; it touches no
+//! raster backend. The tile executor is the only consumer, so a glyph's
+//! material is resolved once and shared by every command it produces.
 
 use std::sync::OnceLock;
 
