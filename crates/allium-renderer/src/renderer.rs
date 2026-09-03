@@ -3971,6 +3971,16 @@ pub enum AnimationLayerRaster {
     DeferredSdf(DeferredAnimationSdfLayer),
 }
 
+/// A rasterized animation layer together with the execution telemetry of the
+/// SDF run that produced it.
+///
+/// `execution` is `None` when no run took place: the layer covered no pixels,
+/// or its commands were retained in place of its pixels.
+pub struct CroppedLayerBackendRaster {
+    pub raster: AnimationLayerRaster,
+    pub execution: Option<FullCardSdfExecutionOutput>,
+}
+
 /// An animation layer kept as commands rather than pixels.
 ///
 /// The commands are in canvas coordinates — un-shifted — so a window of any
@@ -4026,6 +4036,33 @@ pub struct OrderedLayerRaster {
 }
 
 impl CustomProfileRenderer {
+    /// Reports whether a card animates, without rendering it: builds the
+    /// scene the export would render and preflights its compiled programs up
+    /// to `maximum_tick`.
+    #[cfg(feature = "animation-export")]
+    pub fn animation_preflight_with_profile(
+        &self,
+        card: &CustomProfileCard,
+        profile: Option<&crate::profile::ProfileData>,
+        document_key: &str,
+        region: &str,
+        maximum_tick: u64,
+    ) -> Result<allium_renderer_core::AnimationPreflight, String> {
+        let md = self.snapshot();
+        let scene = crate::core_shadow::build_scene(
+            card,
+            &md,
+            document_key,
+            region,
+            profile,
+            region,
+            self.assets.as_deref(),
+        )?;
+        scene
+            .animation_preflight(maximum_tick)
+            .map_err(|error| error.to_string())
+    }
+
     /// Renders a card's animation export: preflights the compiled scene,
     /// rasterizes each element layer through the ordered SDF path with the
     /// executors the backend selection grants, composites the frames, and
@@ -4057,6 +4094,40 @@ impl CustomProfileRenderer {
         )
     }
 
+    /// Resolves a backend config against this renderer's capabilities for the
+    /// animation layer raster.
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn resolve_animation_profile_backend(
+        &self,
+        config: &crate::profile_backend::ProfileBackendConfig,
+    ) -> Result<crate::profile_backend::ResolvedProfileBackend, String> {
+        config
+            .resolve(self.profile_backend_capabilities())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Records the identity of every atlas the animation layer raster may
+    /// sample, so a telemetry consumer can tell which atlas build produced the
+    /// pixels. Atlases the selection did not enable are left out.
+    #[cfg(feature = "animation-export")]
+    pub(crate) fn record_animation_profile_atlas_identities(
+        &self,
+        telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
+        text_enabled: bool,
+        shape_enabled: bool,
+        usage: &str,
+    ) {
+        let sdf_atlases = self.sdf_atlases.load_full();
+        record_profile_atlas_identities(
+            telemetry,
+            text_enabled.then_some(sdf_atlases.as_ref()),
+            shape_enabled
+                .then_some(self.shape_sdf_atlas.as_deref())
+                .flatten(),
+            usage,
+        );
+    }
+
     /// Renders one element layer through the ordered SDF path — the same
     /// pipeline the profile backend uses for full pages — onto a transparent
     /// surface expanded for the layer's dynamic travel, then crops to the
@@ -4066,19 +4137,23 @@ impl CustomProfileRenderer {
     pub fn render_ordered_element_layer_cropped(
         &self,
         card: &CustomProfileCard,
+        md: &MasterData,
+        assets: Option<&AssetStore>,
         profile: Option<&crate::profile::ProfileData>,
         text_sdf: crate::profile_backend::TextSdfExecutor,
         shape_sdf: crate::profile_backend::ShapeSdfExecutor,
         include_dynamic_bounds: bool,
         forbid_legacy_elements: bool,
+        tile_width: u16,
+        tile_height: u16,
+        render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<AnimationLayerRaster, String> {
-        let md = self.snapshot();
+    ) -> Result<CroppedLayerBackendRaster, String> {
         let w = crate::transform::CANVAS_WIDTH as i32;
         let h = crate::transform::CANVAS_HEIGHT as i32;
         let elements = crate::elements::flatten_and_sort(card);
         let dynamic = if include_dynamic_bounds {
-            layer_dynamic_for_elements(&elements, &md)
+            layer_dynamic_for_elements(&elements, md)
         } else {
             None
         };
@@ -4111,12 +4186,12 @@ impl CustomProfileRenderer {
         if let Some(executor) = tight_executor {
             return self.render_animation_sdf_layer_tight(
                 card,
-                &md,
-                self.assets.as_deref(),
+                md,
+                assets,
                 profile,
                 executor,
-                32,
-                32,
+                tile_width,
+                tile_height,
                 dynamic,
                 expansion,
                 maximum_retained_layer_bytes,
@@ -4137,26 +4212,28 @@ impl CustomProfileRenderer {
             prepare_direct_axis_shape: false,
             forbid_legacy_elements,
         };
-        let generation = self.pin_render_object_generation();
         let mut output = self.render_ordered_sdf_surface_candidate(
             card,
             profile,
             text_executor,
             shape_executor,
-            32,
-            32,
+            tile_width,
+            tile_height,
             false,
             false,
             spec,
-            &md,
-            self.assets.as_deref(),
+            md,
+            assets,
             None,
-            generation.store(),
+            render_object_store,
         )?;
         let rgba = std::mem::take(&mut output.rgba);
         let row_bytes = surface_w as usize * 4;
         let surface_bytes = row_bytes * surface_h as usize;
+        let bounds_started = std::time::Instant::now();
         let (bx, by, bw, bh) = opaque_bounds_for_pixels(&rgba, surface_w, surface_h, row_bytes)?;
+        output.timings.postprocess_bounds_ns = elapsed_ns(bounds_started);
+        let crop_started = std::time::Instant::now();
         let raster = if bw == 0 || bh == 0 {
             OrderedLayerRaster {
                 pixels: Vec::new(),
@@ -4189,9 +4266,18 @@ impl CustomProfileRenderer {
                 scratch_peak_bytes: surface_bytes.saturating_add(bw as usize * bh as usize * 4),
             }
         };
+        output.timings.postprocess_crop_ns = elapsed_ns(crop_started);
+        output.timings.total_ns = output
+            .timings
+            .total_ns
+            .saturating_add(output.timings.postprocess_bounds_ns)
+            .saturating_add(output.timings.postprocess_crop_ns);
         let raster = AnimationLayerRaster::Ordered(raster);
         self.recycle_profile_rgba_scratch(rgba);
-        Ok(raster)
+        Ok(CroppedLayerBackendRaster {
+            raster,
+            execution: Some(output),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4207,8 +4293,10 @@ impl CustomProfileRenderer {
         dynamic: Option<LayerDynamic>,
         reachable: CanvasExpansion,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<AnimationLayerRaster, String> {
+    ) -> Result<CroppedLayerBackendRaster, String> {
+        let total_started = std::time::Instant::now();
         let sdf_atlases = self.sdf_atlases.load_full();
+        let capture_started = std::time::Instant::now();
         let captured = capture_sdf_primitives(
             card,
             md,
@@ -4219,6 +4307,7 @@ impl CustomProfileRenderer {
             crate::transform::CANVAS_HEIGHT as u32,
             SdfCaptureKinds::TEXT_AND_SHAPE,
         )?;
+        let capture_ns = elapsed_ns(capture_started);
 
         let base_source = crate::sdf::tile::MixedSdfAtlasSource::new(
             &sdf_atlases,
@@ -4233,6 +4322,7 @@ impl CustomProfileRenderer {
         let runtime_pages = self
             .realtime_oversized_glyph_generation
             .then_some(&mut runtime_text_pages);
+        let mapping_started = std::time::Instant::now();
         let mut commands = map_captured_sdf_commands(
             &captured.primitives,
             &sdf_atlases,
@@ -4243,17 +4333,21 @@ impl CustomProfileRenderer {
             Some(&mut realtime_edt_batch),
             None,
         )?;
+        let command_mapping_ns = elapsed_ns(mapping_started);
 
-        let empty = AnimationLayerRaster::Ordered(OrderedLayerRaster {
-            pixels: Vec::new(),
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            dynamic: dynamic.clone(),
-            legacy_element_count: 0,
-            scratch_peak_bytes: 0,
-        });
+        let empty = CroppedLayerBackendRaster {
+            raster: AnimationLayerRaster::Ordered(OrderedLayerRaster {
+                pixels: Vec::new(),
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                dynamic: dynamic.clone(),
+                legacy_element_count: 0,
+                scratch_peak_bytes: 0,
+            }),
+            execution: None,
+        };
         let Some((content_x, content_y, content_w, content_h)) =
             tight_sdf_command_bounds(&commands)
         else {
@@ -4290,8 +4384,8 @@ impl CustomProfileRenderer {
         // rasterized per frame. The commands stay in canvas coordinates here,
         // so any window origin can be applied later.
         if retained_peak_bytes > maximum_retained_layer_bytes {
-            return Ok(AnimationLayerRaster::DeferredSdf(
-                DeferredAnimationSdfLayer {
+            return Ok(CroppedLayerBackendRaster {
+                raster: AnimationLayerRaster::DeferredSdf(DeferredAnimationSdfLayer {
                     commands,
                     text_atlases: sdf_atlases,
                     shape_atlas: self.shape_sdf_atlas.clone(),
@@ -4307,8 +4401,9 @@ impl CustomProfileRenderer {
                     width,
                     height,
                     dynamic,
-                },
-            ));
+                }),
+                execution: None,
+            });
         }
 
         shift_sdf_commands(&mut commands, -(origin_x as f32), -(origin_y as f32));
@@ -4323,6 +4418,7 @@ impl CustomProfileRenderer {
         )
         .map_err(|error| error.to_string())?;
 
+        let plan_started = std::time::Instant::now();
         let plan = crate::sdf::tile::SdfTilePlan::build_for_one_shot_dynamic_layer(
             crate::sdf::tile::TileGrid {
                 canvas_width: width,
@@ -4334,9 +4430,11 @@ impl CustomProfileRenderer {
             &source,
         )
         .map_err(|error| error.to_string())?;
+        let plan_build_ns = elapsed_ns(plan_started);
 
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
-        match executor {
+        let execute_started = std::time::Instant::now();
+        let execution_stats = match executor {
             SdfLayerCandidateExecutor::ScalarF32 => plan
                 .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
                 .map_err(|error| error.to_string())?,
@@ -4349,7 +4447,9 @@ impl CustomProfileRenderer {
                 )
                 .map_err(|error| error.to_string())?,
         };
+        let execute_ns = elapsed_ns(execute_started);
 
+        let crop_started = std::time::Instant::now();
         let pixels = crop_pixels_lossless(
             &rgba,
             width as usize * 4,
@@ -4360,22 +4460,56 @@ impl CustomProfileRenderer {
             width,
             height,
         )?;
+        let crop_ns = elapsed_ns(crop_started);
         // The surface is already the intersection of the content bounds and
         // the reachable canvas, so the full surface is the layer raster; the
         // accounting matches the production backend (surface plus the full
         // surface copy taken during the crop).
         let scratch_peak_bytes = surface_bytes.saturating_mul(2);
         self.recycle_profile_rgba_scratch(rgba);
-        Ok(AnimationLayerRaster::Ordered(OrderedLayerRaster {
-            pixels,
-            x: origin_x,
-            y: origin_y,
+        let mut execution = FullCardSdfExecutionOutput {
             width,
             height,
-            dynamic,
-            legacy_element_count: 0,
-            scratch_peak_bytes,
-        }))
+            clear_rgba: [0, 0, 0, 0],
+            ..FullCardSdfExecutionOutput::default()
+        };
+        execution.sdf_run_count = 1;
+        execution.sdf_text_element_count = captured.text_count;
+        execution.sdf_shape_element_count = captured.shape_count;
+        execution.captured_text_count = captured.text_count;
+        execution.captured_shape_count = captured.shape_count;
+        execution.realtime_edt_glyphs = realtime_edt_glyphs;
+        execution.realtime_edt_batch = realtime_edt_batch;
+        execution.plan_stats = plan.stats();
+        execution.execution_stats = execution_stats;
+        execution.atlas_mapped_bytes =
+            sdf_atlases
+                .mapped_bytes()
+                .saturating_add(self.shape_sdf_atlas.as_deref().map_or(
+                    0,
+                    crate::sdf::shape_atlas::MappedShapeSdfAtlas::mapped_bytes,
+                ));
+        execution.plan_bytes = plan.resident_bytes();
+        execution.span_bytes = plan.span_bytes();
+        execution.timings.capture_ns = capture_ns;
+        execution.timings.command_mapping_ns = command_mapping_ns;
+        execution.timings.plan_build_ns = plan_build_ns;
+        execution.timings.execute_ns = execute_ns;
+        execution.timings.postprocess_crop_ns = crop_ns;
+        execution.timings.total_ns = elapsed_ns(total_started);
+        Ok(CroppedLayerBackendRaster {
+            raster: AnimationLayerRaster::Ordered(OrderedLayerRaster {
+                pixels,
+                x: origin_x,
+                y: origin_y,
+                width,
+                height,
+                dynamic,
+                legacy_element_count: 0,
+                scratch_peak_bytes,
+            }),
+            execution: Some(execution),
+        })
     }
 
     /// Rasterizes one source-space window of a deferred SDF animation layer

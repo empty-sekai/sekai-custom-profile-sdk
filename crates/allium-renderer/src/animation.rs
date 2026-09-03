@@ -925,6 +925,9 @@ impl DirtyRegionSet {
     }
 }
 
+/// Atlas-identity usage label for the animation layer raster.
+const ANIMATION_LAYER_RASTER_USAGE: &str = "animation-layer-raster";
+
 type AnimationRasterGroup = (
     Option<allium_renderer_core::LayerId>,
     Vec<(allium_renderer_core::AuthoredElementKind, usize)>,
@@ -1284,7 +1287,7 @@ fn rasterize_animation_groups(
     _dynamic_expansions: &std::collections::BTreeMap<allium_renderer_core::LayerId, [i32; 4]>,
     groups: &[AnimationRasterGroup],
     backend: Option<crate::profile_backend::ProfileBackendConfig>,
-    _render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
     retained_layer_budget: usize,
 ) -> Result<
     (
@@ -1303,11 +1306,9 @@ fn rasterize_animation_groups(
         );
     };
     let started = std::time::Instant::now();
-    let selection = config
-        .resolve(renderer.profile_backend_capabilities())
-        .map_err(|error| error.to_string())?;
+    let selection = renderer.resolve_animation_profile_backend(&config)?;
     let mut telemetry = ProfileRenderTelemetry::new(
-        config,
+        config.clone(),
         crate::profile_backend::PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
     );
     telemetry.apply_selection(selection.clone());
@@ -1321,18 +1322,29 @@ fn rasterize_animation_groups(
     let (layers, bytes, scratch) = if sdf_selected {
         let forbid_legacy_elements =
             selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
+        renderer.record_animation_profile_atlas_identities(
+            &mut telemetry,
+            selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia,
+            selection.shape_sdf != crate::profile_backend::ShapeSdfExecutor::Skia,
+            ANIMATION_LAYER_RASTER_USAGE,
+        );
         rasterize_animation_groups_ordered(
             renderer,
             card,
+            md,
+            assets,
             profile,
             groups,
             selection.text_sdf,
             selection.shape_sdf,
             forbid_legacy_elements,
+            config.tile_width,
+            config.tile_height,
+            &mut telemetry,
+            render_object_store,
             retained_layer_budget,
         )?
     } else {
-        let _ = (md, assets);
         return Err(
             "the animation backend selection resolved to the retired legacy layer raster;              request SDF executors"
                 .into(),
@@ -1358,39 +1370,210 @@ fn animation_selection_grants_sdf_executors(
 /// Rasterizes each animation group through the ordered SDF path — the same
 /// pipeline the profile backend uses for pages — with the executors the
 /// backend selection granted.
+///
+/// Oversized glyphs are generated once for the whole export rather than once
+/// per layer: every group's card contributes to a single realtime-EDT batch
+/// that stays installed for the layer loop, so layers that share a glyph share
+/// the page generated for it.
+#[allow(clippy::too_many_arguments)]
 fn rasterize_animation_groups_ordered(
     renderer: &crate::renderer::CustomProfileRenderer,
     card: &CustomProfileCard,
+    md: &MasterData,
+    assets: Option<&AssetStore>,
     profile: Option<&crate::profile::ProfileData>,
     groups: &[AnimationRasterGroup],
     text_sdf: crate::profile_backend::TextSdfExecutor,
     shape_sdf: crate::profile_backend::ShapeSdfExecutor,
     forbid_legacy_elements: bool,
+    tile_width: u16,
+    tile_height: u16,
+    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
+    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
     retained_layer_budget: usize,
 ) -> Result<(Vec<RasterLayer>, usize, usize), String> {
     let mut layers = Vec::with_capacity(groups.len());
     let mut layer_raster_bytes = 0usize;
     let mut scratch_peak_bytes = 0usize;
-    for (dynamic_layer_id, members) in groups {
-        let layer_card = grouped_layer_card(card, members);
-        let output = renderer.render_ordered_element_layer_cropped(
-            &layer_card,
-            profile,
-            text_sdf,
-            shape_sdf,
-            animation_group_uses_dynamic_bounds(*dynamic_layer_id),
-            forbid_legacy_elements,
-            retained_layer_budget.saturating_sub(layer_raster_bytes),
-        )?;
-        push_animation_raster(
-            &mut layers,
-            &mut layer_raster_bytes,
-            &mut scratch_peak_bytes,
-            *dynamic_layer_id,
-            output,
-        )?;
-    }
-    Ok((layers, layer_raster_bytes, scratch_peak_bytes))
+    let layer_cards = groups
+        .iter()
+        .map(|(_, members)| grouped_layer_card(card, members))
+        .collect::<Vec<_>>();
+    let prepared = renderer.prepare_realtime_edt_batch(&layer_cards, md, assets, profile)?;
+    telemetry.work.realtime_edt_glyph_count = prepared
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.substitution_count)
+        .sum();
+    telemetry.bytes.realtime_edt_page_bytes =
+        prepared.glyphs.iter().map(|glyph| glyph.page_bytes).sum();
+    telemetry.timings.realtime_edt_generation_ns = prepared
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.generation_ns)
+        .sum();
+    telemetry
+        .realtime_edt_glyphs
+        .extend(prepared.glyphs.iter().cloned());
+    telemetry.realtime_edt_batch.accumulate(&prepared.telemetry);
+
+    renderer.with_realtime_edt_batch(prepared, || {
+        for ((dynamic_layer_id, _), layer_card) in groups.iter().zip(&layer_cards) {
+            let output = renderer.render_ordered_element_layer_cropped(
+                layer_card,
+                md,
+                assets,
+                profile,
+                text_sdf,
+                shape_sdf,
+                animation_group_uses_dynamic_bounds(*dynamic_layer_id),
+                forbid_legacy_elements,
+                tile_width,
+                tile_height,
+                render_object_store,
+                retained_layer_budget.saturating_sub(layer_raster_bytes),
+            )?;
+            if let Some(execution) = output.execution.as_ref() {
+                record_animation_layer_execution(telemetry, execution);
+            }
+            push_animation_raster(
+                &mut layers,
+                &mut layer_raster_bytes,
+                &mut scratch_peak_bytes,
+                *dynamic_layer_id,
+                output.raster,
+            )?;
+        }
+        Ok((layers, layer_raster_bytes, scratch_peak_bytes))
+    })
+}
+
+/// Folds one layer's SDF execution record into the export-wide telemetry.
+fn record_animation_layer_execution(
+    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
+    output: &crate::renderer::FullCardSdfExecutionOutput,
+) {
+    telemetry.work.realtime_edt_glyph_count =
+        telemetry.work.realtime_edt_glyph_count.saturating_add(
+            output
+                .realtime_edt_glyphs
+                .iter()
+                .map(|glyph| glyph.substitution_count)
+                .sum::<u64>(),
+        );
+    telemetry.bytes.realtime_edt_page_bytes =
+        telemetry.bytes.realtime_edt_page_bytes.saturating_add(
+            output
+                .realtime_edt_glyphs
+                .iter()
+                .map(|glyph| glyph.page_bytes)
+                .sum::<u64>(),
+        );
+    telemetry.timings.realtime_edt_generation_ns =
+        telemetry.timings.realtime_edt_generation_ns.saturating_add(
+            output
+                .realtime_edt_glyphs
+                .iter()
+                .map(|glyph| glyph.generation_ns)
+                .sum::<u64>(),
+        );
+    telemetry
+        .realtime_edt_glyphs
+        .extend(output.realtime_edt_glyphs.iter().cloned());
+    telemetry
+        .realtime_edt_batch
+        .accumulate(&output.realtime_edt_batch);
+    telemetry.work.element_run_count = telemetry
+        .work
+        .element_run_count
+        .saturating_add(output.sdf_run_count.saturating_add(output.legacy_run_count));
+    telemetry.bytes.atlas_mapped_bytes = output.atlas_mapped_bytes;
+    telemetry.timings.surface_create_ns = telemetry
+        .timings
+        .surface_create_ns
+        .saturating_add(output.timings.surface_create_ns);
+    telemetry.timings.surface_clear_ns = telemetry
+        .timings
+        .surface_clear_ns
+        .saturating_add(output.timings.surface_clear_ns);
+    telemetry.timings.sdf_capture_ns = telemetry
+        .timings
+        .sdf_capture_ns
+        .saturating_add(output.timings.capture_ns);
+    telemetry.timings.sdf_capture_rich_parse_ns = telemetry
+        .timings
+        .sdf_capture_rich_parse_ns
+        .saturating_add(output.timings.capture_rich_parse_ns);
+    telemetry.timings.sdf_capture_font_resolve_ns = telemetry
+        .timings
+        .sdf_capture_font_resolve_ns
+        .saturating_add(output.timings.capture_font_resolve_ns);
+    telemetry.timings.sdf_capture_layout_setup_ns = telemetry
+        .timings
+        .sdf_capture_layout_setup_ns
+        .saturating_add(output.timings.capture_layout_setup_ns);
+    telemetry.timings.sdf_capture_measure_ns = telemetry
+        .timings
+        .sdf_capture_measure_ns
+        .saturating_add(output.timings.capture_measure_ns);
+    telemetry.timings.sdf_capture_command_build_ns = telemetry
+        .timings
+        .sdf_capture_command_build_ns
+        .saturating_add(output.timings.capture_command_build_ns);
+    telemetry.timings.sdf_capture_emit_ns = telemetry
+        .timings
+        .sdf_capture_emit_ns
+        .saturating_add(output.timings.capture_emit_ns);
+    telemetry.timings.sdf_command_mapping_ns = telemetry
+        .timings
+        .sdf_command_mapping_ns
+        .saturating_add(output.timings.command_mapping_ns);
+    telemetry.timings.sdf_plan_build_ns = telemetry
+        .timings
+        .sdf_plan_build_ns
+        .saturating_add(output.timings.plan_build_ns);
+    telemetry.timings.sdf_execute_ns = telemetry
+        .timings
+        .sdf_execute_ns
+        .saturating_add(output.timings.execute_ns);
+    telemetry.timings.legacy_element_draw_ns = telemetry
+        .timings
+        .legacy_element_draw_ns
+        .saturating_add(output.timings.legacy_draw_ns);
+    telemetry.timings.rgba_snapshot_ns = telemetry
+        .timings
+        .rgba_snapshot_ns
+        .saturating_add(output.timings.rgba_snapshot_ns);
+    telemetry.timings.dynamic_layer_bounds_ns = telemetry
+        .timings
+        .dynamic_layer_bounds_ns
+        .saturating_add(output.timings.postprocess_bounds_ns);
+    telemetry.timings.dynamic_layer_crop_ns = telemetry
+        .timings
+        .dynamic_layer_crop_ns
+        .saturating_add(output.timings.postprocess_crop_ns);
+    telemetry.record_executed_sdf_commands(
+        output.sdf_text_element_count,
+        output.sdf_shape_element_count,
+        output.captured_text_count,
+    );
+    telemetry.record_sdf_plan(output.plan_stats, output.plan_bytes, output.span_bytes);
+    telemetry.record_sdf_execution(output.execution_stats);
+    telemetry.record_legacy_commands(
+        crate::profile_backend::ProfileCommandKind::Text,
+        output.legacy_text_count,
+        0,
+    );
+    telemetry.record_legacy_commands(
+        crate::profile_backend::ProfileCommandKind::Shape,
+        output.legacy_shape_count,
+        0,
+    );
+    telemetry.record_legacy_commands(
+        crate::profile_backend::ProfileCommandKind::Image,
+        output.legacy_image_count,
+        output.timings.legacy_draw_ns,
+    );
 }
 
 fn push_animation_raster(
@@ -5038,6 +5221,284 @@ mod tests {
         .unwrap();
 
         assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
+    }
+
+    /// A provider that names exactly one shape resource, so a shape element
+    /// resolves to a stable asset key without any other master-data table.
+    struct SingleShapeProvider;
+
+    impl crate::masterdata::MasterDataProvider for SingleShapeProvider {
+        fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _card_id: i32) -> Option<crate::types::CardEntry> {
+            None
+        }
+        fn resolve_color(&self, _color_id: i32) -> Option<crate::masterdata::ResolvedColor> {
+            None
+        }
+        fn resolve_font(&self, _font_id: i32) -> Option<String> {
+            None
+        }
+        fn resolve_stamp(&self, _stamp_id: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(
+            &self,
+            res_type: &str,
+            id: i32,
+        ) -> Option<crate::masterdata::ResourceInfo> {
+            (res_type == "shape" && id == TELEMETRY_SHAPE_ID).then(|| {
+                crate::masterdata::ResourceInfo {
+                    file_name: TELEMETRY_SHAPE_FILE.into(),
+                    load_val: "custom_profile".into(),
+                    resource_type: "shape".into(),
+                }
+            })
+        }
+        fn resolve_honor(
+            &self,
+            _honor_id: i32,
+            _honor_level: i32,
+        ) -> Option<crate::masterdata::ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, _id: i32) -> Option<crate::types::BondsHonorEntry> {
+            None
+        }
+        fn get_bonds_honor_word(
+            &self,
+            _word_id: i64,
+        ) -> Option<crate::types::BondsHonorWordEntry> {
+            None
+        }
+        fn get_honor(&self, _honor_id: i32) -> Option<crate::types::HonorEntry> {
+            None
+        }
+        fn resolve_unit_vs_sd(&self, _self_id: i32, _partner_id: i32) -> i32 {
+            0
+        }
+        fn font_count(&self) -> usize {
+            0
+        }
+        fn color_count(&self) -> usize {
+            0
+        }
+    }
+
+    const TELEMETRY_SHAPE_ID: i32 = 1;
+    const TELEMETRY_SHAPE_FILE: &str = "telemetry_square";
+    const TELEMETRY_SHAPE_EXTENT: u32 = 8;
+
+    /// Writes a shape SDF atlas whose single entry matches the identity the
+    /// asset store derives for `asset_key`, and returns it opened.
+    fn telemetry_shape_atlas(
+        root: &std::path::Path,
+        asset_key: &str,
+        identity_width: i32,
+        identity_height: i32,
+        identity_rg8_sha256: String,
+    ) -> std::sync::Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas> {
+        use sha2::Digest;
+
+        let extent = TELEMETRY_SHAPE_EXTENT as usize;
+        let mut page =
+            vec![0u8; crate::sdf::shape_atlas::SHAPE_PAGE_HEADER_BYTES + extent * extent * 2];
+        let magic = crate::sdf::shape_atlas::SHAPE_PAGE_MAGIC;
+        page[..magic.len()].copy_from_slice(magic);
+        page[12..16]
+            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_PAGE_VERSION.to_le_bytes());
+        page[16..20].copy_from_slice(&TELEMETRY_SHAPE_EXTENT.to_le_bytes());
+        page[20..24].copy_from_slice(&TELEMETRY_SHAPE_EXTENT.to_le_bytes());
+        page[24..28]
+            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_WIDTH.to_le_bytes());
+        page[28..32]
+            .copy_from_slice(&crate::sdf::shape_atlas::SHAPE_BLOCK_HEIGHT.to_le_bytes());
+        page[32..36].copy_from_slice(&crate::sdf::shape_atlas::SHAPE_CHANNELS.to_le_bytes());
+        // Fully inside the shape everywhere, so the executor writes pixels.
+        for texel in 0..extent * extent {
+            let offset = crate::sdf::shape_atlas::SHAPE_PAGE_HEADER_BYTES + texel * 2;
+            page[offset] = 255;
+            page[offset + 1] = 255;
+        }
+        let page_name = "shape-page-000.rg8swz";
+        std::fs::write(root.join(page_name), &page).expect("write shape page");
+        let manifest = crate::sdf::shape_atlas::ShapeSdfAtlasManifest {
+            schema: crate::sdf::shape_atlas::SHAPE_ATLAS_MANIFEST_SCHEMA.into(),
+            generator_contract: crate::sdf::shape_atlas::SHAPE_ATLAS_GENERATOR_CONTRACT.into(),
+            pixel_format: crate::sdf::shape_atlas::SHAPE_ATLAS_PIXEL_FORMAT.into(),
+            pages: vec![crate::sdf::shape_atlas::ShapeSdfAtlasPageManifest {
+                file: page_name.into(),
+                width: TELEMETRY_SHAPE_EXTENT,
+                height: TELEMETRY_SHAPE_EXTENT,
+                file_sha256: hex::encode(sha2::Sha256::digest(&page)),
+            }],
+            shapes: vec![crate::sdf::shape_atlas::ShapeSdfAtlasEntry {
+                shape_id: TELEMETRY_SHAPE_ID,
+                asset_key: asset_key.into(),
+                source_sha256: "00".repeat(32),
+                source_rg8_sha256: identity_rg8_sha256,
+                page: 0,
+                rect: [0, 0, TELEMETRY_SHAPE_EXTENT, TELEMETRY_SHAPE_EXTENT],
+                source_size: [identity_width as u32, identity_height as u32],
+            }],
+            generation: crate::sdf::shape_atlas::ShapeSdfAtlasGenerationReport {
+                requested_shape_count: 1,
+                packed_shape_count: 1,
+                failed_shape_count: 0,
+                page_width: TELEMETRY_SHAPE_EXTENT,
+                page_height: TELEMETRY_SHAPE_EXTENT,
+                gutter: 0,
+                failures: Vec::new(),
+            },
+        };
+        let manifest_path = root.join("manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize shape manifest"),
+        )
+        .expect("write shape manifest");
+        std::sync::Arc::new(
+            crate::sdf::shape_atlas::MappedShapeSdfAtlas::open(&manifest_path)
+                .expect("open shape atlas"),
+        )
+    }
+
+    /// The ordered layer raster must report what it did, not just what it drew:
+    /// the atlases it was allowed to sample, the runs it executed, and a
+    /// realtime-EDT account whose totals agree with the per-glyph records they
+    /// were summed from.
+    ///
+    /// The corpus is shape-only, so no oversized glyph is generated and the
+    /// three realtime-EDT totals are legitimately zero; the assertion is the
+    /// invariant that each total equals the sum over `realtime_edt_glyphs`,
+    /// which holds whether or not any glyph was generated.
+    #[test]
+    fn ordered_layer_raster_reports_atlas_identity_runs_and_realtime_edt_totals() {
+        let root = tempfile::tempdir().expect("shape telemetry tempdir");
+        let extent = TELEMETRY_SHAPE_EXTENT;
+        let pixels = vec![255u8; (extent * extent * 4) as usize];
+        let encoded =
+            crate::codec::png::encode_rgba(extent, extent, &pixels).expect("encode shape source");
+        let asset_key = format!("custom_profile/shape/{TELEMETRY_SHAPE_FILE}");
+        let assets = std::sync::Arc::new(crate::assets::AssetStore::new(4));
+        assets.put(asset_key.clone(), encoded);
+        let identity = assets
+            .shape_sdf_source_identity_for_key(&asset_key)
+            .expect("shape source identity");
+
+        let atlas = telemetry_shape_atlas(
+            root.path(),
+            &asset_key,
+            identity.width,
+            identity.height,
+            identity.rg8_sha256,
+        );
+        let renderer = crate::renderer::CustomProfileRenderer::new(std::sync::Arc::new(
+            SingleShapeProvider,
+        ))
+        .with_assets(std::sync::Arc::clone(&assets))
+        .with_shape_sdf_atlas(atlas);
+
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "shapes": [{
+                "objectData": {
+                    "layer": 0,
+                    "lock": false,
+                    "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
+                    "visible": true
+                },
+                "alpha": 1.0,
+                "colorId": 1,
+                "id": TELEMETRY_SHAPE_ID,
+                "outlineAlpha": 0.0,
+                "outlineColorId": 1,
+                "outlineSize": 0.0
+            }]
+        }))
+        .expect("build shape-only card");
+
+        let groups: Vec<AnimationRasterGroup> = vec![(
+            None,
+            vec![(allium_renderer_core::AuthoredElementKind::Shape, 0)],
+        )];
+        let config = crate::profile_backend::ProfileBackendConfig {
+            shape_sdf: crate::profile_backend::ShapeSdfExecutor::ScalarOracle,
+            collect_telemetry: true,
+            ..crate::profile_backend::ProfileBackendConfig::default()
+        };
+        let md = renderer.snapshot_masterdata();
+        let (layers, _bytes, _scratch, telemetry) = rasterize_animation_groups(
+            &renderer,
+            &card,
+            None,
+            &md,
+            Some(assets.as_ref()),
+            None,
+            &std::collections::BTreeMap::new(),
+            &groups,
+            Some(config),
+            None,
+            usize::MAX,
+        )
+        .expect("rasterize the shape layer");
+        assert_eq!(layers.len(), 1, "the shape group produced one raster layer");
+
+        let telemetry = telemetry.expect("a configured backend reports telemetry");
+
+        assert!(
+            !telemetry.atlas_identities.is_empty(),
+            "the layer raster recorded no atlas identity",
+        );
+        assert!(
+            telemetry
+                .atlas_identities
+                .iter()
+                .all(|identity| identity.usage == ANIMATION_LAYER_RASTER_USAGE),
+            "atlas identities carry the animation layer raster usage",
+        );
+        assert!(
+            telemetry
+                .atlas_identities
+                .iter()
+                .any(|identity| identity.family == "shape"),
+            "the enabled shape atlas is among the recorded identities",
+        );
+
+        assert!(
+            telemetry.work.element_run_count > 0,
+            "the layer raster executed no element run",
+        );
+
+        let glyph_substitutions: u64 = telemetry
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.substitution_count)
+            .sum();
+        let glyph_page_bytes: u64 = telemetry
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.page_bytes)
+            .sum();
+        let glyph_generation_ns: u64 = telemetry
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.generation_ns)
+            .sum();
+        assert_eq!(
+            telemetry.work.realtime_edt_glyph_count, glyph_substitutions,
+            "the glyph total disagrees with the per-glyph records",
+        );
+        assert_eq!(
+            telemetry.bytes.realtime_edt_page_bytes, glyph_page_bytes,
+            "the page-byte total disagrees with the per-glyph records",
+        );
+        assert_eq!(
+            telemetry.timings.realtime_edt_generation_ns, glyph_generation_ns,
+            "the generation-time total disagrees with the per-glyph records",
+        );
     }
 
     #[test]
