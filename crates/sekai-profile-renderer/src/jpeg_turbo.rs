@@ -119,60 +119,69 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
         .ok()
         .filter(|quality| (1..=100).contains(quality))
         .ok_or_else(|| format!("invalid JPEG quality {quality}"))?;
-    #[cfg(target_arch = "x86_64")]
-    if !(std::arch::is_x86_feature_detected!("avx512f")
-        && std::arch::is_x86_feature_detected!("avx512bw"))
-    {
-        return Err("AVX-512 JPEG YUV420 is unavailable".into());
-    }
+    // `cfg` on a `return` statement only removes that statement; the rest of the
+    // body still type-checks, and it reads the planes only the AVX-512
+    // conversion produces. So the whole implementation, not just the entry
+    // check, sits behind the architecture gate.
     #[cfg(not(target_arch = "x86_64"))]
-    return Err("AVX-512 JPEG YUV420 is unavailable".into());
+    {
+        let _ = scratch;
+        Err("AVX-512 JPEG YUV420 is unavailable".into())
+    }
 
     #[cfg(target_arch = "x86_64")]
-    let yuv =
-        unsafe { rgba_to_full_range_yuv420_avx512(rgba, width as usize, height as usize, scratch) };
-    let mut output = std::ptr::null_mut();
-    let mut output_length: c_ulong = 0;
-    let mut error = [0 as c_char; 256];
-    let status = unsafe {
-        allium_jpeg_encode_yuv420(
-            yuv.y_plane().as_ptr(),
-            yuv.cb_plane().as_ptr(),
-            yuv.cr_plane().as_ptr(),
-            width,
-            height,
-            yuv.y_stride as u32,
-            yuv.chroma_stride as u32,
-            quality,
-            &mut output,
-            &mut output_length,
-            error.as_mut_ptr(),
-            error.len(),
-        )
-    };
-    if status != 0 {
-        let detail = unsafe { CStr::from_ptr(error.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
-        return Err(if detail.is_empty() {
-            format!("libjpeg-turbo raw YUV encode failed with status {status}")
-        } else {
-            format!("libjpeg-turbo raw YUV encode failed: {detail}")
-        });
-    }
-    if output.is_null() {
-        return Err("libjpeg-turbo returned a null raw YUV output".into());
-    }
-    let length = match usize::try_from(output_length) {
-        Ok(length) => length,
-        Err(_) => {
-            unsafe { allium_jpeg_free(output.cast()) };
-            return Err("libjpeg-turbo raw YUV output length overflow".into());
+    {
+        if !(std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw"))
+        {
+            return Err("AVX-512 JPEG YUV420 is unavailable".into());
         }
-    };
-    let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
-    unsafe { allium_jpeg_free(output.cast()) };
-    Ok(encoded)
+        let yuv = unsafe {
+            rgba_to_full_range_yuv420_avx512(rgba, width as usize, height as usize, scratch)
+        };
+        let mut output = std::ptr::null_mut();
+        let mut output_length: c_ulong = 0;
+        let mut error = [0 as c_char; 256];
+        let status = unsafe {
+            allium_jpeg_encode_yuv420(
+                yuv.y_plane().as_ptr(),
+                yuv.cb_plane().as_ptr(),
+                yuv.cr_plane().as_ptr(),
+                width,
+                height,
+                yuv.y_stride as u32,
+                yuv.chroma_stride as u32,
+                quality,
+                &mut output,
+                &mut output_length,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status != 0 {
+            let detail = unsafe { CStr::from_ptr(error.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
+            return Err(if detail.is_empty() {
+                format!("libjpeg-turbo raw YUV encode failed with status {status}")
+            } else {
+                format!("libjpeg-turbo raw YUV encode failed: {detail}")
+            });
+        }
+        if output.is_null() {
+            return Err("libjpeg-turbo returned a null raw YUV output".into());
+        }
+        let length = match usize::try_from(output_length) {
+            Ok(length) => length,
+            Err(_) => {
+                unsafe { allium_jpeg_free(output.cast()) };
+                return Err("libjpeg-turbo raw YUV output length overflow".into());
+            }
+        };
+        let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
+        unsafe { allium_jpeg_free(output.cast()) };
+        Ok(encoded)
+    }
 }
 
 struct Yuv420Buffer<'a> {
