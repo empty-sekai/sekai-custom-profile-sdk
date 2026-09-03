@@ -11,7 +11,9 @@ use crate::text::font::resolve_tmp_face_info_constants;
 use crate::text::measure::{
     resolve_indent_value, resolve_segment_font_size, segments_to_global, transform_char_for_segment,
 };
-use crate::text::richtext::{parse_rich_segments, Indent, InlineAlign, LineIndent, TextSegment};
+use crate::text::richtext::{
+    parse_rich_segments, Indent, InlineAlign, LineHeight, LineIndent, TextSegment,
+};
 use crate::types::TextElement;
 #[cfg(feature = "skia-oracle")]
 use skia_safe::Matrix;
@@ -1203,14 +1205,28 @@ fn layout_text_ops(
     }
 
     let base_line_h = text.size;
-    let lh_override: Option<f32> = segments.iter().find_map(|s| s.line_height);
+    let lh_override: Option<f32> = segments.iter().find_map(|segment| {
+        segment.line_height.map(|spec| {
+            let size = resolve_segment_font_size(segment.size, text.size);
+            match spec {
+                LineHeight::Pixels(value) => value,
+                LineHeight::Em(value) => value * size,
+                LineHeight::Percent(value) => {
+                    FACE_LINE_HEIGHT * value / 100.0 * (size / TMP_POINT_SIZE * TEXT_SCALE)
+                }
+            }
+        })
+    });
     let n_lines = line_max_sizes.len();
 
     // TMP lineGap 实测为 75.625（= m_LineHeight - (ascentLine - descentLine) + 0.625）
     // 0.625 是 TMP 内部的行间距修正项（通过 Frida 多数据点拟合确认）
     const ASCENT_LINE: f32 = 66.0;
     const DESCENT_LINE: f32 = -9.0;
-    const LINE_GAP: f32 = 150.0 - (66.0 + 9.0) + 0.625;
+    /// Face line height of the profile fonts, in the same units as the sampling
+    /// point size. A percentage line height is a share of this value.
+    const FACE_LINE_HEIGHT: f32 = 150.0;
+    const LINE_GAP: f32 = FACE_LINE_HEIGHT - (-DESCENT_LINE + ASCENT_LINE) + 0.625;
 
     let mut line_asc: Vec<f32> = Vec::with_capacity(n_lines);
     let mut line_des: Vec<f32> = Vec::with_capacity(n_lines);

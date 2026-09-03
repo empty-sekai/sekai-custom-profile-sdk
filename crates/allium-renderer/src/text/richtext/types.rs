@@ -15,6 +15,19 @@ pub enum LineIndent {
     Pixels(f32),
 }
 
+/// `<line-height>` value together with the TMP tag unit it was written in.
+/// The unit decides how the number becomes a pixel advance, so it has to
+/// survive until a font size is known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineHeight {
+    /// A bare number: already a pixel advance.
+    Pixels(f32),
+    /// `%`: a share of the face line height, scaled by the current size.
+    Percent(f32),
+    /// `em`: a multiple of the current font size.
+    Em(f32),
+}
+
 /// `<size>` 标签尺寸描述。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SizeSpec {
@@ -61,7 +74,7 @@ pub struct TextSegment {
     pub voffset: Option<f32>,
     pub rotate: Option<f32>,
     pub cspace: Option<f32>,
-    pub line_height: Option<f32>,
+    pub line_height: Option<LineHeight>,
     pub line_indent: Option<LineIndent>,
     pub indent: Option<Indent>,
     pub position: Option<Indent>,

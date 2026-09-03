@@ -8,4 +8,6 @@ mod tests;
 mod types;
 
 pub use parser::parse_rich_segments;
-pub use types::{CaseTransform, Indent, InlineAlign, LineIndent, SizeSpec, TextSegment};
+pub use types::{
+    CaseTransform, Indent, InlineAlign, LineHeight, LineIndent, SizeSpec, TextSegment,
+};

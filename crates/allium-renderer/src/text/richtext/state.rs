@@ -24,7 +24,7 @@ pub(crate) struct RichTextParseState {
     pub(crate) voffset_stack: Vec<f32>,
     pub(crate) rotate_stack: Vec<f32>,
     pub(crate) cspace_override: Option<f32>,
-    pub(crate) line_height_override: Option<f32>,
+    pub(crate) line_height_override: Option<super::types::LineHeight>,
     pub(crate) line_indent_override: Option<LineIndent>,
     pub(crate) indent_stack: Vec<Indent>,
     pub(crate) position_stack: Vec<Indent>,

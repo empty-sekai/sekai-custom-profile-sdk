@@ -1,7 +1,7 @@
 //! TMP 标签处理逻辑。
 
 use super::state::RichTextParseState;
-use super::types::{CaseTransform, Indent, InlineAlign, LineIndent, SizeSpec};
+use super::types::{CaseTransform, Indent, InlineAlign, LineHeight, LineIndent, SizeSpec};
 
 fn named_color(name: &str) -> Option<(u8, u8, u8)> {
     match name {
@@ -319,8 +319,16 @@ impl RichTextParseState {
         }
         if let Some(v) = tl.strip_prefix("line-height=") {
             let v = v.trim_matches('#');
-            if let Some(n) = tmp_convert_to_float(v) {
-                self.line_height_override = Some(n);
+            let (number, wrap): (&str, fn(f32) -> LineHeight) =
+                if let Some(rest) = v.strip_suffix('%') {
+                    (rest, LineHeight::Percent)
+                } else if let Some(rest) = v.strip_suffix("em") {
+                    (rest, LineHeight::Em)
+                } else {
+                    (v, LineHeight::Pixels)
+                };
+            if let Some(n) = tmp_convert_to_float(number) {
+                self.line_height_override = Some(wrap(n));
             }
             return true;
         }
