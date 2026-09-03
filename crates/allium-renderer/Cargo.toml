@@ -2,7 +2,7 @@
 name = "allium-renderer"
 version = "0.3.2"
 edition = "2021"
-description = "Skia CPU rendering engine: scene-graph interpreter for game cards and WidgetDocument info-graphics"
+description = "Custom profile card rendering engine: TextMesh Pro-compatible layout, SDF text and shape rasterization, and a dependency-free CPU compositor"
 license = "AGPL-3.0-only"
 
 [dependencies]
