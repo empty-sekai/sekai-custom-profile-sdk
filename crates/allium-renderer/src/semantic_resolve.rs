@@ -1708,6 +1708,7 @@ mod tests {
             crate::core_shadow::build_text_scene(&card, &md, "page-only-fixture").unwrap();
         let full_preflight = full_scene.animation_preflight(120).unwrap();
         let motion_preflight = motion_scene.animation_preflight(120).unwrap();
+        assert!(full_preflight.observable_program_count > 0);
         assert_eq!(full_preflight, motion_preflight);
         let authored = allium_renderer_core::profile_scene::ordered_profile_elements(
             &card,

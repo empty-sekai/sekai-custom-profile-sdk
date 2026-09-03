@@ -372,4 +372,82 @@ mod tests {
             );
         }
     }
+    /// A character honor whose masterdata row carries neither a background
+    /// bundle nor a frame still has to produce a downloadable key. The
+    /// background falls back to the honor's own bundle name, so no key may
+    /// collapse into an empty path segment.
+    #[test]
+    fn a_character_honor_without_background_or_frame_keeps_every_path_segment() {
+        use crate::masterdata::{
+            MasterData, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+        };
+        use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
+
+        struct BackgroundlessHonorProvider;
+
+        impl MasterDataProvider for BackgroundlessHonorProvider {
+            fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+                None
+            }
+            fn get_card(&self, _: i32) -> Option<CardEntry> {
+                None
+            }
+            fn resolve_color(&self, _: i32) -> Option<ResolvedColor> {
+                None
+            }
+            fn resolve_font(&self, _: i32) -> Option<String> {
+                None
+            }
+            fn resolve_stamp(&self, _: i32) -> Option<String> {
+                None
+            }
+            fn resolve_resource(&self, _: &str, _: i32) -> Option<ResourceInfo> {
+                None
+            }
+            fn resolve_honor(&self, _: i32, honor_level: i32) -> Option<ResolvedHonor> {
+                Some(ResolvedHonor {
+                    asset_bundle_name: "honor_0001".to_string(),
+                    honor_rarity: "high".to_string(),
+                    honor_type: "character".to_string(),
+                    background_asset_bundle_name: None,
+                    frame_name: None,
+                    is_live_master: false,
+                    has_star: true,
+                    honor_level,
+                    honor_mission_type: None,
+                })
+            }
+            fn get_bonds_honor(&self, _: i32) -> Option<BondsHonorEntry> {
+                None
+            }
+            fn get_bonds_honor_word(&self, _: i64) -> Option<BondsHonorWordEntry> {
+                None
+            }
+            fn get_honor(&self, _: i32) -> Option<HonorEntry> {
+                None
+            }
+            fn resolve_unit_vs_sd(&self, self_id: i32, _: i32) -> i32 {
+                self_id
+            }
+            fn font_count(&self) -> usize {
+                0
+            }
+            fn color_count(&self) -> usize {
+                0
+            }
+        }
+
+        let md = MasterData::new(std::sync::Arc::new(BackgroundlessHonorProvider));
+        let mut keys = Vec::new();
+        super::collect_honor_keys(1, 1, false, &md, &mut keys);
+
+        let background = keys
+            .iter()
+            .find(|key| key.contains("degree_sub"))
+            .expect("a background key");
+        assert_eq!(background, "honor/honor_0001/degree_sub");
+        for key in &keys {
+            assert!(!key.contains("//"), "key has an empty path segment: {key}");
+        }
+    }
 }
