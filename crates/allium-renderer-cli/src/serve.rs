@@ -8,7 +8,6 @@
 //!   {"id": 2, "method": "reload_masterdata", "params": {"dir": "..."}}
 //!   {"id": 3, "method": "ping"}
 //!   {"id": 4, "method": "shutdown"}
-//!   {"id": 5, "method": "render_honor", "params": {...}}
 //!
 //! `render` params：
 //!   card: CustomProfileCard 或 UserCustomProfileCard 数组（必填）
@@ -18,12 +17,8 @@
 //!   output: 输出文件路径（与 inline 二选一；都缺省时报错）
 //!   inline: true 时响应 data 字段返 base64（默认 false）
 //!
-//! `render_honor` params：
-//!   kind: normal|bonds（默认 normal）
-//!   honorId / honorLevel / fullSize（必填；fullSize 默认 true）
-//!   bonds 另接受 wordId / inverse / useUnitVirtualSinger
-//!   quality: WebP quality 0..100（默认 90）
-//!   output / inline：与 render 相同
+//! `render_honor` 已随 legacy honor renderer 一并移除；该 method 仍被识别，
+//! 但一律返回错误。
 //!
 //! `render` 响应：
 //!   {"id": 1, "ok": true, "result": {"path": "...", "bytes": 12345,
@@ -105,7 +100,7 @@ pub fn run(
                 write_result(&stdout, id, result);
             }
             "render_honor" => {
-                let result = handle_render_honor(&renderer, &assets, &asset_urls, &request);
+                let result = handle_render_honor(&request);
                 write_result(&stdout, id, result);
             }
             other => {
@@ -171,63 +166,17 @@ fn honor_card(
     crate::card_from_value(card, None)
 }
 
-fn handle_render_honor(
-    renderer: &CustomProfileRenderer,
-    assets: &Arc<AssetStore>,
-    asset_urls: &AssetUrls,
-    request: &Value,
-) -> Result<Value, String> {
+fn handle_render_honor(request: &Value) -> Result<Value, String> {
     let params = request.get("params").ok_or("render_honor missing params")?;
     let kind = params
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("normal");
-    let honor_id = required_i32(params, "honorId")?;
-    let honor_level = required_i32(params, "honorLevel")?;
-    let full_size = params
-        .get("fullSize")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let quality = params
-        .get("quality")
-        .and_then(Value::as_u64)
-        .unwrap_or(90)
-        .min(100) as u32;
-    let inline = params
-        .get("inline")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let output = params.get("output").and_then(Value::as_str);
-    if !inline && output.is_none() {
-        return Err("render_honor requires params.output or inline:true".into());
-    }
-
-    let card = honor_card(params, kind)?;
-    if let Some(dynamic_url) = &asset_urls.dynamic {
-        let wanted = crate::missing_asset_keys(renderer, &card, assets);
-        if !wanted.is_empty() {
-            let (ok, fail) = crate::fetch::load_assets_url(
-                assets,
-                &wanted,
-                dynamic_url,
-                asset_urls.static_.as_deref(),
-                asset_urls.layout,
-            );
-            tracing::debug!(ok, fail, kind, honor_id, honor_level, "honor assets loaded");
-        }
-    }
-    let missing_assets = crate::missing_asset_keys(renderer, &card, assets);
-    if !missing_assets.is_empty() {
-        return Err(format!(
-            "render_honor missing {} asset(s): {}",
-            missing_assets.len(),
-            missing_assets.join(", ")
-        ));
-    }
-
-    let _ = (honor_level, full_size, quality, output, inline);
+    // Validate the request first so a malformed call still gets the specific
+    // parameter error rather than the blanket one below.
+    honor_card(params, kind)?;
     Err(format!(
-        "render_honor kind={kind} is no longer available: the legacy honor renderer was removed"
+        "render_honor kind={kind} is not served by --serve: honor artwork is          baked offline into the render-object store, and the honor element          renderer it would need is present only in a skia-oracle build"
     ))
 }
 
