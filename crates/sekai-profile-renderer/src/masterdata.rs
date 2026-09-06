@@ -17,18 +17,22 @@ impl ResolvedColor {
     /// 从 `#RRGGBB` 或 `#RRGGBBAA` 格式解析颜色。
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim_start_matches('#');
-        let len = hex.len();
+        // 字节级解析：长度按字节计，字符串切片遇到非字符边界会 panic；
+        // 非法输入返回 None。
+        let bytes = hex.as_bytes();
+        let len = bytes.len();
         if len != 6 && len != 8 {
             return None;
         }
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        let a = if len == 8 {
-            u8::from_str_radix(&hex[6..8], 16).ok()?
-        } else {
-            255
+        let pair = |range: std::ops::Range<usize>| -> Option<u8> {
+            std::str::from_utf8(&bytes[range])
+                .ok()
+                .and_then(|value| u8::from_str_radix(value, 16).ok())
         };
+        let r = pair(0..2)?;
+        let g = pair(2..4)?;
+        let b = pair(4..6)?;
+        let a = if len == 8 { pair(6..8)? } else { 255 };
         Some(Self { r, g, b, a })
     }
 }

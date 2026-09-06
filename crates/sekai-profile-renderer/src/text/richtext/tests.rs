@@ -62,3 +62,22 @@ fn size_tag_parses_absolute_delta_percent_and_em_units() {
     assert_eq!(segs[3].size, Some(SizeSpec::Percent(150.0)));
     assert_eq!(segs[4].size, Some(SizeSpec::Em(1.5)));
 }
+
+#[test]
+fn mark_tag_accepts_multi_byte_values_without_panicking() {
+    // The alpha slice indexes the byte representation; a string slice would
+    // land inside a character and panic. Non-hex bytes resolve to nibble 15
+    // (TMP semantics) and the alpha falls back to its default.
+    let segs = parse_rich_segments("<mark=#日1日1>a</mark>");
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].mark_color, Some((255, 241, 255, 64)));
+}
+
+#[test]
+fn mark_tag_keeps_parsing_alpha_from_valid_hex() {
+    let segs = parse_rich_segments("<mark=#FF000040>a</mark>");
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].mark_color, Some((0xFF, 0x00, 0x00, 0x40)));
+    let segs = parse_rich_segments("<mark=#FF0000>a</mark>");
+    assert_eq!(segs[0].mark_color, Some((0xFF, 0x00, 0x00, 64)));
+}

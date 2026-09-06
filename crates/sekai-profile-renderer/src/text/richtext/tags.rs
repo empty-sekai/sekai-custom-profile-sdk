@@ -486,11 +486,15 @@ impl RichTextParseState {
         }
         if let Some(v) = tl.strip_prefix("mark=#") {
             let c = parse_hex_color(v).unwrap_or((255, 255, 0));
-            let a = if v.len() >= 8 {
-                u8::from_str_radix(&v[6..8], 16).unwrap_or(64)
-            } else {
-                64
-            };
+            // Byte-based, like the colour body: a string slice would panic
+            // when the tag value holds a multi-byte character; fall back to
+            // the default alpha instead.
+            let a = v
+                .as_bytes()
+                .get(6..8)
+                .and_then(|pair| std::str::from_utf8(pair).ok())
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .unwrap_or(64);
             self.mark_stack.push((c.0, c.1, c.2, a));
             return true;
         }

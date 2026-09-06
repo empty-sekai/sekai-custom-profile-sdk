@@ -37,18 +37,23 @@ pub struct ResolvedColor {
 impl ResolvedColor {
     pub fn from_hex(value: &str) -> Option<Self> {
         let value = value.strip_prefix('#').unwrap_or(value);
-        if value.len() != 6 && value.len() != 8 {
+        // Byte-based: the length is measured in bytes, and a string slice at
+        // a non-char-boundary index would panic on multi-byte input. Invalid
+        // digits yield None rather than a panic.
+        let bytes = value.as_bytes();
+        if bytes.len() != 6 && bytes.len() != 8 {
             return None;
         }
+        let hex2 = |range: std::ops::Range<usize>| {
+            std::str::from_utf8(&bytes[range])
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        };
         Some(Self {
-            r: u8::from_str_radix(&value[0..2], 16).ok()?,
-            g: u8::from_str_radix(&value[2..4], 16).ok()?,
-            b: u8::from_str_radix(&value[4..6], 16).ok()?,
-            a: if value.len() == 8 {
-                u8::from_str_radix(&value[6..8], 16).ok()?
-            } else {
-                255
-            },
+            r: hex2(0..2)?,
+            g: hex2(2..4)?,
+            b: hex2(4..6)?,
+            a: if bytes.len() == 8 { hex2(6..8)? } else { 255 },
         })
     }
 }
@@ -452,5 +457,23 @@ mod tests {
             "honor_bg_event_cheerteam"
         );
         assert!(honor.has_rank_overlay());
+    }
+
+    #[test]
+    fn from_hex_rejects_multi_byte_input_without_panicking() {
+        // The length check counts bytes; a string slice at a non-char-boundary
+        // index would panic on multi-byte input.
+        assert_eq!(ResolvedColor::from_hex("日日"), None);
+        assert_eq!(ResolvedColor::from_hex("#日日日"), None);
+        assert_eq!(ResolvedColor::from_hex("#11223g"), None);
+        assert_eq!(
+            ResolvedColor::from_hex("#112233"),
+            Some(ResolvedColor {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+                a: 255
+            })
+        );
     }
 }
