@@ -148,12 +148,16 @@ test("WASM string decoding snapshots growable Emscripten memory", async () => {
   const worker = await source("src/worker.ts");
   assert.match(
     worker,
-    /TextDecoder\(\)\.decode\(new Uint8Array\(mod\.HEAPU8\.subarray\(pointer, end\)\)\)/,
+    /TextDecoder\(\)\.decode\(new Uint8Array\(heap\.subarray\(pointer, end\)\)\)/,
   );
   assert.doesNotMatch(
     worker,
     /TextDecoder\(\)\.decode\(mod\.HEAPU8\.subarray\(pointer, end\)\)/,
   );
+  // The scan must stay inside the heap: an out-of-bounds read yields
+  // undefined and would otherwise loop forever.
+  assert.match(worker, /while \(end < heap\.length && heap\[end\] !== 0\) end \+= 1;/);
+  assert.match(worker, /WASM_MEMORY_OUT_OF_RANGE/);
 });
 
 test("the container build resolves Cargo home instead of a machine-specific registry", async () => {

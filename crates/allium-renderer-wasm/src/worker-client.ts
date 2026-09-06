@@ -1,4 +1,5 @@
 import {
+  RENDERER_WORKER_PROTOCOL,
   type GlyphBatchRequest,
   type LayerMaskOverride,
   type PrebuiltFontContract,
@@ -61,7 +62,9 @@ export class RendererWorkerClient {
       moduleUrl: moduleUrl.toString(),
       wasmUrl: wasmUrl.toString(),
     });
-    if (result.kind !== "init") throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid init response");
+    if (result.kind !== "init" || result.protocol !== RENDERER_WORKER_PROTOCOL) {
+      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid init response");
+    }
     return client;
   }
 

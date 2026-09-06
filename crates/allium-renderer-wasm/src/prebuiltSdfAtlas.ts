@@ -1,4 +1,5 @@
 import { glyphKey, type GlyphRequest, type SdfAtlas } from "./fontSdfAtlas.js";
+import { RENDERER_WORKER_PROTOCOL } from "./protocol.js";
 import type { AtlasPageUpdate } from "./types/atlas.js";
 
 export type PrebuiltSdfAtlasPage = {
@@ -318,7 +319,7 @@ function combineSignals(first: AbortSignal, second: AbortSignal): { signal: Abor
 
 function emptyWorkerStats() {
   return {
-    protocol: "allium.renderer-worker/2" as const,
+    protocol: RENDERER_WORKER_PROTOCOL,
     initialized: true, scenes: 0, masterDataSessions: 0, atlasSessions: 0,
     authoringSessions: 0, fonts: 0, requests: 0, failures: 0, wasmMs: 0, bridgeBytes: 0,
   };

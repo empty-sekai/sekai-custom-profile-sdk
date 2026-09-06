@@ -85,6 +85,10 @@ export class BrowserSemanticResourceManager {
       identity: string;
       lease: ImageResourceLease<LoadedBrowserResource>;
     }> = [];
+    // Once Promise.all has rejected, in-flight tasks may still complete their
+    // acquire later; each task must self-release instead of pushing a lease
+    // nobody will ever release (the cache only evicts entries with no refs).
+    let failed = false;
     try {
       await Promise.all([...unique].map(async ([identity, resource]) => {
         const cacheIdentity = this.provider.cacheIdentity?.(resource) ?? identity;
@@ -92,10 +96,16 @@ export class BrowserSemanticResourceManager {
           const value = await this.load(resource, sharedSignal);
           return { value, bytes: decodedBytes(value.image) };
         }, signal);
+        if (failed) {
+          lease.release();
+          return;
+        }
         leases.push({ identity, lease });
       }));
     } catch (error) {
+      failed = true;
       for (const { lease } of leases) lease.release();
+      leases.length = 0;
       throw error;
     }
     const sources = new Map(

@@ -404,6 +404,12 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
         [masterDataHandle(request.payload.masterDataId)],
       );
       const profileRequest = preparationRecord(request.payload.request, "request");
+      if (profileRequest.demandOnly === true) {
+        // Localization demand phase: the core returns only localization demands
+        // and the preparation must reach the main thread untouched.
+        result = { kind: "prepareProfile", preparation };
+        break;
+      }
       if (profileRequest.fontDemandOnly === true) {
         const families = preparation.font_families;
         if (!Array.isArray(families) || families.some((family) => typeof family !== "string" || family.length === 0)) {
@@ -831,9 +837,17 @@ function callJson<T>(mod: EmscriptenModule, name: string, argumentTypes: Array<"
 }
 
 function readCString(mod: EmscriptenModule, pointer: number): string {
+  const heap = mod.HEAPU8;
+  if (!Number.isInteger(pointer) || pointer < 0 || pointer >= heap.length) {
+    throw new WorkerError("WASM_MEMORY_OUT_OF_RANGE", `C string pointer ${pointer} is outside WASM memory`);
+  }
   let end = pointer;
-  while (mod.HEAPU8[end] !== 0) end += 1;
-  return new TextDecoder().decode(new Uint8Array(mod.HEAPU8.subarray(pointer, end)));
+  // An out-of-bounds read yields undefined, which would loop forever below.
+  while (end < heap.length && heap[end] !== 0) end += 1;
+  if (end >= heap.length) {
+    throw new WorkerError("WASM_MEMORY_OUT_OF_RANGE", "C string is not NUL-terminated within WASM memory");
+  }
+  return new TextDecoder().decode(new Uint8Array(heap.subarray(pointer, end)));
 }
 
 function requireLoadedModule(): EmscriptenModule {

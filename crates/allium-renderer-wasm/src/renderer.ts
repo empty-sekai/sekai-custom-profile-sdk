@@ -687,12 +687,17 @@ export class BrowserScene {
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.renderer.destroy();
-    this.resources.release();
-    await this.atlas?.release();
-    await this.core.destroy();
-    this.runtime.markDestroyed();
-    this.onDestroy?.(this);
+    try {
+      this.renderer.destroy();
+      this.resources.release();
+      await this.atlas?.release();
+      await this.core.destroy();
+    } finally {
+      // A failed release step must not leave this scene registered in the
+      // renderer's active set; runtime destruction is terminal either way.
+      this.runtime.markDestroyed();
+      this.onDestroy?.(this);
+    }
   }
 
   notifyContextLost(): void {
