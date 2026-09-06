@@ -335,7 +335,14 @@ impl ProfileMasterData for JsonMasterData {
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
         let honor: HonorEntry = self.table("honors")?.typed(honor_id.into())?;
         let live = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
-        let level = honor.levels.iter().find(|entry| entry.level == honor_level);
+        // A level the masterdata does not know yet (data lagging behind player
+        // progress) falls back to the last known level, matching the game's
+        // lookup, rather than producing an empty asset bundle name.
+        let level = honor
+            .levels
+            .iter()
+            .find(|entry| entry.level == honor_level)
+            .or_else(|| honor.levels.last());
         let group = honor
             .group_id
             .and_then(|id| self.table("honorGroups")?.get(id.into()));
@@ -475,5 +482,36 @@ mod tests {
                 a: 255
             })
         );
+    }
+
+    #[test]
+    fn live_master_honor_falls_back_to_the_last_known_level() {
+        // The game resolves a level the masterdata does not list yet to the
+        // last known level instead of dropping the honor or clearing its
+        // asset bundle name.
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "honors",
+            serde_json::json!([{
+                "id": 7,
+                "assetbundleName": null,
+                "honorRarity": null,
+                "groupId": null,
+                "honorMissionType": "master_full_perfect",
+                "levels": [
+                    { "level": 1, "assetbundleName": "honor_live_1", "honorRarity": "low" },
+                    { "level": 5, "assetbundleName": "honor_live_5", "honorRarity": "high" },
+                ],
+            }]),
+        )
+        .unwrap();
+        let honor = data.resolve_honor(7, 9).unwrap();
+        assert!(honor.is_live_master);
+        assert_eq!(honor.asset_bundle_name, "honor_live_5");
+        assert_eq!(honor.honor_rarity, "high");
+        // A listed level still resolves exactly.
+        let honor = data.resolve_honor(7, 1).unwrap();
+        assert_eq!(honor.asset_bundle_name, "honor_live_1");
+        assert_eq!(honor.honor_rarity, "low");
     }
 }

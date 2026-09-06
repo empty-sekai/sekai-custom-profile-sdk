@@ -539,11 +539,14 @@ fn populate_resolve_snapshot_parts(
                     card_id: leader.card_id,
                     after_training: leader.after_training,
                     master_rank: leader.master_rank,
+                    // Same fallback as the card-member snapshot: a leader card
+                    // absent from userCards is stale data, rendered at the
+                    // default level rather than level 0.
                     level: profile
                         .user_cards
                         .get(&leader.card_id)
                         .map(|card| card.level)
-                        .unwrap_or_default(),
+                        .unwrap_or(60),
                     rarity: card.card_rarity_type.clone(),
                     attribute: card.attr.clone(),
                     image: ComponentImageSnapshot {
@@ -726,15 +729,13 @@ fn build_standard_honor_visual(
         .map(|name| format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"));
     let default_frame = format!("honor/frame_degree_{size_char}_{rarity}");
     let frame_key = custom_frame
-        .filter(|key| asset_size(resources, "static", key).is_some())
+        .filter(|key| asset_size(resources, "assets", key).is_some())
         .unwrap_or(default_frame);
     let frame = optional_descriptor(frame_key, (w, h), "honor_frame", honor_id, resources);
     let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
         ("rank_live/honor", suffix.to_string())
     } else if resolved.is_live_master {
         ("honor", "scroll".into())
-    } else if resolved.honor_type == "character" {
-        ("honor", format!("rank_{suffix}_{}", honor_level / 10 + 1))
     } else {
         ("honor", format!("rank_{suffix}"))
     };

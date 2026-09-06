@@ -21,7 +21,9 @@ pub struct HonorSlot {
     pub honor_id: i32,
     /// 称号等级（决定星星数量）
     pub honor_level: i32,
-    /// 是否为全尺寸（第一个槽位 = true → 380×80，后两个 = false → 180×80）
+    /// 展示偏好标志（游戏 seq==2 的槽位为 true）。名片 semantic 路径把本
+    /// 字段当排序权重（大槽优先），排序后交换前两个槽位，最终渲染尺寸由
+    /// 交换后的槽位位置决定（第 0 槽 380×80 main，其余 180×80 sub）。
     pub full_size: bool,
     /// 称号类型（"normal" 或 "bonds"）
     pub profile_honor_type: String,

@@ -215,7 +215,14 @@ impl MasterDataProvider for JsonMasterDataProvider {
         let honor: HonorEntry = self.typed("honors", honor_id as i64)?;
         let is_live_master = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
         let (abn, rarity) = if is_live_master {
-            let lvl = honor.levels.iter().find(|l| l.level == honor_level);
+            // A level the masterdata does not know yet falls back to the last
+            // known level, matching the game's lookup, instead of rendering
+            // from an empty asset bundle name.
+            let lvl = honor
+                .levels
+                .iter()
+                .find(|l| l.level == honor_level)
+                .or_else(|| honor.levels.last());
             let a = lvl
                 .and_then(|l| l.assetbundle_name.as_deref())
                 .unwrap_or("")
@@ -366,5 +373,26 @@ mod tests {
         let p = provider_with("cards", "[]");
         assert!(p.missing_tables().contains(&"stamps"));
         assert!(!p.missing_tables().contains(&"cards"));
+    }
+
+    #[test]
+    fn live_master_honor_falls_back_to_the_last_known_level() {
+        // The game resolves a level the masterdata does not list yet to the
+        // last known level instead of clearing the asset bundle name.
+        let p = provider_with(
+            "honors",
+            r##"[{"id": 7, "assetbundleName": null, "honorRarity": null, "groupId": null,
+                  "honorMissionType": "master_full_perfect",
+                  "levels": [
+                    {"level": 1, "assetbundleName": "honor_live_1", "honorRarity": "low"},
+                    {"level": 5, "assetbundleName": "honor_live_5", "honorRarity": "high"}
+                  ]}]"##,
+        );
+        let honor = p.resolve_honor(7, 9).expect("honor");
+        assert!(honor.is_live_master);
+        assert_eq!(honor.asset_bundle_name, "honor_live_5");
+        assert_eq!(honor.honor_rarity, "high");
+        let honor = p.resolve_honor(7, 1).expect("honor");
+        assert_eq!(honor.asset_bundle_name, "honor_live_1");
     }
 }
