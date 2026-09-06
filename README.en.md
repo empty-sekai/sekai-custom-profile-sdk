@@ -104,7 +104,8 @@ const masterData = await renderer.loadMasterData(
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
-  card,
+  // Full profile API response; the card document is derived from
+  // userCustomProfileCards (first entry, or pageIndex) and shares its source.
   profile,
   frameMode: "animate",
 });

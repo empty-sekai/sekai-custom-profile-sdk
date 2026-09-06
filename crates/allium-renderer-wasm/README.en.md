@@ -15,7 +15,7 @@ Version 0.2 provides a stateful scene API built from a Rust/WASM semantic runtim
 - WebGL2;
 - ES modules and Web Workers;
 - optional IndexedDB for persistent opaque glyph records;
-- host-provided profile/card JSON, masterdata, a font provider or pre-registered fonts, and a `ResourceProvider`.
+- host-provided profile API response JSON (the card document is derived by the SDK; a standalone `card` is no longer passed), masterdata, a font provider or pre-registered fonts, and a `ResourceProvider`.
 
 The host supplies fonts, player data, masterdata, and image assets. Host-provided font bytes with fixed source hashes, FreeType metrics, TMP parsing, and the SDF pipeline jointly define text layout and glyph pixels.
 
@@ -69,7 +69,8 @@ const masterData = await renderer.loadMasterData(
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
-  card,
+  // Full profile API response; the card document is derived from
+  // userCustomProfileCards (first entry, or pageIndex) and shares its source.
   profile,
   frameMode: "animate",
 });
@@ -113,7 +114,7 @@ The authoring core retains at most 150 history transactions and validates the 15
 
 `createProfileScene()` performs the following work:
 
-1. The worker sends the card, profile, locale, and masterdata session to WASM.
+1. The SDK derives the card document from `profile.userCustomProfileCards` (`pageIndex` selects the page, first by default) and sends it with the profile, locale, and masterdata session to WASM; the deprecated standalone `card` input is still accepted (without profile data);
 2. The shared semantic core collects scene-local localization demand, and the host provider returns an immutable text snapshot.
 3. WASM resolves authored elements and components with that snapshot and emits the font-family demand actually used by the scene.
 4. The main thread invokes the optional `FontProvider` through a bounded queue, hashes returned bytes, and fixes each family-to-hash mapping for the renderer lifetime. The host may instead call `registerFont()` before scene creation.
@@ -387,7 +388,7 @@ Do not rebuild the layer-tree DOM on every animation tick. Keep stable layer row
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "preview",
-  card,
+  profile,
   sdf: { persistence: "memory-only" },
 });
 ```
@@ -420,7 +421,7 @@ const controller = new AbortController();
 const pendingScene = renderer.createProfileScene({
   masterData,
   documentKey: "preview",
-  card,
+  profile,
   signal: controller.signal,
 });
 
@@ -428,7 +429,7 @@ controller.abort();
 
 await pendingScene; // rejects if creation was still in progress
 
-const scene = await renderer.createProfileScene({ masterData, documentKey: "preview", card });
+const scene = await renderer.createProfileScene({ masterData, documentKey: "preview", profile });
 await scene.destroy();
 await masterData.destroy();
 renderer.destroy();

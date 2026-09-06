@@ -84,8 +84,16 @@ export type MasterDataTableLoader = (
 export type ProfileSceneCreateOptions = {
   masterData: RendererMasterData;
   documentKey: string;
-  card: unknown;
+  /**
+   * Full profile API response body. The card document is derived from
+   * `userCustomProfileCards` (first entry unless `pageIndex` says otherwise),
+   * so the card and the profile data can never drift apart.
+   */
   profile?: unknown;
+  /** @deprecated legacy input: a standalone card document without profile data. */
+  card?: unknown;
+  /** Zero-based index into `profile.userCustomProfileCards`. Defaults to 0. */
+  pageIndex?: number;
   locale?: string;
   frameMode?: "final" | "animate";
   signal?: AbortSignal;
@@ -95,6 +103,44 @@ export type ProfileSceneCreateOptions = {
     persistence?: PersistentCacheSelection;
   };
 };
+
+/**
+ * Resolves the authoring card + profile pair from the `profile`-first
+ * contract, falling back to the deprecated standalone `card` input.
+ */
+function resolveProfileSceneInputs(
+  options: ProfileSceneCreateOptions,
+): { card: unknown; profile: unknown } {
+  if (options.profile != null) {
+    const cards = (options.profile as Record<string, unknown>).userCustomProfileCards;
+    if (!Array.isArray(cards) || cards.length === 0) {
+      throw new BrowserRendererError(
+        "INVALID_PROFILE_INPUT",
+        "profile response does not contain a userCustomProfileCards array",
+      );
+    }
+    const index = options.pageIndex ?? 0;
+    const entry = cards[index];
+    const card =
+      entry && typeof entry === "object"
+        ? (entry as Record<string, unknown>).customProfileCard
+        : undefined;
+    if (card == null) {
+      throw new BrowserRendererError(
+        "INVALID_PROFILE_INPUT",
+        `userCustomProfileCards[${index}].customProfileCard is missing`,
+      );
+    }
+    return { card, profile: options.profile };
+  }
+  if (options.card != null) {
+    return { card: options.card, profile: undefined };
+  }
+  throw new BrowserRendererError(
+    "INVALID_PROFILE_INPUT",
+    "createProfileScene requires profile (full profile API response); card alone is deprecated",
+  );
+}
 
 /**
  * WebGL2-only browser renderer. Rust/WASM scene, text layout, and glyph work
@@ -186,14 +232,15 @@ export class BrowserRenderer {
     let core: RendererScene | null = null;
     let atlas: SdfAtlas | null = null;
     const abort = combinedAbortSignal(this.lifetime.signal, options.signal);
+    const inputs = resolveProfileSceneInputs(options);
     try {
       const locale = options.locale ?? this.region;
       let localizedText: Record<string, string> | undefined;
       if (this.localizations) {
         const demandPreparation = await options.masterData.prepareProfile({
           documentKey: options.documentKey,
-          card: options.card,
-          profile: options.profile,
+          card: inputs.card,
+          profile: inputs.profile,
           locale,
           demandOnly: true,
         });
@@ -205,8 +252,8 @@ export class BrowserRenderer {
       if (this.providedFonts || this.prebuiltSdfAtlasProvider) {
         const fontPreparation = await options.masterData.prepareProfile({
           documentKey: options.documentKey,
-          card: options.card,
-          profile: options.profile,
+          card: inputs.card,
+          profile: inputs.profile,
           locale,
           localizedText,
           fontDemandOnly: true,
@@ -229,8 +276,8 @@ export class BrowserRenderer {
       }
       const preparation = await options.masterData.prepareProfile({
         documentKey: options.documentKey,
-        card: options.card,
-        profile: options.profile,
+        card: inputs.card,
+        profile: inputs.profile,
         locale,
         localizedText,
       });
@@ -255,8 +302,8 @@ export class BrowserRenderer {
       resources = acquired;
       const compiled = await options.masterData.createProfileScene({
         documentKey: options.documentKey,
-        card: options.card,
-        profile: options.profile,
+        card: inputs.card,
+        profile: inputs.profile,
         locale,
         localizedText,
         frameMode: options.frameMode ?? "animate",
