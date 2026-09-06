@@ -260,6 +260,8 @@ pub enum ProfileResolveError {
     MissingLocalizedText(String),
     #[error("missing resolved resource descriptor {0}")]
     MissingResource(String),
+    #[error("invalid general recipe: {0}")]
+    InvalidRecipe(String),
 }
 
 impl NormalizedProfileElement<'_> {
@@ -456,7 +458,7 @@ pub fn lower_identity_general(
         .nodes
         .iter()
         .map(general_recipe_node_to_command)
-        .collect();
+        .collect::<Result<Vec<_>, ProfileResolveError>>()?;
     let mut interaction_regions = recipe.interaction_regions.clone();
     interaction_regions.extend(
         recipe
@@ -486,7 +488,7 @@ pub fn lower_identity_general(
 
 fn general_recipe_node_to_command(
     node: &crate::general_recipe::GeneralRecipeNode,
-) -> SemanticCommandSource {
+) -> Result<SemanticCommandSource, ProfileResolveError> {
     use crate::general_recipe::{
         GeneralClip, GeneralFill, GeneralGeometry, GeneralImageSampling, GeneralImageSource,
         GeneralImageSourceConstraint, GeneralRecipePayload, GeneralTextAlign,
@@ -544,7 +546,7 @@ fn general_recipe_node_to_command(
                 GeneralClip::Rect { bounds, .. } => Some(rect_quad(*bounds)),
                 GeneralClip::RoundedRect { .. } | GeneralClip::Ellipse { .. } => None,
             });
-            command
+            Ok(command)
         }
         GeneralRecipePayload::Text {
             source,
@@ -611,7 +613,7 @@ fn general_recipe_node_to_command(
                 anchor_x,
                 baseline: (*render_baseline).or_else(|| (!wrap).then_some(*font_size * 0.35 / 2.0)),
             });
-            command
+            Ok(command)
         }
         GeneralRecipePayload::Image {
             resource,
@@ -699,8 +701,15 @@ fn general_recipe_node_to_command(
                         height: 1.0,
                     },
                     GeneralImageSource::Pixels(rect) => {
-                        let [width, height] = natural_size
-                            .expect("pixel image source requires resolved natural dimensions");
+                        // Recipes are serializable; a restored payload can carry
+                        // `pixels` without natural_size. That is a contract
+                        // violation and must fail explicitly, not panic.
+                        let [width, height] = natural_size.ok_or_else(|| {
+                            ProfileResolveError::InvalidRecipe(format!(
+                                "pixel image source {:?} requires resolved natural dimensions",
+                                node.id
+                            ))
+                        })?;
                         Rect {
                             x: rect.x / width.max(f32::EPSILON),
                             y: rect.y / height.max(f32::EPSILON),
@@ -734,7 +743,7 @@ fn general_recipe_node_to_command(
                     }
                 }
             }
-            command
+            Ok(command)
         }
         GeneralRecipePayload::Group { phase, .. } => {
             let mut command = SemanticCommandSource::composite(
@@ -755,7 +764,7 @@ fn general_recipe_node_to_command(
                     }
                 };
             }
-            command
+            Ok(command)
         }
     }
 }
@@ -1263,7 +1272,12 @@ pub fn resolve_profile_scene(
                         bounds,
                         visual,
                     );
-                    layer_commands.extend(overlay.iter().map(general_recipe_node_to_command));
+                    layer_commands.extend(
+                        overlay
+                            .iter()
+                            .map(general_recipe_node_to_command)
+                            .collect::<Result<Vec<_>, ProfileResolveError>>()?,
+                    );
                 }
             }
         }
@@ -1619,9 +1633,11 @@ fn configure_text_command(
     line_spacing: f32,
 ) {
     command.bounds = layout_bounds(layout);
+    // Alignment is the low bits of the authored TextAlignmentOptions value:
+    // a bitmask where 1 = left, 2 = center, 4 = right.
     command.matrix[4] = match alignment {
         2 => layout.cx,
-        3 => layout.cx + layout.w / 2.0,
+        4 => layout.cx + layout.w / 2.0,
         _ => layout.cx - layout.w / 2.0,
     };
     command.matrix[5] = -layout.cy;

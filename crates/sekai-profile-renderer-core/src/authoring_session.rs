@@ -623,6 +623,9 @@ impl AuthoringSession {
     }
 
     pub fn undo(&mut self) -> Result<Option<AuthoringDelta>, AuthoringError> {
+        // Restoring a snapshot mid-gesture would desync the active gesture's
+        // baseline; commit would then diff against a stale page state.
+        self.ensure_no_gesture()?;
         let Some(entry) = self.undo.pop_back() else {
             return Ok(None);
         };
@@ -636,6 +639,7 @@ impl AuthoringSession {
     }
 
     pub fn redo(&mut self) -> Result<Option<AuthoringDelta>, AuthoringError> {
+        self.ensure_no_gesture()?;
         let Some(entry) = self.redo.pop() else {
             return Ok(None);
         };
@@ -1720,5 +1724,33 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn undo_and_redo_are_rejected_while_a_gesture_is_active() {
+        // Restoring a snapshot mid-gesture would desync the active gesture's
+        // baseline; both entries must wait for the gesture to end.
+        let mut session = AuthoringSession::new(GameProfileDocument::blank());
+        let id = session
+            .apply(AuthoringCommand::Create {
+                page: 0,
+                category: AuthoringCategory::Texts,
+                element: text(),
+            })
+            .unwrap()
+            .changes[0]
+            .id;
+        session.begin_gesture(id).unwrap();
+        assert!(matches!(
+            session.undo(),
+            Err(AuthoringError::GestureInProgress)
+        ));
+        assert!(matches!(
+            session.redo(),
+            Err(AuthoringError::GestureInProgress)
+        ));
+        // Once the gesture is gone the pre-gesture history is reachable again.
+        session.cancel_gesture().unwrap();
+        assert!(session.undo().unwrap().is_some());
     }
 }
