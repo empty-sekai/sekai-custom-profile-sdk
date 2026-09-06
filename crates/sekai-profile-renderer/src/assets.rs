@@ -501,15 +501,17 @@ impl AssetStore {
                     .map_err(|e| format!("读取目录 {} 失败: {e}", path.display()))?;
                 Self::walk_static_dir_recursive(base, sub_entries, count, keys_and_data)?;
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if ext_lower == "png" || ext_lower == "jpg" {
+                if matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg") {
                     let rel = path
                         .strip_prefix(base)
                         .map_err(|e| format!("路径前缀错误: {e}"))?;
-                    let key = rel.to_string_lossy().replace('\\', "/");
-                    let key = key
-                        .trim_end_matches(".png")
-                        .trim_end_matches(".jpg")
+                    let rel_lossy = rel.to_string_lossy().replace('\\', "/");
+                    // strip_suffix strips exactly once and matches the original
+                    // casing: `.PNG` is stripped too, and `foo.png.png` keeps
+                    // one `.png` (trim_end_matches would strip both).
+                    let key = rel_lossy
+                        .strip_suffix(&format!(".{ext}"))
+                        .unwrap_or(&rel_lossy)
                         .to_string();
                     let data = std::fs::read(&path)
                         .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;

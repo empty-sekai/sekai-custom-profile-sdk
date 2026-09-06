@@ -231,15 +231,17 @@ fn load_assets_dir(store: &AssetStore, dir: &std::path::Path) -> Result<usize, S
             if path.is_dir() {
                 walk(base, &path, store, count)?;
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext = ext.to_lowercase();
-                if ext == "png" || ext == "jpg" || ext == "webp" {
+                if matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "webp") {
                     let rel = path
                         .strip_prefix(base)
                         .map_err(|e| format!("路径前缀错误: {e}"))?;
-                    let key = rel
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_end_matches(&format!(".{ext}"))
+                    // strip_suffix strips exactly once and matches the original
+                    // casing: `.PNG` is stripped too, and `foo.png.png` keeps
+                    // one `.png` (trim_end_matches would strip both).
+                    let rel_lossy = rel.to_string_lossy().replace('\\', "/");
+                    let key = rel_lossy
+                        .strip_suffix(&format!(".{ext}"))
+                        .unwrap_or(&rel_lossy)
                         .to_string();
                     let data = std::fs::read(&path)
                         .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
@@ -319,17 +321,18 @@ fn encode_candidate_png(
         .map_err(|error| format!("PNG 编码失败: {error}"))
 }
 
-/// 收集名片所需但 AssetStore 中缺失的素材 key。
+/// 收集名片所需但 AssetStore 中缺失的素材 key（排序去重）。
 fn missing_asset_keys(
     renderer: &CustomProfileRenderer,
     card: &CustomProfileCard,
     store: &AssetStore,
 ) -> Vec<String> {
     let md = renderer.snapshot_masterdata();
-    sekai_profile_renderer::asset_keys::collect_card_asset_keys(card, &md)
-        .into_iter()
-        .filter(|key| !store.contains(key))
-        .collect()
+    let mut keys = sekai_profile_renderer::asset_keys::collect_card_asset_keys(card, &md);
+    keys.sort();
+    keys.dedup();
+    keys.retain(|key| !store.contains(key));
+    keys
 }
 
 /// 收集名片 + profile 所需但 AssetStore 中缺失的素材 key（URL 取材用）。

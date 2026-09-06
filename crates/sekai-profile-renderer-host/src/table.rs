@@ -51,7 +51,17 @@ impl Table {
     }
 
     /// 按 id 反序列化为强类型记录。
+    ///
+    /// 行存在但字段与 schema 不符时返回 `None` 并记 warning：数据缺陷
+    /// 不应与「id 不存在」不可区分。
     pub fn typed<T: serde::de::DeserializeOwned>(&self, id: i64) -> Option<T> {
-        serde_json::from_value(self.by_id(id)?.clone()).ok()
+        let value = self.by_id(id)?;
+        match serde_json::from_value(value.clone()) {
+            Ok(typed) => Some(typed),
+            Err(error) => {
+                tracing::warn!(%id, %error, "masterdata 行反序列化失败，按缺失处理");
+                None
+            }
+        }
     }
 }

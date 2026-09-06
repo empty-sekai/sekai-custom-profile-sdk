@@ -233,6 +233,19 @@ impl JsonTable {
     }
 }
 
+/// Canonicalizes a region code so the CN font-name mapping and `locale`'s
+/// alias table agree on the same inputs regardless of caller casing.
+pub fn normalize_region(region: &str) -> String {
+    match region.trim().to_ascii_lowercase().as_str() {
+        "cn" | "sc" | "zh-cn" | "zh-hans" => "cn".into(),
+        "jp" | "ja" | "ja-jp" => "jp".into(),
+        "tw" | "tc" | "zh-tw" | "zh-hant" => "tw".into(),
+        "en" | "world" | "en-us" | "en-gb" => "en".into(),
+        "kr" | "ko" | "ko-kr" => "kr".into(),
+        other => other.into(),
+    }
+}
+
 /// Parsed table collection. It contains no network or filesystem policy.
 #[derive(Clone, Debug)]
 pub struct JsonMasterData {
@@ -243,7 +256,7 @@ pub struct JsonMasterData {
 impl JsonMasterData {
     pub fn new(region: impl Into<String>) -> Self {
         Self {
-            region: region.into(),
+            region: normalize_region(&region.into()),
             tables: BTreeMap::new(),
         }
     }
@@ -513,5 +526,20 @@ mod tests {
         let honor = data.resolve_honor(7, 1).unwrap();
         assert_eq!(honor.asset_bundle_name, "honor_live_1");
         assert_eq!(honor.honor_rarity, "low");
+    }
+
+    #[test]
+    fn region_aliases_canonicalize_to_the_font_mapping_region() {
+        let table = serde_json::json!([{ "id": 1, "fontName": "FOT-RodinNTLGPro-DB" }]);
+        for region in ["CN", "zh-cn", "sc"] {
+            let mut data = JsonMasterData::new(region);
+            data.insert_value("customProfileTextFonts", table.clone())
+                .unwrap();
+            assert_eq!(
+                data.resolve_font(1).as_deref(),
+                Some("FZLanTingHei-DB-GBK"),
+                "region {region} must map the CN font"
+            );
+        }
     }
 }
