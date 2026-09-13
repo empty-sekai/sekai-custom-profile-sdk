@@ -1281,67 +1281,35 @@ fn standard_honor_visual(
     metadata: &impl ResourceMetadata,
 ) -> Option<HonorVisualSnapshot> {
     let resolved = masterdata.resolve_honor(id, level)?;
-    let (width, suffix, size_char) = if full_size {
-        (380.0, "main", "m")
-    } else {
-        (180.0, "sub", "s")
-    };
+    let width = if full_size { 380.0 } else { 180.0 };
     let size = ResourceMetric {
         width,
         height: 80.0,
     };
-    let background_name = resolved.effective_background_asset_bundle_name().to_owned();
-    let background_dir = if resolved.honor_type == "rank_match" {
-        "rank_live/honor"
-    } else {
-        "honor"
-    };
-    let rarity = honor_rarity_number(&resolved.honor_rarity);
-    let frame_candidates = vec![
-        resolved.frame_name.as_ref().and_then(|name| {
-            optional_descriptor(
-                "assets",
-                format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"),
-                size,
-                "honor_frame",
-                id,
-                metadata,
-            )
-        }),
+    let plan = resolved.asset_plan(level, full_size);
+    let descriptor = |resource: &ResourceKey, metric, table| {
         optional_descriptor(
-            "static",
-            format!("honor/frame_degree_{size_char}_{rarity}"),
-            size,
-            "honor_frame",
-            id,
-            metadata,
-        ),
-    ];
-    let overlay = if resolved.has_rank_overlay() {
-        let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-            ("rank_live/honor", suffix.into())
-        } else if resolved.is_live_master {
-            ("honor", "scroll".into())
-        } else {
-            ("honor", format!("rank_{suffix}"))
-        };
-        optional_descriptor(
-            "assets",
-            format!(
-                "{overlay_dir}/{}/{overlay_name}",
-                resolved.asset_bundle_name
-            ),
-            size,
-            "honor_overlay",
+            &resource.namespace,
+            resource.key.clone(),
+            metric,
+            table,
             id,
             metadata,
         )
-    } else {
-        // Standard character, achievement, event and limited-event degree-only
-        // bundles do not receive a synthetic overlay. Special shared-background
-        // families are selected by `has_rank_overlay` above.
-        None
     };
+    let frame_candidates = plan
+        .frame_candidates
+        .iter()
+        .map(|candidate| {
+            candidate
+                .as_ref()
+                .and_then(|key| descriptor(key, size, "honor_frame"))
+        })
+        .collect();
+    let overlay = plan
+        .overlay
+        .as_ref()
+        .and_then(|key| descriptor(key, size, "honor_overlay"));
     let progress = profile
         .and_then(|profile| {
             resolved
@@ -1362,38 +1330,29 @@ fn standard_honor_visual(
             has_star: resolved.has_star,
             is_live_master: resolved.is_live_master,
             progress,
-            background: optional_descriptor(
-                "assets",
-                format!("{background_dir}/{background_name}/degree_{suffix}"),
-                size,
-                "honor_background",
-                id,
-                metadata,
-            ),
+            background: descriptor(&plan.background, size, "honor_background"),
             frame_candidates,
             overlay,
-            star: optional_descriptor(
-                "static",
-                "honor/icon_degreeLv".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
-            star_high: optional_descriptor(
-                "static",
-                "honor/icon_degreeLv6".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
+            star: plan.star.as_ref().and_then(|key| {
+                descriptor(
+                    key,
+                    ResourceMetric {
+                        width: 16.0,
+                        height: 16.0,
+                    },
+                    "honor_static",
+                )
+            }),
+            star_high: plan.star_high.as_ref().and_then(|key| {
+                descriptor(
+                    key,
+                    ResourceMetric {
+                        width: 16.0,
+                        height: 16.0,
+                    },
+                    "honor_static",
+                )
+            }),
             live_star_on: None,
             live_star_off: None,
         },
@@ -1767,6 +1726,89 @@ fn insert_color(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn low_rarity_honor_frames_resolve_custom_fallback_or_no_frame() {
+        struct Available<'a>(&'a [&'a str]);
+        impl super::ResourceMetadata for Available<'_> {
+            fn metric(&self, _: &crate::ResourceKey) -> Option<super::ResourceMetric> {
+                None
+            }
+            fn availability(&self, key: &crate::ResourceKey) -> super::ResourceAvailability {
+                if self.0.contains(&key.key.as_str()) {
+                    super::ResourceAvailability::Available
+                } else {
+                    super::ResourceAvailability::Unavailable
+                }
+            }
+        }
+        let mut md = crate::masterdata::JsonMasterData::new("en");
+        md.insert_value(
+            "honors",
+            serde_json::json!([{
+                "id": 1, "assetbundleName": "honor_sample", "honorRarity": "low",
+                "groupId": 1, "levels": [{ "level": 1 }]
+            }]),
+        )
+        .unwrap();
+        md.insert_value(
+            "honorGroups",
+            serde_json::json!([{
+                "id": 1, "honorType": "character", "frameName": "custom_frame"
+            }]),
+        )
+        .unwrap();
+        let card = serde_json::from_value(serde_json::json!({"honors": [{
+            "objectData": {
+                "layer": 0, "lock": false, "visible": true,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            },
+            "id": 1, "honorLevel": 1, "fullSize": true
+        }]}))
+        .unwrap();
+        let custom = "honor_frame/custom_frame/frame_degree_m_1";
+        let fallback = "honor/frame_degree_m_1";
+        for (available, expected) in [
+            (vec![custom, fallback], Some(("assets", custom))),
+            (vec![custom], Some(("assets", custom))),
+            (vec![fallback], Some(("static", fallback))),
+            (vec![], None),
+        ] {
+            let visual = super::standard_honor_visual(
+                "honor",
+                1,
+                1,
+                true,
+                None,
+                &md,
+                &Available(&available),
+            )
+            .unwrap();
+            let source_key = crate::profile_scene::ordered_profile_elements(&card, "frames")[0]
+                .source_key
+                .clone();
+            let snapshot = crate::profile_scene::ProfileResolveSnapshot {
+                honor_visuals: std::collections::BTreeMap::from([(source_key, visual)]),
+                ..Default::default()
+            };
+            let scene =
+                crate::profile_scene::resolve_profile_scene(&card, "frames", &snapshot).unwrap();
+            let frames = scene
+                .commands
+                .iter()
+                .filter_map(|command| match &command.payload {
+                    crate::SemanticCommandPayload::Image { resource, .. }
+                        if resource.key.contains("frame_degree") =>
+                    {
+                        Some((resource.namespace.as_str(), resource.key.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(frames, expected.into_iter().collect::<Vec<_>>());
+        }
+    }
     use super::*;
     use crate::masterdata::JsonMasterData;
 
