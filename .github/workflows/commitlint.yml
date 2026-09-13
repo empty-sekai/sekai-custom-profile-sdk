@@ -37,9 +37,16 @@ jobs:
           };
           EOF
 
-      - name: Lint PR commits
-        run: |
-          npx commitlint \
-            --from=${{ github.event.pull_request.base.sha }} \
-            --to=${{ github.event.pull_request.head.sha }} \
-            --verbose
+      - name: Lint pull request commits
+        if: github.event_name == 'pull_request'
+        run: >-
+          npx commitlint
+          --from=${{ github.event.pull_request.base.sha }}
+          --to=${{ github.event.pull_request.head.sha }}
+          --verbose
+
+      # A push has no base/head pair, and linting the full history would fail
+      # on commits that predate this workflow. Lint the pushed tip only.
+      - name: Lint pushed commit
+        if: github.event_name == 'push'
+        run: npx commitlint --last --verbose
