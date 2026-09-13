@@ -130,25 +130,39 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
     case "resolveAtlas": {
       const mod = await loadedModule();
       const handle = atlasHandle(request.payload.atlasId);
-      const warm = resolveAtlasRecords(mod, handle, request.payload.keys, request.payload.cached);
-      const missing = new Set(warm.missingKeys);
-      const generated: AtlasGlyphRecord[] = [];
-      for (const group of request.payload.generate) {
-        const glyphs = group.glyphs.filter((entry) => missing.has(entry.key));
-        if (glyphs.length > 0) generated.push(...await generateAtlasRecords({ ...group, glyphs, chars: glyphs.map((entry) => entry.char) }));
+      const leases: number[] = [];
+      try {
+        const warm = resolveAtlasRecords(mod, handle, request.payload.keys, request.payload.cached);
+        if (warm.lease != null) leases.push(warm.lease);
+        const missing = new Set(warm.missingKeys);
+        const generated: AtlasGlyphRecord[] = [];
+        for (const group of request.payload.generate) {
+          const glyphs = group.glyphs.filter((entry) => missing.has(entry.key));
+          if (glyphs.length > 0) generated.push(...await generateAtlasRecords({ ...group, glyphs, chars: glyphs.map((entry) => entry.char) }));
+        }
+        const cold = generated.length > 0 ? resolveAtlasRecords(mod, handle, [...missing], generated) : null;
+        if (cold?.lease != null) leases.push(cold.lease);
+        const missingKeys = cold?.missingKeys ?? warm.missingKeys;
+        if (missingKeys.length > 0) throw new WorkerError("ATLAS_GLYPH_MISSING", `Atlas could not resolve ${missingKeys.length} glyph resource(s)`);
+        transfers = generated.map((record) => record.pixels.buffer);
+        counters.bridgeBytes += generated.reduce((sum, record) => sum + record.pixels.byteLength, 0);
+        result = { kind: "resolveAtlas", result: {
+          leases,
+          placements: [...warm.placements, ...(cold?.placements ?? [])],
+          missingKeys,
+          generated,
+          stats: cold?.stats ?? warm.stats,
+        } };
+      } catch (error) {
+        for (const lease of leases) {
+          try {
+            mod.ccall("sdf_atlas_release", "number", ["number", "number"], [handle, lease]);
+          } catch {
+            // Attempt every release while preserving the resolution failure.
+          }
+        }
+        throw error;
       }
-      const cold = generated.length > 0 ? resolveAtlasRecords(mod, handle, [...missing], generated) : null;
-      const missingKeys = cold?.missingKeys ?? warm.missingKeys;
-      if (missingKeys.length > 0) throw new WorkerError("ATLAS_GLYPH_MISSING", `Atlas could not resolve ${missingKeys.length} glyph resource(s)`);
-      transfers = generated.map((record) => record.pixels.buffer);
-      counters.bridgeBytes += generated.reduce((sum, record) => sum + record.pixels.byteLength, 0);
-      result = { kind: "resolveAtlas", result: {
-        leases: [warm.lease, cold?.lease].filter((lease): lease is number => lease != null),
-        placements: [...warm.placements, ...(cold?.placements ?? [])],
-        missingKeys,
-        generated,
-        stats: cold?.stats ?? warm.stats,
-      } };
       break;
     }
     case "atlasPages": {

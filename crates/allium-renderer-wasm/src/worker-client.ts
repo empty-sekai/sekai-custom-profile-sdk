@@ -49,7 +49,8 @@ export class RendererWorkerClient {
   private constructor(worker: Worker) {
     this.worker = worker;
     worker.onmessage = (event: MessageEvent<RendererWorkerResponse>) => this.receive(event.data);
-    worker.onerror = (event) => this.failAll(new RendererWorkerError("WORKER_CRASHED", event.message));
+    worker.onerror = (event) => this.close(new RendererWorkerError("WORKER_CRASHED", event.message));
+    worker.onmessageerror = () => this.close(new RendererWorkerError("WORKER_MESSAGE_ERROR", "Renderer worker response could not be deserialized"));
   }
 
   static async create(options: RendererWorkerClientOptions = {}): Promise<RendererWorkerClient> {
@@ -58,14 +59,19 @@ export class RendererWorkerClient {
     const wasmUrl = options.wasmUrl ?? new URL("./allium_renderer_wasm.wasm", import.meta.url);
     const worker = options.workerFactory?.(workerUrl) ?? new Worker(workerUrl, { type: "module", name: "sekai-custom-profile-sdk" });
     const client = new RendererWorkerClient(worker);
-    const result = await client.request("init", {
-      moduleUrl: moduleUrl.toString(),
-      wasmUrl: wasmUrl.toString(),
-    });
-    if (result.kind !== "init" || result.protocol !== RENDERER_WORKER_PROTOCOL) {
-      throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid init response");
+    try {
+      const result = await client.request("init", {
+        moduleUrl: moduleUrl.toString(),
+        wasmUrl: wasmUrl.toString(),
+      });
+      if (result.kind !== "init" || result.protocol !== RENDERER_WORKER_PROTOCOL) {
+        throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid init response");
+      }
+      return client;
+    } catch (error) {
+      client.terminate();
+      throw error;
     }
-    return client;
   }
 
   async registerFont(font: RegisteredFont): Promise<void> {
@@ -157,10 +163,7 @@ export class RendererWorkerClient {
   }
 
   terminate(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.worker.terminate();
-    this.failAll(new RendererWorkerError("WORKER_TERMINATED", "Renderer worker was terminated"));
+    this.close(new RendererWorkerError("WORKER_TERMINATED", "Renderer worker was terminated"));
   }
 
   async sceneRequest(
@@ -179,7 +182,12 @@ export class RendererWorkerClient {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, kind, payload } as RendererWorkerRequest, transfers);
+      try {
+        this.worker.postMessage({ id, kind, payload } as RendererWorkerRequest, transfers);
+      } catch (error) {
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -189,6 +197,19 @@ export class RendererWorkerClient {
     this.pending.delete(response.id);
     if (response.ok) pending.resolve(response.result);
     else pending.reject(new RendererWorkerError(response.error.code, response.error.message));
+  }
+
+  private close(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
+    this.worker.onmessageerror = null;
+    try {
+      this.worker.terminate();
+    } finally {
+      this.failAll(error);
+    }
   }
 
   private failAll(error: Error): void {

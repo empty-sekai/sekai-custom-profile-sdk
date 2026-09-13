@@ -17,6 +17,7 @@ type InflightEntry<T> = {
   controller: AbortController;
   waiters: number;
   settled: boolean;
+  entry?: CacheEntry<T>;
 };
 
 export class SessionImageResourceCache<T> {
@@ -71,12 +72,18 @@ export class SessionImageResourceCache<T> {
       }).catch(() => undefined);
     }
     pending.waiters += 1;
+    let acquired = false;
     try {
       const entry = await awaitWithAbort(pending.promise, signal);
-      entry.refs += 1;
+      // load() already reserved this waiter's reference before publishing the entry.
+      acquired = true;
       entry.touched = ++this.clock;
       return this.lease(entry);
     } finally {
+      // Cancellation can win after admission but before the lease is delivered.
+      if (!acquired && pending.entry) {
+        pending.entry.refs = Math.max(0, pending.entry.refs - 1);
+      }
       pending.waiters = Math.max(0, pending.waiters - 1);
       if (pending.waiters === 0 && !pending.settled) {
         if (this.inflight.get(key) === pending) this.inflight.delete(key);
@@ -115,24 +122,36 @@ export class SessionImageResourceCache<T> {
     owner: InflightEntry<T>,
   ): Promise<CacheEntry<T>> {
     const decoded = await loader();
-    if (this.inflight.get(key) !== owner) {
+    try {
+      if (this.inflight.get(key) !== owner) {
+        throw abortReason(owner.controller.signal);
+      }
+      if (!Number.isFinite(decoded.bytes) || !Number.isInteger(decoded.bytes) || decoded.bytes < 0) {
+        throw new Error(`invalid decoded image byte size ${decoded.bytes}`);
+      }
+      if (decoded.bytes > this.budget.hardBytes) {
+        throw new Error(`decoded image exceeds hard byte budget: ${decoded.bytes} > ${this.budget.hardBytes}`);
+      }
+      this.evictUntil(this.budget.hardBytes - decoded.bytes);
+      if (this.totalBytes + decoded.bytes > this.budget.hardBytes) {
+        throw new Error(`decoded image cache hard byte budget is pinned`);
+      }
+      // Reserve all waiting leases now: another load or clear() can run before
+      // their acquire continuations and must not dispose this decoded value.
+      const entry: CacheEntry<T> = {
+        value: decoded.value,
+        bytes: decoded.bytes,
+        refs: owner.waiters,
+        touched: ++this.clock,
+      };
+      owner.entry = entry;
+      this.entries.set(key, entry);
+      this.totalBytes += decoded.bytes;
+      return entry;
+    } catch (error) {
       this.budget.dispose?.(decoded.value);
-      throw abortReason(owner.controller.signal);
+      throw error;
     }
-    if (!Number.isFinite(decoded.bytes) || !Number.isInteger(decoded.bytes) || decoded.bytes < 0) {
-      throw new Error(`invalid decoded image byte size ${decoded.bytes}`);
-    }
-    if (decoded.bytes > this.budget.hardBytes) {
-      throw new Error(`decoded image exceeds hard byte budget: ${decoded.bytes} > ${this.budget.hardBytes}`);
-    }
-    this.evictUntil(this.budget.hardBytes - decoded.bytes);
-    if (this.totalBytes + decoded.bytes > this.budget.hardBytes) {
-      throw new Error(`decoded image cache hard byte budget is pinned`);
-    }
-    const entry: CacheEntry<T> = { value: decoded.value, bytes: decoded.bytes, refs: 0, touched: ++this.clock };
-    this.entries.set(key, entry);
-    this.totalBytes += decoded.bytes;
-    return entry;
   }
 
   private lease(entry: CacheEntry<T>): ImageResourceLease<T> {

@@ -231,9 +231,15 @@ export class BrowserRenderer {
     let resources: BrowserSemanticResourceSet | null = null;
     let core: RendererScene | null = null;
     let atlas: SdfAtlas | null = null;
+    let renderer: SemanticWebglSceneRenderer | null = null;
     const abort = combinedAbortSignal(this.lifetime.signal, options.signal);
-    const inputs = resolveProfileSceneInputs(options);
+    const assertActive = () => {
+      if (abort.signal.aborted) throw abortReason(abort.signal);
+      this.assertAlive();
+    };
     try {
+      assertActive();
+      const inputs = resolveProfileSceneInputs(options);
       const locale = options.locale ?? this.region;
       let localizedText: Record<string, string> | undefined;
       if (this.localizations) {
@@ -300,6 +306,7 @@ export class BrowserRenderer {
       let acquired: BrowserSemanticResourceSet;
       acquired = await this.resources.acquire(requestedResources, abort.signal);
       resources = acquired;
+      assertActive();
       const compiled = await options.masterData.createProfileScene({
         documentKey: options.documentKey,
         card: inputs.card,
@@ -319,17 +326,19 @@ export class BrowserRenderer {
         }),
       }, preparedLayoutRequest(preparation, atlas));
       core = compiled.scene;
+      assertActive();
       const plan = semanticCommandPlanFromCoreSnapshot(
         core.initial.snapshot as unknown as Parameters<typeof semanticCommandPlanFromCoreSnapshot>[0],
       );
       assertPreparedResources(plan.resourceRequests(), acquired.sources);
-      const renderer = new SemanticWebglSceneRenderer(this.gl);
+      renderer = new SemanticWebglSceneRenderer(this.gl);
       const bootstrap = await renderer.setScene({
         plan,
         atlas,
         layout: compiled.layout,
         imageSources: acquired.sources,
       });
+      assertActive();
       const scene = new BrowserScene(core, renderer, acquired, atlas, {
         dynamicProgramCount: compiled.layout.dynamicPrograms.length,
         canvas: this.canvas,
@@ -340,9 +349,7 @@ export class BrowserRenderer {
       this.scenes.add(scene);
       return scene;
     } catch (error) {
-      atlas?.release();
-      resources?.release();
-      await core?.destroy().catch(() => undefined);
+      await releaseSceneResources(renderer, resources, atlas, core).catch(() => undefined);
       throw error;
     } finally {
       abort.dispose();
@@ -627,6 +634,22 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
+async function releaseSceneResources(
+  renderer: SemanticWebglSceneRenderer | null,
+  resources: BrowserSemanticResourceSet | null,
+  atlas: SdfAtlas | null,
+  core: RendererScene | null,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    Promise.resolve().then(() => renderer?.destroy()),
+    Promise.resolve().then(() => resources?.release()),
+    Promise.resolve().then(() => atlas?.release()),
+    Promise.resolve().then(() => core?.destroy()),
+  ]);
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
+}
+
 export class BrowserScene {
   private destroyed = false;
   private readonly runtime: RendererRuntimeTelemetry;
@@ -735,10 +758,7 @@ export class BrowserScene {
     if (this.destroyed) return;
     this.destroyed = true;
     try {
-      this.renderer.destroy();
-      this.resources.release();
-      await this.atlas?.release();
-      await this.core.destroy();
+      await releaseSceneResources(this.renderer, this.resources, this.atlas, this.core);
     } finally {
       // A failed release step must not leave this scene registered in the
       // renderer's active set; runtime destruction is terminal either way.
