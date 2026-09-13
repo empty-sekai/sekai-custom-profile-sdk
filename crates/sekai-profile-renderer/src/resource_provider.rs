@@ -39,6 +39,11 @@ impl ResourceProvider {
     }
 
     /// 设置磁盘缓存目录。
+    ///
+    /// 目录即缓存的作用域。[`Self::get`] 回退到磁盘时只按 key 查找同名文件，
+    /// 不校验内容版本，因此调用方需保证同一目录内 key 到字节的映射稳定：
+    /// 当上游同 key 的资源已经换了内容，请改用另一个目录，
+    /// 或在设置前自行清理该目录。
     pub fn set_disk_cache_dir(&mut self, dir: PathBuf) {
         std::fs::create_dir_all(&dir).ok();
         self.disk_cache_dir = Some(dir);

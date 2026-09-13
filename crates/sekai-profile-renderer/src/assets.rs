@@ -403,7 +403,13 @@ impl AssetStore {
         Some((decoded.width, decoded.height, pixels))
     }
 
-    /// 设置磁盘缓存目录（S3 下载的资源持久化到磁盘，重启不丢失）
+    /// 设置磁盘缓存目录（S3 下载的资源持久化到磁盘，重启不丢失）。
+    ///
+    /// 目录即缓存的作用域。命中只按 key 查找同名文件，不校验内容版本，
+    /// 因此调用方需保证同一目录内 key 到字节的映射稳定：当上游同 key 的资源
+    /// 已经换了内容，请改用另一个目录，或在设置前自行清理该目录。
+    /// 注意 [`AssetStore::contains`] 把磁盘命中也算作已存在，
+    /// 用它决定是否回源的调用方不会重新拉取陈旧文件。
     pub fn set_disk_cache_dir(&mut self, dir: std::path::PathBuf) {
         self.cache
             .lock()
