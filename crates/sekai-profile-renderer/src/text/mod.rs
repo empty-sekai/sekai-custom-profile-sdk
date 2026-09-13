@@ -525,6 +525,7 @@ pub(crate) enum TextSdfCommandError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextSdfCaptureError {
     PerspectiveTransform,
+    UnsupportedFeature { feature: &'static str },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -744,7 +745,13 @@ pub(crate) fn capture_text_sdf_from_affine(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> TextSdfCaptureTimings {
-    let mut run = layout_text_ops(text, md, None, atlases, None, true);
+    let mut run = match layout_text_ops(text, md, None, atlases, None, true) {
+        Ok(run) => run,
+        Err(error) => {
+            observer(Err(error));
+            return TextSdfCaptureTimings::default();
+        }
+    };
     let emit_started = Some(std::time::Instant::now());
     for op in &run.draw_ops {
         if op.ch.chars().all(char::is_whitespace) {
@@ -773,7 +780,14 @@ pub(crate) fn capture_text_sdf_with_placement(
     outline_override: Option<TextOutlineOverride>,
     observer: &mut dyn FnMut(Result<ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> TextSdfCaptureTimings {
-    let mut run = layout_text_ops(text, md, Some(placement), atlases, outline_override, true);
+    let mut run = match layout_text_ops(text, md, Some(placement), atlases, outline_override, true)
+    {
+        Ok(run) => run,
+        Err(error) => {
+            observer(Err(error));
+            return TextSdfCaptureTimings::default();
+        }
+    };
     let emit_started = Some(std::time::Instant::now());
     for op in &run.draw_ops {
         if op.ch.chars().all(char::is_whitespace) {
@@ -827,6 +841,29 @@ fn resolve_outline_params(
         })
 }
 
+/// Reject decoration spans that cannot be represented by SDF glyph commands.
+/// The parsed spans distinguish active markup from literal text and empty tags.
+fn validate_sdf_text_segments(segments: &[TextSegment]) -> Result<(), TextSdfCaptureError> {
+    for segment in segments {
+        if !segment.text.chars().any(|ch| ch != '\n') {
+            continue;
+        }
+        let feature = if segment.mark_color.is_some() {
+            Some("text mark")
+        } else if segment.underline {
+            Some("text underline")
+        } else if segment.strikethrough {
+            Some("text strikethrough")
+        } else {
+            None
+        };
+        if let Some(feature) = feature {
+            return Err(TextSdfCaptureError::UnsupportedFeature { feature });
+        }
+    }
+    Ok(())
+}
+
 /// Runs the full TMP-compatible layout for one text element: rich-text
 /// parsing, measurement, line placement and glyph operation construction.
 /// Nothing here touches a raster backend.
@@ -837,7 +874,7 @@ fn layout_text_ops(
     capture_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     outline_override: Option<TextOutlineOverride>,
     timing_enabled: bool,
-) -> TextLayoutRun {
+) -> Result<TextLayoutRun, TextSdfCaptureError> {
     let capture_timing_enabled = timing_enabled;
     let rich_parse_started = capture_timing_enabled.then(std::time::Instant::now);
     let mut capture_timings = TextSdfCaptureTimings::default();
@@ -865,6 +902,7 @@ fn layout_text_ops(
     }
 
     let segments = parse_rich_segments(&text.text);
+    validate_sdf_text_segments(&segments)?;
     let global = segments_to_global(&segments);
     let debug_probe = debug_text_probe_enabled();
     tracing::debug!(
@@ -895,12 +933,12 @@ fn layout_text_ops(
             "declared font family is unavailable; skipping the text element"
         );
         capture_timings.font_resolve_ns = capture_elapsed_ns(font_resolve_started);
-        return TextLayoutRun {
+        return Ok(TextLayoutRun {
             font_family: resolved_name,
             draw_ops: Vec::new(),
             decorations: Vec::new(),
             timings: capture_timings,
-        };
+        });
     }
 
     let base_size = text.size;
@@ -1809,12 +1847,12 @@ fn layout_text_ops(
             "TMP_DEBUG_DRAW"
         );
     }
-    TextLayoutRun {
+    Ok(TextLayoutRun {
         font_family: resolved_name,
         draw_ops,
         decorations,
         timings: capture_timings,
-    }
+    })
 }
 
 fn text_render_translation(
@@ -1860,6 +1898,133 @@ fn static_line_indent_terminal_x(
 #[cfg(test)]
 mod tests {
     use super::effective_vertex_alpha;
+
+    #[test]
+    fn sdf_capture_rejects_decoration_spans_without_emitting_partial_glyphs() {
+        use crate::masterdata::{MasterData, MasterDataProvider};
+        use std::sync::Arc;
+
+        struct NoFonts;
+        impl MasterDataProvider for NoFonts {
+            fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+                None
+            }
+            fn get_card(&self, _: i32) -> Option<crate::types::CardEntry> {
+                None
+            }
+            fn resolve_color(&self, _: i32) -> Option<crate::masterdata::ResolvedColor> {
+                None
+            }
+            fn resolve_font(&self, _: i32) -> Option<String> {
+                panic!("unsupported decoration must be rejected before font lookup");
+            }
+            fn resolve_stamp(&self, _: i32) -> Option<String> {
+                None
+            }
+            fn resolve_resource(&self, _: &str, _: i32) -> Option<crate::masterdata::ResourceInfo> {
+                None
+            }
+            fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {
+                None
+            }
+            fn get_bonds_honor(&self, _: i32) -> Option<crate::types::BondsHonorEntry> {
+                None
+            }
+            fn get_bonds_honor_word(&self, _: i64) -> Option<crate::types::BondsHonorWordEntry> {
+                None
+            }
+            fn get_honor(&self, _: i32) -> Option<crate::types::HonorEntry> {
+                None
+            }
+            fn resolve_unit_vs_sd(&self, id: i32, _: i32) -> i32 {
+                id
+            }
+            fn font_count(&self) -> usize {
+                0
+            }
+            fn color_count(&self) -> usize {
+                0
+            }
+        }
+
+        let md = MasterData::new(Arc::new(NoFonts));
+        for (text, feature) in [
+            ("plain <u>underlined</u>", "text underline"),
+            ("plain <s>struck</s>", "text strikethrough"),
+            ("plain <mark=#ff0000>marked</mark>", "text mark"),
+            ("<u> </u>", "text underline"),
+        ] {
+            let element = serde_json::from_value(serde_json::json!({
+                "objectData": {
+                    "layer": 0, "lock": false, "visible": true,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+                },
+                "colorId": 1, "fontId": 1, "lineSpacing": 0.0,
+                "outlineColorId": 1, "outlineSize": 0.0, "size": 24.0,
+                "text": text, "type": 1
+            }))
+            .unwrap();
+            for placed in [false, true] {
+                let mut events = Vec::new();
+                let mut observer = |event| events.push(event);
+                let affine = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+                if placed {
+                    super::capture_text_sdf_with_placement(
+                        affine,
+                        &element,
+                        &md,
+                        None,
+                        super::TextRenderPlacement {
+                            anchor_x: 0.0,
+                            baseline: None,
+                        },
+                        None,
+                        &mut observer,
+                    );
+                } else {
+                    super::capture_text_sdf_from_affine(affine, &element, &md, None, &mut observer);
+                }
+                assert_eq!(events.len(), 1, "text={text}, placed={placed}");
+                assert!(matches!(
+                    events[0],
+                    Err(super::TextSdfCaptureError::UnsupportedFeature { feature: value })
+                        if value == feature
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn sdf_capture_accepts_literal_markup_empty_decorations_and_supported_styles() {
+        for text in [
+            "plain text",
+            "<b>bold</b><i>italic</i><color=#ff0000>red</color>",
+            "<noparse><u>literal</u><s>literal</s><mark=#ff0000>literal</mark></noparse>",
+            "<u></u><s></s><mark=#ff0000></mark>plain",
+            "<u>\n</u><s>\n</s><mark=#ff0000>\n</mark>",
+        ] {
+            let segments = super::parse_rich_segments(text);
+            assert_eq!(
+                super::validate_sdf_text_segments(&segments),
+                Ok(()),
+                "text={text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rich_text_parsing_retains_decoration_semantics_for_non_capture_consumers() {
+        let segments = super::parse_rich_segments("<u>A</u><s>B</s><mark=#ff0000>C</mark>");
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, "A");
+        assert!(segments[0].underline);
+        assert_eq!(segments[1].text, "B");
+        assert!(segments[1].strikethrough);
+        assert_eq!(segments[2].text, "C");
+        assert_eq!(segments[2].mark_color, Some((255, 0, 0, 64)));
+    }
 
     /// A capture given the outline as resolved RGBA must produce exactly the
     /// glyph stream the color-table route produces for the same color, and a

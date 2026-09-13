@@ -2387,9 +2387,14 @@ fn append_semantic_text_draws(
                 draw.device_clip = device_clip;
                 draws.push(draw);
             }
-            Err(error) => capture_error = Some(error.to_string()),
+            Err(error) => {
+                capture_error = Some(ProfileCompositorError::SemanticSdf {
+                    role: command.role.clone(),
+                    reason: error.to_string(),
+                });
+            }
         },
-        Err(error) => capture_error = Some(format!("{error:?}")),
+        Err(error) => capture_error = Some(text_capture_error(&command.role, error)),
     };
     let capture = crate::elements::generals::sdf_text::capture_general_sdf_text_from_lowered(
         content_matrix,
@@ -2414,13 +2419,55 @@ fn append_semantic_text_draws(
         role: command.role.clone(),
         reason,
     })?;
-    if let Some(reason) = capture_error {
-        return Err(ProfileCompositorError::SemanticSdf {
-            role: command.role.clone(),
-            reason,
-        });
+    if let Some(error) = capture_error {
+        return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod capture_error_tests {
+    #[test]
+    fn unsupported_text_capture_features_keep_the_public_feature_error() {
+        for feature in ["text underline", "text strikethrough", "text mark"] {
+            let error = super::text_capture_error(
+                "profile-text",
+                crate::text::TextSdfCaptureError::UnsupportedFeature { feature },
+            );
+            assert!(matches!(
+                error,
+                super::ProfileCompositorError::UnsupportedFeature { role, feature: actual }
+                    if role == "profile-text" && actual == feature
+            ));
+        }
+        let error = super::text_capture_error(
+            "profile-text",
+            crate::text::TextSdfCaptureError::PerspectiveTransform,
+        );
+        assert!(matches!(
+            error,
+            super::ProfileCompositorError::SemanticSdf { role, reason }
+                if role == "profile-text" && reason == "PerspectiveTransform"
+        ));
+    }
+}
+
+fn text_capture_error(
+    role: &str,
+    error: crate::text::TextSdfCaptureError,
+) -> ProfileCompositorError {
+    match error {
+        crate::text::TextSdfCaptureError::UnsupportedFeature { feature } => {
+            ProfileCompositorError::UnsupportedFeature {
+                role: role.into(),
+                feature: feature.into(),
+            }
+        }
+        error => ProfileCompositorError::SemanticSdf {
+            role: role.into(),
+            reason: format!("{error:?}"),
+        },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
