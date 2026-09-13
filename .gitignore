@@ -13,5 +13,8 @@ crates/allium-renderer-wasm/serve-demo.cjs
 node_modules/
 /tmp/
 
+# Local code index
+/.codegraph/
+
 # Local agent instructions (private, never published)
 AGENTS.md
