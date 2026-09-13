@@ -5,6 +5,8 @@ name: lint-commits
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
 
 jobs:
   lint:

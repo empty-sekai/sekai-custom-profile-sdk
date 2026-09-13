@@ -1,0 +1,90 @@
+name: ci
+
+# Mirrors the verification jobs of the release workflow so a green run here
+# predicts a green release. Keep the two in step when either changes.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype6-dev libssl-dev libx264-dev pkg-config
+
+      - run: cargo fmt --all -- --check
+      # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
+      # lints don't gate a pull request without touching engine source.
+      - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
+      - run: cargo test --workspace --all-features
+
+  test-no-skia:
+    name: test (no skia)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfreetype6-dev pkg-config
+
+      - run: cargo test -p sekai-profile-renderer --no-default-features
+      - run: cargo build -p sekai-profile-card-cli
+
+  browser:
+    name: browser gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # test:gates covers the demo server, which loads the real wasm artifacts,
+      # so the package has to be built before the gates run.
+      - name: Build wasm in container
+        run: bash crates/allium-renderer-wasm/build.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build TypeScript wrapper
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm run build:ts
+
+      - name: Browser gates
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          npm run test:gates
+          npm run verify:wasm:runtime
+          npm run audit:public
+
+      - name: WebGL2 GPU contract gate
+        working-directory: crates/allium-renderer-wasm
+        run: |
+          node --test \
+            scripts/test/m3-browser-semantic-resources.test.mjs \
+            scripts/test/m3-semantic-geometry.test.mjs \
+            scripts/test/m3-semantic-text-glyph-bridge.test.mjs \
+            scripts/test/m4-shape-sdf-shader.test.mjs
