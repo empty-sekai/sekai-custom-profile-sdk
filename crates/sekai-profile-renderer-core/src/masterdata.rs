@@ -145,7 +145,99 @@ pub fn honor_has_rank_overlay(
         .any(|prefix| asset_bundle_name.starts_with(prefix))
 }
 
+/// Resource identities for one standard honor. Frame candidates are ordered
+/// alternatives, not independent requirements: custom first, then default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandardHonorAssetPlan {
+    pub background: crate::ResourceKey,
+    pub overlay: Option<crate::ResourceKey>,
+    pub frame_candidates: [Option<crate::ResourceKey>; 2],
+    pub star: Option<crate::ResourceKey>,
+    pub star_high: Option<crate::ResourceKey>,
+}
+
+impl StandardHonorAssetPlan {
+    /// All possible source keys, including both sides of the frame fallback.
+    pub fn resources(&self) -> impl Iterator<Item = &crate::ResourceKey> {
+        std::iter::once(&self.background)
+            .chain(self.overlay.iter())
+            .chain(self.frame_candidates.iter().flatten())
+            .chain(self.star.iter())
+            .chain(self.star_high.iter())
+    }
+}
+
 impl ResolvedHonor {
+    pub fn asset_plan(&self, level: i32, full_size: bool) -> StandardHonorAssetPlan {
+        let resource = |namespace: &str, key: String| crate::ResourceKey {
+            namespace: namespace.into(),
+            key,
+        };
+        let (suffix, size_char) = if full_size {
+            ("main", "m")
+        } else {
+            ("sub", "s")
+        };
+        let directory = if self.honor_type == "rank_match" {
+            "rank_live/honor"
+        } else {
+            "honor"
+        };
+        let rarity = match self.honor_rarity.as_str() {
+            "low" => 1,
+            "middle" => 2,
+            "high" => 3,
+            _ => 4,
+        };
+        let frame_candidates = [
+            self.frame_name.as_ref().map(|name| {
+                resource(
+                    "assets",
+                    format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"),
+                )
+            }),
+            Some(resource(
+                "static",
+                format!("honor/frame_degree_{size_char}_{rarity}"),
+            )),
+        ];
+        let overlay = self.has_rank_overlay().then(|| {
+            let name = if self.honor_type == "rank_match" {
+                suffix.into()
+            } else if self.is_live_master {
+                "scroll".into()
+            } else {
+                format!("rank_{suffix}")
+            };
+            resource(
+                "assets",
+                format!("{directory}/{}/{name}", self.asset_bundle_name),
+            )
+        });
+        let mut star_level = level % 10;
+        if star_level == 0 && level > 0 {
+            star_level = 10;
+        }
+        let has_stars = self.has_star
+            && !self.is_live_master
+            && matches!(self.honor_type.as_str(), "character" | "achievement");
+        StandardHonorAssetPlan {
+            background: resource(
+                "assets",
+                format!(
+                    "{directory}/{}/degree_{suffix}",
+                    self.effective_background_asset_bundle_name(),
+                ),
+            ),
+            overlay,
+            frame_candidates,
+            star: (has_stars && star_level > 0)
+                .then(|| resource("static", "honor/icon_degreeLv".into())),
+            star_high: (has_stars && star_level > 5)
+                .then(|| resource("static", "honor/icon_degreeLv6".into())),
+        }
+    }
+
     pub fn effective_background_asset_bundle_name(&self) -> &str {
         effective_honor_background_asset_bundle_name(
             &self.honor_type,
@@ -437,6 +529,85 @@ impl ProfileMasterData for JsonMasterData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planned_honor() -> ResolvedHonor {
+        ResolvedHonor {
+            asset_bundle_name: "honor_sample".into(),
+            honor_rarity: "low".into(),
+            honor_type: "character".into(),
+            background_asset_bundle_name: None,
+            frame_name: Some("custom_frame".into()),
+            is_live_master: false,
+            has_star: true,
+            honor_mission_type: None,
+        }
+    }
+
+    #[test]
+    fn standard_honor_plan_keeps_ordered_frames_and_namespaces_for_all_rarities() {
+        for (rarity, number) in [("low", 1), ("middle", 2), ("high", 3), ("highest", 4)] {
+            for (full_size, size) in [(true, "m"), (false, "s")] {
+                let mut honor = planned_honor();
+                honor.honor_rarity = rarity.into();
+                let plan = honor.asset_plan(10, full_size);
+                let frames = plan
+                    .frame_candidates
+                    .iter()
+                    .flatten()
+                    .map(|key| (key.namespace.as_str(), key.key.clone()))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    frames,
+                    vec![
+                        (
+                            "assets",
+                            format!("honor_frame/custom_frame/frame_degree_{size}_{number}")
+                        ),
+                        ("static", format!("honor/frame_degree_{size}_{number}")),
+                    ]
+                );
+                assert_eq!(plan.star.as_ref().unwrap().namespace, "static");
+                assert_eq!(plan.star_high.as_ref().unwrap().namespace, "static");
+                assert_eq!(plan.resources().count(), 5);
+            }
+        }
+    }
+
+    #[test]
+    fn standard_honor_plan_requests_stars_only_when_they_are_drawn() {
+        let mut honor = planned_honor();
+        for (level, normal, high) in [
+            (-1, false, false),
+            (0, false, false),
+            (1, true, false),
+            (5, true, false),
+            (6, true, true),
+            (10, true, true),
+            (11, true, false),
+            (20, true, true),
+        ] {
+            let plan = honor.asset_plan(level, false);
+            assert_eq!(
+                (plan.star.is_some(), plan.star_high.is_some()),
+                (normal, high),
+                "level={level}"
+            );
+        }
+        for honor_type in ["normal", "rank_match", "event"] {
+            honor.honor_type = honor_type.into();
+            let plan = honor.asset_plan(10, true);
+            assert!(plan.star.is_none() && plan.star_high.is_none());
+        }
+        honor.honor_type = "achievement".into();
+        assert!(honor.asset_plan(10, true).star_high.is_some());
+        honor.has_star = false;
+        assert!(honor.asset_plan(10, true).star.is_none());
+        honor.has_star = true;
+        honor.is_live_master = true;
+        let plan = honor.asset_plan(10, true);
+        assert!(plan.star.is_none() && plan.star_high.is_none());
+        assert_eq!(plan.overlay.unwrap().key, "honor/honor_sample/scroll");
+    }
     #[test]
     fn json_provider_maps_fonts_by_region_without_mutating_source_tables() {
         let table = serde_json::json!([{ "id": 1, "fontName": "FOT-RodinNTLGPro-DB" }]);

@@ -328,11 +328,9 @@ fn missing_asset_keys(
     store: &AssetStore,
 ) -> Vec<String> {
     let md = renderer.snapshot_masterdata();
-    let mut keys = sekai_profile_renderer::asset_keys::collect_card_asset_keys(card, &md);
-    keys.sort();
-    keys.dedup();
-    keys.retain(|key| !store.contains(key));
-    keys
+    sekai_profile_renderer::asset_keys::missing_card_asset_keys(card, &md, |key| {
+        store.contains(key)
+    })
 }
 
 /// 收集名片 + profile 所需但 AssetStore 中缺失的素材 key（URL 取材用）。
@@ -343,13 +341,18 @@ fn missing_asset_keys_with_profile(
     store: &AssetStore,
 ) -> Vec<String> {
     let md = renderer.snapshot_masterdata();
-    let mut keys = sekai_profile_renderer::asset_keys::collect_card_asset_keys(card, &md);
+    let mut keys = sekai_profile_renderer::asset_keys::missing_card_asset_keys(card, &md, |key| {
+        store.contains(key)
+    });
     if let Some(p) = profile {
-        keys.extend(sekai_profile_renderer::asset_keys::collect_profile_asset_keys(p, &md));
+        keys.extend(
+            sekai_profile_renderer::asset_keys::missing_profile_asset_keys(p, &md, |key| {
+                store.contains(key)
+            }),
+        );
     }
     keys.sort();
     keys.dedup();
-    keys.retain(|key| !store.contains(key));
     keys
 }
 

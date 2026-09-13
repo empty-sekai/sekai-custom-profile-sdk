@@ -3,10 +3,70 @@
 use crate::masterdata::MasterData;
 use crate::profile::ProfileData;
 use crate::types::CustomProfileCard;
+use sekai_profile_renderer_core::{masterdata::StandardHonorAssetPlan, ResourceKey};
 
-/// 从单页名片中收集需要从 S3 下载的素材 key。
+#[derive(Default)]
+struct AssetRequirements {
+    // Each group needs one available member. A singleton is an ordinary asset.
+    groups: Vec<Vec<ResourceKey>>,
+}
+
+impl AssetRequirements {
+    fn push(&mut self, key: String) {
+        self.groups.push(vec![ResourceKey {
+            namespace: "assets".into(),
+            key,
+        }]);
+    }
+
+    fn honor(&mut self, plan: &StandardHonorAssetPlan) {
+        for key in std::iter::once(&plan.background).chain(plan.overlay.iter()) {
+            self.groups.push(vec![key.clone()]);
+        }
+        self.groups
+            .push(plan.frame_candidates.iter().flatten().cloned().collect());
+        for key in plan.star.iter().chain(plan.star_high.iter()) {
+            self.groups.push(vec![key.clone()]);
+        }
+    }
+
+    fn keys(self) -> Vec<String> {
+        self.groups
+            .into_iter()
+            .flatten()
+            .map(|resource| resource.key)
+            .collect()
+    }
+
+    fn missing(&self, mut available: impl FnMut(&str) -> bool) -> Vec<String> {
+        let mut missing = Vec::new();
+        for group in &self.groups {
+            if !group.iter().any(|resource| available(&resource.key)) {
+                missing.extend(group.iter().map(|resource| resource.key.clone()));
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        missing
+    }
+}
+
+/// Collects possible asset keys, including alternatives that need not all exist.
 pub fn collect_card_asset_keys(card: &CustomProfileCard, md: &MasterData) -> Vec<String> {
-    let mut keys = Vec::new();
+    card_asset_requirements(card, md).keys()
+}
+
+/// Reports missing assets without treating an available frame fallback as missing.
+pub fn missing_card_asset_keys(
+    card: &CustomProfileCard,
+    md: &MasterData,
+    available: impl FnMut(&str) -> bool,
+) -> Vec<String> {
+    card_asset_requirements(card, md).missing(available)
+}
+
+fn card_asset_requirements(card: &CustomProfileCard, md: &MasterData) -> AssetRequirements {
+    let mut keys = AssetRequirements::default();
 
     for e in &card.stamps {
         let abn = md
@@ -95,9 +155,22 @@ pub fn resolve_card_member_key(
     })
 }
 
-/// 收集 `ProfileData` 中面板渲染需要的隐式素材 key。
+/// Collects profile-panel asset candidates, including frame alternatives.
 pub fn collect_profile_asset_keys(profile: &ProfileData, md: &MasterData) -> Vec<String> {
-    let mut keys = Vec::new();
+    profile_asset_requirements(profile, md).keys()
+}
+
+/// Reports missing profile-panel resources using the same fallback groups as cards.
+pub fn missing_profile_asset_keys(
+    profile: &ProfileData,
+    md: &MasterData,
+    available: impl FnMut(&str) -> bool,
+) -> Vec<String> {
+    profile_asset_requirements(profile, md).missing(available)
+}
+
+fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRequirements {
+    let mut keys = AssetRequirements::default();
 
     if let Some(lc) = &profile.leader_card {
         let suffix = if lc.after_training {
@@ -170,51 +243,10 @@ fn collect_honor_keys(
     honor_level: i32,
     full_size: bool,
     md: &MasterData,
-    keys: &mut Vec<String>,
+    keys: &mut AssetRequirements,
 ) {
-    let resolved = match md.resolve_honor(honor_id, honor_level) {
-        Some(r) => r,
-        None => return,
-    };
-    let suffix = if full_size { "main" } else { "sub" };
-
-    let bg_abn = resolved.effective_background_asset_bundle_name();
-    let bg_dir = if resolved.honor_type == "rank_match" {
-        "rank_live/honor"
-    } else {
-        "honor"
-    };
-    keys.push(format!("{}/{}/degree_{}", bg_dir, bg_abn, suffix));
-
-    if resolved.has_rank_overlay() {
-        let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-            ("rank_live/honor", suffix.to_string())
-        } else if resolved.is_live_master {
-            ("honor", "scroll".to_string())
-        } else {
-            ("honor", format!("rank_{}", suffix))
-        };
-        keys.push(format!(
-            "{}/{}/{}",
-            overlay_dir, resolved.asset_bundle_name, overlay_name
-        ));
-    }
-
-    if let Some(ref fname) = resolved.frame_name {
-        let sc = if full_size { "m" } else { "s" };
-        let rarity = match resolved.honor_rarity.as_str() {
-            "low" => 1,
-            "middle" => 2,
-            "high" => 3,
-            _ => 4,
-        };
-        if rarity < 3 {
-            return;
-        }
-        keys.push(format!(
-            "honor_frame/{}/frame_degree_{}_{}",
-            fname, sc, rarity
-        ));
+    if let Some(resolved) = md.resolve_honor(honor_id, honor_level) {
+        keys.honor(&resolved.asset_plan(full_size));
     }
 }
 
@@ -225,7 +257,7 @@ fn collect_bonds_honor_keys(
     inverse: bool,
     use_unit_vs: bool,
     md: &MasterData,
-    keys: &mut Vec<String>,
+    keys: &mut AssetRequirements,
 ) {
     let entry = match md.get_bonds_honor(bonds_honor_id) {
         Some(e) => e,
@@ -438,8 +470,9 @@ mod tests {
         }
 
         let md = MasterData::new(std::sync::Arc::new(BackgroundlessHonorProvider));
-        let mut keys = Vec::new();
-        super::collect_honor_keys(1, 1, false, &md, &mut keys);
+        let mut requirements = super::AssetRequirements::default();
+        super::collect_honor_keys(1, 1, false, &md, &mut requirements);
+        let keys = requirements.keys();
 
         let background = keys
             .iter()

@@ -666,10 +666,10 @@ fn build_standard_honor_visual(
     resources: ResolveResourceContext<'_>,
 ) -> Option<HonorVisualSnapshot> {
     let resolved = md.resolve_honor(honor_id, honor_level)?;
-    let (w, h, suffix, size_char) = if full_size {
-        (380.0, 80.0, "main", "m")
+    let (w, h) = if full_size {
+        (380.0, 80.0)
     } else {
-        (180.0, 80.0, "sub", "s")
+        (180.0, 80.0)
     };
     let progress = profile
         .and_then(|profile| {
@@ -709,51 +709,30 @@ fn build_standard_honor_visual(
             },
         });
     }
-    let background_name = resolved.effective_background_asset_bundle_name();
-    let background_dir = if resolved.honor_type == "rank_match" {
-        "rank_live/honor"
-    } else {
-        "honor"
-    };
+    let plan = resolved.asset_plan(full_size);
     let background = optional_descriptor(
-        format!("{background_dir}/{background_name}/degree_{suffix}"),
+        plan.background.key.clone(),
         (w, h),
         "honor_background",
         honor_id,
         resources,
     );
-    let rarity = honor_rarity_number(&resolved.honor_rarity);
-    let custom_frame = resolved
-        .frame_name
+    let frame_key = plan.frame_candidates[0]
         .as_ref()
-        .map(|name| format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"));
-    let default_frame = format!("honor/frame_degree_{size_char}_{rarity}");
-    let frame_key = custom_frame
-        .filter(|key| asset_size(resources, "assets", key).is_some())
-        .unwrap_or(default_frame);
-    let frame = optional_descriptor(frame_key, (w, h), "honor_frame", honor_id, resources);
-    let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-        ("rank_live/honor", suffix.to_string())
-    } else if resolved.is_live_master {
-        ("honor", "scroll".into())
-    } else {
-        ("honor", format!("rank_{suffix}"))
-    };
-    let overlay = resolved
-        .has_rank_overlay()
-        .then(|| {
-            optional_descriptor(
-                format!(
-                    "{overlay_dir}/{}/{overlay_name}",
-                    resolved.asset_bundle_name
-                ),
-                (w, h),
-                "honor_overlay",
-                honor_id,
-                resources,
-            )
-        })
-        .flatten();
+        .filter(|key| asset_size(resources, &key.namespace, &key.key).is_some())
+        .or(plan.frame_candidates[1].as_ref());
+    let frame = frame_key.and_then(|key| {
+        optional_descriptor(key.key.clone(), (w, h), "honor_frame", honor_id, resources)
+    });
+    let overlay = plan.overlay.as_ref().and_then(|key| {
+        optional_descriptor(
+            key.key.clone(),
+            (w, h),
+            "honor_overlay",
+            honor_id,
+            resources,
+        )
+    });
     Some(HonorVisualSnapshot {
         source_field: source_field.into(),
         source_id: honor_id.to_string(),
@@ -768,20 +747,24 @@ fn build_standard_honor_visual(
             background,
             frame_candidates: vec![frame],
             overlay,
-            star: optional_descriptor(
-                "honor/icon_degreeLv".into(),
-                (16.0, 16.0),
-                "honor_static",
-                honor_id,
-                resources,
-            ),
-            star_high: optional_descriptor(
-                "honor/icon_degreeLv6".into(),
-                (16.0, 16.0),
-                "honor_static",
-                honor_id,
-                resources,
-            ),
+            star: plan.star.as_ref().and_then(|key| {
+                optional_descriptor(
+                    key.key.clone(),
+                    (16.0, 16.0),
+                    "honor_static",
+                    honor_id,
+                    resources,
+                )
+            }),
+            star_high: plan.star_high.as_ref().and_then(|key| {
+                optional_descriptor(
+                    key.key.clone(),
+                    (16.0, 16.0),
+                    "honor_static",
+                    honor_id,
+                    resources,
+                )
+            }),
             live_star_on: None,
             live_star_off: None,
         },

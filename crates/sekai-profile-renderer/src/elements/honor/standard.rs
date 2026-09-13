@@ -80,17 +80,10 @@ fn render_honor_impl(
     } else {
         (180.0, 80.0)
     };
-    let suffix = if full_size { "main" } else { "sub" };
+    let plan = resolved.asset_plan(full_size);
     let paint = Paint::default();
 
-    let bg_abn = resolved.effective_background_asset_bundle_name();
-    let bg_dir = if resolved.honor_type == "rank_match" {
-        "rank_live/honor"
-    } else {
-        "honor"
-    };
-    let bg_key = format!("{}/{}/degree_{}", bg_dir, bg_abn, suffix);
-    if let Some(img) = assets.get_image(&bg_key) {
+    if let Some(img) = assets.get_image(&plan.background.key) {
         let iw = img.width() as f32;
         let ih = img.height() as f32;
         canvas.draw_image_rect(
@@ -104,25 +97,11 @@ fn render_honor_impl(
         );
     }
 
-    let rarity_num = match resolved.honor_rarity.as_str() {
-        "low" => 1,
-        "middle" => 2,
-        "high" => 3,
-        _ => 4,
-    };
-    let size_char = if full_size { "m" } else { "s" };
-    let mut frame_img = None;
-    if let Some(ref fname) = resolved.frame_name {
-        let frame_key = format!(
-            "honor_frame/{}/frame_degree_{}_{}",
-            fname, size_char, rarity_num
-        );
-        frame_img = assets.get_image(&frame_key);
-    }
-    if frame_img.is_none() {
-        let default_key = format!("honor/frame_degree_{}_{}", size_char, rarity_num);
-        frame_img = assets.get_image(&default_key);
-    }
+    let frame_img = plan
+        .frame_candidates
+        .iter()
+        .flatten()
+        .find_map(|resource| assets.get_image(&resource.key));
 
     if let Some(img) = frame_img {
         let iw = img.width() as f32;
@@ -133,7 +112,7 @@ fn render_honor_impl(
         let ox = (w - iw) / 2.0;
         let dst = Rect::from_xywh(-w / 2.0 + ox, -h / 2.0, iw, ih);
         tracing::debug!(
-            honor_type = %resolved.honor_type, full_size, rarity_num,
+            honor_type = %resolved.honor_type, full_size, rarity = %resolved.honor_rarity,
             frame_name = ?resolved.frame_name,
             frame_w = img.width(), frame_h = img.height(), honor_w = w, honor_h = h, ox,
             dst_x = dst.left, dst_right = dst.right, honor_right = w / 2.0,
@@ -150,23 +129,8 @@ fn render_honor_impl(
         );
     }
 
-    let overlay_key = if resolved.has_rank_overlay() {
-        let (overlay_dir, overlay_name) = if resolved.honor_type == "rank_match" {
-            ("rank_live/honor", suffix.to_string())
-        } else if resolved.is_live_master {
-            ("honor", "scroll".to_string())
-        } else {
-            ("honor", format!("rank_{}", suffix))
-        };
-        Some(format!(
-            "{}/{}/{}",
-            overlay_dir, resolved.asset_bundle_name, overlay_name
-        ))
-    } else {
-        None
-    };
-    if let Some(overlay_key) = overlay_key {
-        if let Some(img) = assets.get_image(&overlay_key) {
+    if let Some(overlay) = &plan.overlay {
+        if let Some(img) = assets.get_image(&overlay.key) {
             let iw = img.width() as f32;
             let ih = img.height() as f32;
             let (dx, dy) = if resolved.is_live_master {
@@ -203,7 +167,7 @@ fn render_honor_impl(
     if resolved.is_live_master && render_player_overlay {
         render_live_master_overlay(canvas, &resolved, full_size, w, h, profile);
     }
-    render_stars(canvas, &resolved, full_size, w, h, assets);
+    render_stars(canvas, &plan, resolved.honor_level, full_size, w, h, assets);
 }
 
 fn render_live_master_overlay(
@@ -266,29 +230,31 @@ pub(crate) fn draw_live_master_progress_text(
 
 fn render_stars(
     canvas: &Canvas,
-    resolved: &ResolvedHonor,
+    plan: &sekai_profile_renderer_core::masterdata::StandardHonorAssetPlan,
+    honor_level: i32,
     full_size: bool,
     w: f32,
     h: f32,
     assets: &AssetStore,
 ) {
-    if !resolved.has_star || resolved.is_live_master {
-        return;
-    }
-    if resolved.honor_type != "character" && resolved.honor_type != "achievement" {
+    if plan.star.is_none() && plan.star_high.is_none() {
         return;
     }
 
     let paint = Paint::default();
-    let mut level = resolved.honor_level % 10;
-    if level == 0 && resolved.honor_level > 0 {
+    let mut level = honor_level % 10;
+    if level == 0 && honor_level > 0 {
         level = 10;
     }
     let base_y = -h / 2.0 + 63.0;
     let base_x = if full_size { -w / 2.0 + 54.0 } else { -40.0 };
     let normal_count = level.min(5);
 
-    if let Some(star_img) = assets.get_image("honor/icon_degreeLv") {
+    if let Some(star_img) = plan
+        .star
+        .as_ref()
+        .and_then(|resource| assets.get_image(&resource.key))
+    {
         let sw = star_img.width() as f32;
         let sh = star_img.height() as f32;
         for i in 0..normal_count {
@@ -306,7 +272,11 @@ fn render_stars(
     }
 
     if level > 5 {
-        if let Some(star6_img) = assets.get_image("honor/icon_degreeLv6") {
+        if let Some(star6_img) = plan
+            .star_high
+            .as_ref()
+            .and_then(|resource| assets.get_image(&resource.key))
+        {
             let sw = star6_img.width() as f32;
             let sh = star6_img.height() as f32;
             for i in 0..(level - 5) {

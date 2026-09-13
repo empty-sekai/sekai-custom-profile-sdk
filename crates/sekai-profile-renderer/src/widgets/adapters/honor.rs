@@ -103,71 +103,11 @@ fn collect_honor_keys(
         return Vec::new();
     };
 
-    let mut keys = Vec::new();
-    let suffix = if full_size { "main" } else { "sub" };
-    let bg_abn = resolved.effective_background_asset_bundle_name();
-    let bg_dir = if resolved.honor_type == "rank_match" {
-        "rank_live/honor"
-    } else {
-        "honor"
-    };
-    keys.push(format!("{}/{}/degree_{}", bg_dir, bg_abn, suffix));
-
-    let overlay_name = if !resolved.has_rank_overlay() {
-        None
-    } else if resolved.honor_type == "rank_match" {
-        Some(suffix.to_string())
-    } else if resolved.is_live_master {
-        Some("scroll".to_string())
-    } else {
-        Some(format!("rank_{}", suffix))
-    };
-    if let Some(name) = overlay_name {
-        let overlay_dir = if resolved.honor_type == "rank_match" {
-            "rank_live/honor"
-        } else {
-            "honor"
-        };
-        keys.push(format!(
-            "{}/{}/{}",
-            overlay_dir, resolved.asset_bundle_name, name
-        ));
-    }
-
-    if let Some(frame_name) = resolved.frame_name {
-        let size_char = if full_size { "m" } else { "s" };
-        let rarity_num = match resolved.honor_rarity.as_str() {
-            "low" => 1,
-            "middle" => 2,
-            "high" => 3,
-            _ => 4,
-        };
-        keys.push(format!(
-            "honor_frame/{}/frame_degree_{}_{}",
-            frame_name, size_char, rarity_num
-        ));
-    } else {
-        let size_char = if full_size { "m" } else { "s" };
-        let rarity_num = match resolved.honor_rarity.as_str() {
-            "low" => 1,
-            "middle" => 2,
-            "high" => 3,
-            _ => 4,
-        };
-        keys.push(format!("honor/frame_degree_{}_{}", size_char, rarity_num));
-    }
-
-    if !resolved.is_live_master
-        && resolved.has_star
-        && matches!(resolved.honor_type.as_str(), "character" | "achievement")
-    {
-        keys.push("honor/icon_degreeLv".to_string());
-        if resolved.honor_level % 10 > 5 {
-            keys.push("honor/icon_degreeLv6".to_string());
-        }
-    }
-
-    keys
+    resolved
+        .asset_plan(full_size)
+        .resources()
+        .map(|resource| resource.key.clone())
+        .collect()
 }
 
 fn collect_bonds_honor_keys(

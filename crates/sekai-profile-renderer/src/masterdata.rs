@@ -60,6 +60,28 @@ pub struct ResolvedHonor {
 }
 
 impl ResolvedHonor {
+    pub(crate) fn asset_plan(
+        &self,
+        full_size: bool,
+    ) -> sekai_profile_renderer_core::masterdata::StandardHonorAssetPlan {
+        self.clone()
+            .into_core()
+            .asset_plan(self.honor_level, full_size)
+    }
+
+    fn into_core(self) -> sekai_profile_renderer_core::masterdata::ResolvedHonor {
+        sekai_profile_renderer_core::masterdata::ResolvedHonor {
+            asset_bundle_name: self.asset_bundle_name,
+            honor_rarity: self.honor_rarity,
+            honor_type: self.honor_type,
+            background_asset_bundle_name: self.background_asset_bundle_name,
+            frame_name: self.frame_name,
+            is_live_master: self.is_live_master,
+            has_star: self.has_star,
+            honor_mission_type: self.honor_mission_type,
+        }
+    }
+
     /// Returns the bundle that owns the degree layer. CN limited-event fan
     /// honors ship `honor_top_*` as rank overlays only and share the cheer-team
     /// degree layer; their honorGroups rows omit backgroundAssetbundleName.
@@ -310,18 +332,7 @@ impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
         honor_id: i32,
         honor_level: i32,
     ) -> Option<sekai_profile_renderer_core::masterdata::ResolvedHonor> {
-        MasterData::resolve_honor(self, honor_id, honor_level).map(|value| {
-            sekai_profile_renderer_core::masterdata::ResolvedHonor {
-                asset_bundle_name: value.asset_bundle_name,
-                honor_rarity: value.honor_rarity,
-                honor_type: value.honor_type,
-                background_asset_bundle_name: value.background_asset_bundle_name,
-                frame_name: value.frame_name,
-                is_live_master: value.is_live_master,
-                has_star: value.has_star,
-                honor_mission_type: value.honor_mission_type,
-            }
-        })
+        MasterData::resolve_honor(self, honor_id, honor_level).map(ResolvedHonor::into_core)
     }
 
     fn get_bonds_honor(
