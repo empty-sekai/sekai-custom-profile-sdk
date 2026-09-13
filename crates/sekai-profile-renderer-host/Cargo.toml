@@ -10,7 +10,7 @@ repository.workspace = true
 all-features = true
 
 [dependencies]
-sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.5.0" }
+sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.5.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
