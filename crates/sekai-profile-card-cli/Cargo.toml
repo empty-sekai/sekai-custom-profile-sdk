@@ -6,6 +6,9 @@ description = "render-card: a CLI that renders Project SEKAI custom profile card
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[bin]]
 name = "render-card"
 path = "src/main.rs"

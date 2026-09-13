@@ -6,6 +6,9 @@ description = "Backend-independent core for the profile card renderer: scene, dy
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 bincode = { workspace = true }
 serde = { workspace = true }

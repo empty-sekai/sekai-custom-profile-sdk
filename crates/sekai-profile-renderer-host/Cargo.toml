@@ -6,6 +6,9 @@ description = "Shared host layer: JSON-backed MasterDataProvider for CLI and was
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.5.0" }
 serde = { workspace = true }
