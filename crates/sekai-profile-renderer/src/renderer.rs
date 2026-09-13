@@ -2224,55 +2224,6 @@ impl CustomProfileRenderer {
     }
 }
 
-#[cfg(feature = "animation-export")]
-#[derive(Default)]
-struct AnimationCanvasExpansion {
-    left: i32,
-    right: i32,
-    top: i32,
-    bottom: i32,
-}
-
-#[cfg(feature = "animation-export")]
-fn animation_canvas_expansion(
-    elements: &[crate::elements::RenderElement<'_>],
-    md: &MasterData,
-) -> AnimationCanvasExpansion {
-    const PAD: i32 = 8;
-    let Some(text) = elements.iter().find_map(|element| match element {
-        crate::elements::RenderElement::Text(text) if text.object_data.visible => Some(*text),
-        _ => None,
-    }) else {
-        return AnimationCanvasExpansion::default();
-    };
-    let Some(animation) = crate::text::line_indent_x_animation(text, md) else {
-        return AnimationCanvasExpansion::default();
-    };
-    let (_, _, angle_deg, scale_x, _) = crate::transform::extract_transform(&text.object_data);
-    let radians = angle_deg.to_radians();
-    let cos = radians.cos();
-    let sin = radians.sin();
-    let mut min_dx = 0.0_f32;
-    let mut max_dx = 0.0_f32;
-    let mut min_dy = 0.0_f32;
-    let mut max_dy = 0.0_f32;
-    for frame in animation.frames {
-        let local_x = frame.dx_local * scale_x;
-        let dx = local_x * cos;
-        let dy = local_x * sin;
-        min_dx = min_dx.min(dx);
-        max_dx = max_dx.max(dx);
-        min_dy = min_dy.min(dy);
-        max_dy = max_dy.max(dy);
-    }
-    AnimationCanvasExpansion {
-        left: max_dx.max(0.0).ceil() as i32 + PAD,
-        right: (-min_dx).max(0.0).ceil() as i32 + PAD,
-        top: max_dy.max(0.0).ceil() as i32 + PAD,
-        bottom: (-min_dy).max(0.0).ceil() as i32 + PAD,
-    }
-}
-
 /// 扫描像素缓冲区，找到所有 alpha > 0 像素的最小包围矩形。
 fn find_opaque_bounds(
     pixels: &[u8],

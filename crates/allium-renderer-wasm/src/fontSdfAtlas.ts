@@ -110,7 +110,6 @@ type CanonicalGlyphRasterPlan = Omit<GlyphRasterPlan, "region" | "family" | "fon
 type SessionEngine = {
   atlas: RendererAtlas;
   contractId: string;
-  charToGlyphIndex: Map<string, number>;
   missingChars: Set<string>;
   metrics: Map<string, Omit<AtlasGlyphRecord, "pixels">>;
   placements: Map<string, { page: number; pageEpoch: number }>;
@@ -143,9 +142,7 @@ export async function buildSdfAtlas(
     glyph,
   ] as const));
   for (const request of uniqueRequests) {
-    const glyph = planned.get(requestKey(request));
-    if (glyph) engine.charToGlyphIndex.set(requestKey(request), glyph.glyphIndex);
-    else engine.missingChars.add(requestKey(request));
+    if (!planned.has(requestKey(request))) engine.missingChars.add(requestKey(request));
   }
   const resolved = uniqueRequests.flatMap((request): ResolvedRequest[] => {
     const glyph = planned.get(requestKey(request));
@@ -289,7 +286,6 @@ async function getEngine(worker: RendererWorkerClient, contractId: string): Prom
       const engine: SessionEngine = {
         atlas,
         contractId,
-        charToGlyphIndex: new Map(),
         missingChars: new Set(),
         metrics: new Map(),
         placements: new Map(),
