@@ -15,6 +15,21 @@ use crate::{
 pub const SUPPORTED_GENERAL_TYPES: [i32; 15] =
     [2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18];
 
+/// Solid label colours for the six music difficulties, in difficulty order:
+/// easy, normal, hard, expert, master, append.
+///
+/// Components that draw the append label as a gradient still index this table
+/// and then replace the fill, so the append entry is only what a solid append
+/// label would be.
+const DIFFICULTY_LABEL_COLORS: [[f32; 4]; 6] = [
+    [0.000, 0.859, 0.451, 1.0],
+    [0.149, 0.792, 0.996, 1.0],
+    [0.996, 0.788, 0.000, 1.0],
+    [0.996, 0.239, 0.447, 1.0],
+    [0.788, 0.169, 1.000, 1.0],
+    [0.843, 0.741, 1.000, 1.0],
+];
+
 pub fn general_type_requires_font(general_type: i32, has_live_master_honor: bool) -> bool {
     match general_type {
         5 | 18 => false,
@@ -2941,14 +2956,7 @@ fn build_detailed_music_recipe(
         ("master", results.master),
         ("append", results.append),
     ];
-    let colors = [
-        [0.000, 0.859, 0.451, 1.0],
-        [0.149, 0.792, 0.996, 1.0],
-        [0.996, 0.788, 0.000, 1.0],
-        [0.996, 0.239, 0.447, 1.0],
-        [0.788, 0.169, 1.000, 1.0],
-        [0.843, 0.741, 1.000, 1.0],
-    ];
+    let colors = DIFFICULTY_LABEL_COLORS;
     let groups = [
         (
             "clear",
@@ -3106,13 +3114,7 @@ fn build_tabbed_music_recipe(
         ("master", 9, 10, results.master),
         ("append", 12, 13, results.append),
     ];
-    let colors = [
-        [0.000, 0.859, 0.451, 1.0],
-        [0.149, 0.792, 0.996, 1.0],
-        [0.996, 0.788, 0.000, 1.0],
-        [0.996, 0.239, 0.447, 1.0],
-        [0.788, 0.169, 1.000, 1.0],
-    ];
+    let colors = DIFFICULTY_LABEL_COLORS;
     let mut ordinal = 0u32;
     for (difficulty_index, (role, label_index, number_index, values)) in
         difficulties.iter().enumerate()
@@ -3131,7 +3133,7 @@ fn build_tabbed_music_recipe(
             ordinal,
             layout_rect(label),
             GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
-            colors.get(difficulty_index).copied().unwrap_or([0.0; 4]),
+            colors[difficulty_index],
         );
         if *role == "append" {
             background.payload = GeneralRecipePayload::Shape {
