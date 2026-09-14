@@ -17,9 +17,6 @@
 //!   output: 输出文件路径（与 inline 二选一；都缺省时报错）
 //!   inline: true 时响应 data 字段返 base64（默认 false）
 //!
-//! `render_honor` 已随 legacy honor renderer 一并移除；该 method 仍被识别，
-//! 但一律返回错误。
-//!
 //! `render` 响应：
 //!   {"id": 1, "ok": true, "result": {"path": "...", "bytes": 12345,
 //!     "missing_assets": [...], "warnings": [...]}}
@@ -99,10 +96,6 @@ pub fn run(
                 let result = handle_render(&renderer, &assets, &asset_urls, &request);
                 write_result(&stdout, id, result);
             }
-            "render_honor" => {
-                let result = handle_render_honor(&request);
-                write_result(&stdout, id, result);
-            }
             other => {
                 write_response(
                     &stdout,
@@ -114,70 +107,6 @@ pub fn run(
 
     tracing::info!("stdin 关闭，退出");
     ExitCode::SUCCESS
-}
-
-fn required_i32(params: &Value, name: &str) -> Result<i32, String> {
-    let value = params
-        .get(name)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("render_honor missing integer params.{name}"))?;
-    i32::try_from(value).map_err(|_| format!("render_honor params.{name} is out of i32 range"))
-}
-
-fn honor_card(
-    params: &Value,
-    kind: &str,
-) -> Result<sekai_profile_renderer::types::CustomProfileCard, String> {
-    let honor_id = required_i32(params, "honorId")?;
-    let honor_level = params
-        .get("honorLevel")
-        .and_then(Value::as_i64)
-        .unwrap_or(1);
-    let full_size = params
-        .get("fullSize")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-    let object_data = json!({
-        "layer": 0,
-        "lock": false,
-        "position": {"x": 0.0, "y": 0.0, "z": 0.0},
-        "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
-        "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
-        "visible": true,
-    });
-    let card = match kind {
-        "normal" => json!({"honors": [{
-            "id": honor_id,
-            "honorLevel": honor_level,
-            "fullSize": full_size,
-            "objectData": object_data,
-        }]}),
-        "bonds" => json!({"bondsHonors": [{
-            "id": honor_id,
-            "honorLevel": honor_level,
-            "fullSize": full_size,
-            "wordId": params.get("wordId").and_then(Value::as_i64).unwrap_or(0),
-            "inverse": params.get("inverse").and_then(Value::as_bool).unwrap_or(false),
-            "useUnitVirtualSinger": params.get("useUnitVirtualSinger").and_then(Value::as_bool).unwrap_or(false),
-            "objectData": object_data,
-        }]}),
-        _ => return Err(format!("unsupported render_honor kind: {kind}")),
-    };
-    crate::card_from_value(card, None)
-}
-
-fn handle_render_honor(request: &Value) -> Result<Value, String> {
-    let params = request.get("params").ok_or("render_honor missing params")?;
-    let kind = params
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("normal");
-    // Validate the request first so a malformed call still gets the specific
-    // parameter error rather than the blanket one below.
-    honor_card(params, kind)?;
-    Err(format!(
-        "render_honor kind={kind} is not served by --serve: honor artwork is          baked offline into the render-object store, and the honor element          renderer it would need is present only in a skia-oracle build"
-    ))
 }
 
 fn write_result(stdout: &std::io::Stdout, id: Value, result: Result<Value, String>) {
@@ -282,66 +211,4 @@ fn handle_render(
         result["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&data));
     }
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normal_honor_card_preserves_level_and_size() {
-        let params = json!({
-            "honorId": 6030,
-            "honorLevel": 7,
-            "fullSize": false,
-        });
-        let card = honor_card(&params, "normal").expect("normal honor card");
-
-        assert_eq!(card.honors.len(), 1);
-        let honor = &card.honors[0];
-        assert_eq!(honor.id, 6030);
-        assert_eq!(honor.honor_level, 7);
-        assert!(!honor.full_size);
-        assert!(card.bonds_honors.is_empty());
-    }
-
-    #[test]
-    fn bonds_honor_card_preserves_all_variant_fields() {
-        let params = json!({
-            "honorId": 1010201,
-            "honorLevel": 10,
-            "fullSize": false,
-            "wordId": 1010202,
-            "inverse": true,
-            "useUnitVirtualSinger": true,
-        });
-        let card = honor_card(&params, "bonds").expect("bonds honor card");
-
-        assert_eq!(card.bonds_honors.len(), 1);
-        let honor = &card.bonds_honors[0];
-        assert_eq!(honor.id, 1010201);
-        assert_eq!(honor.honor_level, 10);
-        assert_eq!(honor.word_id, 1010202);
-        assert!(!honor.full_size);
-        assert!(honor.inverse);
-        assert!(honor.use_unit_virtual_singer);
-        assert!(card.honors.is_empty());
-    }
-
-    #[test]
-    fn honor_card_rejects_unknown_kind() {
-        let error = honor_card(&json!({"honorId": 1}), "mystery")
-            .expect_err("unknown honor kind must fail closed");
-        assert!(error.contains("unsupported render_honor kind"));
-    }
-
-    #[test]
-    fn required_integer_rejects_missing_and_out_of_range_values() {
-        let missing = required_i32(&json!({}), "honorId").expect_err("missing integer must fail");
-        assert!(missing.contains("missing integer params.honorId"));
-
-        let out_of_range = required_i32(&json!({"honorId": i64::MAX}), "honorId")
-            .expect_err("out-of-range integer must fail");
-        assert!(out_of_range.contains("out of i32 range"));
-    }
 }
