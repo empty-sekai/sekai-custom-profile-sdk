@@ -1,3 +1,10 @@
+//! Localized strings for the fixed labels General panels draw.
+//!
+//! Panels such as music clear or challenge live carry captions that belong to
+//! the game rather than to player data. [`resolve`] looks one up by region and
+//! key, and [`profile_localization_demands`] reports which keys a given card
+//! will need so a host can prepare fonts and glyph coverage before rendering.
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;

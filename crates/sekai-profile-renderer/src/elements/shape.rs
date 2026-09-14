@@ -1,3 +1,9 @@
+//! Shape element drawing and SDF capture.
+//!
+//! Shapes are rasterized through their signed distance field so they stay sharp
+//! under the card's transforms; the capture entry points produce the field for
+//! a shape under a given transform.
+
 use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, ResolvedColor};
 use crate::sdf::shape::ShapeSdfMaterial;

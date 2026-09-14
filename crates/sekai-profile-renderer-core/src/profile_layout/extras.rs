@@ -1,3 +1,5 @@
+//! Measured layouts for the character rank and story favorite panels.
+
 // Auto-split from layout.rs
 
 use super::{ElementLayout, PanelLayout};

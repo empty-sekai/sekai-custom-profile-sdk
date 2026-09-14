@@ -1,3 +1,9 @@
+//! TextMesh Pro rich-text helpers.
+//!
+//! Profile text may carry TMP markup. [`strip_tmp_tags`] removes it to recover
+//! the plain string, and [`numeric_text_runs`] reports the spans that are
+//! digits, which callers use to lay numbers out on their own metrics.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

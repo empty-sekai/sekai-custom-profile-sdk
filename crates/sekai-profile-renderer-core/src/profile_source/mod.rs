@@ -1,3 +1,8 @@
+//! Input model: the card and element shapes as they arrive from the game API.
+//!
+//! These types mirror the payload rather than the renderer's needs. Lowering
+//! them into [`crate::profile_scene`] snapshots is what makes them drawable.
+
 mod card;
 mod elements;
 

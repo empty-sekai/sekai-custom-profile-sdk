@@ -1,3 +1,8 @@
+//! x86 SIMD kernels for SDF tile shading.
+//!
+//! Selected at runtime on capable CPUs; every kernel here has a scalar
+//! equivalent in the parent module that produces the same result.
+
 use std::arch::x86_64::*;
 
 use super::{

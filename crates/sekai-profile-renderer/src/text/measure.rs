@@ -1,3 +1,5 @@
+//! Text measurement: advances, line breaking and the resulting box.
+
 use crate::text::richtext::{CaseTransform, Indent, InlineAlign, SizeSpec, TextSegment};
 
 pub(super) struct RichTextGlobal {

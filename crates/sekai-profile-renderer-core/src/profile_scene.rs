@@ -1,3 +1,11 @@
+//! Snapshot types: the resolved player data a recipe builder reads.
+//!
+//! Raw profile JSON carries optional fields, per-region shapes and references
+//! that still have to be looked up. Lowering it produces a
+//! [`ProfileComponentSnapshot`], where every value a panel can draw is already
+//! present and typed. Recipe builders in [`crate::general_recipe`] read only
+//! this, so they never touch masterdata or the API payload directly.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

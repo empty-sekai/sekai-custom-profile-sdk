@@ -7,7 +7,11 @@
 //! encodes a 1x1 PNG, lets Skia decode and read it back, and writes
 //! `table[alpha * 256 + premultiplied] = skia_value` to a 65 536-byte file.
 //!
-//! Usage: skia-unpremul-table <out-file>
+//! Usage:
+//!
+//! ```text
+//! skia-unpremul-table <out-file>
+//! ```
 
 use sekai_profile_renderer::codec::{png, premultiply_channel};
 

@@ -15,7 +15,10 @@
 //! buffers legitimately differ; the premultiplied ones must not.
 //!
 //! Usage:
-//!   png-parity <dir> [more dirs...]
+//!
+//! ```text
+//! png-parity <dir> [more dirs...]
+//! ```
 //!
 //! Exit status is non-zero if any file mismatches, so it can gate a change.
 

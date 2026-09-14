@@ -1,4 +1,35 @@
 //! Backend-neutral renderer state and command contract shared by native and WASM.
+//!
+//! This crate holds everything about a custom profile card that does not depend
+//! on how pixels are produced: the input model, the resolved snapshot, the
+//! panel recipes and the layout constants. Both the native CPU backend and the
+//! browser WebGL2 backend consume it, so a rule written here is the single
+//! source of truth for both rather than something each backend re-derives.
+//!
+//! # Pipeline
+//!
+//! Game payload ([`profile_source`]) is lowered into a resolved snapshot
+//! ([`profile_scene`]) by [`profile_resolve`], and each panel is then turned
+//! into an ordered node list by [`general_recipe`]. Nodes carry layout
+//! coordinates and resource keys; turning them into draw calls is the backend's
+//! job.
+//!
+//! # Modules
+//!
+//! | Module | Responsibility |
+//! | --- | --- |
+//! | [`profile_source`] | Card and element shapes as the game API sends them |
+//! | [`profile_scene`] | Resolved snapshot a recipe builder reads |
+//! | [`profile_resolve`] | Lowering from source to snapshot |
+//! | [`general_recipe`] | Per-panel node lists, backend-neutral |
+//! | [`profile_layout`] | Measured panel geometry |
+//! | [`profile_transform`] | Transform and matrix helpers shared by backends |
+//! | [`masterdata`] | Masterdata lookups the resolve step needs |
+//! | [`locale`] | Region-specific strings for fixed panel labels |
+//! | [`tmp_text`] | TextMesh Pro markup handling |
+//! | [`sdf_geometry`] | Path segments and their analytic distance field |
+//! | [`authoring_document`] | Editable document model |
+//! | [`authoring_session`] | Editing session state and command handling |
 
 pub mod authoring_document;
 pub mod authoring_session;

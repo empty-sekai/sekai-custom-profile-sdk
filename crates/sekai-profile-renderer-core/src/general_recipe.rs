@@ -1,3 +1,16 @@
+//! General panel recipes: one backend-neutral node list per panel type.
+//!
+//! A General panel is one of the fixed card components the game ships (player
+//! name, total power, music clear, and so on), each identified by its
+//! `general_type` number. [`SUPPORTED_GENERAL_TYPES`] lists the ones this crate
+//! builds. Resolving a panel produces a [`GeneralRecipe`]: an ordered list of
+//! [`GeneralRecipeNode`]s whose payloads describe images, shapes and text in
+//! layout coordinates, with no reference to any raster backend.
+//!
+//! Panel geometry comes from the measured constants in
+//! [`crate::profile_layout`]; text content comes from the snapshot passed in,
+//! resolved through [`crate::locale`].
+
 use serde::{Deserialize, Serialize};
 
 use crate::profile_layout::{

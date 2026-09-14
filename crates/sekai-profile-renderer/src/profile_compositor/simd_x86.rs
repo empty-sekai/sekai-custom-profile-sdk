@@ -1,3 +1,8 @@
+//! x86 SIMD kernels for the compositor.
+//!
+//! Selected at runtime on capable CPUs; every kernel here has a scalar
+//! equivalent in the parent module that produces the same result.
+
 use std::arch::x86_64::*;
 
 use sekai_profile_renderer_core::{BlendMode, LinearGradient, Matrix2d, Rect, ShapePrimitive};

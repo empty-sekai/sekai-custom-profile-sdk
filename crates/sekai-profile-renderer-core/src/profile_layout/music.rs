@@ -1,3 +1,5 @@
+//! Measured layouts for the music clear panels.
+
 // Auto-split from layout.rs
 
 use super::{ElementLayout, PanelLayout};

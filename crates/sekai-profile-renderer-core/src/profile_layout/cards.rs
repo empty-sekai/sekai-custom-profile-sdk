@@ -1,3 +1,5 @@
+//! Measured layouts for the panels that show cards.
+
 // Auto-split from layout.rs
 
 use super::{ElementLayout, PanelLayout};

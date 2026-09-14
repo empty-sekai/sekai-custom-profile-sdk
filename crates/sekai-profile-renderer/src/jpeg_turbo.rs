@@ -1,3 +1,9 @@
+//! JPEG encoding of a finished RGBA frame.
+//!
+//! [`encode_rgba`] is the portable path. The AVX-512 entry points convert to
+//! YUV 4:2:0 with explicit scratch so a caller rendering many cards can reuse
+//! one buffer; [`yuv420_scratch_len`] sizes it.
+
 use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
 
 unsafe extern "C" {

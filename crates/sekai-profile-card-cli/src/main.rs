@@ -7,10 +7,13 @@
 //!   日志只走 stderr。
 //!
 //! 用法：
-//!   render-card --masterdata <dir> --card <card.json> -o <out.jpg> \
-//!       [--profile <profile.json>] [--assets-dir <dir>] [--font-dir <dir>] \
-//!       [--format jpeg|png|png-transparent] [--page <seq>]
-//!   render-card --serve --masterdata <dir> [--assets-dir <dir>] [--font-dir <dir>]
+//!
+//! ```text
+//! render-card --masterdata <dir> --card <card.json> -o <out.jpg> \
+//!     [--profile <profile.json>] [--assets-dir <dir>] [--font-dir <dir>] \
+//!     [--format jpeg|png|png-transparent] [--page <seq>]
+//! render-card --serve --masterdata <dir> [--assets-dir <dir>] [--font-dir <dir>]
+//! ```
 
 mod fetch;
 mod serve;

@@ -1,3 +1,10 @@
+//! Animated output: presets, encoder configuration and cache identity.
+//!
+//! A card with moving elements is encoded as a short clip. [`AnimationPreset`]
+//! names the quality/size tradeoffs available, [`H264EncoderConfig`] carries the
+//! resolved encoder settings, and [`animation_encoder_cache_suffix`] derives the
+//! identity a cached encode is keyed by.
+
 #[cfg(test)]
 use std::io::Cursor;
 

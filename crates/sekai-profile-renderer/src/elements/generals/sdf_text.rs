@@ -1,3 +1,5 @@
+//! General panel text, built and captured through the SDF text pipeline.
+
 use super::layout;
 use crate::masterdata::MasterData;
 use crate::text::{

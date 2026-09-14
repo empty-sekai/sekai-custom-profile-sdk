@@ -1,3 +1,5 @@
+//! Measured layouts for the MVP / superstar and challenge live panels.
+
 // Auto-split from layout.rs
 
 use super::{ElementLayout, PanelLayout};

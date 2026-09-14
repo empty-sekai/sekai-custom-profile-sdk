@@ -1,3 +1,5 @@
+//! Measured layouts for the player name, total power and comment panels.
+
 // Auto-split from layout.rs
 
 use super::{ElementLayout, PanelLayout};

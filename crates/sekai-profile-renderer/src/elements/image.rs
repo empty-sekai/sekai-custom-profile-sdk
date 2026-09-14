@@ -1,3 +1,8 @@
+//! Image element drawing: card art, asset images and their placeholders.
+//!
+//! Covers the crops the card layout needs (`cover_crop_source_rect` and the
+//! member draw helpers) and the placeholder drawn when an asset is missing.
+
 use crate::assets::AssetStore;
 use crate::widgets::card_util::{
     cover_crop_rect, draw_stars_horizontal, rarity_count, rarity_suffix, star_icon_key,

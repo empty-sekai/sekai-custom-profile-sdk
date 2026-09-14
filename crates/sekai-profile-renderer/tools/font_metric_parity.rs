@@ -7,7 +7,10 @@
 //! fallback is removed, so the switch is made on measured evidence.
 //!
 //! Usage:
-//!   font-metric-parity <family> [size ...]
+//!
+//! ```text
+//! font-metric-parity <family> [size ...]
+//! ```
 //!
 //! `family` is a name from the renderer's font map, e.g. FZLanTingHei-DB-GBK.
 //! Sizes default to a spread covering small UI text through display sizes.
