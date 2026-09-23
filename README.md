@@ -209,3 +209,22 @@ release gates 覆盖 ABI/schema、shared-core source consistency、TMP debug par
 ## License
 
 仓库采用 AGPL-3.0-only。browser npm package 另含 `crates/allium-renderer-wasm/LICENSE-EXCEPTION` 中的有限 browser linking exception。修改 SDK、服务端使用和非浏览器使用仍受完整 AGPL 约束，包括网络交互场景下的源代码提供义务。
+
+
+## Plain CPU canvas
+
+The Rust API also exposes a bounded plain-label canvas at
+sekai_profile_renderer::profile_compositor::canvas. Canvas reuses the profile
+compositor's image sampling, source-over blending, and semantic shape rasterizer.
+It supports cropped/scaled PNG images, rectangular clipping, rectangles, rounded
+rectangles, ellipses, quadratic strokes, and FreeType plain labels. Font borrows
+font bytes, allowing callers to keep one shared allocation. Rich TMP text still
+uses the profile pipeline.
+
+The canvas is available without skia-oracle. Pixel buffers are premultiplied RGBA;
+encode_png converts them to straight-alpha PNG. Canvas and decoded image buffers
+are limited to 128 MiB; encoded PNG inputs are limited to 32 MiB. Callers remain
+responsible for aggregate cache and concurrency budgets.
+
+Run the plain_canvas example with a font file and an output PNG path. Its output
+is a functional demonstration, not a profile-parity or visual acceptance baseline.

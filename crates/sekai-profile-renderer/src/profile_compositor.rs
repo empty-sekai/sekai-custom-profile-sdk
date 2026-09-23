@@ -5226,3 +5226,6 @@ mod tests {
         ));
     }
 }
+
+/// Reusable image and shape drawing on the same compositor.
+pub mod canvas;
