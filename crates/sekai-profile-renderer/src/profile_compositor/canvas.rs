@@ -201,6 +201,25 @@ impl Canvas {
         .map(|_| ())
         .map_err(|e| e.to_string())
     }
+
+    /// Crops the premultiplied buffer without a decode or alpha round-trip.
+    pub fn crop(&self, x: u32, y: u32, width: u32, height: u32) -> Result<Self, String> {
+        if width == 0
+            || height == 0
+            || x.checked_add(width).is_none_or(|v| v > self.width)
+            || y.checked_add(height).is_none_or(|v| v > self.height)
+        {
+            return Err("crop outside canvas".into());
+        }
+        let mut out = Self::new(width, height, [0; 4])?;
+        for row in 0..height as usize {
+            let start = ((y as usize + row) * self.width as usize + x as usize) * 4;
+            let target = row * width as usize * 4;
+            out.pixels[target..target + width as usize * 4]
+                .copy_from_slice(&self.pixels[start..start + width as usize * 4]);
+        }
+        Ok(out)
+    }
     pub fn encode_png(&self) -> Result<Vec<u8>, String> {
         let mut rgba = self.pixels.clone();
         for p in rgba.chunks_exact_mut(4) {
