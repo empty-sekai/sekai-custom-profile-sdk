@@ -109,6 +109,47 @@ test("page switching releases the inactive scene before allocating the next one"
   assert.equal(session.activePage, 1);
 });
 
+test("pages without an integer seq sort as seq 0, as the renderer orders them", () => {
+  const profile = {
+    userCustomProfileCards: [
+      { seq: 3, customProfileCardId: 30, customProfileCard: { texts: [] } },
+      { customProfileCardId: 0, customProfileCard: { texts: [] } },
+      { seq: 1, customProfileCardId: 10, customProfileCard: { texts: [] } },
+    ],
+  };
+
+  assert.deepEqual(normalizePages(profile).map((page) => page.cardId), [0, 10, 30]);
+});
+
+test("each page button renders its own page of the profile", async () => {
+  const profile = {
+    userCustomProfileCards: [
+      { seq: 3, customProfileCardId: 30, customProfileCard: { texts: [] } },
+      { seq: 2, customProfileCardId: 20, customProfileCard: { texts: [] } },
+      { seq: 1, customProfileCardId: 10, customProfileCard: { texts: [] } },
+    ],
+  };
+  const requests = [];
+  const session = new WorkbenchSession({});
+  session.config = { sdfBackend: "edt", persistence: "origin" };
+  session.masterData = {};
+  session.renderer = {
+    async createProfileScene(options) {
+      requests.push(options);
+      return { async destroy() {}, async dump() { return { layers: [] }; }, draw() {} };
+    },
+  };
+  session.pages = normalizePages(profile).map((page) => ({ ...page, profile, scene: null, dump: null }));
+
+  for (const index of [2, 0, 1]) await session.switchPage(index);
+
+  assert.deepEqual(requests.map((options) => options.pageIndex), [2, 0, 1]);
+  for (const options of requests) {
+    assert.equal(options.profile, profile);
+    assert.equal(options.card, undefined);
+  }
+});
+
 test("animation ticks update inspector data without rebuilding the layer tree", async () => {
   const [demo, inspector] = await Promise.all([
     readFile(new URL("../../demo/demo.js", import.meta.url), "utf8"),

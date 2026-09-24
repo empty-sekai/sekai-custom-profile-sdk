@@ -6,10 +6,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::authoring_document::{GameProfileDocument, GameProfileDocumentError};
+use crate::authoring_document::{
+    check_element_shape, ElementShapeError, GameProfileDocument, GameProfileDocumentError,
+};
 
 pub const AUTHORING_HISTORY_LIMIT: usize = 150;
 pub const AUTHORING_CHECKPOINT_SCHEMA: &str = "allium.renderer-authoring-checkpoint/v1";
+/// Largest checkpoint revision a JavaScript number carries exactly; checkpoints
+/// cross the browser boundary as JSON.
+const MAX_CHECKPOINT_REVISION: u64 = (1 << 53) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct AuthoringElementId(pub u32);
@@ -178,6 +183,10 @@ pub enum AuthoringError {
     ObjectDataParameterForbidden,
     #[error("page {page} already contains the maximum of {max} elements")]
     ElementLimitReached { page: usize, max: usize },
+    #[error("the custom profile already contains the maximum of {max} pages")]
+    PageLimitReached { max: usize },
+    #[error("authoring element IDs are exhausted")]
+    ElementIdsExhausted,
     #[error("layer {layer} is outside page {page} element range 0..{count}")]
     InvalidLayer {
         page: usize,
@@ -323,6 +332,12 @@ impl AuthoringSession {
                 checkpoint.schema
             )));
         }
+        if checkpoint.revision > MAX_CHECKPOINT_REVISION {
+            return Err(AuthoringError::InvalidCheckpoint(format!(
+                "revision {} exceeds {MAX_CHECKPOINT_REVISION}",
+                checkpoint.revision
+            )));
+        }
         if checkpoint.undo.len() + checkpoint.redo.len() > AUTHORING_HISTORY_LIMIT {
             return Err(AuthoringError::InvalidCheckpoint(format!(
                 "history contains {} entries, maximum is {}",
@@ -330,7 +345,7 @@ impl AuthoringSession {
                 AUTHORING_HISTORY_LIMIT
             )));
         }
-        let document = GameProfileDocument::from_export_value(checkpoint.document)?;
+        let document = GameProfileDocument::from_snapshot_value(checkpoint.document)?;
         let session = Self {
             document,
             ids: checkpoint.ids,
@@ -453,6 +468,7 @@ impl AuthoringSession {
 
     pub fn append_blank_page(&mut self) -> Result<AuthoringDelta, AuthoringError> {
         self.ensure_no_gesture()?;
+        self.ensure_page_capacity()?;
         let before = self.snapshot_document();
         let selection_before = self.selected_id;
         self.document.append_blank_page();
@@ -482,6 +498,8 @@ impl AuthoringSession {
             .get(page)
             .cloned()
             .ok_or(AuthoringError::PageNotFound(page))?;
+        self.ensure_page_capacity()?;
+        let ids = self.allocate_page_ids(page)?;
         let before = self.snapshot_document();
         let selection_before = self.selected_id;
         let destination = page + 1;
@@ -489,7 +507,6 @@ impl AuthoringSession {
         copy["customProfileCardId"] = Value::from(0);
         copy["customProfileId"] = Value::from(0);
         self.document.pages_mut().insert(destination, copy);
-        let ids = self.allocate_page_ids(destination)?;
         self.ids.insert(destination, ids);
         self.document.normalize_page_sequence();
         self.selected_id = None;
@@ -604,6 +621,9 @@ impl AuthoringSession {
         let forward = self.apply_inner(command)?;
         self.document.validate()?;
         let after = self.snapshot(page)?;
+        if after.value == before.value && after.ids == before.ids {
+            return Ok(self.delta(Vec::new(), false));
+        }
         let reverse = reverse_changes(&forward);
         self.undo.push_back(HistoryEntry {
             before: HistorySnapshot::Page(before),
@@ -774,7 +794,7 @@ impl AuthoringSession {
                 validate_element(&element)?;
                 let layer = self.page_element_count(page);
                 element["objectData"]["layer"] = Value::from(layer);
-                let id = self.allocate_id();
+                let id = self.allocate_id()?;
                 self.elements_mut(page, category)?.push(element);
                 self.ids[page].get_mut(&category).unwrap().push(id);
                 self.selected_id = Some(id);
@@ -793,7 +813,7 @@ impl AuthoringSession {
                 offset_position(&mut element, 30.0, 30.0)?;
                 let layer = self.page_element_count(location.page);
                 element["objectData"]["layer"] = Value::from(layer);
-                let new_id = self.allocate_id();
+                let new_id = self.allocate_id()?;
                 self.elements_mut(location.page, location.category)?
                     .push(element);
                 self.ids[location.page]
@@ -816,16 +836,28 @@ impl AuthoringSession {
                     .get_mut(&location.category)
                     .unwrap()
                     .remove(location.index);
-                self.normalize_layers(location.page)?;
+                let renumbered = self.normalize_layers(location.page)?;
                 if self.selected_id == Some(id) {
                     self.selected_id = None;
                 }
-                Ok(vec![change(
+                let mut changes = vec![change(
                     id,
                     location.page,
                     location.category,
                     AuthoringChangeKind::Removed,
-                )])
+                )];
+                for changed_id in self.element_ids(location.page)? {
+                    if renumbered.contains(&changed_id) {
+                        let changed = self.locate(changed_id)?;
+                        changes.push(change(
+                            changed_id,
+                            changed.page,
+                            changed.category,
+                            AuthoringChangeKind::Updated,
+                        ));
+                    }
+                }
+                Ok(changes)
             }
             AuthoringCommand::SetTransform {
                 id,
@@ -958,6 +990,16 @@ impl AuthoringSession {
         }
     }
 
+    fn ensure_page_capacity(&self) -> Result<(), AuthoringError> {
+        if self.document.page_count() >= GameProfileDocument::MAX_PAGES {
+            return Err(AuthoringError::PageLimitReached {
+                max: GameProfileDocument::MAX_PAGES,
+            });
+        }
+        Ok(())
+    }
+
+    /// Fresh IDs for a copy of `page`, laid out like its category arrays.
     fn allocate_page_ids(
         &mut self,
         page: usize,
@@ -966,12 +1008,12 @@ impl AuthoringSession {
             .into_iter()
             .map(|category| Ok((category, self.elements(page, category)?.len())))
             .collect::<Result<Vec<_>, AuthoringError>>()?;
+        let mut ids = self
+            .allocate_ids(counts.iter().map(|(_, count)| count).sum())?
+            .into_iter();
         Ok(counts
             .into_iter()
-            .map(|(category, count)| {
-                let ids = (0..count).map(|_| self.allocate_id()).collect();
-                (category, ids)
-            })
+            .map(|(category, count)| (category, ids.by_ref().take(count).collect()))
             .collect())
     }
 
@@ -1060,13 +1102,20 @@ impl AuthoringSession {
         Err(AuthoringError::ElementNotFound(id))
     }
 
-    fn allocate_id(&mut self) -> AuthoringElementId {
-        let id = AuthoringElementId(self.next_id);
-        self.next_id = self
-            .next_id
-            .checked_add(1)
-            .expect("authoring element id space exhausted");
-        id
+    fn allocate_id(&mut self) -> Result<AuthoringElementId, AuthoringError> {
+        Ok(self.allocate_ids(1)?[0])
+    }
+
+    /// Hands out `count` consecutive IDs, or none when they do not all fit.
+    /// `next_id` stays above every issued ID, so `u32::MAX` is never issued.
+    fn allocate_ids(&mut self, count: usize) -> Result<Vec<AuthoringElementId>, AuthoringError> {
+        let end = u32::try_from(count)
+            .ok()
+            .and_then(|count| self.next_id.checked_add(count))
+            .ok_or(AuthoringError::ElementIdsExhausted)?;
+        let ids = (self.next_id..end).map(AuthoringElementId).collect();
+        self.next_id = end;
+        Ok(ids)
     }
 
     fn snapshot(&self, page: usize) -> Result<PageSnapshot, AuthoringError> {
@@ -1109,7 +1158,7 @@ impl AuthoringSession {
         match snapshot {
             HistorySnapshot::Page(page) => self.restore_page(page),
             HistorySnapshot::Document(document) => {
-                self.document = GameProfileDocument::from_export_value(document.value.clone())?;
+                self.document = GameProfileDocument::from_snapshot_value(document.value.clone())?;
                 self.ids = document.ids.clone();
                 validate_ids_for_document(&self.document, &self.ids)?;
                 Ok(())
@@ -1133,7 +1182,12 @@ impl AuthoringSession {
         Ok(())
     }
 
-    fn normalize_layers(&mut self, page: usize) -> Result<(), AuthoringError> {
+    /// Renumbers the page's layers to `0..count` in their current order and
+    /// returns the elements whose layer value changed.
+    fn normalize_layers(
+        &mut self,
+        page: usize,
+    ) -> Result<BTreeSet<AuthoringElementId>, AuthoringError> {
         let mut locations = Vec::new();
         for category in AuthoringCategory::ALL {
             for index in 0..self.elements(page, category)?.len() {
@@ -1144,10 +1198,15 @@ impl AuthoringSession {
             }
         }
         locations.sort_by_key(|(layer, _, _)| *layer);
+        let mut renumbered = BTreeSet::new();
         for (layer, (_, category, index)) in locations.into_iter().enumerate() {
-            self.elements_mut(page, category)?[index]["objectData"]["layer"] = Value::from(layer);
+            let slot = &mut self.elements_mut(page, category)?[index]["objectData"]["layer"];
+            if slot.as_u64() != Some(layer as u64) {
+                *slot = Value::from(layer);
+                renumbered.insert(self.ids[page][&category][index]);
+            }
         }
-        Ok(())
+        Ok(renumbered)
     }
 
     fn finish(
@@ -1209,13 +1268,13 @@ impl AuthoringSession {
 fn validate_history_snapshot(snapshot: &HistorySnapshot) -> Result<u32, AuthoringError> {
     match snapshot {
         HistorySnapshot::Page(page) => {
-            let document = GameProfileDocument::from_export_value(serde_json::json!({
+            let document = GameProfileDocument::from_snapshot_value(serde_json::json!({
                 "userCustomProfileCards": [page.value.clone()]
             }))?;
             validate_ids_for_document(&document, std::slice::from_ref(&page.ids))
         }
         HistorySnapshot::Document(document) => {
-            let value = GameProfileDocument::from_export_value(document.value.clone())?;
+            let value = GameProfileDocument::from_snapshot_value(document.value.clone())?;
             validate_ids_for_document(&value, &document.ids)
         }
     }
@@ -1285,25 +1344,10 @@ fn empty_page_ids() -> BTreeMap<AuthoringCategory, Vec<AuthoringElementId>> {
 }
 
 fn validate_element(element: &Value) -> Result<(), AuthoringError> {
-    let object = element
-        .as_object()
-        .ok_or(AuthoringError::ElementMustBeObject)?;
-    let data = object
-        .get("objectData")
-        .and_then(Value::as_object)
-        .ok_or(AuthoringError::InvalidObjectData)?;
-    for key in ["position", "scale", "rotation"] {
-        if !data.get(key).is_some_and(Value::is_object) {
-            return Err(AuthoringError::InvalidObjectData);
-        }
-    }
-    if data.get("layer").and_then(Value::as_i64).is_none()
-        || data.get("lock").and_then(Value::as_bool).is_none()
-        || data.get("visible").and_then(Value::as_bool).is_none()
-    {
-        return Err(AuthoringError::InvalidObjectData);
-    }
-    Ok(())
+    check_element_shape(element).map_err(|error| match error {
+        ElementShapeError::NotAnObject => AuthoringError::ElementMustBeObject,
+        ElementShapeError::InvalidObjectData => AuthoringError::InvalidObjectData,
+    })
 }
 
 fn offset_position(element: &mut Value, dx: f64, dy: f64) -> Result<(), AuthoringError> {
@@ -1724,6 +1768,259 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    fn session_with_texts(count: usize) -> (AuthoringSession, Vec<AuthoringElementId>) {
+        let mut session = AuthoringSession::new(GameProfileDocument::blank());
+        let ids = (0..count)
+            .map(|_| {
+                session
+                    .apply(AuthoringCommand::Create {
+                        page: 0,
+                        category: AuthoringCategory::Texts,
+                        element: text(),
+                    })
+                    .unwrap()
+                    .changes[0]
+                    .id
+            })
+            .collect();
+        (session, ids)
+    }
+
+    fn layer_of(change: &AuthoringElementChange) -> u64 {
+        change.element.as_ref().unwrap()["objectData"]["layer"]
+            .as_u64()
+            .unwrap()
+    }
+
+    #[test]
+    fn delete_reports_every_element_whose_layer_it_renumbers() {
+        let (mut session, ids) = session_with_texts(3);
+
+        let deleted = session
+            .apply(AuthoringCommand::Delete { id: ids[0] })
+            .unwrap();
+        let kinds = deleted
+            .changes
+            .iter()
+            .map(|change| (change.id, change.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                (ids[0], AuthoringChangeKind::Removed),
+                (ids[1], AuthoringChangeKind::Updated),
+                (ids[2], AuthoringChangeKind::Updated),
+            ]
+        );
+        assert_eq!(layer_of(&deleted.changes[1]), 0);
+        assert_eq!(layer_of(&deleted.changes[2]), 1);
+
+        let undone = session.undo().unwrap().unwrap();
+        let kinds = undone
+            .changes
+            .iter()
+            .map(|change| (change.id, change.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                (ids[0], AuthoringChangeKind::Inserted),
+                (ids[1], AuthoringChangeKind::Updated),
+                (ids[2], AuthoringChangeKind::Updated),
+            ]
+        );
+        assert_eq!(layer_of(&undone.changes[0]), 0);
+        assert_eq!(layer_of(&undone.changes[1]), 1);
+        assert_eq!(layer_of(&undone.changes[2]), 2);
+
+        // Deleting the top element renumbers nothing else.
+        let top = session
+            .apply(AuthoringCommand::Delete { id: ids[2] })
+            .unwrap();
+        assert_eq!(top.changes.len(), 1);
+    }
+
+    #[test]
+    fn commands_that_change_nothing_leave_history_and_revision_alone() {
+        let (mut session, ids) = session_with_texts(2);
+        session.undo().unwrap().unwrap();
+        let revision = session.revision();
+        let id = ids[0];
+
+        let no_ops = [
+            AuthoringCommand::SetVisible { id, visible: true },
+            AuthoringCommand::SetLock { id, lock: false },
+            AuthoringCommand::SetTransform {
+                id,
+                position: None,
+                scale: None,
+                rotation: None,
+            },
+            AuthoringCommand::SetTransform {
+                id,
+                position: Some([0.0, 0.0, 0.0]),
+                scale: Some([1.0, 1.0, 1.0]),
+                rotation: Some([0.0, 0.0, 0.0, 1.0]),
+            },
+            AuthoringCommand::SetParameters {
+                id,
+                values: BTreeMap::from([("size".into(), Value::from(24.0))]),
+            },
+            AuthoringCommand::SetParameters {
+                id,
+                values: BTreeMap::new(),
+            },
+            AuthoringCommand::ChangeLayer { id, layer: 0 },
+        ];
+        for command in no_ops {
+            let delta = session.apply(command.clone()).unwrap();
+            assert_eq!(delta.revision, revision, "{command:?}");
+            assert!(delta.changes.is_empty(), "{command:?}");
+            assert!(delta.can_redo, "{command:?}");
+        }
+        assert_eq!(session.revision(), revision);
+        // Only the creation of the remaining element is left to undo.
+        session.undo().unwrap().unwrap();
+        assert!(session.element_ids(0).unwrap().is_empty());
+        assert!(session.undo().unwrap().is_none());
+    }
+
+    #[test]
+    fn page_operations_keep_the_game_order_of_imported_pages() {
+        let page = |seq: i64, card_id: i64| {
+            let mut page =
+                GameProfileDocument::blank().export_value()["userCustomProfileCards"][0].clone();
+            page["seq"] = Value::from(seq);
+            page["customProfileCardId"] = Value::from(card_id);
+            page
+        };
+        let document = GameProfileDocument::from_profile_value(serde_json::json!({
+            "userCustomProfileCards": [page(2, 20), page(1, 10)]
+        }))
+        .unwrap();
+        let mut session = AuthoringSession::new(document);
+
+        session.append_blank_page().unwrap();
+
+        let exported = session.export_value();
+        let mut pages = exported["userCustomProfileCards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                (
+                    page["seq"].as_i64().unwrap(),
+                    page["customProfileCardId"].as_i64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // The game shows pages by ascending seq.
+        pages.sort_by_key(|(seq, _)| *seq);
+        let shown = pages.iter().map(|(_, card)| *card).collect::<Vec<_>>();
+        assert_eq!(shown, [10, 20, 0]);
+    }
+
+    #[test]
+    fn checkpoints_keep_the_page_order_their_ids_were_captured_with() {
+        let mut first =
+            GameProfileDocument::blank().export_value()["userCustomProfileCards"][0].clone();
+        first["seq"] = Value::from(2);
+        first["customProfileCard"]["texts"] = serde_json::json!([text()]);
+        let mut second = first.clone();
+        second["seq"] = Value::from(1);
+        second["customProfileCard"]["texts"] = serde_json::json!([]);
+        let document = GameProfileDocument::from_snapshot_value(serde_json::json!({
+            "userCustomProfileCards": [first, second]
+        }))
+        .unwrap();
+        let session = AuthoringSession::new(document);
+        let text_id = session.element_ids(0).unwrap()[0];
+
+        let restored =
+            AuthoringSession::from_checkpoint_value(session.export_checkpoint_value().unwrap())
+                .unwrap();
+
+        assert_eq!(restored.element_ids(0).unwrap(), vec![text_id]);
+        assert!(restored.element_ids(1).unwrap().is_empty());
+        assert_eq!(restored.export_value(), session.export_value());
+    }
+
+    #[test]
+    fn a_custom_profile_holds_at_most_ten_pages() {
+        let mut session = AuthoringSession::new(GameProfileDocument::blank());
+        for _ in 1..10 {
+            session.append_blank_page().unwrap();
+        }
+        assert_eq!(
+            session.export_value()["userCustomProfileCards"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        let revision = session.revision();
+        assert!(session.append_blank_page().is_err());
+        assert!(session.duplicate_page(0).is_err());
+        assert_eq!(session.revision(), revision);
+        assert_eq!(
+            session.export_value()["userCustomProfileCards"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+
+        session.delete_page(9).unwrap();
+        session.duplicate_page(0).unwrap();
+    }
+
+    #[test]
+    fn exhausted_element_ids_fail_closed() {
+        let (session, ids) = session_with_texts(1);
+        let mut checkpoint = session.export_checkpoint_value().unwrap();
+        checkpoint["nextId"] = Value::from(u32::MAX - 1);
+        let mut restored = AuthoringSession::from_checkpoint_value(checkpoint).unwrap();
+        let create = || AuthoringCommand::Create {
+            page: 0,
+            category: AuthoringCategory::Texts,
+            element: text(),
+        };
+
+        let last = restored.apply(create()).unwrap().changes[0].id;
+        assert_eq!(last, AuthoringElementId(u32::MAX - 1));
+        let before = restored.export_value();
+        let revision = restored.revision();
+        assert!(restored.apply(create()).is_err());
+        assert!(restored
+            .apply(AuthoringCommand::Duplicate { id: ids[0] })
+            .is_err());
+        assert!(restored.duplicate_page(0).is_err());
+        assert_eq!(restored.export_value(), before);
+        assert_eq!(restored.revision(), revision);
+        assert_eq!(restored.element_ids(0).unwrap(), vec![ids[0], last]);
+        restored.append_blank_page().unwrap();
+    }
+
+    #[test]
+    fn checkpoint_rejects_a_revision_that_cannot_round_trip_through_javascript() {
+        let (session, _) = session_with_texts(1);
+        let checkpoint = session.export_checkpoint_value().unwrap();
+        for revision in [u64::MAX, 1u64 << 53] {
+            let mut corrupt = checkpoint.clone();
+            corrupt["revision"] = Value::from(revision);
+            assert!(
+                matches!(
+                    AuthoringSession::from_checkpoint_value(corrupt),
+                    Err(AuthoringError::InvalidCheckpoint(_))
+                ),
+                "revision {revision}"
+            );
+        }
+        let mut largest = checkpoint;
+        largest["revision"] = Value::from((1u64 << 53) - 1);
+        assert!(AuthoringSession::from_checkpoint_value(largest).is_ok());
     }
 
     #[test]

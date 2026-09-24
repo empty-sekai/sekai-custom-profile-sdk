@@ -48,10 +48,49 @@ pub enum GameProfileDocumentError {
         count: usize,
         max: usize,
     },
+    #[error(
+        "userCustomProfileCards[{page}].customProfileCard.{category}[{index}] must be an object with a complete objectData"
+    )]
+    InvalidElement {
+        page: usize,
+        category: &'static str,
+        index: usize,
+    },
+}
+
+/// Why a JSON value is not shaped like a custom-profile element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElementShapeError {
+    NotAnObject,
+    InvalidObjectData,
+}
+
+/// Checks the shape every custom-profile element shares: a JSON object whose
+/// `objectData` holds `position`, `scale` and `rotation` objects, an integer
+/// `layer` and boolean `lock` and `visible` flags.
+pub(crate) fn check_element_shape(element: &Value) -> Result<(), ElementShapeError> {
+    let object = element.as_object().ok_or(ElementShapeError::NotAnObject)?;
+    let data = object
+        .get("objectData")
+        .and_then(Value::as_object)
+        .ok_or(ElementShapeError::InvalidObjectData)?;
+    let transforms = ["position", "scale", "rotation"]
+        .into_iter()
+        .all(|key| data.get(key).is_some_and(Value::is_object));
+    if !transforms
+        || data.get("layer").and_then(Value::as_i64).is_none()
+        || data.get("lock").and_then(Value::as_bool).is_none()
+        || data.get("visible").and_then(Value::as_bool).is_none()
+    {
+        return Err(ElementShapeError::InvalidObjectData);
+    }
+    Ok(())
 }
 
 impl GameProfileDocument {
     pub const MAX_ELEMENTS_PER_PAGE: usize = 150;
+    /// Pages one custom profile can hold in the game's editor.
+    pub const MAX_PAGES: usize = 10;
 
     pub fn blank() -> Self {
         let card = CARD_ARRAYS
@@ -73,8 +112,27 @@ impl GameProfileDocument {
         }
     }
 
+    /// Imports `userCustomProfileCards` from a profile response.
+    ///
+    /// Pages are ordered by ascending `seq`, the order the game shows them, so
+    /// page indices match the renderer's `pageIndex`. Pages with equal `seq`
+    /// keep their response order.
     pub fn from_profile_value(profile: Value) -> Result<Self, GameProfileDocumentError> {
-        let profile = profile
+        let mut document = Self::from_snapshot_value(profile)?;
+        document
+            .pages_mut()
+            .sort_by_key(|page| page["seq"].as_i64().unwrap_or_default());
+        Ok(document)
+    }
+
+    pub fn from_export_value(export: Value) -> Result<Self, GameProfileDocumentError> {
+        Self::from_profile_value(export)
+    }
+
+    /// Rebuilds a document captured by an authoring session without reordering
+    /// its pages, whose positions the session's element IDs are bound to.
+    pub(crate) fn from_snapshot_value(value: Value) -> Result<Self, GameProfileDocumentError> {
+        let profile = value
             .as_object()
             .ok_or(GameProfileDocumentError::ProfileMustBeObject)?;
         let cards = profile
@@ -89,10 +147,6 @@ impl GameProfileDocument {
         };
         document.validate()?;
         Ok(document)
-    }
-
-    pub fn from_export_value(export: Value) -> Result<Self, GameProfileDocumentError> {
-        Self::from_profile_value(export)
     }
 
     pub fn export_value(&self) -> Value {
@@ -157,7 +211,7 @@ impl GameProfileDocument {
                 .get("customProfileCard")
                 .and_then(Value::as_object)
                 .ok_or(GameProfileDocumentError::CardMustBeObject { page: page_index })?;
-            let mut count = 0;
+            let mut categories = Vec::with_capacity(CARD_ARRAYS.len());
             for category in CARD_ARRAYS {
                 let values = card
                     .get(category)
@@ -170,14 +224,27 @@ impl GameProfileDocument {
                         page: page_index,
                         category,
                     })?;
-                count += values.len();
+                categories.push((category, values));
             }
+            let count = categories.iter().map(|(_, values)| values.len()).sum();
             if count > Self::MAX_ELEMENTS_PER_PAGE {
                 return Err(GameProfileDocumentError::ElementLimitExceeded {
                     page: page_index,
                     count,
                     max: Self::MAX_ELEMENTS_PER_PAGE,
                 });
+            }
+            for (category, values) in categories {
+                if let Some(index) = values
+                    .iter()
+                    .position(|element| check_element_shape(element).is_err())
+                {
+                    return Err(GameProfileDocumentError::InvalidElement {
+                        page: page_index,
+                        category,
+                        index,
+                    });
+                }
             }
         }
         Ok(())
@@ -186,7 +253,7 @@ impl GameProfileDocument {
 
 #[cfg(test)]
 mod tests {
-    use super::GameProfileDocument;
+    use super::{GameProfileDocument, GameProfileDocumentError};
     use serde_json::{json, Value};
 
     use super::CARD_ARRAYS;
@@ -320,7 +387,92 @@ mod tests {
         value["userCustomProfileCards"][0]["customProfileCard"]["texts"] =
             Value::Array((0..151).map(|_| json!({})).collect());
 
-        assert!(GameProfileDocument::from_export_value(value).is_err());
+        assert_eq!(
+            GameProfileDocument::from_export_value(value),
+            Err(GameProfileDocumentError::ElementLimitExceeded {
+                page: 0,
+                count: 151,
+                max: 150
+            })
+        );
+    }
+
+    fn element() -> Value {
+        json!({
+            "objectData": {
+                "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "scale": {"x": 1.0, "y": 1.0, "z": 1.0},
+                "rotation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
+                "layer": 0, "lock": false, "visible": true
+            },
+            "type": 1
+        })
+    }
+
+    #[test]
+    fn rejects_elements_without_the_game_object_data_shape() {
+        let mut missing_lock = element();
+        missing_lock["objectData"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lock");
+        let malformed = [
+            json!(5),
+            json!(null),
+            json!("text"),
+            json!({}),
+            json!({"objectData": 5}),
+            json!({"objectData": {}}),
+            missing_lock,
+        ];
+        for malformed in malformed {
+            let mut value = GameProfileDocument::blank().export_value();
+            value["userCustomProfileCards"][0]["customProfileCard"]["shapes"] =
+                json!([element(), malformed.clone()]);
+            assert_eq!(
+                GameProfileDocument::from_export_value(value),
+                Err(GameProfileDocumentError::InvalidElement {
+                    page: 0,
+                    category: "shapes",
+                    index: 1
+                }),
+                "element {malformed}"
+            );
+        }
+
+        let mut value = GameProfileDocument::blank().export_value();
+        value["userCustomProfileCards"][0]["customProfileCard"]["shapes"] = json!([element()]);
+        assert!(GameProfileDocument::from_export_value(value).is_ok());
+    }
+
+    #[test]
+    fn imported_pages_follow_ascending_seq_like_the_game() {
+        let page = |seq: i64, card_id: i64| {
+            let mut page =
+                GameProfileDocument::blank().export_value()["userCustomProfileCards"][0].clone();
+            page["seq"] = json!(seq);
+            page["customProfileCardId"] = json!(card_id);
+            page
+        };
+        let profile = json!({
+            "userCustomProfileCards": [page(6, 60), page(2, 20), page(5, 50), page(2, 21)]
+        });
+
+        let exported = GameProfileDocument::from_profile_value(profile)
+            .unwrap()
+            .export_value();
+        let order = exported["userCustomProfileCards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                (
+                    page["seq"].as_i64().unwrap(),
+                    page["customProfileCardId"].as_i64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(order, [(2, 20), (2, 21), (5, 50), (6, 60)]);
     }
 
     #[test]

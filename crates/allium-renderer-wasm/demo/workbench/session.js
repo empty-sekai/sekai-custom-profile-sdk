@@ -154,8 +154,8 @@ export class WorkbenchSession extends EventTarget {
         page.scene = await this.renderer.createProfileScene({
           masterData: this.masterData,
           documentKey: page.documentKey,
-          card: page.card,
           profile: page.profile,
+          pageIndex: index,
           frameMode: "animate",
           sdf: {
             backend: this.config.sdfBackend,
@@ -291,9 +291,9 @@ export function normalizePages(input) {
     throw new Error("Profile JSON does not contain any valid custom-profile pages.");
   }
   return entries
-    .map((entry, index) => {
+    .map((entry) => {
       const card = entry.customProfileCard ?? entry;
-      const sequence = Number.isFinite(entry.seq) ? Number(entry.seq) : index + 1;
+      const sequence = Number.isInteger(entry.seq) ? entry.seq : 0;
       const cardId = entry.customProfileCardId ?? card.id ?? null;
       return {
         sequence,
