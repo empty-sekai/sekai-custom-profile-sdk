@@ -20,8 +20,8 @@ default = ["jpeg-turbo"]
 jpeg-turbo = ["sekai-profile-renderer/jpeg-turbo"]
 
 [dependencies]
-sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.5.1" }
-sekai-profile-renderer-host = { path = "../sekai-profile-renderer-host", version = "0.5.1" }
+sekai-profile-renderer = { path = "../sekai-profile-renderer", version = "0.6.0" }
+sekai-profile-renderer-host = { path = "../sekai-profile-renderer-host", version = "0.6.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

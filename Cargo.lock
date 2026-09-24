@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "allium-renderer-wasm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64",
  "freetype-rs",
@@ -1097,7 +1097,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sekai-profile-card-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64",
  "sekai-profile-renderer",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-renderer"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-renderer-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "freetype-rs",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-renderer-host"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "sekai-profile-renderer",
  "serde",
