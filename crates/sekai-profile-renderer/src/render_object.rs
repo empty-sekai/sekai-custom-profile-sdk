@@ -39,8 +39,6 @@ pub const PROFILE_RENDER_OBJECT_PREWARM_PREFIXES: &[&str] = &[
     "component:deck-art-variant/",
 ];
 const PREWARM_PAGE_STRIDE: usize = 4096;
-const DECK_ART_VARIANT_PREWARM_CONTRACT: &str =
-    "allium.deck-art-variant.sdk-6b0dae58.crop312x512.slot148x243.v1";
 pub const HONOR_RENDER_OBJECT_CONTRACT: &str = "allium.honor-final.shared-core.v1";
 
 pub fn standard_honor_object_key(honor_id: i32, honor_level: i32, full_size: bool) -> String {
@@ -602,14 +600,8 @@ impl MappedRenderObjectStore {
         let mut use_deck_variants = true;
         for entry in deck_sources {
             deck_source_count = deck_source_count.saturating_add(1);
-            let mut digest = Sha256::new();
-            digest.update(DECK_ART_VARIANT_PREWARM_CONTRACT.as_bytes());
-            digest.update(entry.pixel_sha256.as_bytes());
-            digest.update(entry.width.to_le_bytes());
-            digest.update(entry.height.to_le_bytes());
-            let key = format!(
-                "component:deck-art-variant/{DECK_ART_VARIANT_PREWARM_CONTRACT}/{}",
-                hex::encode(digest.finalize())
+            let (key, _) = crate::profile_compositor::deck_art_variant_identity_from_source(
+                &entry.source_sha256,
             );
             if !self.object_by_key.contains_key(&key) {
                 use_deck_variants = false;
@@ -1425,5 +1417,46 @@ mod tests {
         assert_eq!(report.object_bytes, 128);
         assert_eq!(report.page_touch_count, 8);
         assert_eq!(report.checksum, 65_537);
+    }
+
+    #[test]
+    fn profile_hotset_prewarm_skips_deck_sources_covered_by_variants() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let output = root.path().join("store");
+        let source_key = "texture:assets/character/member_cutout/res/normal";
+        let source_sha256 = hex::encode(Sha256::digest(b"deck source"));
+        let (variant_key, variant_sha256) =
+            crate::profile_compositor::deck_art_variant_identity_from_source(&source_sha256);
+        let mut writer = RenderObjectStoreWriter::create(&output, "prewarm-variant-fixture", 128)
+            .expect("writer");
+        // Keys are added in ascending order: "component:" sorts before "texture:".
+        writer
+            .add(RenderObjectWrite {
+                key: &variant_key,
+                kind: RenderObjectKind::Component,
+                source_sha256: &variant_sha256,
+                width: 2,
+                height: 2,
+                row_bytes: 8,
+                pixels: &[5u8; 16],
+            })
+            .expect("variant object");
+        writer
+            .add(RenderObjectWrite {
+                key: source_key,
+                kind: RenderObjectKind::Texture,
+                source_sha256: &source_sha256,
+                width: 2,
+                height: 2,
+                row_bytes: 8,
+                pixels: &[9u8; 16],
+            })
+            .expect("deck source object");
+        let manifest = writer.finish().expect("finish store");
+        let store = MappedRenderObjectStore::open(manifest).expect("open store");
+
+        let report = store.prewarm_profile_hotset();
+        assert_eq!(report.object_count, 1);
+        assert_eq!(report.object_bytes, 16);
     }
 }

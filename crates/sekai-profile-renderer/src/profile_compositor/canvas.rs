@@ -152,6 +152,11 @@ impl Canvas {
         stroke_width: f32,
     ) -> Result<(), String> {
         validate_rect(bounds)?;
+        // An asset mask is sampled from a shape atlas, which this canvas does
+        // not hold; refusing it keeps the call from succeeding with no pixels.
+        if matches!(primitive, ShapePrimitive::AssetMask { .. }) {
+            return Err("unsupported shape primitive: asset mask".into());
+        }
         let mut command = SemanticCommandSource::shape(
             StableId(1),
             StableId(1),
@@ -330,6 +335,30 @@ mod tests {
             .premultiplied_rgba()
             .chunks_exact(4)
             .any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn asset_mask_shapes_are_rejected_instead_of_drawing_nothing() {
+        let mut canvas = Canvas::new(4, 4, [0; 4]).expect("canvas");
+        let result = canvas.shape(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            },
+            ShapePrimitive::AssetMask {
+                resource: sekai_profile_renderer_core::ResourceKey {
+                    namespace: "assets".into(),
+                    key: "custom_profile/shape/heart".into(),
+                },
+            },
+            [255, 0, 0, 255],
+            [0; 4],
+            0.0,
+        );
+        assert!(result.is_err());
+        assert!(canvas.premultiplied_rgba().iter().all(|&value| value == 0));
     }
 
     #[test]

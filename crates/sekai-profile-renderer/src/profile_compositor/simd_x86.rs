@@ -279,11 +279,7 @@ pub(super) unsafe fn raster_semantic_shape_packet(
     let byte_mask = _mm512_set1_epi32(0xff);
     let mut packed = _mm512_setzero_si512();
     for (channel, value) in accumulated.into_iter().enumerate() {
-        let value = _mm512_min_ps(_mm512_max_ps(value, zero), one);
-        let quantized = _mm512_cvttps_epi32(_mm512_add_ps(
-            _mm512_mul_ps(value, _mm512_set1_ps(255.0)),
-            _mm512_set1_ps(0.5),
-        ));
+        let quantized = round_unit_to_byte(value);
         packed = _mm512_or_si512(
             packed,
             _mm512_sllv_epi32(
@@ -294,6 +290,21 @@ pub(super) unsafe fn raster_semantic_shape_packet(
     }
     blend_rgba8_vector(destination, packed, active, blend_mode);
     covered
+}
+
+/// `(clamp01(value) * 255).round()` with `f32::round` semantics. The distance
+/// from the scaled value to its floor is exact, so a value just below a half
+/// step stays below it instead of being carried up by adding 0.5 first.
+#[target_feature(enable = "avx512f")]
+unsafe fn round_unit_to_byte(value: __m512) -> __m512i {
+    let unit = _mm512_min_ps(
+        _mm512_max_ps(value, _mm512_setzero_ps()),
+        _mm512_set1_ps(1.0),
+    );
+    let scaled = _mm512_mul_ps(unit, _mm512_set1_ps(255.0));
+    let floor = _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC }>(scaled);
+    let upper = _mm512_cmp_ps_mask::<_CMP_GE_OQ>(_mm512_sub_ps(scaled, floor), _mm512_set1_ps(0.5));
+    _mm512_cvttps_epi32(_mm512_mask_add_ps(floor, upper, floor, _mm512_set1_ps(1.0)))
 }
 
 #[target_feature(enable = "avx512f")]

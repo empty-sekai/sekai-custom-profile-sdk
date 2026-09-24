@@ -1086,19 +1086,8 @@ impl CustomProfileRenderer {
         let semantic_resolve_started = std::time::Instant::now();
         let resolved_scene = if render_object_store.is_some() && pre_resolved_scene.is_none() {
             Some(
-                crate::semantic_resolve::resolve_card_commands_with_resources(
-                    card,
-                    md,
-                    "native:ordered-profile-backend",
-                    profile,
-                    "cn",
-                    crate::semantic_resolve::ResolveResourceContext {
-                        assets,
-                        render_objects: render_object_store,
-                        catalog_lookup_ns: None,
-                    },
-                )
-                .map_err(|error| format!("resolve ordered profile scene: {error}"))?,
+                resolve_native_profile_scene(card, md, profile, assets, render_object_store)
+                    .map_err(|error| format!("resolve ordered profile scene: {error}"))?,
             )
         } else {
             None
@@ -1669,17 +1658,12 @@ impl CustomProfileRenderer {
         {
             let md = self.snapshot();
             Some(
-                crate::semantic_resolve::resolve_card_commands_with_resources(
+                resolve_native_profile_scene(
                     card,
                     &md,
-                    "native:ordered-profile-backend",
                     profile,
-                    "cn",
-                    crate::semantic_resolve::ResolveResourceContext {
-                        assets: self.assets.as_deref(),
-                        render_objects: render_object_store,
-                        catalog_lookup_ns: None,
-                    },
+                    self.assets.as_deref(),
+                    render_object_store,
                 )
                 .map_err(|error| ProfileBackendRenderError::Render(error.to_string()))?,
             )
@@ -3791,6 +3775,29 @@ fn elapsed_ns(started: std::time::Instant) -> u64 {
     started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
+/// Resolves the semantic scene a native single-page render draws. Fixed General
+/// captions follow the region the master data belongs to.
+fn resolve_native_profile_scene(
+    card: &CustomProfileCard,
+    md: &MasterData,
+    profile: Option<&crate::profile::ProfileData>,
+    assets: Option<&AssetStore>,
+    render_objects: Option<&crate::render_object::MappedRenderObjectStore>,
+) -> Result<crate::semantic_resolve::ResolvedCardCommands, crate::semantic_resolve::ResolveError> {
+    crate::semantic_resolve::resolve_card_commands_with_resources(
+        card,
+        md,
+        "native:ordered-profile-backend",
+        profile,
+        md.region().as_str(),
+        crate::semantic_resolve::ResolveResourceContext {
+            assets,
+            render_objects,
+            catalog_lookup_ns: None,
+        },
+    )
+}
+
 fn render_authored_image_into_pixels(
     pixels: &mut [u8],
     scene: &sekai_profile_renderer_core::profile_scene::ResolvedProfileScene,
@@ -5520,6 +5527,94 @@ mod tests {
         }
         fn color_count(&self) -> usize {
             0
+        }
+    }
+
+    /// Reports one server region and otherwise carries no master data.
+    struct RegionalProvider(crate::region::Region);
+
+    impl MasterDataProvider for RegionalProvider {
+        fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _card_id: i32) -> Option<CardEntry> {
+            None
+        }
+        fn resolve_color(&self, _color_id: i32) -> Option<ResolvedColor> {
+            None
+        }
+        fn resolve_font(&self, _font_id: i32) -> Option<String> {
+            Some(crate::widgets::theme::fonts::PRIMARY.into())
+        }
+        fn resolve_stamp(&self, _stamp_id: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(&self, _res_type: &str, _id: i32) -> Option<ResourceInfo> {
+            None
+        }
+        fn resolve_honor(&self, _honor_id: i32, _honor_level: i32) -> Option<ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, _id: i32) -> Option<BondsHonorEntry> {
+            None
+        }
+        fn get_bonds_honor_word(&self, _word_id: i64) -> Option<BondsHonorWordEntry> {
+            None
+        }
+        fn get_honor(&self, _honor_id: i32) -> Option<HonorEntry> {
+            None
+        }
+        fn resolve_unit_vs_sd(&self, self_id: i32, _partner_id: i32) -> i32 {
+            self_id
+        }
+        fn font_count(&self) -> usize {
+            1
+        }
+        fn color_count(&self) -> usize {
+            0
+        }
+        fn region(&self) -> crate::region::Region {
+            self.0
+        }
+    }
+
+    #[test]
+    fn native_scene_captions_follow_the_masterdata_region() {
+        use crate::region::Region;
+        use sekai_profile_renderer_core::{SemanticCommandPayload, TextSource};
+
+        let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "generals": [{
+                "objectData": {
+                    "layer": 1, "lock": false,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 },
+                    "visible": true
+                },
+                "type": 4
+            }]
+        }))
+        .expect("card");
+        let profile = crate::profile::ProfileData {
+            word: "Bio".into(),
+            ..crate::profile::ProfileData::default()
+        };
+        for (region, expected) in [(Region::Cn, "个性签名"), (Region::Jp, "ひとこと")] {
+            let md = MasterData::new(Arc::new(RegionalProvider(region)));
+            let scene = resolve_native_profile_scene(&card, &md, Some(&profile), None, None)
+                .expect("resolve scene");
+            let title = scene
+                .commands
+                .iter()
+                .find_map(|command| match &command.payload {
+                    SemanticCommandPayload::Text {
+                        source: TextSource::Localized { key, value, .. },
+                        ..
+                    } if key == "custom_profile.general.comment.title" => Some(value.as_str()),
+                    _ => None,
+                });
+            assert_eq!(title, Some(expected), "{region:?}");
         }
     }
 
