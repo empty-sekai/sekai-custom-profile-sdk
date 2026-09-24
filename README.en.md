@@ -168,6 +168,12 @@ some regions only. `--masterdata` and `--masterdata-url` load them when present;
 the `characterIcons`, `materials`, and `userInterfaceIcons` elements are not drawn and no
 missing-table warning is reported.
 
+Collections follow the `customProfileResourceCollectionType` of their
+`customProfileCollectionResources` row: `can_badge` rows draw their image through a lit badge
+material that also needs the static asset `ui/sekai_badge_normal` (a normal map, listed in the
+CLI's static manifest); `omikuji` rows name a prefab rather than an image and are neither drawn
+nor requested; every other type, and a missing one, draws as a plain image.
+
 `--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
 `--asset-url-layout game-assets` only when the source follows the extracted game asset
 layout. That explicit mode reuses the shared core canonical mapping for

@@ -138,6 +138,7 @@ impl Canvas {
             clip,
             None,
             None,
+            None,
             ImageExecutor::Scalar,
         )
         .map(|_| ())

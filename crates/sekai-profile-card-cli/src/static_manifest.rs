@@ -363,10 +363,26 @@ pub static STATIC_KEYS: &[&str] = &[
     "ui/icon_unit_vb",
     "ui/icon_unit_vs_wh",
     "ui/icon_unit_ws",
+    "ui/sekai_badge_normal",
 ];
 
 /// True if `key` names an engine-shipped static asset (served from --static-url).
 /// Backed by binary search over the byte-sorted [`STATIC_KEYS`] manifest.
 pub fn is_static_key(key: &str) -> bool {
     STATIC_KEYS.binary_search(&key).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_manifest_is_byte_sorted_and_serves_the_badge_normal_map_as_static() {
+        assert!(STATIC_KEYS
+            .windows(2)
+            .all(|pair| pair[0].as_bytes() < pair[1].as_bytes()));
+        assert!(is_static_key(
+            sekai_profile_renderer::core::badge_material::NORMAL_MAP_KEY
+        ));
+    }
 }

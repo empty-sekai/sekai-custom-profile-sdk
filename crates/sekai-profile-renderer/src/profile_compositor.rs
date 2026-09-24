@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use sekai_profile_renderer_core::profile_scene::{ComponentControlState, ResolvedProfileScene};
 use sekai_profile_renderer_core::{
-    AuthoredElementKind, BlendMode, CompositeOperation, FontRole, LayerSource, Matrix2d,
-    ParameterValue, Rect, ResourceKey, SemanticCommandPayload, SemanticCommandSource,
+    AuthoredElementKind, BlendMode, CompositeOperation, FontRole, ImageMaterial, LayerSource,
+    Matrix2d, ParameterValue, Rect, ResourceKey, SemanticCommandPayload, SemanticCommandSource,
     ShapePrimitive, StableId, TextSource,
 };
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,13 @@ struct AxisAlignedClip {
 enum ImageClipGeometry {
     RoundedRect { radius: [f32; 2] },
     Ellipse,
+}
+
+/// Inputs of the lit badge material for one image command.
+#[derive(Clone, Copy)]
+struct BadgeShading<'a> {
+    normal_map: MappedRenderObject<'a>,
+    tangent: [f32; 2],
 }
 
 struct OwnedRenderObject {
@@ -679,6 +686,7 @@ fn try_render_general_base_into(
             None,
             None,
             None,
+            None,
             executor,
         )?;
         base_fragments = base_fragments.saturating_add(raster.fragments);
@@ -1022,6 +1030,7 @@ pub fn build_deck_art_variant_simd(
         [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         BlendMode::SrcOver,
         "deck-art-variant-builder",
+        None,
         None,
         None,
         None,
@@ -1371,6 +1380,7 @@ fn render_image_commands_into(
                 tint,
                 clip,
                 alpha_mask,
+                material,
             } => {
                 let mut translated_matrix = command.matrix;
                 translated_matrix[5] += control_state.translate_y;
@@ -1445,6 +1455,29 @@ fn render_image_commands_into(
                     ),
                     _ => None,
                 };
+                // The normal map is a required resource like the mask: it
+                // resolves the same way and a missing one fails the command.
+                let normal_map = match material {
+                    ImageMaterial::Plain => None,
+                    ImageMaterial::LitBadge { normal_map } => Some(normal_map),
+                };
+                let normal_map_key = normal_map.map(render_object_key_for_resource);
+                let normal_map_fallback = match (&normal_map_key, normal_map) {
+                    (Some(key), Some(resource)) if store.object(key).is_none() => {
+                        load_source_fallback_object(assets, resource)?
+                    }
+                    _ => None,
+                };
+                let badge = match &normal_map_key {
+                    Some(key) => Some(BadgeShading {
+                        normal_map: store
+                            .object(key)
+                            .or_else(|| normal_map_fallback.as_ref().map(OwnedRenderObject::mapped))
+                            .ok_or_else(|| ProfileCompositorError::MissingObject(key.clone()))?,
+                        tangent: sekai_profile_renderer_core::badge_material::tangent(matrix),
+                    }),
+                    None => None,
+                };
                 let target = targets
                     .last_mut()
                     .map(|target| target.pixels.as_mut_slice())
@@ -1463,6 +1496,7 @@ fn render_image_commands_into(
                     command_clip,
                     image_clip,
                     mask_object,
+                    badge,
                     executor,
                 )?;
                 stats.image_command_count = stats.image_command_count.saturating_add(1);
@@ -1773,6 +1807,7 @@ pub fn render_image_scene_skia_reference(
                 tint,
                 clip,
                 alpha_mask,
+                material,
             } => {
                 let matrix = compose_matrix(layer.matrix, command.matrix);
                 let (command_clip, image_clip) = validate_image_command(
@@ -1786,6 +1821,9 @@ pub fn render_image_scene_skia_reference(
                 )?;
                 if !tint.iter().all(|value| value.to_bits() == 1.0f32.to_bits()) {
                     return unsupported(&command.role, "Skia reference tint");
+                }
+                if !material.is_plain() {
+                    return unsupported(&command.role, "Skia reference image material");
                 }
                 let object_key = render_object_key_for_resource(resource);
                 if !images_by_key.contains_key(&object_key) {
@@ -2713,6 +2751,7 @@ fn raster_image_command(
     command_clip: Option<AxisAlignedClip>,
     image_clip: Option<ImageClipGeometry>,
     alpha_mask: Option<MappedRenderObject<'_>>,
+    badge: Option<BadgeShading<'_>>,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
     validate_geometry(bounds, uv, tint, matrix, role)?;
@@ -2720,6 +2759,12 @@ fn raster_image_command(
     if let Some(mask) = alpha_mask {
         validate_object(mask, role)?;
     }
+    if let Some(badge) = badge {
+        validate_object(badge.normal_map, role)?;
+    }
+    // The badge material applies the tint while shading, so its output
+    // reaches the blender untinted.
+    let blend_tint = if badge.is_some() { [1.0; 4] } else { tint };
     if bounds.width == 0.0 || bounds.height == 0.0 {
         return Ok(RasterImageStats::default());
     }
@@ -2765,12 +2810,14 @@ fn raster_image_command(
     }
     let mut stats = RasterImageStats::default();
     let packet_blend = executor == ImageExecutor::Simd
-        && tint.iter().all(|value| value.to_bits() == 1.0f32.to_bits());
+        && blend_tint
+            .iter()
+            .all(|value| value.to_bits() == 1.0f32.to_bits());
     // The two fast paths below read the source straight out of the mapped
     // object, so they cannot fold a second texture into the sample. A masked
-    // command gathers through the loop instead, where the mask is applied before
-    // either blender sees the source.
-    let direct_source_sampling = alpha_mask.is_none();
+    // or lit command gathers through the loop instead, where the mask and the
+    // material are applied before either blender sees the source.
+    let direct_source_sampling = alpha_mask.is_none() && badge.is_none();
     #[cfg(target_arch = "x86_64")]
     let affine_packet_blend = packet_blend
         && direct_source_sampling
@@ -2856,8 +2903,10 @@ fn raster_image_command(
                 if !image_clip_contains(image_clip, bounds, local_x, local_y) {
                     continue;
                 }
-                let source_x = ((uv.x + u * uv.width) * source.entry.width as f32).floor();
-                let source_y = ((uv.y + v * uv.height) * source.entry.height as f32).floor();
+                let image_u = uv.x + u * uv.width;
+                let image_v = uv.y + v * uv.height;
+                let source_x = (image_u * source.entry.width as f32).floor();
+                let source_y = (image_v * source.entry.height as f32).floor();
                 let sx = source_x
                     .max(0.0)
                     .min(source.entry.width.saturating_sub(1) as f32)
@@ -2868,6 +2917,10 @@ fn raster_image_command(
                     as u32;
                 let mut source_pixel = object_pixel(source, sx, sy)
                     .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))?;
+                if let Some(badge) = badge {
+                    source_pixel =
+                        badge_fragment(source_pixel, badge, image_u, image_v, tint, role)?;
+                }
                 if let Some(mask) = alpha_mask {
                     // The mask spans the command bounds, so it is sampled at the
                     // same normalised position as the source. Its alpha scales
@@ -2922,7 +2975,7 @@ fn raster_image_command(
                             width: canvas_width,
                             height: canvas_height,
                         })?;
-                    let source_pixel = apply_tint(source_pixels[lane].to_le_bytes(), tint);
+                    let source_pixel = apply_tint(source_pixels[lane].to_le_bytes(), blend_tint);
                     blend_pixel(destination_pixel, source_pixel, blend_mode);
                 }
                 stats.scalar_fragments = stats.scalar_fragments.saturating_add(active_fragments);
@@ -3172,6 +3225,70 @@ fn object_pixel(object: MappedRenderObject<'_>, x: u32, y: u32) -> Option<[u8; 4
         .checked_add(usize::try_from(x).ok()?.checked_mul(4)?)?;
     let pixel = object.pixels.get(offset..offset.checked_add(4)?)?;
     Some([pixel[0], pixel[1], pixel[2], pixel[3]])
+}
+
+/// One lit badge fragment: the image texel `albedo` (premultiplied, as the
+/// compositor stores it) shaded with the normal map at the same image UV.
+fn badge_fragment(
+    albedo: [u8; 4],
+    badge: BadgeShading<'_>,
+    image_u: f32,
+    image_v: f32,
+    vertex_color: [f32; 4],
+    role: &str,
+) -> Result<[u8; 4], ProfileCompositorError> {
+    let normal = sample_straight_bilinear(badge.normal_map, image_u, image_v, role)?;
+    Ok(sekai_profile_renderer_core::badge_material::shade(
+        straight_texel(albedo),
+        normal,
+        badge.tangent,
+        vertex_color,
+    )
+    .map(quantize))
+}
+
+/// A premultiplied texel as straight RGBA in `0..=1`; a transparent texel has
+/// no colour.
+fn straight_texel(texel: [u8; 4]) -> [f32; 4] {
+    if texel[3] == 0 {
+        return [0.0; 4];
+    }
+    let alpha = f32::from(texel[3]);
+    [
+        (f32::from(texel[0]) / alpha).min(1.0),
+        (f32::from(texel[1]) / alpha).min(1.0),
+        (f32::from(texel[2]) / alpha).min(1.0),
+        alpha / 255.0,
+    ]
+}
+
+/// Bilinear, edge-clamped sample of an object's straight texels at a UV in
+/// `0..=1` with v down, as a GPU samples a straight-alpha texture with linear
+/// filtering.
+fn sample_straight_bilinear(
+    object: MappedRenderObject<'_>,
+    u: f32,
+    v: f32,
+    role: &str,
+) -> Result<[f32; 4], ProfileCompositorError> {
+    let max_x = object.entry.width.saturating_sub(1) as f32;
+    let max_y = object.entry.height.saturating_sub(1) as f32;
+    let x = (u * object.entry.width as f32 - 0.5).clamp(0.0, max_x);
+    let y = (v * object.entry.height as f32 - 0.5).clamp(0.0, max_y);
+    let (x0, y0) = (x.floor(), y.floor());
+    let (x1, y1) = ((x0 + 1.0).min(max_x), (y0 + 1.0).min(max_y));
+    let (fx, fy) = (x - x0, y - y0);
+    let texel = |x: f32, y: f32| {
+        object_pixel(object, x as u32, y as u32)
+            .map(straight_texel)
+            .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))
+    };
+    let lerp = |a: [f32; 4], b: [f32; 4], t: f32| -> [f32; 4] {
+        std::array::from_fn(|channel| a[channel] * (1.0 - t) + b[channel] * t)
+    };
+    let top = lerp(texel(x0, y0)?, texel(x1, y0)?, fx);
+    let bottom = lerp(texel(x0, y1)?, texel(x1, y1)?, fx);
+    Ok(lerp(top, bottom, fy))
 }
 
 fn apply_tint(source: [u8; 4], tint: [f32; 4]) -> [u8; 4] {
@@ -5758,6 +5875,181 @@ mod software_tests {
             .expect("render clipped image");
             assert_eq!(stats.sampled_fragment_count, 0, "{executor:?}");
             assert!(pixels.iter().all(|&value| value == 0), "{executor:?}");
+        }
+    }
+
+    const BADGE_ALBEDO: &str = "texture:assets/badge";
+    const BADGE_NORMAL_MAP: &str = "texture:static/ui/sekai_badge_normal";
+    const RED: [u8; 4] = [200, 40, 90, 255];
+    const TILTED: [u8; 4] = [200, 90, 220, 255];
+    const FLAT: [u8; 4] = [128, 128, 255, 255];
+
+    fn badge_image(
+        id: u64,
+        layer_id: StableId,
+        bounds: Rect,
+        element_alpha: f32,
+    ) -> SemanticCommandSource {
+        let mut command = assets_image(id, layer_id, "collection", "badge", bounds, full_uv());
+        if let SemanticCommandPayload::Image { tint, material, .. } = &mut command.payload {
+            tint[3] = element_alpha;
+            *material = ImageMaterial::LitBadge {
+                normal_map: ResourceKey {
+                    namespace: "static".into(),
+                    key: "ui/sekai_badge_normal".into(),
+                },
+            };
+        }
+        command
+    }
+
+    fn pixels_of(texels: &[[u8; 4]]) -> Vec<u8> {
+        texels.concat()
+    }
+
+    /// Renders `scene` with the scalar executor and, where available, the
+    /// packet executor, and returns the pixels both agree on.
+    fn render_both(
+        scene: &ResolvedProfileScene,
+        store: &MappedRenderObjectStore,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let scalar = render_image_scene_scalar(scene, store, width, height).expect("scalar badge");
+        if packet_simd_available() {
+            let simd = render_image_scene_simd(scene, store, width, height).expect("simd badge");
+            assert_eq!(simd.pixels, scalar.pixels, "executors agree");
+        }
+        scalar.pixels
+    }
+
+    // Expected pixels follow a double-precision evaluation of the badge
+    // material over the same texels, rounded to 8 bits.
+
+    #[test]
+    fn lit_badges_shade_each_pixel_from_its_image_texel_and_the_bilinear_normal_map() {
+        let layer_id = StableId::derive("layer", b"badge");
+        let (_temp, store) = store(vec![
+            texture(
+                BADGE_ALBEDO,
+                4,
+                1,
+                pixels_of(&[
+                    [50, 75, 113, 255],
+                    RED,
+                    [10, 20, 30, 255],
+                    [120, 200, 60, 255],
+                ]),
+            ),
+            texture(BADGE_NORMAL_MAP, 2, 1, pixels_of(&[FLAT, TILTED])),
+        ]);
+        let scene = scene(
+            layer(layer_id, AuthoredElementKind::Collection, 0),
+            vec![badge_image(1, layer_id, rect(0.0, 0.0, 4.0, 1.0), 1.0)],
+        );
+        // The normal map is half as wide as the image: the outer pixels clamp
+        // to its edge texels and the inner ones blend a quarter and three
+        // quarters of the way between them.
+        assert_eq!(
+            render_both(&scene, &store, 4, 1),
+            pixels_of(&[
+                [88, 112, 149, 255],
+                [209, 56, 104, 255],
+                [35, 44, 54, 255],
+                [126, 203, 68, 255],
+            ])
+        );
+    }
+
+    #[test]
+    fn the_badge_tangent_frame_follows_the_element_rotation_and_flip() {
+        let layer_id = StableId::derive("layer", b"turned-badge");
+        let (_temp, store) = store(vec![
+            texture(BADGE_ALBEDO, 2, 2, pixels_of(&[RED; 4])),
+            texture(BADGE_NORMAL_MAP, 2, 2, pixels_of(&[TILTED; 4])),
+        ]);
+        let (sin, cos) = 30f32.to_radians().sin_cos();
+        for (name, matrix, expected) in [
+            (
+                "upright",
+                [1.0, 0.0, 0.0, 1.0, 8.0, 8.0],
+                [203, 49, 97, 255],
+            ),
+            // Turned 30 degrees counter-clockwise on screen.
+            (
+                "turned",
+                [cos, -sin, sin, cos, 8.0, 8.0],
+                [196, 42, 90, 255],
+            ),
+            (
+                "mirrored",
+                [-1.0, 0.0, 0.0, 1.0, 8.0, 8.0],
+                [194, 40, 88, 255],
+            ),
+        ] {
+            let mut badge_layer = layer(layer_id, AuthoredElementKind::Collection, 0);
+            badge_layer.matrix = matrix;
+            let scene = scene(
+                badge_layer,
+                vec![badge_image(1, layer_id, rect(-4.0, -4.0, 8.0, 8.0), 1.0)],
+            );
+            let pixels = render_both(&scene, &store, 16, 16);
+            let centre = (8 * 16 + 8) * 4;
+            assert_eq!(pixels[centre..centre + 4], expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn badge_alpha_is_cut_at_one_half_and_scaled_by_the_element_alpha() {
+        let layer_id = StableId::derive("layer", b"badge-alpha");
+        // Magenta at alpha 127 and 128, stored premultiplied.
+        let (_cut_temp, cut_store) = store(vec![
+            texture(
+                BADGE_ALBEDO,
+                2,
+                1,
+                pixels_of(&[[127, 0, 127, 127], [128, 0, 128, 128]]),
+            ),
+            texture(BADGE_NORMAL_MAP, 1, 1, pixels_of(&[FLAT])),
+        ]);
+        let scene_for = |element_alpha| {
+            scene(
+                layer(layer_id, AuthoredElementKind::Collection, 0),
+                vec![badge_image(
+                    1,
+                    layer_id,
+                    rect(0.0, 0.0, 2.0, 1.0),
+                    element_alpha,
+                )],
+            )
+        };
+        assert_eq!(
+            render_both(&scene_for(1.0), &cut_store, 2, 1),
+            pixels_of(&[[0; 4], [255, 40, 255, 255]])
+        );
+
+        let (_half_temp, half_store) = store(vec![
+            texture(BADGE_ALBEDO, 1, 1, pixels_of(&[RED])),
+            texture(BADGE_NORMAL_MAP, 1, 1, pixels_of(&[TILTED])),
+        ]);
+        let half = scene(
+            layer(layer_id, AuthoredElementKind::Collection, 0),
+            vec![badge_image(1, layer_id, rect(0.0, 0.0, 1.0, 1.0), 0.5)],
+        );
+        assert_eq!(render_both(&half, &half_store, 1, 1), [101, 24, 48, 128]);
+    }
+
+    #[test]
+    fn a_badge_without_its_normal_map_fails_like_any_missing_resource() {
+        let layer_id = StableId::derive("layer", b"badge-missing");
+        let (_temp, store) = store(vec![texture(BADGE_ALBEDO, 1, 1, pixels_of(&[RED]))]);
+        let scene = scene(
+            layer(layer_id, AuthoredElementKind::Collection, 0),
+            vec![badge_image(1, layer_id, rect(0.0, 0.0, 1.0, 1.0), 1.0)],
+        );
+        match render_image_scene_scalar(&scene, &store, 1, 1) {
+            Err(ProfileCompositorError::MissingObject(key)) => assert_eq!(key, BADGE_NORMAL_MAP),
+            other => panic!("a missing normal map must fail the command: {other:?}"),
         }
     }
 }

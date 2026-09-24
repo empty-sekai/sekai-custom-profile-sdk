@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use sekai_profile_renderer::masterdata::{
-    MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+    CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
 };
 use sekai_profile_renderer::region::Region;
 use sekai_profile_renderer::types::{
@@ -219,6 +219,9 @@ impl MasterDataProvider for JsonMasterDataProvider {
             file_name: v["fileName"].as_str()?.to_string(),
             load_val: v["resourceLoadVal"].as_str()?.to_string(),
             resource_type: v["customProfileResourceType"].as_str()?.to_string(),
+            collection_type: CollectionResourceType::parse(
+                v["customProfileResourceCollectionType"].as_str(),
+            ),
         })
     }
 
@@ -349,6 +352,28 @@ mod tests {
         );
         assert_eq!(p.resolve_player_info_label(2).as_deref(), Some("Total"));
         assert!(p.resolve_player_info_label(99).is_none());
+    }
+
+    #[test]
+    fn collection_rows_carry_their_collection_type() {
+        let p = provider_with(
+            "customProfileCollectionResources",
+            r#"[
+                {"id": 1, "customProfileResourceType": "collection", "customProfileResourceCollectionType": "can_badge", "resourceLoadVal": "custom_profile/collection/crash", "fileName": "fixture_canbadge"},
+                {"id": 2, "customProfileResourceType": "collection", "customProfileResourceCollectionType": "omikuji", "resourceLoadVal": "lottery_game/new_year_2022", "fileName": "Prefabs/Omikuji"},
+                {"id": 3, "customProfileResourceType": "collection", "customProfileResourceCollectionType": null, "resourceLoadVal": "custom_profile/collection/misc", "fileName": "plain"},
+                {"id": 4, "customProfileResourceType": "collection", "resourceLoadVal": "custom_profile/collection/misc", "fileName": "absent"}
+            ]"#,
+        );
+        let kind = |id| {
+            p.resolve_resource("collection", id)
+                .unwrap()
+                .collection_type
+        };
+        assert_eq!(kind(1), CollectionResourceType::CanBadge);
+        assert_eq!(kind(2), CollectionResourceType::Omikuji);
+        assert_eq!(kind(3), CollectionResourceType::None);
+        assert_eq!(kind(4), CollectionResourceType::None);
     }
 
     #[test]

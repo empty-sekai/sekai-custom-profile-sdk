@@ -1,6 +1,7 @@
 import type { SemanticDrawOperation, SemanticResourceKey } from "./semanticCommandPlanner.js";
 
-export type SemanticDrawBatchKind = "shape" | "image" | "mask" | "text" | "composite";
+/** `badge` is an image drawn with the lit badge material. */
+export type SemanticDrawBatchKind = "shape" | "image" | "badge" | "mask" | "text" | "composite";
 export type SemanticBlendMode = "src_over" | "src_in" | "dst_in" | "multiply" | "screen" | "add";
 export type SemanticCompositeOperation = "marker" | "begin_isolation" | "end_isolation";
 
@@ -13,11 +14,14 @@ export type SemanticDrawBatch = {
   commandSlots: Uint32Array;
   resource: SemanticResourceKey | null;
   maskResource: SemanticResourceKey | null;
+  normalMapResource: SemanticResourceKey | null;
   blendMode: SemanticBlendMode;
   compositeOperation: SemanticCompositeOperation | null;
 };
 
-export const SEMANTIC_FLOATS_PER_VERTEX = 28;
+/** Per vertex: position, UV, shape UV, fill, stroke, params, clip quad,
+ * shape size, and the canvas direction of the command's local +x axis. */
+export const SEMANTIC_FLOATS_PER_VERTEX = 30;
 export function semanticTextBatchKey(commandIds: readonly string[]): string {
   return `semantic-text-batch\0${commandIds.join("\0")}`;
 }
@@ -29,14 +33,14 @@ const UNIT_TRIANGLES = [
 /** Compile immutable geometry only. Render mask and dynamic translation remain
  * in the dense layer-state textures, so toggles/ticks never rebuild vertices. */
 export function compileSemanticDrawBatches(operations: SemanticDrawOperation[]): SemanticDrawBatch[] {
-  const groups: Array<{ key: string; kind: SemanticDrawBatchKind; resource: SemanticResourceKey | null; maskResource: SemanticResourceKey | null; blendMode: SemanticBlendMode; compositeOperation: SemanticCompositeOperation | null; operations: SemanticDrawOperation[] }> = [];
+  const groups: Array<{ key: string; kind: SemanticDrawBatchKind; resource: SemanticResourceKey | null; maskResource: SemanticResourceKey | null; normalMapResource: SemanticResourceKey | null; blendMode: SemanticBlendMode; compositeOperation: SemanticCompositeOperation | null; operations: SemanticDrawOperation[] }> = [];
   for (const operation of operations) {
     const descriptor = batchDescriptor(operation);
     const previous = groups.at(-1);
     if (previous?.key === descriptor.key) previous.operations.push(operation);
     else groups.push({ ...descriptor, operations: [operation] });
   }
-  return groups.map((group) => compileGroup(group.kind, group.resource, group.maskResource, group.blendMode, group.compositeOperation, group.operations));
+  return groups.map((group) => compileGroup(group.kind, group.resource, group.maskResource, group.normalMapResource, group.blendMode, group.compositeOperation, group.operations));
 }
 
 function batchDescriptor(operation: SemanticDrawOperation): {
@@ -44,6 +48,7 @@ function batchDescriptor(operation: SemanticDrawOperation): {
   kind: SemanticDrawBatchKind;
   resource: SemanticResourceKey | null;
   maskResource: SemanticResourceKey | null;
+  normalMapResource: SemanticResourceKey | null;
   blendMode: SemanticBlendMode;
   compositeOperation: SemanticCompositeOperation | null;
 } {
@@ -53,17 +58,22 @@ function batchDescriptor(operation: SemanticDrawOperation): {
     const resource = requireResource(payload.resource, operation.command.id);
     const maskResource = optionalResource(payload.alpha_mask);
     const maskKey = maskResource ? `\0${maskResource.namespace}\0${maskResource.key}` : "";
-    return { key: `image\0${blendMode}\0${resource.namespace}\0${resource.key}${maskKey}`, kind: "image", resource, maskResource, blendMode, compositeOperation: null };
+    const normalMapResource = imageNormalMap(payload.material, operation.command.id);
+    if (normalMapResource) {
+      const normalMapKey = `\0${normalMapResource.namespace}\0${normalMapResource.key}`;
+      return { key: `badge\0${blendMode}\0${resource.namespace}\0${resource.key}${maskKey}${normalMapKey}`, kind: "badge", resource, maskResource, normalMapResource, blendMode, compositeOperation: null };
+    }
+    return { key: `image\0${blendMode}\0${resource.namespace}\0${resource.key}${maskKey}`, kind: "image", resource, maskResource, normalMapResource: null, blendMode, compositeOperation: null };
   }
   if (payload.kind === "shape") {
     const maskResource = assetMaskResource(payload.primitive);
-    if (maskResource) return { key: `mask\0${blendMode}\0${maskResource.namespace}\0${maskResource.key}`, kind: "mask", resource: maskResource, maskResource: null, blendMode, compositeOperation: null };
-    return { key: `shape\0${blendMode}`, kind: "shape", resource: null, maskResource: null, blendMode, compositeOperation: null };
+    if (maskResource) return { key: `mask\0${blendMode}\0${maskResource.namespace}\0${maskResource.key}`, kind: "mask", resource: maskResource, maskResource: null, normalMapResource: null, blendMode, compositeOperation: null };
+    return { key: `shape\0${blendMode}`, kind: "shape", resource: null, maskResource: null, normalMapResource: null, blendMode, compositeOperation: null };
   }
-  if (payload.kind === "text") return { key: `text\0${blendMode}`, kind: "text", resource: null, maskResource: null, blendMode, compositeOperation: null };
+  if (payload.kind === "text") return { key: `text\0${blendMode}`, kind: "text", resource: null, maskResource: null, normalMapResource: null, blendMode, compositeOperation: null };
   if (payload.kind === "composite") {
     const compositeOperation = requireCompositeOperation(payload.operation, operation.command.id);
-    return { key: `composite\0${operation.command.id}`, kind: "composite", resource: null, maskResource: null, blendMode, compositeOperation };
+    return { key: `composite\0${operation.command.id}`, kind: "composite", resource: null, maskResource: null, normalMapResource: null, blendMode, compositeOperation };
   }
   throw new Error(`unsupported semantic command payload ${(payload as { kind?: unknown }).kind}`);
 }
@@ -72,12 +82,13 @@ function compileGroup(
   kind: SemanticDrawBatchKind,
   resource: SemanticResourceKey | null,
   maskResource: SemanticResourceKey | null,
+  normalMapResource: SemanticResourceKey | null,
   blendMode: SemanticBlendMode,
   compositeOperation: SemanticCompositeOperation | null,
   operations: SemanticDrawOperation[]
 ): SemanticDrawBatch {
   if (kind === "text" || kind === "composite") {
-    return { kind, resource, maskResource, blendMode, compositeOperation, operations: [...operations], commandIds: operations.map((op) => op.command.id), vertices: new Float32Array(), layerSlots: new Uint32Array(), commandSlots: new Uint32Array() };
+    return { kind, resource, maskResource, normalMapResource, blendMode, compositeOperation, operations: [...operations], commandIds: operations.map((op) => op.command.id), vertices: new Float32Array(), layerSlots: new Uint32Array(), commandSlots: new Uint32Array() };
   }
   const vertices = new Float32Array(operations.length * 6 * SEMANTIC_FLOATS_PER_VERTEX);
   const layerSlots = new Uint32Array(operations.length * 6);
@@ -97,6 +108,7 @@ function compileGroup(
     const strokeWidth = payload.kind === "shape" && typeof payload.stroke_width === "number"
       ? payload.stroke_width
       : 0;
+    const axis = linearAxis(operation.baseMatrix, commandMatrix);
     for (const [unitX, unitY] of UNIT_TRIANGLES) {
       const vertexFill = payload.kind === "shape" ? gradientColor(payload.gradient, unitX, unitY, fill) : fill;
       const localX = bounds.x + bounds.width * unitX;
@@ -113,6 +125,7 @@ function compileGroup(
         primitive, radiusX, radiusY, strokeWidth,
         ...clip[0], ...clip[1], ...clip[2], ...clip[3],
         bounds.width, bounds.height,
+        ...axis,
       ], base);
       layerSlots[vertexOffset] = operation.layerSlot;
       commandSlots[vertexOffset] = operation.commandSlot;
@@ -123,6 +136,7 @@ function compileGroup(
     kind,
     resource,
     maskResource,
+    normalMapResource,
     blendMode,
     compositeOperation,
     operations: [...operations],
@@ -175,6 +189,14 @@ function optionalPoint(value: unknown, fallback: [number, number]): [number, num
   return Array.isArray(value) && value.length === 2 && value.every((entry) => typeof entry === "number" && Number.isFinite(entry))
     ? [value[0], value[1]]
     : fallback;
+}
+
+/** Canvas direction of the local +x axis under `base` after `command`. */
+function linearAxis(
+  base: [number, number, number, number, number, number],
+  command: [number, number, number, number, number, number],
+): [number, number] {
+  return [base[0] * command[0] + base[2] * command[1], base[1] * command[0] + base[3] * command[1]];
 }
 
 function transformPoint(matrix: [number, number, number, number, number, number], x: number, y: number): [number, number] {
@@ -252,6 +274,17 @@ function requireResource(value: unknown, commandId: string): SemanticResourceKey
   const resource = value as Record<string, unknown>;
   if (typeof resource.namespace !== "string" || typeof resource.key !== "string") throw new Error(`invalid command resource ${commandId}`);
   return { namespace: resource.namespace, key: resource.key };
+}
+
+/** Normal map of a lit-badge image material; null for a plain image, whose
+ * JSON omits the material. */
+function imageNormalMap(value: unknown, commandId: string): SemanticResourceKey | null {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid image material ${commandId}`);
+  const material = value as Record<string, unknown>;
+  if (material.kind === "plain") return null;
+  if (material.kind !== "lit_badge") throw new Error(`unsupported image material ${commandId}: ${String(material.kind)}`);
+  return requireResource(material.normal_map, commandId);
 }
 
 function optionalResource(value: unknown): SemanticResourceKey | null {

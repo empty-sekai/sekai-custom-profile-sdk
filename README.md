@@ -169,6 +169,11 @@ cargo run --release --bin render-card -- \
 `--masterdata` 与 `--masterdata-url` 存在时加载；缺失时 `characterIcons`、`materials`、
 `userInterfaceIcons` 元素不绘制，也不计入缺表告警。
 
+收藏品按 `customProfileCollectionResources` 行的 `customProfileResourceCollectionType` 绘制：
+`can_badge`（罐徽章）以带光照的徽章材质绘制原图，另需静态素材 `ui/sekai_badge_normal`
+（法线贴图，已列入 CLI 静态清单）；`omikuji` 行指向预制体而非图片，不绘制也不请求素材；
+其余类型与缺省值按普通图片绘制。
+
 `--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical
 映射解析 `bonds_honor/character` 与 `bonds_honor/word`，不改变 renderer asset key。

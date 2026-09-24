@@ -8,13 +8,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::masterdata::ProfileMasterData;
+use crate::masterdata::{CollectionResourceType, ProfileMasterData, ResourceInfo};
 use crate::profile_data::{MusicDifficultyStats as ProfileMusicStats, ProfileData};
 use crate::profile_scene::{
-    card_member_lookup_key, ordered_profile_elements, resource_lookup_key, CardVisualSnapshot,
-    CharacterRankSnapshot, ComponentImageSnapshot, HonorVisualKind, HonorVisualSnapshot,
-    MusicDifficultySnapshot, MusicResultsSnapshot, ProfileComponentSnapshot, ProfileElementRef,
-    ProfileResolveSnapshot, ResolvedProfileScene, ResourceDescriptor, StoryFavoriteSnapshot,
+    card_member_lookup_key, collection_normal_map_lookup_key, ordered_profile_elements,
+    resource_lookup_key, CardVisualSnapshot, CharacterRankSnapshot, ComponentImageSnapshot,
+    HonorVisualKind, HonorVisualSnapshot, MusicDifficultySnapshot, MusicResultsSnapshot,
+    ProfileComponentSnapshot, ProfileElementRef, ProfileResolveSnapshot, ResolvedProfileScene,
+    ResourceDescriptor, StoryFavoriteSnapshot,
 };
 use crate::profile_source::CustomProfileCard;
 use crate::{LineIndentSource, ParameterValue, ResourceKey};
@@ -501,6 +502,7 @@ fn prepare_profile_inner(
             crate::SemanticCommandPayload::Image {
                 resource,
                 alpha_mask,
+                material,
                 ..
             } => {
                 collect_command_resource(
@@ -515,6 +517,14 @@ fn prepare_profile_inner(
                         &format!("command.{}.alpha_mask", command.id.0),
                         mask,
                         fallback,
+                    );
+                }
+                if let crate::ImageMaterial::LitBadge { normal_map } = material {
+                    collect_command_resource(
+                        &mut resources,
+                        &format!("command.{}.normal_map", command.id.0),
+                        normal_map,
+                        normal_map_metric(),
                     );
                 }
             }
@@ -695,11 +705,15 @@ fn populate_authored_resources(
         }
         match authored_resource(element.value, masterdata) {
             AuthoredResource::None => {}
-            AuthoredResource::MissingRow => {
+            AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
                 snapshot.omitted_elements.insert(element.source_key);
             }
             AuthoredResource::Request(request) => {
                 insert_request(snapshot, request, resource_metadata)
+            }
+            AuthoredResource::LitBadge { image, normal_map } => {
+                insert_request(snapshot, image, resource_metadata);
+                insert_request(snapshot, normal_map, resource_metadata);
             }
         }
     }
@@ -715,15 +729,27 @@ pub enum AuthoredResource {
     /// The master-data row the element references does not exist. The game
     /// does not build such an element.
     MissingRow,
+    /// The row names content that is not an image: an omikuji collection
+    /// points at a prefab. The element is not drawn and requests nothing.
+    NotDrawn,
     /// The resource to load, keyed by [`resource_lookup_key`].
     Request(ProfileResourceRequest),
+    /// A can-badge collection: its image, drawn with the lit badge material,
+    /// and the material's normal map, keyed by
+    /// [`collection_normal_map_lookup_key`].
+    LitBadge {
+        image: ProfileResourceRequest,
+        normal_map: ProfileResourceRequest,
+    },
 }
 
 /// Resolves the resource an authored image-like element draws: shapes, card
 /// members, stamps and the `customProfile*Resources` image kinds. Keys follow
 /// the master-data rows (`resourceLoadVal/fileName`, card and stamp asset
 /// bundles); a missing row yields [`AuthoredResource::MissingRow`] rather than
-/// an invented key.
+/// an invented key. Collections follow their row's collection type: omikuji
+/// rows are [`AuthoredResource::NotDrawn`] and can badges
+/// [`AuthoredResource::LitBadge`].
 pub fn authored_resource(
     element: ProfileElementRef<'_>,
     masterdata: &(impl ProfileMasterData + ?Sized),
@@ -784,13 +810,7 @@ pub fn authored_resource(
         ProfileElementRef::Other(value) => {
             master_resource_request(masterdata, "other", "etc", value.id, SMALL_RESOURCE)
         }
-        ProfileElementRef::Collection(value) => master_resource_request(
-            masterdata,
-            "collection",
-            "collection",
-            value.id,
-            SMALL_RESOURCE,
-        ),
+        ProfileElementRef::Collection(value) => return collection_resource(masterdata, value.id),
         ProfileElementRef::StandMember(value) => master_resource_request(
             masterdata,
             "stand-member",
@@ -841,6 +861,35 @@ const SMALL_RESOURCE: ResourceMetric = ResourceMetric {
     width: 100.0,
     height: 100.0,
 };
+
+fn normal_map_metric() -> ResourceMetric {
+    ResourceMetric {
+        width: crate::badge_material::NORMAL_MAP_SIZE,
+        height: crate::badge_material::NORMAL_MAP_SIZE,
+    }
+}
+
+fn collection_resource(
+    masterdata: &(impl ProfileMasterData + ?Sized),
+    id: i32,
+) -> AuthoredResource {
+    let Some(row) = masterdata.resolve_resource("collection", id) else {
+        return AuthoredResource::MissingRow;
+    };
+    let image = row_resource_request(&row, "collection", id, SMALL_RESOURCE);
+    match row.collection_type {
+        CollectionResourceType::Omikuji => AuthoredResource::NotDrawn,
+        CollectionResourceType::CanBadge => AuthoredResource::LitBadge {
+            image,
+            normal_map: ProfileResourceRequest {
+                lookup_key: collection_normal_map_lookup_key(id),
+                resource: crate::badge_material::normal_map_resource(),
+                fallback: normal_map_metric(),
+            },
+        },
+        _ => AuthoredResource::Request(image),
+    }
+}
 
 /// Card artwork key: the cut-out illustration for cropped cards
 /// (`member_type` 1, deck slots) and the small full illustration otherwise.
@@ -1352,15 +1401,24 @@ fn master_resource_request(
     id: i32,
     fallback: ResourceMetric,
 ) -> Option<ProfileResourceRequest> {
-    let resource = masterdata.resolve_resource(table_kind, id)?;
-    Some(ProfileResourceRequest {
+    let row = masterdata.resolve_resource(table_kind, id)?;
+    Some(row_resource_request(&row, lookup_kind, id, fallback))
+}
+
+fn row_resource_request(
+    row: &ResourceInfo,
+    lookup_kind: &str,
+    id: i32,
+    fallback: ResourceMetric,
+) -> ProfileResourceRequest {
+    ProfileResourceRequest {
         lookup_key: resource_lookup_key(lookup_kind, id, ""),
         resource: ResourceKey {
             namespace: "assets".into(),
-            key: format!("{}/{}", resource.load_value, resource.file_name),
+            key: format!("{}/{}", row.load_value, row.file_name),
         },
         fallback,
-    })
+    }
 }
 
 fn insert_request(
@@ -1371,16 +1429,18 @@ fn insert_request(
     let metric = metadata
         .metric(&request.resource)
         .unwrap_or(request.fallback);
+    let kind = if request.resource.namespace == "static" {
+        "renderer_static"
+    } else {
+        "master_data"
+    };
     snapshot.resources.insert(
         request.lookup_key,
         ResourceDescriptor {
             resource: request.resource,
             natural_width: metric.width,
             natural_height: metric.height,
-            provenance: BTreeMap::from([(
-                "kind".into(),
-                ParameterValue::Text("master_data".into()),
-            )]),
+            provenance: BTreeMap::from([("kind".into(), ParameterValue::Text(kind.into()))]),
         },
     );
 }
@@ -2924,5 +2984,219 @@ mod tests {
                 "layer {game_layer}"
             );
         }
+    }
+
+    const BADGE_KEY: &str = "custom_profile/collection/crash/crash_fixture_canbadge";
+    const STAND_KEY: &str = "custom_profile/collection/acrylic/acrylic_fixture";
+    const PLAIN_KEY: &str = "custom_profile/collection/misc/plain_fixture";
+    const SECOND_BADGE_KEY: &str = "custom_profile/collection/crash/second_canbadge";
+
+    /// Collection rows 1 (can badge), 2 (omikuji prefab), 3 (acrylic stand),
+    /// 4 (no collection type) and 5 (a second can badge).
+    fn collection_tables() -> JsonMasterData {
+        let mut data = text_and_shape_tables();
+        let row = |id: i32, kind: serde_json::Value, key: &str| {
+            let (load, file) = key.rsplit_once('/').unwrap();
+            serde_json::json!({
+                "id": id, "customProfileResourceType": "collection",
+                "customProfileResourceCollectionType": kind,
+                "resourceLoadType": "assetbundle", "resourceLoadVal": load, "fileName": file
+            })
+        };
+        data.insert_value(
+            "customProfileCollectionResources",
+            serde_json::json!([
+                row(1, "can_badge".into(), BADGE_KEY),
+                row(
+                    2,
+                    "omikuji".into(),
+                    "lottery_game/new_year_2022/Prefabs/Omikuji"
+                ),
+                row(3, "acrylic_stand".into(), STAND_KEY),
+                row(4, serde_json::Value::Null, PLAIN_KEY),
+                row(5, "can_badge".into(), SECOND_BADGE_KEY),
+            ]),
+        )
+        .unwrap();
+        data
+    }
+
+    /// Collections as `(layer, id, visible)`.
+    fn collection_card(elements: &[(i32, i32, bool)]) -> CustomProfileCard {
+        serde_json::from_value(serde_json::json!({
+            "collections": elements
+                .iter()
+                .map(|(layer, id, visible)| serde_json::json!({
+                    "objectData": visible_object(*layer, *visible), "id": id, "targetId": null
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    fn prepared_keys(card: &CustomProfileCard, data: &JsonMasterData) -> Vec<(String, String)> {
+        let mut keys = prepare_profile(card, None, data, "collections", "jp")
+            .unwrap()
+            .resources
+            .into_iter()
+            .map(|request| (request.resource.namespace, request.resource.key))
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys
+    }
+
+    fn collection_scene(card: &CustomProfileCard) -> crate::profile_scene::ResolvedProfileScene {
+        compile_profile_scene(
+            card,
+            None,
+            &collection_tables(),
+            "collections",
+            "jp",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap()
+    }
+
+    fn image_material(
+        scene: &crate::profile_scene::ResolvedProfileScene,
+        game_layer: i32,
+    ) -> (String, crate::Rect, crate::ImageMaterial) {
+        let commands = game_layer_commands(scene, game_layer);
+        assert_eq!(commands.len(), 1, "layer {game_layer}");
+        match &commands[0].payload {
+            crate::SemanticCommandPayload::Image {
+                resource, material, ..
+            } => (resource.key.clone(), commands[0].bounds, material.clone()),
+            other => panic!("layer {game_layer} draws {other:?}"),
+        }
+    }
+
+    fn badge_normal_map() -> ResourceKey {
+        ResourceKey {
+            namespace: "static".into(),
+            key: "ui/sekai_badge_normal".into(),
+        }
+    }
+
+    #[test]
+    fn can_badge_collections_draw_their_image_with_the_lit_badge_material() {
+        let scene = collection_scene(&collection_card(&[
+            (1, 1, true),
+            (2, 3, true),
+            (3, 4, true),
+        ]));
+        let (key, bounds, material) = image_material(&scene, 1);
+        assert_eq!(key, BADGE_KEY);
+        assert_eq!(
+            material,
+            crate::ImageMaterial::LitBadge {
+                normal_map: badge_normal_map()
+            }
+        );
+        // The image keeps the size and placement of a plain collection image.
+        let (_, plain_bounds, _) = image_material(&scene, 3);
+        assert_eq!(bounds, plain_bounds);
+        for (game_layer, key) in [(2, STAND_KEY), (3, PLAIN_KEY)] {
+            assert_eq!(
+                image_material(&scene, game_layer),
+                (key.into(), plain_bounds, crate::ImageMaterial::Plain),
+                "layer {game_layer}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_materials_round_trip_and_plain_images_serialise_without_one() {
+        let scene = collection_scene(&collection_card(&[(1, 1, true), (2, 4, true)]));
+        let command = |game_layer| game_layer_commands(&scene, game_layer)[0].clone();
+        let json = |game_layer| serde_json::to_value(command(game_layer)).unwrap();
+        assert!(json(2)["payload"].get("material").is_none());
+        assert_eq!(
+            json(1)["payload"]["material"],
+            serde_json::json!({
+                "kind": "lit_badge",
+                "normal_map": { "namespace": "static", "key": "ui/sekai_badge_normal" }
+            })
+        );
+        for game_layer in [1, 2] {
+            let parsed: crate::SemanticCommandSource =
+                serde_json::from_value(json(game_layer)).unwrap();
+            assert_eq!(parsed, command(game_layer));
+            let bytes =
+                bincode::encode_to_vec(command(game_layer), bincode::config::standard()).unwrap();
+            let (decoded, _): (crate::SemanticCommandSource, usize) =
+                bincode::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+            assert_eq!(decoded, command(game_layer));
+        }
+    }
+
+    #[test]
+    fn omikuji_collections_request_nothing_and_draw_nothing() {
+        let card = collection_card(&[(1, 2, true), (2, 3, true)]);
+        let data = collection_tables();
+        assert_eq!(
+            authored_resource(
+                crate::profile_scene::ProfileElementRef::Collection(&card.collections[0]),
+                &data,
+            ),
+            AuthoredResource::NotDrawn
+        );
+        assert_eq!(
+            prepared_keys(&card, &data),
+            [("assets".to_string(), STAND_KEY.to_string())]
+        );
+        let scene = collection_scene(&card);
+        let commands = game_layer_commands(&scene, 1);
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(
+            commands[0].payload,
+            crate::SemanticCommandPayload::Composite { .. }
+        ));
+        assert_eq!(image_material(&scene, 2).0, STAND_KEY);
+    }
+
+    #[test]
+    fn the_badge_normal_map_is_requested_only_for_a_visible_can_badge() {
+        let data = collection_tables();
+        let assets = |key: &str| ("assets".to_string(), key.to_string());
+        // Plain collections and a hidden badge need no normal map.
+        assert_eq!(
+            prepared_keys(&collection_card(&[(1, 3, true), (2, 1, false)]), &data),
+            [assets(STAND_KEY)]
+        );
+        // Two visible badges share one normal map.
+        assert_eq!(
+            prepared_keys(
+                &collection_card(&[(1, 1, true), (2, 5, true), (3, 4, true)]),
+                &data
+            ),
+            [
+                assets(BADGE_KEY),
+                assets(SECOND_BADGE_KEY),
+                assets(PLAIN_KEY),
+                ("static".to_string(), "ui/sekai_badge_normal".to_string()),
+            ]
+        );
+        let preparation = prepare_profile(
+            &collection_card(&[(1, 1, true)]),
+            None,
+            &data,
+            "collections",
+            "jp",
+        )
+        .unwrap();
+        let normal_map = preparation
+            .resources
+            .iter()
+            .find(|request| request.resource == badge_normal_map())
+            .unwrap();
+        assert_eq!(
+            normal_map.fallback,
+            ResourceMetric {
+                width: 256.0,
+                height: 256.0
+            }
+        );
     }
 }

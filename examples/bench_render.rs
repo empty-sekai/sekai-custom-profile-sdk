@@ -18,7 +18,9 @@ use std::time::Instant;
 
 use sekai_profile_renderer::assets::AssetStore;
 use sekai_profile_renderer::init::install_fonts;
-use sekai_profile_renderer::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
+use sekai_profile_renderer::masterdata::{
+    CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+};
 use sekai_profile_renderer::profile::ProfileData;
 use sekai_profile_renderer::renderer::CustomProfileRenderer;
 use sekai_profile_renderer::types::{
@@ -112,6 +114,9 @@ impl MasterDataProvider for CachedProvider {
             file_name: v["fileName"].as_str()?.to_string(),
             load_val: v["resourceLoadVal"].as_str()?.to_string(),
             resource_type: v["customProfileResourceType"].as_str()?.to_string(),
+            collection_type: CollectionResourceType::parse(
+                v["customProfileResourceCollectionType"].as_str(),
+            ),
         })
     }
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {

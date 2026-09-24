@@ -50,7 +50,7 @@ test("a successful executor releases every object it created", () => {
   assert.deepEqual([...live].map((object) => object.kind), []);
 });
 
-for (let failCompileAt = 1; failCompileAt <= 6; failCompileAt += 1) {
+for (let failCompileAt = 1; failCompileAt <= 8; failCompileAt += 1) {
   test(`a failed shader compile ${failCompileAt} releases the objects created so far`, () => {
     const { gl, live } = countingContext({ failCompileAt, infoLog: "ERROR: 0:1: syntax error" });
     assert.throws(() => new WebglSemanticCommandExecutor(gl), /syntax error/);
@@ -58,7 +58,7 @@ for (let failCompileAt = 1; failCompileAt <= 6; failCompileAt += 1) {
   });
 }
 
-for (let failLinkAt = 1; failLinkAt <= 3; failLinkAt += 1) {
+for (let failLinkAt = 1; failLinkAt <= 4; failLinkAt += 1) {
   test(`a failed program link ${failLinkAt} releases the objects created so far`, () => {
     const { gl, live } = countingContext({ failLinkAt, infoLog: "link error" });
     assert.throws(() => new WebglSemanticCommandExecutor(gl), /link error/);

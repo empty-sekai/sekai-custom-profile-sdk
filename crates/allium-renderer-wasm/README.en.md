@@ -156,6 +156,8 @@ export interface ResourceProvider {
 
 `namespace`, `key`, and `role` are renderer semantics, not filesystem conventions. The host may interpret them in any way.
 
+A can-badge collection (`customProfileResourceCollectionType` `can_badge`) requests, besides its image, the normal map `namespace: "static"`, `key: "ui/sekai_badge_normal"`. Omikuji collections are not drawn and request nothing.
+
 ### Arbitrary asynchronous sources
 
 ```ts

@@ -5089,7 +5089,9 @@ mod expansion_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
+    use crate::masterdata::{
+        CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+    };
     use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
     #[cfg(feature = "skia-oracle")]
     use crate::types::{
@@ -5651,9 +5653,15 @@ mod tests {
     const USER_INTERFACE_ICON_KEY: &str = "custom_profile/user_interface_icon/profile_icon_0002";
     const ETC_KEY: &str = "custom_profile/etc/etc_001";
 
-    /// Colours plus `customProfileEtcResources` 1 and, when `icon_tables` is
+    const BADGE_KEY: &str = "custom_profile/collection/crash/crash_fixture_canbadge";
+    const OMIKUJI_KEY: &str = "lottery_game/new_year_2022/Prefabs/Omikuji";
+    const STAND_KEY: &str = "custom_profile/collection/acrylic/acrylic_fixture";
+    const BADGE_NORMAL_MAP_KEY: &str = "ui/sekai_badge_normal";
+
+    /// Colours, `customProfileEtcResources` 1, collections 1 (can badge),
+    /// 2 (omikuji prefab) and 3 (acrylic stand), and, when `icon_tables` is
     /// set, character icon 1, material 3 and user-interface icon 2. A region
-    /// without the icon tables has only the first two.
+    /// without the icon tables has only the others.
     struct IconRowsProvider {
         icon_tables: bool,
     }
@@ -5682,11 +5690,15 @@ mod tests {
             None
         }
         fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
-            let key = match (res_type, id) {
-                ("etc", 1) => ETC_KEY,
-                ("character_icon", 1) if self.icon_tables => CHARACTER_ICON_KEY,
-                ("material", 3) if self.icon_tables => MATERIAL_KEY,
-                ("user_interface_icon", 2) if self.icon_tables => USER_INTERFACE_ICON_KEY,
+            let plain = CollectionResourceType::None;
+            let (key, collection_type) = match (res_type, id) {
+                ("etc", 1) => (ETC_KEY, plain),
+                ("collection", 1) => (BADGE_KEY, CollectionResourceType::CanBadge),
+                ("collection", 2) => (OMIKUJI_KEY, CollectionResourceType::Omikuji),
+                ("collection", 3) => (STAND_KEY, CollectionResourceType::AcrylicStand),
+                ("character_icon", 1) if self.icon_tables => (CHARACTER_ICON_KEY, plain),
+                ("material", 3) if self.icon_tables => (MATERIAL_KEY, plain),
+                ("user_interface_icon", 2) if self.icon_tables => (USER_INTERFACE_ICON_KEY, plain),
                 _ => return None,
             };
             let (load_val, file_name) = key.rsplit_once('/')?;
@@ -5694,6 +5706,7 @@ mod tests {
                 file_name: file_name.into(),
                 load_val: load_val.into(),
                 resource_type: res_type.into(),
+                collection_type,
             })
         }
         fn resolve_honor(&self, _honor_id: i32, _honor_level: i32) -> Option<ResolvedHonor> {
@@ -5749,13 +5762,25 @@ mod tests {
     }
 
     fn icon_page_renderer(icon_tables: bool) -> (tempfile::TempDir, CustomProfileRenderer) {
+        page_renderer(
+            icon_tables,
+            &[
+                (CHARACTER_ICON_KEY, [255, 0, 0, 255]),
+                (MATERIAL_KEY, [0, 255, 0, 255]),
+                (USER_INTERFACE_ICON_KEY, [255, 255, 255, 255]),
+                (ETC_KEY, [0, 0, 255, 255]),
+            ],
+        )
+    }
+
+    /// A renderer over [`IconRowsProvider`] whose asset store holds 8x8
+    /// images of one colour each.
+    fn page_renderer(
+        icon_tables: bool,
+        images: &[(&str, [u8; 4])],
+    ) -> (tempfile::TempDir, CustomProfileRenderer) {
         let assets = Arc::new(AssetStore::new(8));
-        for (key, pixel) in [
-            (CHARACTER_ICON_KEY, [255, 0, 0, 255]),
-            (MATERIAL_KEY, [0, 255, 0, 255]),
-            (USER_INTERFACE_ICON_KEY, [255, 255, 255, 255]),
-            (ETC_KEY, [0, 0, 255, 255]),
-        ] {
+        for &(key, pixel) in images {
             assets.put(
                 key.into(),
                 crate::codec::png::encode_rgba(8, 8, &pixel.repeat(64)).expect("png"),
@@ -5827,6 +5852,74 @@ mod tests {
         // Hidden elements and elements without a row are not drawn.
         assert_eq!(pixel_at(&output, -600.0, 200.0), [0; 4]);
         assert_eq!(pixel_at(&output, 600.0, 200.0), [0; 4]);
+    }
+
+    /// A can badge, an omikuji collection and an acrylic stand in a row, and
+    /// a hidden can badge below the omikuji.
+    fn collection_page() -> CustomProfileCard {
+        let object = |layer: i32, x: f32, y: f32, visible: bool| {
+            serde_json::json!({
+                "layer": layer, "lock": false, "visible": visible,
+                "position": { "x": x, "y": y, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "collections": [
+                { "objectData": object(1, -600.0, 0.0, true), "id": 1, "targetId": null },
+                { "objectData": object(2, 0.0, 0.0, true), "id": 2, "targetId": null },
+                { "objectData": object(3, 600.0, 0.0, true), "id": 3, "targetId": null },
+                { "objectData": object(4, 0.0, 200.0, false), "id": 1, "targetId": null }
+            ]
+        }))
+        .expect("collection page")
+    }
+
+    const COLLECTION_IMAGES: [(&str, [u8; 4]); 3] = [
+        (BADGE_KEY, [200, 40, 90, 255]),
+        (STAND_KEY, [0, 255, 0, 255]),
+        // A normal tilted away from the flat surface.
+        (BADGE_NORMAL_MAP_KEY, [200, 90, 220, 255]),
+    ];
+
+    #[test]
+    fn collections_follow_their_collection_type_on_the_native_surface() {
+        let card = collection_page();
+        let (_temp, renderer) = page_renderer(false, &COLLECTION_IMAGES);
+        let md = renderer.snapshot();
+        let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
+        keys.sort();
+        // The omikuji row names a prefab: it requests nothing.
+        assert_eq!(keys, [STAND_KEY, BADGE_KEY, BADGE_NORMAL_MAP_KEY]);
+        let output = renderer
+            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
+            .expect("rendered page");
+        // The badge image lit through the normal map, from a double-precision
+        // evaluation of the badge material.
+        assert_eq!(pixel_at(&output, -600.0, 0.0), [203, 49, 97, 255]);
+        assert_eq!(pixel_at(&output, 0.0, 0.0), [0; 4]);
+        assert_eq!(pixel_at(&output, 600.0, 0.0), [0, 255, 0, 255]);
+        assert_eq!(pixel_at(&output, 0.0, 200.0), [0; 4]);
+    }
+
+    #[test]
+    fn a_missing_badge_normal_map_is_reported_and_fails_the_page() {
+        let card = collection_page();
+        let (_temp, renderer) = page_renderer(false, &COLLECTION_IMAGES[..2]);
+        let md = renderer.snapshot();
+        let assets = renderer.assets().expect("asset store");
+        assert_eq!(
+            crate::asset_keys::missing_card_asset_keys(&card, &md, |key| assets.contains(key)),
+            [BADGE_NORMAL_MAP_KEY]
+        );
+        match renderer.render_full_card_sdf_scalar_f32_transparent_candidate(&card, None) {
+            Err(error) => assert!(
+                error.contains("missing render object texture:assets/ui/sekai_badge_normal"),
+                "{error}"
+            ),
+            Ok(_) => panic!("a missing required resource fails the page"),
+        }
     }
 
     #[test]

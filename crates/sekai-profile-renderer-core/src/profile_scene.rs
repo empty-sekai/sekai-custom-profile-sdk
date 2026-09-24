@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::profile_source::*;
 use crate::{
-    AuthoredElementKind, FontRole, InteractionRegionSource, LayerKind, LayerSource,
+    AuthoredElementKind, FontRole, ImageMaterial, InteractionRegionSource, LayerKind, LayerSource,
     LineIndentSource, ParameterValue, Quad, Rect, SemanticCommandPayload, SemanticCommandSource,
     ShapePrimitive, StableId,
 };
@@ -264,8 +264,9 @@ pub struct ProfileResolveSnapshot {
     pub honor_visuals: BTreeMap<String, HonorVisualSnapshot>,
     #[serde(default)]
     pub card_member_visuals: BTreeMap<String, CardVisualSnapshot>,
-    /// Source keys of elements the game does not build because their
-    /// master-data row does not exist. Their layers stay empty.
+    /// Source keys of elements that are not drawn: the game does not build an
+    /// element whose master-data row does not exist, and an omikuji collection
+    /// row names a prefab rather than an image. Their layers stay empty.
     #[serde(default)]
     pub omitted_elements: BTreeSet<String>,
 }
@@ -1241,6 +1242,13 @@ pub fn resource_lookup_key(kind: &str, id: i32, variant: &str) -> String {
     format!("{kind}\0{id}\0{variant}")
 }
 
+/// Lookup key of the normal map a can-badge collection draws its image with,
+/// in [`ProfileResolveSnapshot::resources`]. A collection with this entry is
+/// drawn with [`ImageMaterial::LitBadge`].
+pub fn collection_normal_map_lookup_key(id: i32) -> String {
+    resource_lookup_key("collection", id, "normal-map")
+}
+
 /// Lookup key of a card-member element's artwork in
 /// [`ProfileResolveSnapshot::resources`].
 pub fn card_member_lookup_key(value: &CardMemberElement) -> String {
@@ -1280,8 +1288,8 @@ pub fn resolve_profile_scene(
             ),
         ]);
         let command_id = semantic_command_id(&element.source_key, "primary", 0);
-        // The viewer never builds hidden elements, nor elements whose
-        // master-data row is missing; their layers keep an empty composite.
+        // The viewer never builds hidden elements, nor the omitted ones; their
+        // layers keep an empty composite.
         let built =
             element.object().visible && !snapshot.omitted_elements.contains(&element.source_key);
         let (layer_kind, source_content, primary) = if built {
@@ -1578,16 +1586,29 @@ fn lower_primary_command(
         ProfileElementRef::Other(value) => resolved_image_with_parameter(
             snapshot, "other", value.id, "", layer_id, command_id, "other", parameters,
         )?,
-        ProfileElementRef::Collection(value) => resolved_image_with_parameter(
-            snapshot,
-            "collection",
-            value.id,
-            "",
-            layer_id,
-            command_id,
-            "collection",
-            parameters,
-        )?,
+        ProfileElementRef::Collection(value) => {
+            let mut resolved = resolved_image_with_parameter(
+                snapshot,
+                "collection",
+                value.id,
+                "",
+                layer_id,
+                command_id,
+                "collection",
+                parameters,
+            )?;
+            if let (Some(normal_map), SemanticCommandPayload::Image { material, .. }) = (
+                snapshot
+                    .resources
+                    .get(&collection_normal_map_lookup_key(value.id)),
+                &mut resolved.2.payload,
+            ) {
+                *material = ImageMaterial::LitBadge {
+                    normal_map: normal_map.resource.clone(),
+                };
+            }
+            resolved
+        }
         ProfileElementRef::StandMember(value) => resolved_image_with_parameter(
             snapshot,
             "stand-member",

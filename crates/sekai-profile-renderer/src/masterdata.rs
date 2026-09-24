@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
 
+pub use sekai_profile_renderer_core::masterdata::CollectionResourceType;
+
 /// 解析后的颜色值（RGBA）。
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedColor {
@@ -43,6 +45,9 @@ pub struct ResourceInfo {
     pub file_name: String,
     pub load_val: String,
     pub resource_type: String,
+    /// `customProfileResourceCollectionType` of a collection row; other rows
+    /// carry [`CollectionResourceType::None`].
+    pub collection_type: CollectionResourceType,
 }
 
 impl ResourceInfo {
@@ -390,6 +395,7 @@ impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
                 file_name: value.file_name,
                 load_value: value.load_val,
                 resource_type: value.resource_type,
+                collection_type: value.collection_type,
             }
         })
     }

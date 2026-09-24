@@ -292,6 +292,7 @@ mod tests {
                 file_name: "star".into(),
                 load_val: "custom_profile/shape_hd".into(),
                 resource_type: "shape".into(),
+                collection_type: crate::masterdata::CollectionResourceType::None,
             })
         }
         fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {

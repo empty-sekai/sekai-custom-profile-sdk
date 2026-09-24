@@ -8,6 +8,7 @@ import type { BrowserImageSource } from "./browserSemanticResources.js";
 
 const PREVIEW_TRANSFORM_TEXTURE_UNIT = 5;
 const ALPHA_MASK_TEXTURE_UNIT = 6;
+const NORMAL_MAP_TEXTURE_UNIT = 7;
 
 const CARD_W = 1830;
 const CARD_H = 812;
@@ -45,6 +46,7 @@ export class WebglSemanticCommandExecutor {
   private shapeProgram: WebGLProgram;
   private textureProgram: WebGLProgram;
   private compositeProgram: WebGLProgram;
+  private badgeProgram: WebGLProgram;
   private compositeVao: WebGLVertexArrayObject;
   private stateTexture: WebGLTexture;
   private maskTexture: WebGLTexture;
@@ -81,6 +83,7 @@ export class WebglSemanticCommandExecutor {
       programs.push(createProgram(gl, VERTEX_SHADER, SHAPE_FRAGMENT_SHADER));
       programs.push(createProgram(gl, VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER));
       programs.push(createProgram(gl, COMPOSITE_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER));
+      programs.push(createProgram(gl, VERTEX_SHADER, BADGE_FRAGMENT_SHADER));
       compositeVao = gl.createVertexArray();
       for (let index = 0; index < 5; index += 1) {
         const texture = gl.createTexture();
@@ -95,7 +98,7 @@ export class WebglSemanticCommandExecutor {
       gl.deleteVertexArray(compositeVao);
       throw error;
     }
-    [this.shapeProgram, this.textureProgram, this.compositeProgram] = programs;
+    [this.shapeProgram, this.textureProgram, this.compositeProgram, this.badgeProgram] = programs;
     [this.stateTexture, this.maskTexture, this.commandMaskTexture, this.commandStateTexture, this.previewTransformTexture] = textures;
     this.compositeVao = compositeVao;
     this.glyphPipeline = glyphPipeline;
@@ -280,22 +283,19 @@ export class WebglSemanticCommandExecutor {
           vertexBytes += glyph.bytes;
           continue;
         }
-        const program = batch.source.kind === "shape" ? this.shapeProgram : this.textureProgram;
+        const program = batch.source.kind === "shape"
+          ? this.shapeProgram
+          : batch.source.kind === "badge" ? this.badgeProgram : this.textureProgram;
         gl.useProgram(program);
         this.bindCommon(program);
         if (batch.source.kind !== "shape") {
-          const resource = batch.source.resource;
-          if (!resource) throw new Error(`semantic ${batch.source.kind} batch has no resource`);
-          const key = resourceIdentity(resource.namespace, resource.key);
-          const texture = this.textures.get(key)?.texture;
-          if (!texture) throw new Error(`semantic GPU resource not loaded ${key}`);
-          gl.activeTexture(gl.TEXTURE2);
-          gl.bindTexture(gl.TEXTURE_2D, texture);
-          const filter = gl.NEAREST;
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
-          gl.uniform1i(gl.getUniformLocation(program, "u_image"), 2);
-          gl.uniform1i(gl.getUniformLocation(program, "u_maskMode"), batch.source.kind === "mask" ? 1 : 0);
+          this.bindTexture(program, "u_image", 2, batch.source.resource, gl.NEAREST, batch.source.kind);
+          if (batch.source.kind === "badge") {
+            // The normal map is filtered bilinearly at the image's UV.
+            this.bindTexture(program, "u_normalMap", NORMAL_MAP_TEXTURE_UNIT, batch.source.normalMapResource, gl.LINEAR, batch.source.kind);
+          } else {
+            gl.uniform1i(gl.getUniformLocation(program, "u_maskMode"), batch.source.kind === "mask" ? 1 : 0);
+          }
           const alphaMask = batch.source.maskResource
             ? this.textures.get(resourceIdentity(batch.source.maskResource.namespace, batch.source.maskResource.key))?.texture ?? null
             : null;
@@ -344,6 +344,7 @@ export class WebglSemanticCommandExecutor {
     this.gl.deleteProgram(this.shapeProgram);
     this.gl.deleteProgram(this.textureProgram);
     this.gl.deleteProgram(this.compositeProgram);
+    this.gl.deleteProgram(this.badgeProgram);
     this.gl.deleteVertexArray(this.compositeVao);
     for (const target of this.isolationTargets) {
       this.gl.deleteFramebuffer(target.framebuffer);
@@ -375,6 +376,26 @@ export class WebglSemanticCommandExecutor {
     gl.activeTexture(gl.TEXTURE0 + PREVIEW_TRANSFORM_TEXTURE_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, this.previewTransformTexture);
     gl.uniform1i(gl.getUniformLocation(program, "u_previewTransform"), PREVIEW_TRANSFORM_TEXTURE_UNIT);
+  }
+
+  private bindTexture(
+    program: WebGLProgram,
+    uniform: string,
+    unit: number,
+    resource: { namespace: string; key: string } | null,
+    filter: number,
+    kind: string,
+  ): void {
+    const gl = this.gl;
+    if (!resource) throw new Error(`semantic ${kind} batch has no ${uniform} resource`);
+    const key = resourceIdentity(resource.namespace, resource.key);
+    const texture = this.textures.get(key)?.texture;
+    if (!texture) throw new Error(`semantic GPU resource not loaded ${key}`);
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.uniform1i(gl.getUniformLocation(program, uniform), unit);
   }
 
   private setBlendMode(mode: SemanticBlendMode): void {
@@ -473,6 +494,7 @@ export class WebglSemanticCommandExecutor {
     floatAttribute(gl, 7, 4, stride, 18 * 4);
     floatAttribute(gl, 8, 4, stride, 22 * 4);
     floatAttribute(gl, 10, 2, stride, 26 * 4);
+    floatAttribute(gl, 11, 2, stride, 28 * 4);
     gl.bindBuffer(gl.ARRAY_BUFFER, slotBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, source.layerSlots, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(6);
@@ -578,6 +600,7 @@ layout(location=7) in vec4 a_clip01;
 layout(location=8) in vec4 a_clip23;
 layout(location=9) in uint a_commandSlot;
 layout(location=10) in vec2 a_shapeSize;
+layout(location=11) in vec2 a_axis;
 uniform vec2 u_canvas;
 uniform sampler2D u_state;
 uniform highp usampler2D u_mask;
@@ -595,6 +618,7 @@ out vec2 v_point;
 out vec4 v_clip01;
 out vec4 v_clip23;
 out vec2 v_shapeSize;
+out vec2 v_tangent;
 flat out uint v_visible;
 void main() {
   float stateU = (float(a_layerSlot) + 0.5) / u_stateWidth;
@@ -623,6 +647,9 @@ void main() {
   v_clip01 = vec4(clip0, clip1);
   v_clip23 = vec4(clip2, clip3);
   v_shapeSize = a_shapeSize;
+  // The local +x axis on the canvas, turned to the lighting frame where +y is up.
+  vec2 axis = vec2(dot(preview0.xy, a_axis), dot(preview1.xy, a_axis));
+  v_tangent = vec2(axis.x, -axis.y);
   v_visible = texture(u_mask, vec2(stateU, 0.5)).r * texture(u_commandMask, vec2(commandU, 0.5)).r;
 }`;
 
@@ -759,6 +786,86 @@ void main() {
     color.rgb *= color.a;
   }
   outColor = color;
+}`;
+
+// The lit badge material; every constant matches the shared core material,
+// which a contract test pins statement by statement.
+const BADGE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec2 v_shapeUv;
+in vec4 v_fill;
+in vec4 v_params;
+in vec2 v_point;
+in vec4 v_clip01;
+in vec4 v_clip23;
+in vec2 v_shapeSize;
+in vec2 v_tangent;
+flat in uint v_visible;
+uniform sampler2D u_image;
+uniform sampler2D u_normalMap;
+uniform sampler2D u_alphaMask;
+uniform int u_hasAlphaMask;
+out vec4 outColor;
+float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+bool insideClip() {
+  highp vec2 p[4];
+  p[0] = v_clip01.xy;
+  p[1] = v_clip01.zw;
+  p[2] = v_clip23.xy;
+  p[3] = v_clip23.zw;
+  float c0 = cross2(p[1] - p[0], v_point - p[0]);
+  float c1 = cross2(p[2] - p[1], v_point - p[1]);
+  float c2 = cross2(p[3] - p[2], v_point - p[2]);
+  float c3 = cross2(p[0] - p[3], v_point - p[3]);
+  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
+}
+// Specular term of one light: the unit direction towards it in xyz, its
+// intensity in w.
+float badgeSpecular(vec3 surface, vec4 light, float roughness2, float normalization) {
+  vec3 halfDir = normalize(light.xyz + vec3(0.0, 0.0, -1.0));
+  float lightHalf = clamp(dot(light.xyz, halfDir), 0.0, 1.0);
+  float lightHalf2 = max(lightHalf * lightHalf, 0.1);
+  float normalHalf = clamp(dot(surface, halfDir), 0.0, 1.0);
+  float d = normalHalf * normalHalf * (roughness2 - 1.0) + 1.00001;
+  float term = roughness2 / (d * d * lightHalf2 * normalization);
+  return clamp(term - 6.1035156e-5, 0.0, 1000.0) * light.w;
+}
+void main() {
+  if (v_visible == uint(0)) discard;
+  if (!insideClip()) discard;
+  if (v_params.x > 1.5 && length((v_shapeUv - 0.5) * 2.0) > 1.0) discard;
+  if (v_params.x > 0.5 && v_params.x < 1.5) {
+    vec2 point = (v_shapeUv - 0.5) * v_shapeSize;
+    vec2 halfSize = v_shapeSize * 0.5;
+    vec2 radius = min(max(v_params.yz, vec2(0.00001)), halfSize);
+    vec2 q = abs(point) - halfSize + radius;
+    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - min(radius.x, radius.y);
+    if (distance > 0.0) discard;
+  }
+  // Both textures hold straight 8-bit values, lit in gamma space.
+  vec4 albedo = texture(u_image, v_uv);
+  vec4 packedNormal = texture(u_normalMap, v_uv);
+  vec3 tangent = vec3(normalize(v_tangent), 0.0);
+  vec3 normal = vec3(0.0, 0.0, -1.0);
+  vec3 bitangent = cross(normal, tangent) * -1.0;
+  float nx = packedNormal.r * packedNormal.a * 2.0 - 1.0;
+  float ny = packedNormal.g * 2.0 - 1.0;
+  float nz = max(sqrt(1.0 - min(nx * nx + ny * ny, 1.0)), 1e-16);
+  // The perturbed normal is used as is, without renormalising.
+  vec3 surface = nx * tangent + ny * bitangent + nz * normal;
+  float roughness = max((1.0 - 0.6) * (1.0 - 0.6), 0.0078125);
+  float roughness2 = roughness * roughness;
+  float normalization = roughness * 4.0 + 30.0;
+  float specular = 0.0;
+  specular += badgeSpecular(surface, vec4(-0.25, 0.25881904, -0.9330127, 0.5), roughness2, normalization);
+  specular += badgeSpecular(surface, vec4(0.4330127, 0.5, -0.75, 0.5), roughness2, normalization);
+  specular += badgeSpecular(surface, vec4(0.5, -0.70710677, -0.5, 0.5), roughness2, normalization);
+  float diffuse = 0.96 * (1.0 - 0.0);
+  float alpha = (albedo.a >= 0.5 ? 1.0 : 0.0) * clamp(v_fill.a, 0.0, 1.0);
+  vec3 color = clamp((albedo.rgb * diffuse + vec3(specular)) * v_fill.rgb * alpha, 0.0, 1.0);
+  outColor = vec4(color, alpha);
+  if (u_hasAlphaMask == 1) outColor *= texture(u_alphaMask, v_shapeUv).a;
 }`;
 
 const COMPOSITE_VERTEX_SHADER = `#version 300 es

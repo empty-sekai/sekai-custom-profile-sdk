@@ -17,10 +17,14 @@ struct AssetRequirements {
 
 impl AssetRequirements {
     fn push(&mut self, key: String) {
-        self.groups.push(vec![ResourceKey {
+        self.resource(ResourceKey {
             namespace: "assets".into(),
             key,
-        }]);
+        });
+    }
+
+    fn resource(&mut self, resource: ResourceKey) {
+        self.groups.push(vec![resource]);
     }
 
     fn honor(&mut self, plan: &StandardHonorAssetPlan) {
@@ -89,13 +93,19 @@ fn card_asset_requirements(
     let mut keys = AssetRequirements::default();
 
     // 图片类元素（形状 / 卡面 / 贴纸 / customProfile*Resources）按 core 的
-    // 资源规则取 key；隐藏元素与 masterdata 缺行的元素游戏不会构建，不计入。
+    // 资源规则取 key；隐藏元素与 masterdata 缺行的元素游戏不会构建，不计入；
+    // 御神签收藏品是预制体而非图片，不绘制也不计入；罐徽章另需静态法线贴图。
     for element in ordered_profile_elements(card, "asset-keys") {
         if !element.object().visible {
             continue;
         }
-        if let AuthoredResource::Request(request) = authored_resource(element.value, md) {
-            keys.push(request.resource.key);
+        match authored_resource(element.value, md) {
+            AuthoredResource::Request(request) => keys.push(request.resource.key),
+            AuthoredResource::LitBadge { image, normal_map } => {
+                keys.push(image.resource.key);
+                keys.resource(normal_map.resource);
+            }
+            AuthoredResource::None | AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {}
         }
     }
 

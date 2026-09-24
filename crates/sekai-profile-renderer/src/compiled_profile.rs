@@ -11,7 +11,9 @@ use std::time::Instant;
 use sekai_profile_renderer_core::profile_scene::authored_kind_name;
 #[cfg(test)]
 use sekai_profile_renderer_core::AuthoredElementKind;
-use sekai_profile_renderer_core::{ResourceKey, SemanticCommandPayload, ShapePrimitive};
+use sekai_profile_renderer_core::{
+    ImageMaterial, ResourceKey, SemanticCommandPayload, ShapePrimitive,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -34,6 +36,7 @@ pub enum CompiledResourceUseKind {
     Image,
     AlphaMask,
     ShapeMask,
+    NormalMap,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -351,11 +354,19 @@ fn collect_scene_resource_requests(scene: &ResolvedCardCommands) -> Vec<Compiled
             SemanticCommandPayload::Image {
                 resource,
                 alpha_mask,
+                material,
                 ..
             } => {
                 insert_resource(&mut resources, resource, CompiledResourceUseKind::Image);
                 if let Some(mask) = alpha_mask {
                     insert_resource(&mut resources, mask, CompiledResourceUseKind::AlphaMask);
+                }
+                if let ImageMaterial::LitBadge { normal_map } = material {
+                    insert_resource(
+                        &mut resources,
+                        normal_map,
+                        CompiledResourceUseKind::NormalMap,
+                    );
                 }
             }
             SemanticCommandPayload::Shape {

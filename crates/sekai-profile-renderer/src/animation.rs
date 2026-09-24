@@ -5363,6 +5363,7 @@ mod tests {
                     file_name: TELEMETRY_SHAPE_FILE.into(),
                     load_val: "custom_profile/shape".into(),
                     resource_type: "shape".into(),
+                    collection_type: crate::masterdata::CollectionResourceType::None,
                 }
             })
         }

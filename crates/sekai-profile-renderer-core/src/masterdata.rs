@@ -71,6 +71,53 @@ pub struct ResourceInfo {
     pub file_name: String,
     pub load_value: String,
     pub resource_type: String,
+    /// `customProfileResourceCollectionType` of the row; rows of the other
+    /// resource tables carry none.
+    #[serde(default)]
+    pub collection_type: CollectionResourceType,
+}
+
+/// Kind of a `customProfileCollectionResources` row, from its
+/// `customProfileResourceCollectionType` column.
+///
+/// Only [`Self::Omikuji`] and [`Self::CanBadge`] draw differently from a plain
+/// image: an omikuji row names a prefab rather than an image and is not drawn,
+/// and a can badge draws its image with the lit material of
+/// [`crate::badge_material`]. Every other kind draws the row's image as is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionResourceType {
+    /// `none`, and also a missing, `null` or unrecognised value.
+    #[default]
+    None,
+    Omikuji,
+    CanBadge,
+    Keyholder,
+    AcrylicStand,
+    Sticker,
+    Towel,
+    SilverTape,
+    TicketHolder,
+    Tapestry,
+}
+
+impl CollectionResourceType {
+    /// Reads a master-data value. A missing or unrecognised value is
+    /// [`Self::None`], which draws like any plain image.
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("omikuji") => Self::Omikuji,
+            Some("can_badge") => Self::CanBadge,
+            Some("keyholder") => Self::Keyholder,
+            Some("acrylic_stand") => Self::AcrylicStand,
+            Some("sticker") => Self::Sticker,
+            Some("towel") => Self::Towel,
+            Some("silver_tape") => Self::SilverTape,
+            Some("ticket_holder") => Self::TicketHolder,
+            Some("tapestry") => Self::Tapestry,
+            _ => Self::None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -661,6 +708,10 @@ impl ProfileMasterData for JsonMasterData {
             file_name: row.get("fileName")?.as_str()?.into(),
             load_value: row.get("resourceLoadVal")?.as_str()?.into(),
             resource_type: row.get("customProfileResourceType")?.as_str()?.into(),
+            collection_type: CollectionResourceType::parse(
+                row.get("customProfileResourceCollectionType")
+                    .and_then(Value::as_str),
+            ),
         })
     }
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
@@ -1013,6 +1064,84 @@ mod tests {
             "honor_bg_event_cheerteam"
         );
         assert!(!honor.has_rank_overlay());
+    }
+
+    #[test]
+    fn collection_rows_carry_their_collection_type_and_unknown_values_read_as_none() {
+        let mut data = JsonMasterData::new("jp");
+        let row = |id: i32, collection_type: serde_json::Value| {
+            let mut row = serde_json::json!({
+                "id": id,
+                "customProfileResourceType": "collection",
+                "resourceLoadVal": "custom_profile/collection/fixture",
+                "fileName": format!("item_{id}"),
+            });
+            if !collection_type.is_null() || id == 5 {
+                row["customProfileResourceCollectionType"] = collection_type;
+            }
+            row
+        };
+        data.insert_value(
+            "customProfileCollectionResources",
+            serde_json::json!([
+                row(1, "can_badge".into()),
+                row(2, "omikuji".into()),
+                row(3, "acrylic_stand".into()),
+                row(4, serde_json::Value::Null),
+                row(5, serde_json::Value::Null),
+                row(6, "a_future_kind".into()),
+                row(7, "none".into()),
+                row(8, "tapestry".into()),
+            ]),
+        )
+        .unwrap();
+        data.insert_value(
+            "customProfileEtcResources",
+            serde_json::json!([{
+                "id": 1, "customProfileResourceType": "etc",
+                "resourceLoadVal": "custom_profile/etc", "fileName": "etc_001",
+            }]),
+        )
+        .unwrap();
+        let kind = |id| {
+            data.resolve_resource("collection", id)
+                .expect("collection row")
+                .collection_type
+        };
+        assert_eq!(kind(1), CollectionResourceType::CanBadge);
+        assert_eq!(kind(2), CollectionResourceType::Omikuji);
+        assert_eq!(kind(3), CollectionResourceType::AcrylicStand);
+        // Absent and null columns, an unknown value and "none" all draw plain.
+        for id in [4, 5, 6, 7] {
+            assert_eq!(kind(id), CollectionResourceType::None, "row {id}");
+        }
+        assert_eq!(kind(8), CollectionResourceType::Tapestry);
+        assert_eq!(
+            data.resolve_resource("etc", 1).unwrap().collection_type,
+            CollectionResourceType::None
+        );
+        for (value, expected) in [
+            ("none", CollectionResourceType::None),
+            ("omikuji", CollectionResourceType::Omikuji),
+            ("can_badge", CollectionResourceType::CanBadge),
+            ("keyholder", CollectionResourceType::Keyholder),
+            ("acrylic_stand", CollectionResourceType::AcrylicStand),
+            ("sticker", CollectionResourceType::Sticker),
+            ("towel", CollectionResourceType::Towel),
+            ("silver_tape", CollectionResourceType::SilverTape),
+            ("ticket_holder", CollectionResourceType::TicketHolder),
+            ("tapestry", CollectionResourceType::Tapestry),
+        ] {
+            assert_eq!(CollectionResourceType::parse(Some(value)), expected);
+            assert_eq!(
+                serde_json::to_value(expected).unwrap(),
+                serde_json::json!(value)
+            );
+        }
+        assert_eq!(
+            CollectionResourceType::parse(None),
+            CollectionResourceType::None
+        );
     }
 
     #[test]

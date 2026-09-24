@@ -155,6 +155,8 @@ export interface ResourceProvider {
 
 `namespace`、`key` 和 `role` 表达 renderer 语义；调用方可将其映射到任意资源命名和存储规则。
 
+罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`；`omikuji` 收藏品不绘制，也不请求资源。
+
 ### 任意异步来源
 
 一个 provider 可以独立组合任意资源规则：

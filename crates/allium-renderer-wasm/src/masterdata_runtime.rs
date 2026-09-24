@@ -714,4 +714,111 @@ mod tests {
         assert!(keys.is_empty(), "{keys:?}");
         assert!(tint.is_empty());
     }
+
+    #[test]
+    fn collections_resolve_their_collection_type_through_the_browser_session() {
+        let created: serde_json::Value = serde_json::from_str(
+            &super::create(r#"{"region":"cn","revision":"collections"}"#).unwrap(),
+        )
+        .unwrap();
+        let handle = created["handle"].as_u64().unwrap() as u32;
+        let row = |id: i32, kind: &str, load: &str, file: &str| {
+            serde_json::json!({
+                "id": id, "customProfileResourceType": "collection",
+                "customProfileResourceCollectionType": kind,
+                "resourceLoadType": "assetbundle", "resourceLoadVal": load, "fileName": file
+            })
+        };
+        super::put_table(
+            handle,
+            &serde_json::json!({
+                "name": "customProfileCollectionResources",
+                "table": [
+                    row(1, "can_badge", "custom_profile/collection/crash", "crash_fixture_canbadge"),
+                    row(2, "omikuji", "lottery_game/new_year_2022", "Prefabs/Omikuji"),
+                    row(3, "sticker", "custom_profile/collection/sticker", "sticker_fixture"),
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        super::seal(handle).unwrap();
+        let object = |layer: i32| {
+            serde_json::json!({
+                "layer": layer, "lock": false, "visible": true,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            })
+        };
+        let request = serde_json::json!({
+            "documentKey": "collections",
+            "card": { "collections": [
+                { "objectData": object(1), "id": 1, "targetId": null },
+                { "objectData": object(2), "id": 2, "targetId": null },
+                { "objectData": object(3), "id": 3, "targetId": null }
+            ] }
+        })
+        .to_string();
+        let prepared: serde_json::Value =
+            serde_json::from_str(&super::prepare(handle, &request).unwrap()).unwrap();
+        let mut resources = prepared["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                format!(
+                    "{}/{}",
+                    request["resource"]["namespace"].as_str().unwrap(),
+                    request["resource"]["key"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>();
+        resources.sort();
+        assert_eq!(
+            resources,
+            [
+                "assets/custom_profile/collection/crash/crash_fixture_canbadge",
+                "assets/custom_profile/collection/sticker/sticker_fixture",
+                "static/ui/sekai_badge_normal",
+            ]
+        );
+        let response: serde_json::Value =
+            serde_json::from_str(&super::create_scene(handle, &request).unwrap()).unwrap();
+        let images = response["snapshot"]["semantic_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["payload"]["kind"] == "image")
+            .map(|command| {
+                (
+                    command["payload"]["resource"]["key"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
+                    command["payload"].get("material").cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            images,
+            [
+                (
+                    "custom_profile/collection/crash/crash_fixture_canbadge".to_owned(),
+                    Some(serde_json::json!({
+                        "kind": "lit_badge",
+                        "normal_map": { "namespace": "static", "key": "ui/sekai_badge_normal" }
+                    }))
+                ),
+                (
+                    "custom_profile/collection/sticker/sticker_fixture".to_owned(),
+                    None
+                ),
+            ]
+        );
+        assert!(super::super::scene::destroy(
+            response["handle"].as_u64().unwrap() as u32
+        ));
+        assert!(super::destroy(handle));
+    }
 }

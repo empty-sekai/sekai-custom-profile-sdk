@@ -14,6 +14,6 @@ test("GLSL vector arrays declare explicit precision for strict mobile drivers", 
   }
   assert.equal(
     shaderSources.join("\n").match(/^\s+highp vec2\s+\w+\s*\[/gm)?.length,
-    7,
+    8,
   );
 });

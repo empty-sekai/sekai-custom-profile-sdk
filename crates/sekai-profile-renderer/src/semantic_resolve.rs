@@ -253,7 +253,7 @@ fn populate_resolve_snapshot_parts(
             }
             match authored_resource(element.value, md) {
                 AuthoredResource::None => {}
-                AuthoredResource::MissingRow => {
+                AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
                     snapshot.omitted_elements.insert(element.source_key);
                 }
                 AuthoredResource::Request(request) => {
@@ -267,6 +267,31 @@ fn populate_resolve_snapshot_parts(
                         id,
                         assets,
                     );
+                }
+                AuthoredResource::LitBadge { image, normal_map } => {
+                    let (table, id) = resource_provenance(element.value);
+                    insert_resource_descriptor(
+                        snapshot,
+                        image.lookup_key,
+                        image.resource.key,
+                        (image.fallback.width, image.fallback.height),
+                        table,
+                        id,
+                        assets,
+                    );
+                    // The normal map is a static asset, resolved like the
+                    // static honor frames.
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        snapshot.resources.entry(normal_map.lookup_key)
+                    {
+                        entry.insert(static_descriptor(
+                            normal_map.resource.key,
+                            (normal_map.fallback.width, normal_map.fallback.height),
+                            "badge_material",
+                            id,
+                            assets,
+                        ));
+                    }
                 }
             }
         }
@@ -1200,6 +1225,7 @@ mod tests {
                 file_name: file_name.into(),
                 load_val: load_val.into(),
                 resource_type: res_type.into(),
+                collection_type: crate::masterdata::CollectionResourceType::None,
             })
         }
         fn resolve_honor(&self, id: i32, level: i32) -> Option<ResolvedHonor> {

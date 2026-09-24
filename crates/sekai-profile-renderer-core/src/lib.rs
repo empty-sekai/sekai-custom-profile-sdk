@@ -30,11 +30,13 @@
 //! | [`sdf_geometry`] | Path segments and their analytic distance field |
 //! | [`sdf_glyph`] | Glyph SDF rasterization shared by the native and browser backends |
 //! | [`sdf_material`] | Text and shape SDF material parameters |
+//! | [`badge_material`] | Lit material of can-badge collection images |
 //! | [`authoring_document`] | Editable document model |
 //! | [`authoring_session`] | Editing session state and command handling |
 
 pub mod authoring_document;
 pub mod authoring_session;
+pub mod badge_material;
 pub mod general_recipe;
 pub mod locale;
 pub mod masterdata;
@@ -59,7 +61,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const SCHEMA_MAJOR: u16 = 1;
-pub const SCHEMA_MINOR: u16 = 15;
+pub const SCHEMA_MINOR: u16 = 16;
 pub const TICKS_PER_SECOND: u32 = 60;
 pub const TMP_PAD: f32 = 64.0;
 pub const TMP_SEED_WIDTH: f32 = 8.46;
@@ -273,6 +275,25 @@ pub enum ImageClip {
     Ellipse,
 }
 
+/// How an image command shades its texels.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageMaterial {
+    /// The texel colour multiplied by the tint.
+    #[default]
+    Plain,
+    /// The lit material of [`badge_material`], with `normal_map` sampled at
+    /// the image's UV. The tint's alpha is the element alpha; the material
+    /// applies no tint colour.
+    LitBadge { normal_map: ResourceKey },
+}
+
+impl ImageMaterial {
+    pub fn is_plain(&self) -> bool {
+        matches!(self, Self::Plain)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommandControlBinding {
@@ -305,6 +326,9 @@ pub enum SemanticCommandPayload {
         clip: Option<ImageClip>,
         #[serde(default)]
         alpha_mask: Option<ResourceKey>,
+        /// Omitted from JSON when [`ImageMaterial::Plain`].
+        #[serde(default, skip_serializing_if = "ImageMaterial::is_plain")]
+        material: ImageMaterial,
     },
     Shape {
         primitive: ShapePrimitive,
@@ -453,6 +477,7 @@ impl SemanticCommandSource {
                 tint: [1.0; 4],
                 clip: None,
                 alpha_mask: None,
+                material: ImageMaterial::Plain,
             },
         }
     }

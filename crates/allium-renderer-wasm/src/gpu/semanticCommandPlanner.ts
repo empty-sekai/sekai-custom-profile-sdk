@@ -258,6 +258,8 @@ function collectResourceRequests(commands: SemanticCommand[]): SemanticResourceK
     if (command.payload.kind === "image") {
       const mask = asResourceKey(command.payload.alpha_mask);
       if (mask) deduplicated.set(`${mask.namespace}\0${mask.key}`, mask);
+      const normalMap = litBadgeNormalMap(command.payload.material);
+      if (normalMap) deduplicated.set(`${normalMap.namespace}\0${normalMap.key}`, normalMap);
     }
   }
   return [...deduplicated.values()].map((resource) => ({ ...resource }));
@@ -271,6 +273,12 @@ function commandResource(payload: SemanticCommand["payload"]): SemanticResourceK
   const assetMask = (primitive as Record<string, unknown>).asset_mask;
   if (!assetMask || typeof assetMask !== "object" || Array.isArray(assetMask)) return null;
   return asResourceKey((assetMask as Record<string, unknown>).resource);
+}
+
+function litBadgeNormalMap(value: unknown): SemanticResourceKey | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const material = value as Record<string, unknown>;
+  return material.kind === "lit_badge" ? asResourceKey(material.normal_map) : null;
 }
 
 function asResourceKey(value: unknown): SemanticResourceKey | null {

@@ -102,6 +102,35 @@ assert.deepEqual(
 );
 assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [iconMasterData.handle]), 1);
 
+const collectionMasterData = callJsonInput("sdf_renderer_core_masterdata_create_json", {
+  region: "cn",
+  revision: "collections",
+});
+callJsonInput("sdf_renderer_core_masterdata_put_table_json", {
+  name: "customProfileCollectionResources",
+  table: [
+    { id: 1, customProfileResourceType: "collection", customProfileResourceCollectionType: "can_badge", resourceLoadVal: "custom_profile/collection/crash", fileName: "crash_fixture_canbadge" },
+    { id: 2, customProfileResourceType: "collection", customProfileResourceCollectionType: "omikuji", resourceLoadVal: "lottery_game/new_year_2022", fileName: "Prefabs/Omikuji" },
+  ],
+}, [collectionMasterData.handle]);
+callJson("sdf_renderer_core_masterdata_seal_json", ["number"], [collectionMasterData.handle]);
+const collectionPreparation = callJsonInput("sdf_renderer_core_profile_prepare_json", {
+  documentKey: "collections",
+  card: {
+    collections: [
+      { objectData: iconObject, id: 1, targetId: null },
+      { objectData: { ...iconObject, layer: 2 }, id: 2, targetId: null },
+    ],
+  },
+}, [collectionMasterData.handle]);
+// A can badge requests its image and the static normal map; the omikuji
+// prefab requests nothing.
+assert.deepEqual(
+  collectionPreparation.resources.map((request) => `${request.resource.namespace}/${request.resource.key}`).sort(),
+  ["assets/custom_profile/collection/crash/crash_fixture_canbadge", "static/ui/sekai_badge_normal"],
+);
+assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [collectionMasterData.handle]), 1);
+
 const authoring = callJson("sdf_renderer_authoring_create_blank_json", [], []);
 assert.ok(Number.isInteger(authoring.handle) && authoring.handle > 0);
 assert.equal(authoring.document.userCustomProfileCards.length, 1);
