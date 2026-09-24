@@ -58,7 +58,7 @@ Rust/WASM 负责：
 
 ## 浏览器快速开始
 
-0.3 的 browser SDK 以 `BrowserAuthoringClient` 和 `BrowserRenderer` 为入口。调用方通过 authoring API 编辑游戏结构文档，并通过必填的 `ResourceProvider` 用任意异步规则解释 SDK 提供的语义 descriptor。
+browser SDK 以 `BrowserAuthoringClient` 和 `BrowserRenderer` 为入口。调用方通过 authoring API 编辑游戏结构文档，并通过必填的 `ResourceProvider` 用任意异步规则解释 SDK 提供的语义 descriptor。
 
 ```ts
 import {
@@ -208,6 +208,29 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免服务端
 性能实现、离线目录生成器和浏览器 resolver 产生不同资源键。
 
+### CPU 画布
+
+`sekai_profile_renderer::profile_compositor::canvas` 提供有界的纯标签画布。`Canvas` 与 profile
+合成器共用图片采样、source-over 混合和语义 shape 光栅器，支持裁切/缩放的 PNG 图片、矩形裁剪、
+矩形、圆角矩形、椭圆、二次曲线描边和 FreeType 纯文本标签。`Font` 借用字体 bytes，调用方可以
+共享同一份内存。TMP 富文本仍走 profile 管线。
+
+画布不依赖 `skia-oracle`。像素缓冲为预乘 RGBA，`encode_png` 输出直通 alpha 的 PNG，`crop`
+把区域复制成新画布而不重新编码。画布与解码后的图片缓冲上限 128 MiB，PNG 输入上限 32 MiB；
+总的缓存与并发预算由调用方负责。
+
+`plain_canvas` 示例接收一个字体文件和输出 PNG 路径。它的输出只演示功能，不作为名片一致性或
+视觉验收基线。
+
+### 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `SEKAI_PROFILE_FONT_DIR` | native 字体目录，`render-card --font-dir` 会设置它；也读取 `FONT_DIR`，之后依次查找 `/usr/share/fonts/custom` 与 `assets/fonts` |
+| `SEKAI_PROFILE_SDF_EDT` | 设为 `1`–`4` 时字形 SDF 改用距离变换生成，值为超采样倍数；未设置或其他值使用解析法 |
+| `SEKAI_PROFILE_REALTIME_EDT_THREADS` | `parallel` feature 下为图集缺失的字形即时生成 SDF 的线程数，`1`–`4`，默认 `2` |
+| `SEKAI_PROFILE_DEBUG_TMP_PROBE`、`SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | 设为 `1`、`true` 或 `yes` 时输出 TMP 排版探针与文本码位的 `tracing` debug 日志 |
+
 ## 缓存与资源所有权
 
 - 字体 bytes 与逻辑 family 由调用方直接注册或通过任意异步 `FontProvider` 提供，并作为字体解析和 glyph cache identity 的唯一来源；
@@ -243,22 +266,3 @@ release gates 覆盖 ABI/schema、shared-core source consistency、TMP debug par
 ## License
 
 仓库采用 AGPL-3.0-only。browser npm package 另含 `crates/allium-renderer-wasm/LICENSE-EXCEPTION` 中的有限 browser linking exception。修改 SDK、服务端使用和非浏览器使用仍受完整 AGPL 约束，包括网络交互场景下的源代码提供义务。
-
-
-## Plain CPU canvas
-
-The Rust API also exposes a bounded plain-label canvas at
-sekai_profile_renderer::profile_compositor::canvas. Canvas reuses the profile
-compositor's image sampling, source-over blending, and semantic shape rasterizer.
-It supports cropped/scaled PNG images, rectangular clipping, rectangles, rounded
-rectangles, ellipses, quadratic strokes, and FreeType plain labels. Font borrows
-font bytes, allowing callers to keep one shared allocation. Rich TMP text still
-uses the profile pipeline.
-
-The canvas is available without skia-oracle. Pixel buffers are premultiplied RGBA;
-encode_png converts them to straight-alpha PNG. Canvas and decoded image buffers
-are limited to 128 MiB; encoded PNG inputs are limited to 32 MiB. Callers remain
-responsible for aggregate cache and concurrency budgets.
-
-Run the plain_canvas example with a font file and an output PNG path. Its output
-is a functional demonstration, not a profile-parity or visual acceptance baseline.

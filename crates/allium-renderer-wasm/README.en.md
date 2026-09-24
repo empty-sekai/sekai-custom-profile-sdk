@@ -8,7 +8,7 @@ TMP rich text and layout implement a compatibility model for the Unity TextMesh 
 
 Rust/WASM owns profile resolution, TMP rich text, layout, dynamic formulas, stable semantic IDs, glyph demand, FreeType metrics, glyph SDF generation, and atlas placement. TypeScript owns the worker boundary, asynchronous resource scheduling, cache I/O, and GPU resource orchestration. WebGL2 consumes the semantic command stream and compact state tables.
 
-Version 0.2 provides a stateful scene API built from a Rust/WASM semantic runtime, dedicated worker, FreeType/SDF atlas, and WebGL2 renderer.
+The SDK provides a stateful scene API built from a Rust/WASM semantic runtime, dedicated worker, FreeType/SDF atlas, and WebGL2 renderer.
 
 ## Requirements
 
@@ -307,7 +307,7 @@ One file may be registered under multiple logical aliases. Glyph identity includ
 
 The first successful registration fixes a family to one source hash for the renderer lifetime. Re-registering identical bytes is idempotent; replacing the same family with different bytes returns `FONT_IDENTITY_CONFLICT`. Create a new renderer when switching font versions so font snapshots, glyph identities, atlases, and persistent-cache boundaries remain explicit.
 
-## Optional prebuilt atlas packages (0.3)
+## Optional prebuilt atlas packages
 
 Scenes still generate SDF glyphs from their actual demand by default and reuse the origin IndexedDB glyph cache. Prebuilt atlases are never downloaded automatically. A host can use a local/HTTP provider directly, or install a complete atlas package into origin IndexedDB from an explicit user action so multiple renderers, editors, and viewers share one installation.
 
@@ -353,7 +353,7 @@ When browser persistence is unnecessary, pass `createHttpPrebuiltSdfAtlasProvide
 Packages are the output of the native crate's `build-sdf-atlas` tool, served unchanged as `<baseUrl>/<family>/manifest.json` plus its page files:
 
 ```sh
-FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
+SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
   --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
   --output font-atlases/FZLanTingHei-DB-GBK
 ```

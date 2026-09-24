@@ -8,7 +8,7 @@ TMP 富文本与排版针对 PJSK 使用的 Unity TextMesh Pro 数据和行为�
 
 Rust/WASM 负责 profile resolution、TMP 富文本、layout、动态公式、稳定语义 ID、glyph demand、FreeType 字体度量、glyph SDF 与 atlas placement；TypeScript 负责 worker、异步资源调度、缓存 I/O 和 GPU resource orchestration；WebGL2 消费 semantic command stream 和紧凑状态表完成绘制。
 
-0.2 提供 stateful scene API，执行路径由 Rust/WASM semantic runtime、dedicated worker、FreeType/SDF atlas 与 WebGL2 renderer 组成。
+SDK 提供 stateful scene API，执行路径由 Rust/WASM semantic runtime、dedicated worker、FreeType/SDF atlas 与 WebGL2 renderer 组成。
 
 ## 运行要求
 
@@ -308,7 +308,7 @@ await renderer.registerFont({ family: "Application Alias", bytes });
 
 同一 renderer 生命周期内，首次成功注册会锁定一个 family 对应的 source hash。用相同 bytes 重复注册是幂等操作；用不同 bytes 覆盖同一 family 会返回 `FONT_IDENTITY_CONFLICT`。需要切换字体版本时应创建新的 renderer，使 font snapshot、glyph identity、atlas 和持久缓存边界保持明确。
 
-## 可选预生成 Atlas 包（0.3）
+## 可选预生成 Atlas 包
 
 默认仍按 scene 的实际 glyph demand 生成 SDF，并使用同源 IndexedDB glyph cache。预生成 atlas 不会自动下载。调用方可以直接使用本地/HTTP provider，也可以通过显式用户操作把完整 atlas 安装到同源 IndexedDB，随后让多个 renderer、编辑器和查看页共享同一份安装结果。
 
@@ -354,7 +354,7 @@ const renderer = await BrowserRenderer.create({
 atlas 包即 native crate 自带 `build-sdf-atlas` 工具的输出目录，原样发布为 `<baseUrl>/<family>/manifest.json` 及其页文件：
 
 ```sh
-FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
+SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
   --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
   --output font-atlases/FZLanTingHei-DB-GBK
 ```

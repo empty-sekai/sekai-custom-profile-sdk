@@ -58,7 +58,7 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 
 ## Browser quick start
 
-The 0.3 browser SDK starts with `BrowserAuthoringClient` and `BrowserRenderer`. Authoring APIs edit game-compatible documents, while a required `ResourceProvider` interprets SDK-provided semantic descriptors with arbitrary asynchronous host logic.
+The browser SDK starts with `BrowserAuthoringClient` and `BrowserRenderer`. Authoring APIs edit game-compatible documents, while a required `ResourceProvider` interprets SDK-provided semantic descriptors with arbitrary asynchronous host logic.
 
 ```ts
 import {
@@ -214,6 +214,31 @@ an explicit background use the shared `honor_bg_event_cheerteam` degree layer.
 `bondsHonorViewType` is composable and may contain both `reverse` and
 `unit_virtual_singer`. Native adapters call the core rule functions so production native
 optimization, offline catalog generation, and browser resolution retain identical keys.
+
+### Plain CPU canvas
+
+`sekai_profile_renderer::profile_compositor::canvas` exposes a bounded plain-label canvas.
+`Canvas` reuses the profile compositor's image sampling, source-over blending, and semantic shape
+rasterizer. It supports cropped/scaled PNG images, rectangular clipping, rectangles, rounded
+rectangles, ellipses, quadratic strokes, and FreeType plain labels. `Font` borrows font bytes, so
+callers can keep one shared allocation. Rich TMP text still uses the profile pipeline.
+
+The canvas is available without `skia-oracle`. Pixel buffers are premultiplied RGBA; `encode_png`
+converts them to a straight-alpha PNG, and `crop` copies a region into a new canvas without
+re-encoding. Canvas and decoded image buffers are limited to 128 MiB; encoded PNG inputs are
+limited to 32 MiB. Callers remain responsible for aggregate cache and concurrency budgets.
+
+Run the `plain_canvas` example with a font file and an output PNG path. Its output is a functional
+demonstration, not a profile-parity or visual acceptance baseline.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `SEKAI_PROFILE_FONT_DIR` | Native font directory; `render-card --font-dir` sets it. `FONT_DIR` is also read, then `/usr/share/fonts/custom` and `assets/fonts` are searched |
+| `SEKAI_PROFILE_SDF_EDT` | `1`–`4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
+| `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas, `1`–`4`, default `2` |
+| `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true`, or `yes` emits `tracing` debug logs for TMP layout probes and text code points |
 
 ## Cache and resource ownership
 
