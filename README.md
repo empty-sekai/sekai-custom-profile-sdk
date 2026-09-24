@@ -149,7 +149,7 @@ layer 显隐复用当前动态 timeline、layout cache、glyph atlas 与图片�
 
 ## Native renderer
 
-native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供。渲染不依赖 Skia：页面经 profile backend 与 ordered SDF 管线产出，文本/图形元素需要安装对应的 SDF atlas 与 render-object store（由自带的 `build-sdf-atlas` / `build-shape-sdf-atlas` / `build-render-object-store` 工具生成）。`skia-oracle` feature 只提供参考合成器与对拍测试。
+native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供。渲染不依赖 Skia：页面经 profile backend 与 ordered SDF 管线产出，文本/图形元素需要安装对应的 SDF atlas 与 render-object store（由自带的 `build-sdf-atlas` / `build-shape-sdf-atlas` / `build-render-object-store` 工具生成）。shape 图集由 `build-shape-sdf-atlas` 从 `customProfileShapeResources` 与各 shape 的 PNG 生成，按原样拷贝距离（红）与 alpha 通道，使用自带的 PNG 解码，不需要 Skia。`skia-oracle` feature 只提供参考合成器与对拍测试。
 
 ```sh
 cargo test --workspace --all-features

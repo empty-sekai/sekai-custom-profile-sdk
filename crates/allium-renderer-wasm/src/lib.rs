@@ -5,6 +5,8 @@ mod glyph_plan;
 mod layout;
 mod masterdata_runtime;
 mod scene;
+#[cfg(test)]
+mod shader_contract;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;

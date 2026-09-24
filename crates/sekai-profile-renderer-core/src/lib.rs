@@ -29,6 +29,7 @@
 //! | [`tmp_text`] | TextMesh Pro markup handling |
 //! | [`sdf_geometry`] | Path segments and their analytic distance field |
 //! | [`sdf_glyph`] | Glyph SDF rasterization shared by the native and browser backends |
+//! | [`sdf_material`] | Text and shape SDF material parameters |
 //! | [`authoring_document`] | Editable document model |
 //! | [`authoring_session`] | Editing session state and command handling |
 
@@ -45,6 +46,7 @@ pub mod profile_source;
 pub mod profile_transform;
 pub mod sdf_geometry;
 pub mod sdf_glyph;
+pub mod sdf_material;
 pub mod tmp_text;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

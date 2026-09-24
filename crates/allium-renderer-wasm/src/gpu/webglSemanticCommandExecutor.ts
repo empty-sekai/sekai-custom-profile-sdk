@@ -711,8 +711,10 @@ void main() {
     float faceCoverage = clamp((sampleColor.r - faceThreshold + sharp) / (2.0 * sharp), 0.0, 1.0) * sampleColor.a;
     float outerCoverage = clamp((sampleColor.r - outlineThreshold + sharp) / (2.0 * sharp), 0.0, 1.0) * sampleColor.a;
     float outlineCoverage = outerCoverage * (1.0 - faceCoverage);
-    float faceAlpha = faceCoverage * floor(clamp(v_fill.a, 0.0, 1.0) * 255.0) / 255.0;
-    float outlineAlpha = outlineCoverage * floor(clamp(v_stroke.a, 0.0, 1.0) * 255.0) / 255.0;
+    // The face alpha reaches the game shader as an 8-bit vertex colour; the
+    // outline colour is a float material colour.
+    float faceAlpha = faceCoverage * roundEven(clamp(v_fill.a, 0.0, 1.0) * 255.0) / 255.0;
+    float outlineAlpha = outlineCoverage * clamp(v_stroke.a, 0.0, 1.0);
     color = vec4(
       v_fill.rgb * faceAlpha + v_stroke.rgb * outlineAlpha * (1.0 - faceAlpha),
       faceAlpha + outlineAlpha * (1.0 - faceAlpha)

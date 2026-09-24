@@ -17,7 +17,8 @@ use thiserror::Error;
 
 use super::atlas::{MappedSdfAtlas, MappedSdfAtlasSet, SdfAtlasGlyphManifest};
 use super::shape::{
-    shade_shape, shade_shape_coverages, texel_coverage, ShapeSdfMaterial, ShapeSdfTexel,
+    coverage_terms, shade_shape, shade_shape_coverages, texel_coverage, ShapeSdfMaterial,
+    ShapeSdfTexel,
 };
 use super::shape_atlas::MappedShapeSdfAtlas;
 
@@ -410,47 +411,6 @@ pub struct SdfOcclusionStats {
     pub occluded_text_fragment_count: u64,
     pub occluded_shape_fragment_count: u64,
     pub fully_occluded_command_count: u64,
-}
-
-pub const HIGHWAY_SDF_ABI_VERSION: u32 = 1;
-pub const HIGHWAY_SDF_KIND_TEXT: u32 = 1;
-pub const HIGHWAY_SDF_KIND_SHAPE: u32 = 2;
-
-/// Stable command record consumed by the experimental C++/Highway executor.
-/// The Rust planner remains authoritative; native executors receive only this
-/// resolved inverse-affine/material form and cannot redo layout or geometry.
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HighwaySdfCommand {
-    pub kind: u32,
-    pub atlas_set: u16,
-    pub atlas_page: u16,
-    pub atlas_rect: [u32; 4],
-    pub inverse_affine: [f32; 6],
-    pub face: [f32; 4],
-    pub outline: [f32; 4],
-    /// Text: face scale/bias, outline scale/bias, vertex alpha, reserved×3.
-    /// Shape: face threshold, outline threshold, sharpness, reserved×5.
-    pub params: [f32; 8],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HighwaySdfSpan {
-    pub command: u32,
-    pub row: u16,
-    pub x0: u16,
-    pub x1: u16,
-    pub reserved: u16,
-}
-
-#[derive(Debug)]
-pub struct HighwaySdfPlan {
-    pub abi_version: u32,
-    pub grid: TileGrid,
-    pub commands: Vec<HighwaySdfCommand>,
-    pub spans: Vec<HighwaySdfSpan>,
-    pub tile_offsets: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1027,82 +987,6 @@ impl SdfTilePlan {
         }
         self.direct_axis_shape = Some(DirectAxisShapePlan { spans });
         Ok(self)
-    }
-
-    pub fn export_highway_abi(&self) -> HighwaySdfPlan {
-        let commands = self
-            .commands
-            .iter()
-            .map(|command| {
-                let (kind, face, outline, params) = match command.source.material {
-                    SdfCommandMaterial::Text(material) => (
-                        HIGHWAY_SDF_KIND_TEXT,
-                        material.face,
-                        material.outline,
-                        [
-                            material.face_scale,
-                            material.face_bias,
-                            material.outline_scale,
-                            material.outline_bias,
-                            material.vertex_alpha,
-                            0.0,
-                            0.0,
-                            0.0,
-                        ],
-                    ),
-                    SdfCommandMaterial::Shape(material) => (
-                        HIGHWAY_SDF_KIND_SHAPE,
-                        material.face,
-                        material.outline,
-                        [
-                            material.face_threshold,
-                            material.outline_threshold,
-                            material.sharpness,
-                            0.0,
-                            0.0,
-                            0.0,
-                            0.0,
-                            0.0,
-                        ],
-                    ),
-                };
-                HighwaySdfCommand {
-                    kind,
-                    atlas_set: command.source.atlas_set,
-                    atlas_page: command.source.atlas_page,
-                    atlas_rect: command.source.atlas_rect,
-                    inverse_affine: [
-                        command.tx_dx,
-                        command.tx_dy,
-                        command.tx_c,
-                        command.ty_dx,
-                        command.ty_dy,
-                        command.ty_c,
-                    ],
-                    face,
-                    outline,
-                    params,
-                }
-            })
-            .collect();
-        let spans = self
-            .spans
-            .iter()
-            .map(|span| HighwaySdfSpan {
-                command: span.command,
-                row: span.row,
-                x0: span.x0,
-                x1: span.x1,
-                reserved: 0,
-            })
-            .collect();
-        HighwaySdfPlan {
-            abi_version: HIGHWAY_SDF_ABI_VERSION,
-            grid: self.grid,
-            commands,
-            spans,
-            tile_offsets: self.tile_offsets.clone(),
-        }
     }
 
     /// Executes the reference FP32 sampler/shader into premultiplied RGBA8.
@@ -2326,12 +2210,10 @@ fn plan_command(
     let atlas_height = atlas_height as f32;
     let (shape_face_offset, shape_outline_offset, shape_coverage_scale) = match source.material {
         SdfCommandMaterial::Shape(material) => {
-            let sharpness = material.sharpness.max(f32::EPSILON);
-            (
-                sharpness - material.face_threshold * 255.0,
-                sharpness - material.outline_threshold * 255.0,
-                (2.0 * sharpness).recip(),
-            )
+            let (face_offset, scale) = coverage_terms(material.face_threshold, material.sharpness);
+            let (outline_offset, _) =
+                coverage_terms(material.outline_threshold, material.sharpness);
+            (face_offset, outline_offset, scale)
         }
         SdfCommandMaterial::Text(_) => (0.0, 0.0, 0.0),
     };
@@ -2585,7 +2467,7 @@ fn shade_sample(command: SdfDrawCommand, sample: BilinearSample) -> Result<[f32;
             let nearest_x = usize::from(sample.fx >= 0.5);
             let nearest_y = usize::from(sample.fy >= 0.5);
             let texel = texels[nearest_y * 2 + nearest_x];
-            Ok(shade_shape([texel; 4], 0.0, 0.0, material))
+            Ok(shade_shape(texel, material))
         }
         _ => Err(SdfTileError::MaterialKindMismatch { command: 0 }),
     }
@@ -2601,8 +2483,7 @@ fn shade_text(material: SdfMaterial, sdf: f32) -> [f32; 4] {
         .outline_scale
         .max(0.0001)
         .mul_add(sdf, -material.outline_bias)
-        .clamp(0.0, 1.0)
-        * (sdf * 12.5).clamp(0.0, 1.0);
+        .clamp(0.0, 1.0);
     let outline_weight = outline_t * (1.0 - material.face[3] * face_t);
     let vertex_alpha = material.vertex_alpha.clamp(0.0, 1.0);
     std::array::from_fn(|channel| {
@@ -2982,46 +2863,6 @@ mod tests {
     }
 
     #[test]
-    fn highway_abi_export_preserves_plan_order_and_has_stable_layout() {
-        let atlas = solid_atlas(255);
-        let commands = [
-            command([1.0, 0.0, 0.0, 1.0], rectangle(0.0, 0.0, 3.0, 2.0)),
-            command([0.0, 1.0, 0.0, 1.0], rectangle(1.0, 0.0, 4.0, 2.0)),
-        ];
-        let grid = TileGrid {
-            canvas_width: 5,
-            canvas_height: 3,
-            tile_width: 2,
-            tile_height: 2,
-        };
-        let plan = SdfTilePlan::build(grid, &commands, &atlas).expect("build plan");
-        let exported = plan.export_highway_abi();
-
-        assert_eq!(exported.abi_version, 1);
-        assert_eq!(exported.commands.len(), 2);
-        assert_eq!(exported.commands[0].kind, 1);
-        assert_eq!(exported.commands[1].kind, 1);
-        assert_eq!(exported.spans.len(), 8);
-        assert_eq!(exported.tile_offsets.len(), 7);
-        assert_eq!(std::mem::size_of_val(&exported.commands[0]), 112);
-        assert_eq!(std::mem::align_of_val(&exported.commands[0]), 16);
-        assert_eq!(std::mem::size_of_val(&exported.spans[0]), 12);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, kind), 0);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, atlas_set), 4);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, atlas_page), 6);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, atlas_rect), 8);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, inverse_affine), 24);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, face), 48);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, outline), 64);
-        assert_eq!(std::mem::offset_of!(HighwaySdfCommand, params), 80);
-        assert_eq!(std::mem::offset_of!(HighwaySdfSpan, command), 0);
-        assert_eq!(std::mem::offset_of!(HighwaySdfSpan, row), 4);
-        assert_eq!(std::mem::offset_of!(HighwaySdfSpan, x0), 6);
-        assert_eq!(std::mem::offset_of!(HighwaySdfSpan, x1), 8);
-        assert_eq!(std::mem::offset_of!(HighwaySdfSpan, reserved), 10);
-    }
-
-    #[test]
     fn bilinear_sampler_and_material_are_locked_by_scalar_oracle() {
         let atlas = TestAtlas {
             width: 2,
@@ -3123,7 +2964,8 @@ mod tests {
         let stats = plan
             .execute_scalar(&atlas, [0, 0, 0, 0], &mut output)
             .expect("mixed scalar execution");
-        assert_eq!(output, [128, 128, 0, 255]);
+        // The shape's 0.5 face alpha becomes the 8-bit vertex alpha 128/255.
+        assert_eq!(output, [127, 128, 0, 255]);
         assert_eq!(stats.text_shaded_fragment_count, 1);
         assert_eq!(stats.shape_shaded_fragment_count, 1);
     }
@@ -3703,5 +3545,79 @@ mod tests {
         assert_eq!(candidate, oracle);
         assert_eq!(stats.precomputed_shape_fragment_count, 0);
         assert!(stats.sampled_texel_count > 0);
+    }
+
+    #[test]
+    fn dilated_underlay_follows_the_material_ramp_down_to_zero_distance() {
+        let material = SdfMaterial {
+            face: [0.0, 0.0, 0.0, 1.0],
+            outline: [0.0, 0.0, 1.0, 1.0],
+            face_scale: 5.43,
+            face_bias: 2.0,
+            outline_scale: 5.43,
+            outline_bias: -0.0474,
+            vertex_alpha: 1.0,
+        };
+        for sdf in [0.0f32, 0.02, 0.05, 0.1] {
+            let expected = 5.43f32.mul_add(sdf, 0.0474).clamp(0.0, 1.0);
+            let shaded = shade_text(material, sdf);
+            assert_eq!(shaded[2], expected, "sdf {sdf}");
+            assert_eq!(shaded[3], expected, "sdf {sdf}");
+        }
+    }
+
+    #[test]
+    fn shape_coverage_ramp_matches_between_scalar_and_simd() {
+        let mut payload = [0u8; 640];
+        for (index, texel) in payload.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            *texel = [126 + (index % 17) as u8, [255, 200, 128, 3, 1][index % 5]];
+        }
+        let atlas = WidePhysicalShapeAtlas { payload };
+        let shape = SdfDrawCommand {
+            kind: SdfPrimitiveKind::Shape,
+            atlas_set: 0,
+            atlas_page: 0,
+            atlas_rect: [0, 0, 40, 8],
+            quad: rectangle(0.0, 0.0, 16.0, 8.0),
+            device_clip: None,
+            material: SdfCommandMaterial::Shape(ShapeSdfMaterial {
+                face: [0.14, 0.28, 0.56, 0.7],
+                outline: [0.24, 0.03, 0.06, 0.3],
+                face_threshold: 0.5475,
+                outline_threshold: 0.5,
+                sharpness: 1.5,
+            }),
+        };
+        let plan =
+            SdfTilePlan::build_for_one_shot_dynamic_layer(TileGrid::new(16, 8), &[shape], &atlas)
+                .expect("ramp shape plan");
+        let mut oracle = vec![0; 16 * 8 * 4];
+        plan.execute_scalar_f32(&atlas, [3, 5, 7, 11], &mut oracle)
+            .expect("scalar f32 oracle");
+        assert!(oracle
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| *pixel != [3, 5, 7, 11]));
+        let mut simd = vec![0; oracle.len()];
+        let result = plan.execute_simd(
+            &atlas,
+            [3, 5, 7, 11],
+            &mut simd,
+            SdfAccumulationMode::F32Tile,
+        );
+        #[cfg(target_arch = "x86_64")]
+        let simd_supported = std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+            && std::arch::is_x86_feature_detected!("fma");
+        #[cfg(not(target_arch = "x86_64"))]
+        let simd_supported = false;
+        if simd_supported {
+            result.expect("supported SIMD execution");
+            assert_eq!(simd, oracle);
+        } else {
+            assert_eq!(result, Err(SdfTileError::SimdUnavailable));
+        }
     }
 }

@@ -1,8 +1,10 @@
 //! Path segments and the analytic distance field built from them.
 //!
-//! Shapes arrive as lines and quadratic or cubic Béziers ([`Segment`]).
-//! [`AnalyticDistanceField`] evaluates the signed distance to that outline in
-//! closed form, which is what the shape SDF atlas is rasterized from.
+//! Glyph outlines arrive as lines and quadratic or cubic Béziers
+//! ([`Segment`]). [`AnalyticDistanceField`] evaluates the signed distance to
+//! that outline in closed form, which is what glyph SDFs are sampled from.
+//! Shape elements do not use it: their distance field ships in the shape
+//! sprites themselves.
 
 const CUBIC_DISTANCE_STEPS: usize = 128;
 const WINDING_QUAD_STEPS: usize = 16;

@@ -5269,7 +5269,7 @@ mod tests {
             (res_type == "shape" && id == TELEMETRY_SHAPE_ID).then(|| {
                 crate::masterdata::ResourceInfo {
                     file_name: TELEMETRY_SHAPE_FILE.into(),
-                    load_val: "custom_profile".into(),
+                    load_val: "custom_profile/shape".into(),
                     resource_type: "shape".into(),
                 }
             })

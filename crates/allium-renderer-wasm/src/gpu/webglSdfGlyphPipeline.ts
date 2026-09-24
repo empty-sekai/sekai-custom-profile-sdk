@@ -11,9 +11,21 @@ type GlyphGpuBatch = {
   bytes: number;
 };
 
+type GlyphUniforms = {
+  atlas: WebGLUniformLocation | null;
+  layerState: WebGLUniformLocation | null;
+  layerStateWidth: WebGLUniformLocation | null;
+  renderMask: WebGLUniformLocation | null;
+  commandMask: WebGLUniformLocation | null;
+  commandState: WebGLUniformLocation | null;
+  commandWidth: WebGLUniformLocation | null;
+  previewTransform: WebGLUniformLocation | null;
+};
+
 export class WebglSdfGlyphPipeline {
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
+  private readonly uniforms: GlyphUniforms;
   private readonly batches = new Map<string, GlyphGpuBatch>();
   private atlasTexture: WebGLTexture;
   private ownsAtlas = true;
@@ -22,6 +34,17 @@ export class WebglSdfGlyphPipeline {
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
     this.program = createProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
+    const uniform = (name: string) => gl.getUniformLocation(this.program, name);
+    this.uniforms = {
+      atlas: uniform("u_atlas"),
+      layerState: uniform("u_layerState"),
+      layerStateWidth: uniform("u_layerStateWidth"),
+      renderMask: uniform("u_renderMask"),
+      commandMask: uniform("u_commandMask"),
+      commandState: uniform("u_commandState"),
+      commandWidth: uniform("u_commandWidth"),
+      previewTransform: uniform("u_previewTransform"),
+    };
     const atlas = gl.createTexture();
     if (!atlas) throw new Error("glyph pipeline atlas allocation failed");
     this.atlasTexture = atlas;
@@ -77,27 +100,28 @@ export class WebglSdfGlyphPipeline {
     const batch = this.batches.get(key);
     if (!batch || batch.instances === 0) return { drawCalls: 0, instances: 0, bytes: batch?.bytes ?? 0 };
     const gl = this.gl;
+    const uniforms = this.uniforms;
     gl.useProgram(this.program);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.atlasTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_atlas"), 0);
+    gl.uniform1i(uniforms.atlas, 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, stateTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_layerState"), 1);
-    gl.uniform1f(gl.getUniformLocation(this.program, "u_layerStateWidth"), stateWidth);
+    gl.uniform1i(uniforms.layerState, 1);
+    gl.uniform1f(uniforms.layerStateWidth, stateWidth);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, maskTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_renderMask"), 2);
+    gl.uniform1i(uniforms.renderMask, 2);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, commandMaskTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_commandMask"), 3);
+    gl.uniform1i(uniforms.commandMask, 3);
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, commandStateTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_commandState"), 4);
-    gl.uniform1f(gl.getUniformLocation(this.program, "u_commandWidth"), commandWidth);
+    gl.uniform1i(uniforms.commandState, 4);
+    gl.uniform1f(uniforms.commandWidth, commandWidth);
     gl.activeTexture(gl.TEXTURE5);
     gl.bindTexture(gl.TEXTURE_2D, previewTransformTexture);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_previewTransform"), 5);
+    gl.uniform1i(uniforms.previewTransform, 5);
     gl.bindVertexArray(batch.vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, batch.instances);
     gl.bindVertexArray(null);
@@ -307,7 +331,7 @@ void main() {
   if (!insideClip()) discard;
   float sdf = texture(u_atlas, vec3(v_uv, v_atlasPage)).r;
   float faceT = clamp(sdf * v_faceScale - v_faceBias, 0.0, 1.0);
-  float underlayT = clamp(sdf * v_underlayScale - v_underlayBias, 0.0, 1.0) * clamp(sdf * 12.5, 0.0, 1.0);
+  float underlayT = clamp(sdf * v_underlayScale - v_underlayBias, 0.0, 1.0);
   vec4 face = vec4(v_color.rgb * v_color.a, v_color.a);
   vec4 outline = vec4(v_outline.rgb * v_outline.a, v_outline.a);
   float oneMinusFace = 1.0 - face.a * faceT;

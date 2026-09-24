@@ -13,7 +13,7 @@ use super::atlas::{prewarm_mapped_page, SdfAtlasPrewarmReport};
 use super::shape::ShapeSdfTexel;
 
 pub const SHAPE_ATLAS_MANIFEST_SCHEMA: &str = "allium.shape-sdf-atlas-manifest.v2";
-pub const SHAPE_ATLAS_GENERATOR_CONTRACT: &str = "allium.shape-sdf-rg8-copy.v2";
+pub const SHAPE_ATLAS_GENERATOR_CONTRACT: &str = "allium.shape-sdf-rg8-copy.v3";
 pub const SHAPE_ATLAS_PIXEL_FORMAT: &str = "rg8-distance-alpha";
 pub const SHAPE_PAGE_MAGIC: &[u8; 10] = b"ALLIUMRG8S";
 pub const SHAPE_PAGE_VERSION: u32 = 1;
@@ -21,6 +21,38 @@ pub const SHAPE_PAGE_HEADER_BYTES: usize = 64;
 pub const SHAPE_BLOCK_WIDTH: u32 = 8;
 pub const SHAPE_BLOCK_HEIGHT: u32 = 8;
 pub const SHAPE_CHANNELS: u32 = 2;
+
+/// A shape sprite reduced to the atlas's two channels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShapeSdfSource {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major `[distance, alpha_gate]` texels.
+    pub rg: Vec<u8>,
+    /// SHA-256 of [`Self::rg`], recorded as `source_rg8_sha256`.
+    pub rg8_sha256: String,
+}
+
+impl ShapeSdfSource {
+    /// Decodes a shape sprite PNG. Red and alpha are kept exactly as stored:
+    /// the sprite texture is sampled without premultiplication, so the atlas
+    /// and the runtime identity check see the same samples the GPU does.
+    pub fn from_png(encoded: &[u8]) -> Result<Self, crate::codec::CodecError> {
+        let decoded = crate::codec::png::decode(encoded)?;
+        let (pixels, _) = decoded.pixels.as_chunks::<4>();
+        let rg: Vec<u8> = pixels
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[3]])
+            .collect();
+        let rg8_sha256 = hex::encode(Sha256::digest(&rg));
+        Ok(Self {
+            width: decoded.width,
+            height: decoded.height,
+            rg,
+            rg8_sha256,
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeSdfAtlasManifest {
@@ -438,6 +470,21 @@ mod tests {
         assert_eq!(prewarm.mapped_bytes, 192);
         assert_eq!(prewarm.page_touch_count, 1);
         assert_eq!(prewarm.checksum, 66);
+    }
+
+    #[test]
+    fn source_keeps_translucent_samples_unchanged() {
+        let pixels = [
+            200, 10, 20, 3, 17, 0, 0, 128, 255, 255, 255, 255, 90, 1, 2, 0,
+        ];
+        let encoded = crate::codec::png::encode_rgba(2, 2, &pixels).expect("encode probe");
+        let source = ShapeSdfSource::from_png(&encoded).expect("decode probe");
+        assert_eq!((source.width, source.height), (2, 2));
+        assert_eq!(source.rg, [200, 3, 17, 128, 255, 255, 90, 0]);
+        assert_eq!(
+            source.rg8_sha256,
+            hex::encode(Sha256::digest([200, 3, 17, 128, 255, 255, 90, 0]))
+        );
     }
 
     #[test]

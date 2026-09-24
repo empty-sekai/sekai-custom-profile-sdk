@@ -689,7 +689,6 @@ fn resolve_text_sdf_glyph_from_affine(
         },
         material: crate::sdf::material::resolve_tile_material_direct(
             op.mesh_carrier,
-            op.scale_x,
             face_color,
             op.sdf_params.as_ref(),
         ),
@@ -815,11 +814,13 @@ pub(crate) struct TextOutlineOverride {
     pub size: f32,
 }
 
+/// The underlay every glyph of a text element carries. Card fonts render with
+/// `UNDERLAY_ON`, so it is present at any outline size, including zero, where
+/// it shares the face edge.
 fn resolve_outline_params(
     outline_override: Option<TextOutlineOverride>,
     text: &TextElement,
     md: &MasterData,
-    font_size: f32,
 ) -> Option<crate::sdf::material::SdfOutlineParams> {
     if let Some(outline) = outline_override {
         return Some(crate::sdf::material::SdfOutlineParams {
@@ -828,7 +829,6 @@ fn resolve_outline_params(
             outline_b: outline.rgba[2],
             outline_a: outline.rgba[3],
             outline_size: outline.size,
-            font_size,
         });
     }
     md.resolve_color(text.outline_color_id)
@@ -838,7 +838,6 @@ fn resolve_outline_params(
             outline_b: oc.b as f32 / 255.0,
             outline_a: oc.a as f32 / 255.0,
             outline_size: text.outline_size,
-            font_size,
         })
 }
 
@@ -1335,7 +1334,7 @@ fn layout_text_ops(
     let total_h_tmp = effective_max_asc - effective_min_des;
     let _total_h = total_h_tmp / TEXT_SCALE;
     let anchor_base = (effective_max_asc + effective_min_des) / (2.0 * TEXT_SCALE);
-    let has_outline = outline_override.map_or(text.outline_size > 0.0, |o| o.size > 0.0);
+    let underlay = resolve_outline_params(outline_override, text, md);
     let max_rw = rect_widths.iter().cloned().fold(0.0f32, f32::max);
     const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
     let box_w = max_rw + PAD_ORIGINAL;
@@ -1679,11 +1678,7 @@ fn layout_text_ops(
                     rotate_deg: seg.rotate.unwrap_or(0.0),
                     font_size: render_size,
                     face: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0, 1.0],
-                    sdf_params: if has_outline {
-                        resolve_outline_params(outline_override, text, md, render_size)
-                    } else {
-                        None
-                    },
+                    sdf_params: underlay,
                     mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
                         render_size,
                         seg.bold,
@@ -1746,11 +1741,7 @@ fn layout_text_ops(
                 rotate_deg: 0.0,
                 font_size: base_size,
                 face: [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0, 1.0],
-                sdf_params: if has_outline {
-                    resolve_outline_params(outline_override, text, md, base_size)
-                } else {
-                    None
-                },
+                sdf_params: underlay,
                 mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
                     base_size, false, fa_u8,
                 ),
@@ -2029,7 +2020,7 @@ mod tests {
 
     /// A capture given the outline as resolved RGBA must produce exactly the
     /// glyph stream the color-table route produces for the same color, and a
-    /// zero-width override must disable the outline entirely.
+    /// zero-width override must keep the underlay on the face edge.
     #[test]
     fn outline_override_matches_the_color_table_route() {
         use std::sync::Arc;
@@ -2159,17 +2150,21 @@ mod tests {
             "the override must reproduce the color-table glyph stream"
         );
 
-        let disabled = capture(
+        let zero_width = capture(
             &element(0.4),
             Some(super::TextOutlineOverride {
-                rgba: [1.0; 4],
+                rgba: [204.0 / 255.0, 51.0 / 255.0, 25.0 / 255.0, 230.0 / 255.0],
                 size: 0.0,
             }),
         );
         let plain = capture(&element(0.0), None);
         assert_eq!(
-            disabled, plain,
-            "a zero-width override must disable the outline"
+            zero_width, plain,
+            "a zero-width override must match the zero-width color-table route"
+        );
+        assert!(
+            plain.iter().all(|glyph| glyph.material.outline[3] > 0.0),
+            "a zero-width outline still draws the underlay"
         );
         assert_ne!(
             table_route, plain,
@@ -2338,7 +2333,6 @@ mod tests {
                 outline_b: 0.1,
                 outline_a: 0.9,
                 outline_size: 0.4,
-                font_size: 24.0,
             }),
             mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(24.0, true, 193),
         };

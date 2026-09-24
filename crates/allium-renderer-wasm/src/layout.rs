@@ -1,3 +1,4 @@
+use sekai_profile_renderer_core::sdf_material::{tmp_uv2_y, TmpGlyphMaterial};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -7,17 +8,6 @@ const ASCENT_LINE: f32 = 66.0;
 const DESCENT_LINE: f32 = -9.0;
 const LINE_GAP: f32 = 150.0 - (66.0 + 9.0) + 0.625;
 const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
-const TMP_SHADER_CLAMP: f32 = 1.0;
-const GRADIENT_SCALE: f32 = 6.0;
-const FACE_DILATE: f32 = 0.0;
-const OUTLINE_WIDTH: f32 = 0.0;
-const OUTLINE_SOFTNESS: f32 = 0.0;
-const UNDERLAY_SOFTNESS: f32 = 0.0;
-const WEIGHT_NORMAL: f32 = 0.0;
-const WEIGHT_BOLD: f32 = 0.75;
-const SHARPNESS: f32 = 0.0;
-const RUNTIME_SCALE_RATIO_C: f32 = 0.6770833;
-const RUNTIME_PIXEL_SCALE: f32 = 763.6753237;
 
 pub fn build_layout_json(input: &str) -> Result<String, String> {
     let request: LayoutRequest =
@@ -708,11 +698,9 @@ fn make_instance(
         ),
         layout_metrics,
         fill,
-        outline: if layer.outline_width > 0.0 {
-            outline
-        } else {
-            [0.0, 0.0, 0.0, 0.0]
-        },
+        // Card text always draws the underlay; a zero width puts it on the
+        // face edge rather than removing it.
+        outline,
         outline_width: layer.outline_width,
         shader_font_size: render_size,
         shader_face_scale: shader_params.face_scale,
@@ -729,54 +717,76 @@ fn compute_sdf_shader_params(
     outline_size: f32,
     vertex_alpha: f32,
 ) -> SdfShaderParams {
-    let uv2_y = runtime_uv2_y(point_size, is_bold);
-    let shader_scale = compute_shader_scale(uv2_y);
-    let ratio_weight_dilate = WEIGHT_NORMAL.max(WEIGHT_BOLD) * 0.25;
-    let selected_weight_dilate = if uv2_y <= 0.0 {
-        WEIGHT_BOLD
-    } else {
-        WEIGHT_NORMAL
-    } * 0.25;
-    let ratio_face_dilate = FACE_DILATE + ratio_weight_dilate;
-    let selected_face_dilate = FACE_DILATE + selected_weight_dilate;
-    let face_denom = (OUTLINE_SOFTNESS + OUTLINE_WIDTH + ratio_face_dilate).max(1.0);
-    let scale_ratio_a =
-        ((GRADIENT_SCALE - TMP_SHADER_CLAMP) / (GRADIENT_SCALE * face_denom)).max(0.0);
-    let face_softness = OUTLINE_SOFTNESS * scale_ratio_a;
-    let face_scale = shader_scale / (1.0 + face_softness * shader_scale);
-    let face_base = 0.5 - selected_face_dilate * scale_ratio_a * 0.5;
-    let face_bias = face_base * face_scale - 0.5;
-
-    let underlay_softness = UNDERLAY_SOFTNESS * RUNTIME_SCALE_RATIO_C;
-    let underlay_scale = shader_scale / (1.0 + underlay_softness * shader_scale);
-    let underlay_bias = face_base * underlay_scale
-        - 0.5
-        - (outline_size.max(0.0) * RUNTIME_SCALE_RATIO_C) * underlay_scale * 0.5;
-
+    let material = TmpGlyphMaterial::new(tmp_uv2_y(point_size, is_bold), outline_size);
     SdfShaderParams {
-        face_scale,
-        face_bias,
-        underlay_scale,
-        underlay_bias,
+        face_scale: material.face_scale,
+        face_bias: material.face_bias,
+        underlay_scale: material.underlay_scale,
+        underlay_bias: material.underlay_bias,
         vertex_alpha,
     }
 }
 
-fn runtime_uv2_y(point_size: f32, is_bold: bool) -> f32 {
-    let mag = (point_size.abs() / 20250.0).max(1e-8);
-    if is_bold {
-        -mag
-    } else {
-        mag
-    }
-}
+#[cfg(test)]
+mod material_tests {
+    use super::{build_layout_json, compute_sdf_shader_params};
+    use sekai_profile_renderer_core::sdf_material::{tmp_uv2_y, TmpGlyphMaterial};
 
-fn compute_shader_scale(uv2_y: f32) -> f32 {
-    let shader_scale = uv2_y.abs() * RUNTIME_PIXEL_SCALE * GRADIENT_SCALE * (SHARPNESS + 1.0);
-    if shader_scale.is_finite() && shader_scale > 0.0001 {
-        shader_scale
-    } else {
-        0.0001
+    #[test]
+    fn zero_width_outline_keeps_the_underlay_on_the_face_edge() {
+        let input = serde_json::json!({
+            "layers": [{
+                "id": "text-layer", "z": 0, "text": "A",
+                "region": "en", "fontFamily": "SyntheticSans", "fontSourceHash": "a".repeat(64),
+                "x": 0.0, "y": 0.0, "fontSize": 24.0, "color": [1.0, 1.0, 1.0, 1.0],
+                "outlineColor": [0.25, 0.5, 0.75, 1.0], "colorRgb": [255.0, 255.0, 255.0],
+                "outlineWidth": 0.0, "lineSpacing": 0.0, "textType": 0, "dynamic": null
+            }],
+            "atlas": { "baseSize": 75.0, "spread": 6.0, "glyphs": [] },
+            "tick": 0, "frameMode": "animate"
+        });
+        let output: serde_json::Value =
+            serde_json::from_str(&build_layout_json(&input.to_string()).unwrap()).unwrap();
+        let instance = &output["instances"][0];
+        assert_eq!(
+            instance["outline"],
+            serde_json::json!([0.25, 0.5, 0.75, 1.0])
+        );
+        assert_eq!(instance["shaderUnderlayBias"], instance["shaderFaceBias"]);
+        assert_eq!(instance["shaderUnderlayScale"], instance["shaderFaceScale"]);
+    }
+
+    #[test]
+    fn shader_params_are_the_shared_glyph_material() {
+        for size in [6.0f32, 8.0, 13.0, 18.0, 24.0, 31.5, 48.0, 72.0, 96.0, 250.0] {
+            for bold in [false, true] {
+                for dilate in [0.0f32, 0.3, 1.0] {
+                    let params = compute_sdf_shader_params(size, bold, dilate, 1.0);
+                    let material = TmpGlyphMaterial::new(tmp_uv2_y(size, bold), dilate);
+                    let context = format!("size {size} bold {bold} dilate {dilate}");
+                    assert_eq!(
+                        params.face_scale.to_bits(),
+                        material.face_scale.to_bits(),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        params.face_bias.to_bits(),
+                        material.face_bias.to_bits(),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        params.underlay_scale.to_bits(),
+                        material.underlay_scale.to_bits(),
+                        "{context}"
+                    );
+                    assert_eq!(
+                        params.underlay_bias.to_bits(),
+                        material.underlay_bias.to_bits(),
+                        "{context}"
+                    );
+                }
+            }
+        }
     }
 }
 

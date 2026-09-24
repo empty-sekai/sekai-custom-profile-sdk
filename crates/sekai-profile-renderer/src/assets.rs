@@ -17,7 +17,6 @@ use std::sync::Mutex;
 
 use lru::LruCache;
 
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
@@ -36,6 +35,23 @@ pub(crate) enum ShapeSourceIdentityError {
     Missing,
     /// The asset is cached but its pixels could not be read.
     Unreadable,
+}
+
+/// Decodes a shape sprite's identity from its PNG bytes: its size and the
+/// hash of its stored red and alpha samples, as the shape atlas records it.
+fn shape_sdf_source_identity_from_png(
+    encoded: &[u8],
+) -> Result<ShapeSdfSourceIdentity, ShapeSourceIdentityError> {
+    if !crate::codec::png::is_png(encoded) {
+        return Err(ShapeSourceIdentityError::Missing);
+    }
+    let source = crate::sdf::shape_atlas::ShapeSdfSource::from_png(encoded)
+        .map_err(|_| ShapeSourceIdentityError::Missing)?;
+    Ok(ShapeSdfSourceIdentity {
+        width: i32::try_from(source.width).map_err(|_| ShapeSourceIdentityError::Unreadable)?,
+        height: i32::try_from(source.height).map_err(|_| ShapeSourceIdentityError::Unreadable)?,
+        rg8_sha256: source.rg8_sha256,
+    })
 }
 
 /// 将缓存 key 规范化为磁盘文件名（`/` → `__`）。
@@ -203,6 +219,12 @@ impl ImageLru {
             }
         }
         false
+    }
+
+    /// 读取磁盘缓存中的原始字节。
+    fn read_from_disk(&self, key: &str) -> Option<Vec<u8>> {
+        let dir = self.disk_cache_dir.as_ref()?;
+        std::fs::read(dir.join(&*normalize_disk_key(key))).ok()
     }
 
     /// 持久化原始字节到磁盘。
@@ -444,10 +466,7 @@ impl AssetStore {
     /// 将素材放入缓存（立即解码为 Image，原始字节写磁盘）。
     #[cfg(feature = "skia-oracle")]
     pub fn put(&self, key: String, data: Vec<u8>) {
-        self.shape_sdf_identities
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(&key);
+        self.record_shape_sdf_identity(&key, &data);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         // 先写磁盘（持久化原始字节供重启后重新加载）
         cache.write_to_disk(&key, &data);
@@ -461,6 +480,10 @@ impl AssetStore {
     /// 将素材放入缓存（非 skia 构建降级：只存原始字节）。
     #[cfg(not(feature = "skia-oracle"))]
     pub fn put(&self, key: String, data: Vec<u8>) {
+        self.shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&key);
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -613,120 +636,58 @@ impl AssetStore {
         std::mem::take(&mut *missing).into_iter().collect()
     }
 
+    /// Records the shape identity of freshly stored bytes. A raster build keeps
+    /// only the premultiplied image, which no longer holds the stored red
+    /// samples, so the identity is taken while the encoded bytes are at hand.
     #[cfg(feature = "skia-oracle")]
-    pub(crate) fn shape_sdf_source_identity(
-        &self,
-        key: &str,
-        image: &skia_safe::Image,
-    ) -> Option<ShapeSdfSourceIdentity> {
+    fn record_shape_sdf_identity(&self, key: &str, encoded: &[u8]) {
         let mut identities = self
             .shape_sdf_identities
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(identity) = identities.get(key) {
-            return Some(identity.clone());
-        }
-
-        let width = image.width();
-        let height = image.height();
-        let width_usize = usize::try_from(width).ok()?;
-        let height_usize = usize::try_from(height).ok()?;
-        let row_bytes = width_usize.checked_mul(4)?;
-        let mut rgba = vec![0u8; row_bytes.checked_mul(height_usize)?];
-        let info = skia_safe::ImageInfo::new(
-            (width, height),
-            skia_safe::ColorType::RGBA8888,
-            skia_safe::AlphaType::Unpremul,
-            None,
-        );
-        if !image.read_pixels(
-            &info,
-            &mut rgba,
-            row_bytes,
-            (0, 0),
-            skia_safe::image::CachingHint::Allow,
-        ) {
-            return None;
-        }
-        let mut hasher = Sha256::new();
-        for pixel in rgba.chunks_exact(4) {
-            hasher.update([pixel[0], pixel[3]]);
-        }
-        let identity = ShapeSdfSourceIdentity {
-            width,
-            height,
-            rg8_sha256: hex::encode(hasher.finalize()),
+        match shape_sdf_source_identity_from_png(encoded) {
+            Ok(identity) => identities.insert(key.to_string(), identity),
+            Err(_) => identities.remove(key),
         };
-        identities.insert(key.to_string(), identity.clone());
-        Some(identity)
     }
 
-    /// Resolves the decoded source identity for a shape asset key, whichever
-    /// decode path this build carries. With a raster backend the identity is
-    /// read from the cached image exactly as before; without one the cached
-    /// PNG bytes decode through the engine's own codec, whose straight RGBA is
-    /// the same stream the atlas builder hashes.
+    /// Resolves the source identity for a shape asset key: the size and hash
+    /// of the stored red and alpha samples, the same stream the shape atlas
+    /// builder copies and records.
     pub(crate) fn shape_sdf_source_identity_for_key(
         &self,
         key: &str,
     ) -> Result<ShapeSdfSourceIdentity, ShapeSourceIdentityError> {
+        if let Some(identity) = self
+            .shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(key)
+        {
+            return Ok(identity.clone());
+        }
         #[cfg(feature = "skia-oracle")]
-        {
-            let image = self
-                .get_image(key)
+        let identity = {
+            self.get_image(key)
                 .ok_or(ShapeSourceIdentityError::Missing)?;
-            self.shape_sdf_source_identity(key, &image)
-                .ok_or(ShapeSourceIdentityError::Unreadable)
-        }
+            let encoded = self
+                .cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .read_from_disk(key)
+                .ok_or(ShapeSourceIdentityError::Unreadable)?;
+            shape_sdf_source_identity_from_png(&encoded)?
+        };
         #[cfg(not(feature = "skia-oracle"))]
-        {
-            if let Some(identity) = self
-                .shape_sdf_identities
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(key)
-            {
-                return Ok(identity.clone());
-            }
+        let identity = {
             let encoded = self.get(key).ok_or(ShapeSourceIdentityError::Missing)?;
-            if !crate::codec::png::is_png(&encoded) {
-                return Err(ShapeSourceIdentityError::Missing);
-            }
-            let decoded = crate::codec::png::decode(&encoded)
-                .map_err(|_| ShapeSourceIdentityError::Missing)?;
-            let width =
-                i32::try_from(decoded.width).map_err(|_| ShapeSourceIdentityError::Unreadable)?;
-            let height =
-                i32::try_from(decoded.height).map_err(|_| ShapeSourceIdentityError::Unreadable)?;
-            let mut hasher = Sha256::new();
-            for pixel in decoded.pixels.chunks_exact(4) {
-                // The atlas builder reads its sources through a premultiplied
-                // decode and an unpremultiplied readback, so translucent
-                // samples lose precision on the round trip. Both halves are
-                // pinned bit-exact against that pipeline, so composing them
-                // reproduces the recorded identity from the straight samples.
-                let alpha = pixel[3];
-                let red = match alpha {
-                    0 => 0,
-                    u8::MAX => pixel[0],
-                    _ => crate::codec::unpremultiply_channel_like_skia(
-                        crate::codec::premultiply_channel(pixel[0], alpha),
-                        alpha,
-                    ),
-                };
-                hasher.update([red, alpha]);
-            }
-            let identity = ShapeSdfSourceIdentity {
-                width,
-                height,
-                rg8_sha256: hex::encode(hasher.finalize()),
-            };
-            self.shape_sdf_identities
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(key.to_string(), identity.clone());
-            Ok(identity)
-        }
+            shape_sdf_source_identity_from_png(&encoded)?
+        };
+        self.shape_sdf_identities
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key.to_string(), identity.clone());
+        Ok(identity)
     }
 
     /// 将已加载的静态素材预解码并移入常驻池。
@@ -734,14 +695,9 @@ impl AssetStore {
     /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
     #[cfg(feature = "skia-oracle")]
     fn pre_decode_static(&self, keys_and_data: &[(String, Vec<u8>)]) -> usize {
-        let mut identities = self
-            .shape_sdf_identities
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        for (key, _) in keys_and_data {
-            identities.remove(key);
+        for (key, data) in keys_and_data {
+            self.record_shape_sdf_identity(key, data);
         }
-        drop(identities);
         let mut count = 0usize;
         let mut pinned = self.pinned_images.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -758,5 +714,35 @@ impl AssetStore {
             }
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+
+    use super::*;
+
+    #[test]
+    fn shape_source_identity_hashes_the_stored_red_and_alpha_samples() {
+        let pixels = [
+            200, 10, 20, 3, 17, 0, 0, 128, 255, 255, 255, 255, 90, 1, 2, 0,
+        ];
+        let encoded = crate::codec::png::encode_rgba(2, 2, &pixels).expect("encode probe");
+        let store = AssetStore::new(4);
+        store.put("custom_profile/shape/probe".into(), encoded);
+        let identity = store
+            .shape_sdf_source_identity_for_key("custom_profile/shape/probe")
+            .expect("probe identity");
+        let mut hasher = Sha256::new();
+        for pixel in pixels.as_chunks::<4>().0 {
+            hasher.update([pixel[0], pixel[3]]);
+        }
+        assert_eq!((identity.width, identity.height), (2, 2));
+        assert_eq!(identity.rg8_sha256, hex::encode(hasher.finalize()));
+        assert_eq!(
+            store.shape_sdf_source_identity_for_key("custom_profile/shape/absent"),
+            Err(ShapeSourceIdentityError::Missing)
+        );
     }
 }

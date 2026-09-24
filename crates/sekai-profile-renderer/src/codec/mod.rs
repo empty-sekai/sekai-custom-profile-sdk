@@ -45,10 +45,10 @@ pub fn premultiply_channel(value: u8, alpha: u8) -> u8 {
 /// Recovers a colour channel from its premultiplied form the way Skia does.
 ///
 /// Skia stores decoded images premultiplied, so reading one back as
-/// non-premultiplied divides by alpha and loses up to 1/255 per channel. That
-/// lossy value — not the file's true sample — is what the offline shape-atlas
-/// builder hashed into `source_rg8_sha256`, so the runtime has to reproduce it
-/// exactly or every deployed atlas fails its source check.
+/// non-premultiplied divides by alpha. The round trip is lossy, and more so as
+/// alpha falls: near half alpha a channel can move by one step, at alpha 3 by
+/// tens of steps. Output that has to match a Skia readback must reproduce that
+/// lossy value exactly.
 ///
 /// Skia divides in single precision and converts back with round-half-to-even,
 /// so the result follows f32 representation rather than exact rational

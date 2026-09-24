@@ -45,6 +45,13 @@ pub struct ResourceInfo {
     pub resource_type: String,
 }
 
+impl ResourceInfo {
+    /// Asset key the resource loads from: `{resourceLoadVal}/{fileName}`.
+    pub fn asset_key(&self) -> String {
+        format!("{}/{}", self.load_val, self.file_name)
+    }
+}
+
 /// 解析后的 Honor 渲染信息。
 #[derive(Debug, Clone)]
 pub struct ResolvedHonor {

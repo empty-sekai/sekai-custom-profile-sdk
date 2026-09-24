@@ -323,7 +323,6 @@ unsafe fn blend_output_constant_span_rgba8(
         0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
     ));
     let inverse_alpha = _mm512_sub_ps(_mm512_set1_ps(1.0), source[3]);
-    let scale = _mm512_set1_ps(1.0 / 255.0);
     while pixels != 0 {
         let lanes = pixels.min(LANES);
         let byte_mask = first_n_byte_mask(lanes * 4);
@@ -332,7 +331,7 @@ unsafe fn blend_output_constant_span_rgba8(
         for channel in 0..4 {
             let indices = _mm512_add_epi8(channel_base, _mm512_set1_epi8(channel as i8));
             let bytes = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, packed));
-            let destination = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes)), scale);
+            let destination = unit_from_steps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes)));
             quantized[channel] =
                 quantize_packet(_mm512_fmadd_ps(destination, inverse_alpha, source[channel]));
         }
@@ -378,7 +377,6 @@ unsafe fn load_existing_tile_rgba8(
     let channel_base = _mm512_castsi128_si512(_mm_setr_epi8(
         0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
     ));
-    let scale = _mm512_set1_ps(1.0 / 255.0);
     for row in 0..valid_height {
         let mut x = 0usize;
         while x < valid_width {
@@ -393,7 +391,7 @@ unsafe fn load_existing_tile_rgba8(
             for channel in 0..4 {
                 let indices = _mm512_add_epi8(channel_base, _mm512_set1_epi8(channel as i8));
                 let bytes = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, rgba));
-                let values = _mm512_mul_ps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes)), scale);
+                let values = unit_from_steps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes)));
                 _mm512_mask_storeu_ps(tile[channel].as_mut_ptr().add(tile_pixel), active, values);
             }
             x += LANES;
@@ -464,11 +462,7 @@ unsafe fn write_span_rgba8(
 
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn quantize_packet(value: __m512) -> __m128i {
-    let rounded = floor_ps(_mm512_add_ps(
-        _mm512_mul_ps(clamp01(value), _mm512_set1_ps(255.0)),
-        _mm512_set1_ps(0.5),
-    ));
-    _mm512_cvtusepi32_epi8(_mm512_cvttps_epi32(rounded))
+    _mm512_cvtusepi32_epi8(_mm512_cvttps_epi32(round_to_255_steps(value)))
 }
 
 fn validate_page(command: &PlannedCommand, page: SdfSwizzledPage<'_>) -> Result<(), SdfTileError> {
@@ -539,23 +533,17 @@ unsafe fn shade_text_packet(
     let top = _mm512_fmadd_ps(_mm512_sub_ps(p10, p00), fx, p00);
     let bottom = _mm512_fmadd_ps(_mm512_sub_ps(p11, p01), fx, p01);
     let sdf = _mm512_fmadd_ps(_mm512_sub_ps(bottom, top), fy, top);
-    let zero = _mm512_setzero_ps();
     let one = _mm512_set1_ps(1.0);
     let face_t = clamp01(_mm512_fmadd_ps(
         sdf,
         _mm512_set1_ps(material.face_scale.max(0.0001)),
         _mm512_set1_ps(-material.face_bias),
     ));
-    let outline_base = clamp01(_mm512_fmadd_ps(
+    let outline_t = clamp01(_mm512_fmadd_ps(
         sdf,
         _mm512_set1_ps(material.outline_scale.max(0.0001)),
         _mm512_set1_ps(-material.outline_bias),
     ));
-    let outline_edge = _mm512_min_ps(
-        _mm512_max_ps(_mm512_mul_ps(sdf, _mm512_set1_ps(12.5)), zero),
-        one,
-    );
-    let outline_t = _mm512_mul_ps(outline_base, outline_edge);
     let outline_weight = _mm512_mul_ps(
         outline_t,
         // Match the scalar oracle's operation order exactly. It performs a
@@ -590,22 +578,21 @@ unsafe fn shade_shape_packet(
         SdfCommandMaterial::Shape(material) => material,
         _ => return Err(SdfTileError::MaterialKindMismatch { command: 0 }),
     };
-    let nearest_x = _mm512_cvttps_epi32(floor_ps(_mm512_add_ps(tx, _mm512_set1_ps(0.5))));
-    let nearest_y = _mm512_cvttps_epi32(floor_ps(_mm512_add_ps(ty, _mm512_set1_ps(0.5))));
+    let nearest_x = nearest_texel(tx);
+    let nearest_y = nearest_texel(ty);
     let [rect_x, rect_y, rect_width, rect_height] = command.source.atlas_rect;
     let x = clamp_i32(nearest_x, rect_x as i32, (rect_x + rect_width - 1) as i32);
     let y = clamp_i32(nearest_y, rect_y as i32, (rect_y + rect_height - 1) as i32);
     let ((distance, gate), used_swizzle) = sample_shape(page, x, y, active)?;
-    let gate_scale = _mm512_mul_ps(gate, _mm512_set1_ps(1.0 / 255.0));
     let face_coverage = shape_coverage(
         distance,
-        gate_scale,
+        gate,
         command.shape_face_offset,
         command.shape_coverage_scale,
     );
     let outline_coverage = shape_coverage(
         distance,
-        gate_scale,
+        gate,
         command.shape_outline_offset,
         command.shape_coverage_scale,
     );
@@ -953,27 +940,13 @@ fn read_packed_texel(payload: &[u8], offset: i32, channels: usize) -> Result<i32
         }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::read_packed_texel;
-
-    #[test]
-    fn packed_texel_reads_valid_text_and_shape_payload_tails() {
-        let payload = [10, 20, 30, 40, 50];
-        assert_eq!(read_packed_texel(&payload, 4, 1), Ok(50));
-        assert_eq!(read_packed_texel(&payload, 3, 2), Ok(40 | (50 << 8)));
-        assert!(read_packed_texel(&payload, 4, 2).is_err());
-        assert!(read_packed_texel(&payload, -1, 1).is_err());
-    }
-}
-
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
-unsafe fn shape_coverage(distance: __m512, gate_scale: __m512, offset: f32, scale: f32) -> __m512 {
+unsafe fn shape_coverage(distance: __m512, gate: __m512, offset: f32, scale: f32) -> __m512 {
     let coverage = clamp01(_mm512_mul_ps(
         _mm512_add_ps(distance, _mm512_set1_ps(offset)),
         _mm512_set1_ps(scale),
     ));
-    _mm512_mul_ps(coverage, gate_scale)
+    _mm512_mul_ps(coverage, unit_from_steps(gate))
 }
 
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
@@ -987,18 +960,46 @@ unsafe fn blend_packet(
     let inverse_alpha = _mm512_sub_ps(_mm512_set1_ps(1.0), source[3]);
     for channel in 0..4 {
         let destination = _mm512_maskz_loadu_ps(active, tile[channel].as_ptr().add(pixel));
-        let mut result = _mm512_fmadd_ps(destination, inverse_alpha, source[channel]);
-        if accumulation == SdfAccumulationMode::Rgba8Writeback {
-            result = _mm512_mul_ps(
-                floor_ps(_mm512_add_ps(
-                    _mm512_mul_ps(clamp01(result), _mm512_set1_ps(255.0)),
-                    _mm512_set1_ps(0.5),
-                )),
-                _mm512_set1_ps(1.0 / 255.0),
-            );
-        }
+        let result = match accumulation {
+            // The scalar RGBA8 model multiplies and adds separately, then
+            // writes the rounded byte back.
+            SdfAccumulationMode::Rgba8Writeback => unit_from_steps(round_to_255_steps(
+                _mm512_add_ps(source[channel], _mm512_mul_ps(destination, inverse_alpha)),
+            )),
+            SdfAccumulationMode::F32Tile => {
+                _mm512_fmadd_ps(destination, inverse_alpha, source[channel])
+            }
+        };
         _mm512_mask_storeu_ps(tile[channel].as_mut_ptr().add(pixel), active, result);
     }
+}
+
+/// The texel the scalar sampler picks: the floor, plus one once the
+/// fractional part reaches one half. Adding 0.5 before flooring would round
+/// coordinates just below a half up.
+#[target_feature(enable = "avx512f")]
+unsafe fn nearest_texel(coordinate: __m512) -> __m512i {
+    let floor = floor_ps(coordinate);
+    let upper =
+        _mm512_cmp_ps_mask::<_CMP_GE_OQ>(_mm512_sub_ps(coordinate, floor), _mm512_set1_ps(0.5));
+    _mm512_cvttps_epi32(_mm512_mask_add_ps(floor, upper, floor, _mm512_set1_ps(1.0)))
+}
+
+/// `(clamp01(value) * 255).round()` with `f32::round` semantics, still in
+/// float. The scaled value is non-negative and its distance to its floor is
+/// exact, so ties and near-ties resolve exactly as in the scalar path.
+#[target_feature(enable = "avx512f")]
+unsafe fn round_to_255_steps(value: __m512) -> __m512 {
+    let scaled = _mm512_mul_ps(clamp01(value), _mm512_set1_ps(255.0));
+    let floor = floor_ps(scaled);
+    let upper = _mm512_cmp_ps_mask::<_CMP_GE_OQ>(_mm512_sub_ps(scaled, floor), _mm512_set1_ps(0.5));
+    _mm512_mask_add_ps(floor, upper, floor, _mm512_set1_ps(1.0))
+}
+
+/// Unit-range value of 8-bit samples, divided like the scalar path.
+#[target_feature(enable = "avx512f")]
+unsafe fn unit_from_steps(steps: __m512) -> __m512 {
+    _mm512_div_ps(steps, _mm512_set1_ps(255.0))
 }
 
 #[target_feature(enable = "avx512f")]
@@ -1054,5 +1055,244 @@ fn first_n_byte_mask(bytes: usize) -> __mmask64 {
         u64::MAX
     } else {
         (1u64 << bytes) - 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn simd_available() -> bool {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("avx512vbmi")
+            && std::arch::is_x86_feature_detected!("fma")
+    }
+
+    /// Values on both sides of every rounding boundary of the 8-bit output.
+    fn rounding_boundaries() -> Vec<f32> {
+        let mut values = vec![0.0, 1.0, 0.001_960_784_2];
+        for step in 0..255u16 {
+            let centre = (f32::from(step) + 0.5) / 255.0;
+            values.extend([
+                f32::from_bits(centre.to_bits() - 1),
+                centre,
+                f32::from_bits(centre.to_bits() + 1),
+            ]);
+        }
+        values
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
+    unsafe fn quantize_lanes(values: &[f32; LANES]) -> [u8; LANES] {
+        let mut bytes = [0u8; LANES];
+        _mm_storeu_si128(
+            bytes.as_mut_ptr().cast(),
+            quantize_packet(_mm512_loadu_ps(values.as_ptr())),
+        );
+        bytes
+    }
+
+    #[test]
+    fn quantize_matches_the_scalar_rounding() {
+        if !simd_available() {
+            return;
+        }
+        for chunk in rounding_boundaries().chunks(LANES) {
+            let mut lanes = [0.0f32; LANES];
+            lanes[..chunk.len()].copy_from_slice(chunk);
+            // SAFETY: the required target features were detected above.
+            let bytes = unsafe { quantize_lanes(&lanes) };
+            for (value, byte) in chunk.iter().zip(bytes) {
+                assert_eq!(byte, super::super::quantize(*value), "value {value:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn rgba8_writeback_blend_matches_the_scalar_source_over() {
+        if !simd_available() {
+            return;
+        }
+        let sources = [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.25, 0.1, 0.05, 0.3],
+            [0.301_960_8, 0.2, 0.1, 0.501_960_8],
+            [0.9, 0.5, 0.2, 1.0],
+        ];
+        for source in sources {
+            for first in (0..=255u16).step_by(LANES) {
+                let destination: Vec<f32> = (first..first + LANES as u16)
+                    .map(|byte| f32::from(byte) / 255.0)
+                    .collect();
+                let mut tile = [
+                    destination.clone(),
+                    destination.clone(),
+                    destination.clone(),
+                    destination.clone(),
+                ];
+                // SAFETY: the required target features were detected above.
+                unsafe {
+                    blend_packet(
+                        &mut tile,
+                        0,
+                        first_n_mask(LANES),
+                        source.map(|channel| _mm512_set1_ps(channel)),
+                        SdfAccumulationMode::Rgba8Writeback,
+                    );
+                }
+                for (lane, value) in destination.iter().enumerate() {
+                    let mut expected = [*value; 4];
+                    super::super::source_over_rgba8(&mut expected, source);
+                    for channel in 0..4 {
+                        assert_eq!(
+                            tile[channel][lane].to_bits(),
+                            expected[channel].to_bits(),
+                            "destination {value} source {source:?} channel {channel}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn existing_rgba8_loads_match_the_scalar_conversion() {
+        if !simd_available() {
+            return;
+        }
+        let output: Vec<u8> = (0..=255u8).flat_map(|byte| [byte; 4]).collect();
+        let mut tile = [
+            vec![0.0; 256],
+            vec![0.0; 256],
+            vec![0.0; 256],
+            vec![0.0; 256],
+        ];
+        // SAFETY: the required target features were detected above.
+        unsafe { load_existing_tile_rgba8(&mut tile, 256, 256, 1, 0, 0, 256, &output) };
+        for byte in 0..=255u8 {
+            let expected = f32::from(byte) / 255.0;
+            for channel in &tile {
+                assert_eq!(channel[usize::from(byte)].to_bits(), expected.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn direct_output_blend_matches_the_scalar_over_path() {
+        if !simd_available() {
+            return;
+        }
+        let source = [0.301_960_8, 0.2, 0.1, 0.501_960_8];
+        let mut output: Vec<u8> = (0..=255u8).flat_map(|byte| [byte; 4]).collect();
+        let expected: Vec<u8> = output
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| {
+                let destination = f32::from(*byte) / 255.0;
+                let channel = index % 4;
+                super::super::quantize(destination.mul_add(1.0 - source[3], source[channel]))
+            })
+            .collect();
+        // SAFETY: the required target features were detected above.
+        unsafe { blend_output_constant_span_rgba8(&mut output, 0, 256, source) };
+        assert_eq!(output, expected);
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
+    unsafe fn shape_coverage_lanes(
+        distance: &[f32; LANES],
+        gate: &[f32; LANES],
+        offset: f32,
+        scale: f32,
+    ) -> [f32; LANES] {
+        let mut coverage = [0.0f32; LANES];
+        _mm512_storeu_ps(
+            coverage.as_mut_ptr(),
+            shape_coverage(
+                _mm512_loadu_ps(distance.as_ptr()),
+                _mm512_loadu_ps(gate.as_ptr()),
+                offset,
+                scale,
+            ),
+        );
+        coverage
+    }
+
+    #[test]
+    fn shape_coverage_matches_the_scalar_texel_coverage() {
+        if !simd_available() {
+            return;
+        }
+        let sharpness = 1.5f32;
+        for threshold in [0.5f32, 0.5475, 0.595, 0.7375, 0.2875] {
+            let (offset, scale) = crate::sdf::shape::coverage_terms(threshold, sharpness);
+            for gate in [255u8, 200, 128, 3, 1] {
+                for first in (0..=255u16).step_by(LANES) {
+                    let distance: [f32; LANES] =
+                        std::array::from_fn(|lane| f32::from(first + lane as u16));
+                    let gates = [f32::from(gate); LANES];
+                    // SAFETY: the required target features were detected above.
+                    let coverage =
+                        unsafe { shape_coverage_lanes(&distance, &gates, offset, scale) };
+                    for (lane, actual) in coverage.iter().enumerate() {
+                        let texel = crate::sdf::shape::ShapeSdfTexel {
+                            distance: (first + lane as u16) as u8,
+                            gate,
+                        };
+                        let expected =
+                            crate::sdf::shape::texel_coverage(texel, threshold, sharpness);
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "threshold {threshold} texel {texel:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
+    unsafe fn nearest_lanes(values: &[f32; LANES]) -> [i32; LANES] {
+        let mut indices = [0i32; LANES];
+        _mm512_storeu_si512(
+            indices.as_mut_ptr().cast(),
+            nearest_texel(_mm512_loadu_ps(values.as_ptr())),
+        );
+        indices
+    }
+
+    #[test]
+    fn nearest_texel_matches_the_scalar_half_texel_rule() {
+        if !simd_available() {
+            return;
+        }
+        let mut values = [0.0f32; LANES];
+        for (lane, value) in values.iter_mut().enumerate() {
+            let centre = lane as f32 + 0.5;
+            *value = match lane % 3 {
+                0 => f32::from_bits(centre.to_bits() - 1),
+                1 => centre,
+                _ => f32::from_bits(centre.to_bits() + 1),
+            };
+        }
+        values[0] = 0.499_999_97;
+        // SAFETY: the required target features were detected above.
+        let indices = unsafe { nearest_lanes(&values) };
+        for (value, index) in values.iter().zip(indices) {
+            let floor = value.floor();
+            let expected = floor as i32 + i32::from(value - floor >= 0.5);
+            assert_eq!(index, expected, "coordinate {value:e}");
+        }
+    }
+
+    #[test]
+    fn packed_texel_reads_valid_text_and_shape_payload_tails() {
+        let payload = [10, 20, 30, 40, 50];
+        assert_eq!(read_packed_texel(&payload, 4, 1), Ok(50));
+        assert_eq!(read_packed_texel(&payload, 3, 2), Ok(40 | (50 << 8)));
+        assert!(read_packed_texel(&payload, 4, 2).is_err());
+        assert!(read_packed_texel(&payload, -1, 1).is_err());
     }
 }

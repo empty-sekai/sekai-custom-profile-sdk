@@ -2315,9 +2315,9 @@ fn append_semantic_text_draws(
     else {
         unreachable!("semantic text renderer received non-text command");
     };
-    // The payload carries the outline already resolved to RGBA; a zero width
-    // means no outline regardless of color, matching the element path.
-    let outline_override = (*outline_size > 0.0).then(|| crate::text::TextOutlineOverride {
+    // The payload carries the outline already resolved to RGBA. It is the
+    // glyph underlay, which card text draws at every width, zero included.
+    let outline_override = Some(crate::text::TextOutlineOverride {
         rgba: *outline_color,
         size: *outline_size,
     });

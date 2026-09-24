@@ -1,11 +1,16 @@
 //! Shape-SDF coverage and material contract.
 //!
-//! Production shape PNGs contain two independent signals: distance in red and
-//! an alpha gate. Thresholding is performed per source texel before sampling,
-//! so an exact scalar oracle must retain both channels. The current legacy
-//! four-argument `Canvas::draw_image_rect` uses Skia's default nearest
-//! sampling; linear filtering remains a separately measured candidate.
+//! Shape sprites carry two independent signals: a distance field in red and
+//! the sprite's alpha, which gates it. The texture is sampled with nearest
+//! filtering, so each fragment evaluates one source texel: its coverage is
+//! thresholded from the distance and multiplied by the gate. The thresholds
+//! and alpha conversions come from
+//! [`sekai_profile_renderer_core::sdf_material`], which the WebGL2 mask shader
+//! shares.
 
+use sekai_profile_renderer_core::sdf_material::{
+    color32_unit, ShapeSdfThresholds, SHAPE_SDF_SHARPNESS,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -26,6 +31,10 @@ pub struct ShapeSdfMaterial {
 }
 
 impl ShapeSdfMaterial {
+    /// Builds the material from a shape element's authored values. The face
+    /// alpha reaches the shader as a vertex colour and is quantized like one;
+    /// the outline colour is a material colour and keeps its float alpha. The
+    /// outline size saturates at one.
     pub fn from_profile_values(
         face_rgb: [f32; 3],
         face_alpha: f32,
@@ -33,10 +42,9 @@ impl ShapeSdfMaterial {
         outline_alpha: f32,
         outline_size: f32,
     ) -> Self {
-        let face_alpha = face_alpha.clamp(0.0, 1.0);
+        let face_alpha = color32_unit(face_alpha);
         let outline_alpha = outline_alpha.clamp(0.0, 1.0);
-        let outline_size = outline_size.max(0.0);
-        let outer_fill_ratio = outline_size * 0.95;
+        let thresholds = ShapeSdfThresholds::new(outline_size);
         Self {
             face: [
                 premultiply_layer_channel(face_rgb[0], face_alpha),
@@ -50,9 +58,9 @@ impl ShapeSdfMaterial {
                 premultiply_layer_channel(outline_rgb[2], outline_alpha),
                 outline_alpha,
             ],
-            face_threshold: 0.5 + outline_size * 0.2375,
-            outline_threshold: (1.0 - outer_fill_ratio * 0.75).min(0.5),
-            sharpness: 1.5,
+            face_threshold: thresholds.face,
+            outline_threshold: thresholds.outline,
+            sharpness: SHAPE_SDF_SHARPNESS,
         }
     }
 }
@@ -61,47 +69,26 @@ fn premultiply_layer_channel(channel: f32, alpha: f32) -> f32 {
     channel.clamp(0.0, 1.0) * alpha.clamp(0.0, 1.0)
 }
 
-/// Matches `draw_shape::sdf_mask_alpha` before the generated mask is scaled.
-pub fn texel_coverage(texel: ShapeSdfTexel, threshold: f32, sharpness: f32) -> f32 {
-    let threshold = threshold * 255.0;
+/// Offset and scale mapping a raw distance byte to coverage for one edge:
+/// `clamp((distance + offset) * scale, 0, 1)`, a ramp of `2 * sharpness`
+/// distance steps centred on `threshold * 255`.
+pub(crate) fn coverage_terms(threshold: f32, sharpness: f32) -> (f32, f32) {
     let sharpness = sharpness.max(f32::EPSILON);
-    let coverage =
-        ((f32::from(texel.distance) - threshold + sharpness) / (2.0 * sharpness)).clamp(0.0, 1.0);
-    coverage * (f32::from(texel.gate) / 255.0)
+    (sharpness - threshold * 255.0, (2.0 * sharpness).recip())
 }
 
-/// Candidate bilinear filtering after per-texel threshold/gate evaluation.
-/// Texel order is `[p00, p10, p01, p11]`.
-pub fn bilinear_coverage(
-    texels: [ShapeSdfTexel; 4],
-    fx: f32,
-    fy: f32,
-    threshold: f32,
-    sharpness: f32,
-) -> f32 {
-    let [p00, p10, p01, p11] = texels.map(|texel| texel_coverage(texel, threshold, sharpness));
-    let top = (p10 - p00).mul_add(fx, p00);
-    let bottom = (p11 - p01).mul_add(fx, p01);
-    (bottom - top).mul_add(fy, top)
+/// Coverage of one texel for the edge at `threshold`, gated by its alpha.
+pub fn texel_coverage(texel: ShapeSdfTexel, threshold: f32, sharpness: f32) -> f32 {
+    let (offset, scale) = coverage_terms(threshold, sharpness);
+    ((f32::from(texel.distance) + offset) * scale).clamp(0.0, 1.0) * (f32::from(texel.gate) / 255.0)
 }
 
 /// Produces one premultiplied source equivalent to drawing the outline mask,
 /// subtracting the face mask from it, then drawing the face above it.
-pub fn shade_shape(
-    texels: [ShapeSdfTexel; 4],
-    fx: f32,
-    fy: f32,
-    material: ShapeSdfMaterial,
-) -> [f32; 4] {
-    let face_coverage =
-        bilinear_coverage(texels, fx, fy, material.face_threshold, material.sharpness);
-    let outline_coverage = bilinear_coverage(
-        texels,
-        fx,
-        fy,
-        material.outline_threshold,
-        material.sharpness,
-    ) * (1.0 - face_coverage);
+pub fn shade_shape(texel: ShapeSdfTexel, material: ShapeSdfMaterial) -> [f32; 4] {
+    let face_coverage = texel_coverage(texel, material.face_threshold, material.sharpness);
+    let outline_coverage = texel_coverage(texel, material.outline_threshold, material.sharpness)
+        * (1.0 - face_coverage);
     shade_shape_coverages(face_coverage, outline_coverage, material)
 }
 
@@ -145,34 +132,11 @@ mod tests {
     }
 
     #[test]
-    fn threshold_is_applied_before_linear_candidate_filtering() {
-        let texels = [
-            ShapeSdfTexel {
-                distance: 0,
-                gate: 255,
-            },
-            ShapeSdfTexel {
-                distance: 255,
-                gate: 255,
-            },
-            ShapeSdfTexel {
-                distance: 255,
-                gate: 0,
-            },
-            ShapeSdfTexel {
-                distance: 255,
-                gate: 255,
-            },
-        ];
-        assert!((bilinear_coverage(texels, 0.5, 0.5, 0.5, 1.5) - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
     fn face_is_composited_above_outline() {
-        let texels = [ShapeSdfTexel {
+        let texel = ShapeSdfTexel {
             distance: 255,
             gate: 255,
-        }; 4];
+        };
         let material = ShapeSdfMaterial {
             face: [0.5, 0.0, 0.0, 0.5],
             outline: [0.0, 0.0, 1.0, 1.0],
@@ -180,18 +144,15 @@ mod tests {
             outline_threshold: 0.5,
             sharpness: 1.5,
         };
-        assert_eq!(
-            shade_shape(texels, 0.0, 0.0, material),
-            [0.5, 0.0, 0.0, 0.5]
-        );
+        assert_eq!(shade_shape(texel, material), [0.5, 0.0, 0.0, 0.5]);
     }
 
     #[test]
     fn partial_face_alpha_attenuates_outline_below_face() {
-        let texels = [ShapeSdfTexel {
+        let texel = ShapeSdfTexel {
             distance: 128,
             gate: 255,
-        }; 4];
+        };
         let material = ShapeSdfMaterial {
             face: [0.25, 0.0, 0.0, 0.5],
             outline: [0.0, 0.0, 1.0, 1.0],
@@ -199,9 +160,9 @@ mod tests {
             outline_threshold: 0.5,
             sharpness: 1.5,
         };
-        let coverage = texel_coverage(texels[0], 0.5, 1.5);
+        let coverage = texel_coverage(texel, 0.5, 1.5);
         let outline_above = coverage * (1.0 - coverage) * (1.0 - 0.5 * coverage);
-        let shaded = shade_shape(texels, 0.0, 0.0, material);
+        let shaded = shade_shape(texel, material);
 
         assert!((shaded[0] - 0.25 * coverage).abs() < 1.0e-7);
         assert!((shaded[2] - outline_above).abs() < 1.0e-7);
@@ -216,6 +177,40 @@ mod tests {
         assert!((material.outline_threshold - 0.5).abs() < 1e-6);
         assert_eq!(material.face, [0.8, 0.0, 0.0, 0.8]);
         assert_eq!(material.outline, [0.0, 0.0, 0.6, 0.6]);
+    }
+
+    #[test]
+    fn outline_size_saturates_at_one() {
+        let full =
+            ShapeSdfMaterial::from_profile_values([1.0, 0.0, 0.0], 1.0, [0.0, 0.0, 1.0], 1.0, 1.0);
+        let over =
+            ShapeSdfMaterial::from_profile_values([1.0, 0.0, 0.0], 1.0, [0.0, 0.0, 1.0], 1.0, 1.5);
+        assert_eq!(over, full);
+        assert!((full.face_threshold - 0.7375).abs() < 1e-6);
+        assert!((full.outline_threshold - 0.2875).abs() < 1e-6);
+        let negative =
+            ShapeSdfMaterial::from_profile_values([1.0, 0.0, 0.0], 1.0, [0.0, 0.0, 1.0], 1.0, -0.5);
+        assert_eq!(negative.face_threshold, 0.5);
+        assert_eq!(negative.outline_threshold, 0.5);
+    }
+
+    #[test]
+    fn face_alpha_is_a_vertex_color_and_outline_alpha_a_material_color() {
+        let material =
+            ShapeSdfMaterial::from_profile_values([1.0, 1.0, 1.0], 0.5, [1.0, 1.0, 1.0], 0.5, 0.3);
+        assert_eq!(material.face[3], 128.0 / 255.0);
+        assert_eq!(material.face[0], 128.0 / 255.0);
+        assert_eq!(material.outline[3], 0.5);
+        assert_eq!(material.outline[0], 0.5);
+        let faint = ShapeSdfMaterial::from_profile_values(
+            [1.0, 1.0, 1.0],
+            0.01,
+            [1.0, 1.0, 1.0],
+            0.01,
+            0.3,
+        );
+        assert_eq!(faint.face[3], 3.0 / 255.0);
+        assert_eq!(faint.outline[3], 0.01);
     }
 
     #[test]

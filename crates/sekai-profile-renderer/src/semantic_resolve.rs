@@ -236,7 +236,7 @@ fn populate_resolve_snapshot_parts(
             }
             let key = md
                 .resolve_resource("shape", shape.id)
-                .map(|resource| format!("custom_profile/shape/{}", resource.file_name))
+                .map(|resource| resource.asset_key())
                 .unwrap_or_else(|| format!("custom_profile/shape/{}", shape.id));
             insert_resource_descriptor(
                 snapshot,

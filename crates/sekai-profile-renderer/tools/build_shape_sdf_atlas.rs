@@ -5,13 +5,12 @@ use std::path::{Path, PathBuf};
 use sekai_profile_renderer::sdf::shape_atlas::{
     MappedShapeSdfAtlas, ShapeSdfAtlasEntry, ShapeSdfAtlasGenerationFailure,
     ShapeSdfAtlasGenerationReport, ShapeSdfAtlasManifest, ShapeSdfAtlasPageManifest,
-    SHAPE_ATLAS_GENERATOR_CONTRACT, SHAPE_ATLAS_MANIFEST_SCHEMA, SHAPE_ATLAS_PIXEL_FORMAT,
-    SHAPE_BLOCK_HEIGHT, SHAPE_BLOCK_WIDTH, SHAPE_CHANNELS, SHAPE_PAGE_HEADER_BYTES,
-    SHAPE_PAGE_MAGIC, SHAPE_PAGE_VERSION,
+    ShapeSdfSource, SHAPE_ATLAS_GENERATOR_CONTRACT, SHAPE_ATLAS_MANIFEST_SCHEMA,
+    SHAPE_ATLAS_PIXEL_FORMAT, SHAPE_BLOCK_HEIGHT, SHAPE_BLOCK_WIDTH, SHAPE_CHANNELS,
+    SHAPE_PAGE_HEADER_BYTES, SHAPE_PAGE_MAGIC, SHAPE_PAGE_VERSION,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use skia_safe::{AlphaType, ColorType, Data, Image, ImageInfo};
 
 const DEFAULT_PAGE_SIZE: u32 = 2048;
 const DEFAULT_GUTTER: u32 = 2;
@@ -35,11 +34,8 @@ struct ShapeResource {
 
 #[derive(Debug)]
 struct DecodedShape {
-    width: u32,
-    height: u32,
-    rg: Vec<u8>,
+    source: ShapeSdfSource,
     source_sha256: String,
-    source_rg8_sha256: String,
 }
 
 #[derive(Debug)]
@@ -85,7 +81,7 @@ impl ShelfPage {
         Some(origin)
     }
 
-    fn copy_shape(&mut self, size: u32, origin: [u32; 2], shape: &DecodedShape) {
+    fn copy_shape(&mut self, size: u32, origin: [u32; 2], shape: &ShapeSdfSource) {
         let stride = size as usize * SHAPE_CHANNELS as usize;
         let source_stride = shape.width as usize * SHAPE_CHANNELS as usize;
         for row in 0..shape.height as usize {
@@ -176,44 +172,11 @@ fn ensure_empty_output(output: &Path) -> Result<(), String> {
 fn decode_shape(path: &Path) -> Result<DecodedShape, String> {
     let encoded =
         fs::read(path).map_err(|error| format!("read {} failed: {error}", path.display()))?;
-    let source_sha256 = hex::encode(Sha256::digest(&encoded));
-    let image = Image::from_encoded(Data::new_copy(&encoded))
-        .ok_or_else(|| format!("decode {} failed", path.display()))?;
-    let width = u32::try_from(image.width()).map_err(|_| "negative image width".to_string())?;
-    let height = u32::try_from(image.height()).map_err(|_| "negative image height".to_string())?;
-    let rgba_len = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .ok_or_else(|| format!("image {} size overflow", path.display()))?;
-    let mut rgba = vec![0u8; rgba_len];
-    let info = ImageInfo::new(
-        (width as i32, height as i32),
-        ColorType::RGBA8888,
-        AlphaType::Unpremul,
-        None,
-    );
-    if !image.read_pixels(
-        &info,
-        &mut rgba,
-        width as usize * 4,
-        (0, 0),
-        skia_safe::image::CachingHint::Allow,
-    ) {
-        return Err(format!("read pixels {} failed", path.display()));
-    }
-    let mut rg = Vec::with_capacity(width as usize * height as usize * 2);
-    for pixel in rgba.chunks_exact(4) {
-        rg.push(pixel[0]);
-        rg.push(pixel[3]);
-    }
-    let source_rg8_sha256 = hex::encode(Sha256::digest(&rg));
+    let source = ShapeSdfSource::from_png(&encoded)
+        .map_err(|error| format!("decode {} failed: {error}", path.display()))?;
     Ok(DecodedShape {
-        width,
-        height,
-        rg,
-        source_sha256,
-        source_rg8_sha256,
+        source,
+        source_sha256: hex::encode(Sha256::digest(&encoded)),
     })
 }
 
@@ -288,6 +251,10 @@ fn build(args: &Args) -> Result<PathBuf, String> {
                 continue;
             }
         };
+        let DecodedShape {
+            source: decoded,
+            source_sha256,
+        } = decoded;
         let packed_width = decoded.width.saturating_add(args.gutter.saturating_mul(2));
         let packed_height = decoded.height.saturating_add(args.gutter.saturating_mul(2));
         if packed_width > args.page_size || packed_height > args.page_size {
@@ -317,8 +284,8 @@ fn build(args: &Args) -> Result<PathBuf, String> {
         shapes.push(ShapeSdfAtlasEntry {
             shape_id: resource.id,
             asset_key,
-            source_sha256: decoded.source_sha256,
-            source_rg8_sha256: decoded.source_rg8_sha256,
+            source_sha256,
+            source_rg8_sha256: decoded.rg8_sha256,
             page: u16::try_from(pages.len())
                 .map_err(|_| "shape atlas page count exceeds u16".to_string())?,
             rect: [origin[0], origin[1], decoded.width, decoded.height],
@@ -414,6 +381,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_sources_keep_translucent_distance_samples() {
+        let directory = std::env::temp_dir().join(format!(
+            "build-shape-sdf-atlas-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&directory).expect("create probe directory");
+        let path = directory.join("probe.png");
+        let pixels = [200, 0, 0, 3, 120, 0, 0, 64, 255, 0, 0, 255, 90, 0, 0, 0];
+        fs::write(
+            &path,
+            sekai_profile_renderer::codec::png::encode_rgba(2, 2, &pixels).expect("encode probe"),
+        )
+        .expect("write probe");
+        let decoded = decode_shape(&path).expect("decode probe");
+        fs::remove_dir_all(&directory).ok();
+        assert_eq!(decoded.source.rg, [200, 3, 120, 64, 255, 255, 90, 0]);
+    }
 
     #[test]
     fn rg8_swizzle_matches_scalar_block_addressing() {

@@ -147,7 +147,7 @@ Layer visibility reuses the active dynamic timeline, layout cache, glyph atlas, 
 
 ## Native renderer
 
-The native adapter serves still-image, CLI, and application-specific scene workloads. Resource bytes and masterdata are always host-provided. Rendering does not require Skia: pages come out of the profile backend and the ordered SDF pipeline, and text and shape elements need their SDF atlases and a render-object store installed, built with the bundled `build-sdf-atlas`, `build-shape-sdf-atlas`, and `build-render-object-store` tools. The `skia-oracle` feature only supplies the reference compositor and the parity tests.
+The native adapter serves still-image, CLI, and application-specific scene workloads. Resource bytes and masterdata are always host-provided. Rendering does not require Skia: pages come out of the profile backend and the ordered SDF pipeline, and text and shape elements need their SDF atlases and a render-object store installed, built with the bundled `build-sdf-atlas`, `build-shape-sdf-atlas`, and `build-render-object-store` tools. `build-shape-sdf-atlas` builds the shape atlas from `customProfileShapeResources` and the shape PNGs, copying the distance (red) and alpha channels unchanged through the bundled PNG decoder, so it needs no Skia. The `skia-oracle` feature only supplies the reference compositor and the parity tests.
 
 ```sh
 cargo test --workspace --all-features

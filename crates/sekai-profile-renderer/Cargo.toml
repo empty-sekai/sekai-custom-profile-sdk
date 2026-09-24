@@ -104,7 +104,6 @@ required-features = ["dev"]
 [[bin]]
 name = "build-shape-sdf-atlas"
 path = "tools/build_shape_sdf_atlas.rs"
-required-features = ["dev"]
 
 [[bin]]
 name = "build-render-object-store"
