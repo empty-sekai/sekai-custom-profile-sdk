@@ -48,6 +48,34 @@ test("font provider fails closed on a missing demanded family", async () => {
   );
 });
 
+test("font provider stops at the first failure and aborts the requests still in flight", async () => {
+  const started = [];
+  const manager = new FontProviderManager({
+    concurrency: 2,
+    provider: {
+      provide(request, { signal }) {
+        started.push(request.family);
+        if (request.family === "A") return Promise.resolve(null);
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => resolve({ bytes: new Uint8Array([1]) }), 20);
+          signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          }, { once: true });
+        });
+      },
+    },
+  });
+  await assert.rejects(
+    manager.resolve(["A", "B", "C", "D"].map((family) => ({ region: "cn", family }))),
+    /font provider returned no bytes for cn:A/,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(started, ["A", "B"]);
+  const { active, failures, loaded } = manager.stats();
+  assert.deepEqual({ active, failures, loaded }, { active: 0, failures: 1, loaded: 0 });
+});
+
 test("BrowserRenderer performs a WASM font-demand phase before final glyph preparation", async () => {
   const renderer = await readFile(new URL("../../src/renderer.ts", import.meta.url), "utf8");
   const worker = await readFile(new URL("../../src/worker.ts", import.meta.url), "utf8");

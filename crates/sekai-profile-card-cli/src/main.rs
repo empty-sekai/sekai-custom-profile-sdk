@@ -48,7 +48,7 @@ render-card：自定义名片渲染 CLI
   --card <file>          名片 JSON：CustomProfileCard 或 UserCustomProfileCard 数组
   --page <seq>           --card 为数组时按 seq 选择页（默认 seq 最小的一页）
   --profile <file>       profile API 响应 JSON（注入 generals 数据与称号等级）
-  --assets-dir <dir>     本地素材目录（key = 相对路径去扩展名）
+  --assets-dir <dir>     本地 PNG 素材目录（key = 相对路径去掉 .png）
   --assets-url <url>     动态素材 URL 前缀（接 /<key>.png）。本地缺失的 key
                          才走网络；与 --assets-dir 可叠加
   --asset-url-layout <layout>
@@ -204,7 +204,10 @@ fn load_profile(path: &PathBuf) -> Result<ProfileData, String> {
     Ok(ProfileData::from_json(&body))
 }
 
-/// 按 --assets-dir 注入素材：key = 相对路径去掉 .png/.jpg 扩展名。
+/// 按 --assets-dir 注入素材：key = 相对路径去掉 `.png` 扩展名。
+///
+/// 只收 PNG：渲染器只解码 PNG，其他格式放进来只会让同名 key 显示为已存在，
+/// 既不渲染也不再按 `--assets-url` 补拉，且同名文件谁生效取决于目录遍历顺序。
 fn load_assets_dir(store: &AssetStore, dir: &std::path::Path) -> Result<usize, String> {
     fn walk(
         base: &std::path::Path,
@@ -220,7 +223,7 @@ fn load_assets_dir(store: &AssetStore, dir: &std::path::Path) -> Result<usize, S
             if path.is_dir() {
                 walk(base, &path, store, count)?;
             } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "webp") {
+                if ext.eq_ignore_ascii_case("png") {
                     let rel = path
                         .strip_prefix(base)
                         .map_err(|e| format!("路径前缀错误: {e}"))?;
@@ -581,5 +584,28 @@ fn main() -> ExitCode {
             eprintln!("渲染失败: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_png_files_in_the_assets_directory_become_assets() {
+        let dir = std::env::temp_dir().join(format!("render-card-assets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("honor")).expect("create assets directory");
+        let png =
+            sekai_profile_renderer::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("encode");
+        std::fs::write(dir.join("honor/a.png"), &png).expect("write png");
+        std::fs::write(dir.join("honor/a.jpg"), b"jpeg bytes").expect("write jpg");
+        std::fs::write(dir.join("b.webp"), b"webp bytes").expect("write webp");
+        let store = AssetStore::new(1);
+        let loaded = load_assets_dir(&store, &dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(loaded, Ok(1));
+        assert_eq!(store.image_size("honor/a"), Some((1, 1)));
+        assert!(!store.contains("b"));
     }
 }

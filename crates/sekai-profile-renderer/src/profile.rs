@@ -5,7 +5,9 @@
 //!
 //! ## 设计原则
 //! - 纯数据结构，不依赖 skia 或任何渲染逻辑
-//! - JSON → struct 转换逻辑只有这一份（`ProfileData::from_json`）
+//! - JSON 解析规则只有 core 的
+//!   [`sekai_profile_renderer_core::profile_data::ProfileData::from_json`] 一份，
+//!   `ProfileData::from_json` 只做类型转换
 //! - 名片上称号的等级与持有判定由 core 的
 //!   [`sekai_profile_renderer_core::profile_data::placed_honor_level`] 决定
 
@@ -324,222 +326,115 @@ fn preview_music_stats(clear: i32, full_combo: i32, all_perfect: i32) -> MusicDi
 }
 
 // ============================================================
-// ProfileData 构建（唯一一份 JSON → struct 逻辑）
+// ProfileData 构建（JSON 解析规则只在 core 一份）
 // ============================================================
 
 impl ProfileData {
     /// 从 profile API 响应 JSON 构建 ProfileData
     ///
-    /// 提取所有 generals 面板所需数据。这是唯一的 JSON → struct 转换入口。
+    /// 提取所有 generals 面板所需数据。解析规则只有
+    /// [`sekai_profile_renderer_core::profile_data::ProfileData::from_json`] 一份，
+    /// 浏览器与 native 后端对同一响应得到同一份数据。
     pub fn from_json(body: &serde_json::Value) -> Self {
-        let mut pd = Self::default();
+        Self::from_core(sekai_profile_renderer_core::profile_data::ProfileData::from_json(body))
+    }
 
-        // 基础字段
-        if let Some(u) = body.get("user") {
-            pd.user_name = u.get("name").and_then(|v| v.as_str()).unwrap_or("").into();
-            pd.user_rank = u.get("rank").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        }
-        if let Some(p) = body.get("userProfile") {
-            pd.word = p.get("word").and_then(|v| v.as_str()).unwrap_or("").into();
-        }
-        if let Some(tp) = body.get("totalPower") {
-            pd.total_power = tp.get("totalPower").and_then(|v| v.as_i64()).unwrap_or(0);
-        }
-        if let Some(m) = body.get("userMultiLiveTopScoreCount") {
-            pd.mvp = m.get("mvp").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            pd.superstar = m.get("superStar").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        }
-        pd.owned_honors =
-            sekai_profile_renderer_core::profile_data::OwnedHonorLevels::from_json(body);
-        if let Some(ch) = body.get("userChallengeLiveSoloResult") {
-            pd.challenge_score = ch.get("highScore").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-            pd.challenge_character_id =
-                ch.get("characterId").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-        }
-
-        // char_ranks（type=11/15）
-        if let Some(chars) = body.get("userCharacters").and_then(|v| v.as_array()) {
-            pd.char_ranks = chars
-                .iter()
-                .filter_map(|c| {
-                    Some(CharacterRankInfo {
-                        character_id: c.get("characterId")?.as_i64()? as i32,
-                        rank: c.get("characterRank")?.as_i64()? as i32,
-                    })
-                })
-                .collect();
-        }
-        if let Some(stages) = body
-            .get("userChallengeLiveSoloStages")
-            .and_then(|value| value.as_array())
-        {
-            let mut maximum = std::collections::BTreeMap::<i32, i32>::new();
-            for stage in stages {
-                let Some(character_id) = stage
-                    .get("characterId")
-                    .and_then(|value| value.as_i64())
-                    .map(|value| value as i32)
-                else {
-                    continue;
-                };
-                let rank = stage
-                    .get("rank")
-                    .and_then(|value| value.as_i64())
-                    .unwrap_or_default() as i32;
-                maximum
-                    .entry(character_id)
-                    .and_modify(|value| *value = (*value).max(rank))
-                    .or_insert(rank);
-            }
-            pd.challenge_ranks = maximum
+    fn from_core(value: sekai_profile_renderer_core::profile_data::ProfileData) -> Self {
+        let character_rank =
+            |rank: sekai_profile_renderer_core::profile_data::CharacterRank| CharacterRankInfo {
+                character_id: rank.character_id,
+                rank: rank.rank,
+            };
+        let music_stats =
+            |stats: sekai_profile_renderer_core::profile_data::MusicDifficultyStats| {
+                MusicDifficultyStats {
+                    clear: stats.clear,
+                    full_combo: stats.full_combo,
+                    all_perfect: stats.all_perfect,
+                }
+            };
+        Self {
+            user_name: value.user_name,
+            user_rank: value.user_rank,
+            total_power: value.total_power,
+            word: value.word,
+            mvp: value.mvp,
+            superstar: value.superstar,
+            challenge_score: value.challenge_score,
+            challenge_character_id: value.challenge_character_id,
+            leader_card: value.leader_card.map(|card| LeaderCardInfo {
+                card_id: card.card_id,
+                after_training: card.after_training,
+                master_rank: card.master_rank,
+            }),
+            honor_slots: value
+                .honor_slots
                 .into_iter()
-                .map(|(character_id, rank)| CharacterRankInfo { character_id, rank })
-                .collect();
-        }
-
-        // music_results（type=12/16）
-        if let Some(mdc) = body
-            .get("userMusicDifficultyClearCount")
-            .and_then(|v| v.as_array())
-        {
-            let mut mr = MusicResults::default();
-            for item in mdc {
-                let diff = item
-                    .get("musicDifficultyType")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let stats = MusicDifficultyStats {
-                    clear: item.get("liveClear").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                    full_combo: item.get("fullCombo").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                    all_perfect: item.get("allPerfect").and_then(|v| v.as_i64()).unwrap_or(0)
-                        as i32,
-                };
-                match diff {
-                    "easy" => mr.easy = stats,
-                    "normal" => mr.normal = stats,
-                    "hard" => mr.hard = stats,
-                    "expert" => mr.expert = stats,
-                    "master" => mr.master = stats,
-                    "append" => mr.append = stats,
-                    _ => {}
-                }
-            }
-            pd.music_results = Some(mr);
-        }
-
-        // userCards 索引：cardId → (after_training, master_rank)
-        let mut ucm: HashMap<i32, UserCardInfo> = HashMap::new();
-        if let Some(uc) = body.get("userCards").and_then(|v| v.as_array()) {
-            for c in uc {
-                if let Some(cid) = c.get("cardId").and_then(|v| v.as_i64()) {
-                    let di = c
-                        .get("defaultImage")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("normal");
-                    let mr = c.get("masterRank").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    let level = c.get("level").and_then(|v| v.as_i64()).unwrap_or(60) as i32;
-                    let trained =
-                        c.get("specialTrainingStatus").and_then(|v| v.as_str()) == Some("done");
-                    ucm.insert(
-                        cid as i32,
+                .map(|slot| HonorSlot {
+                    honor_id: slot.honor_id,
+                    honor_level: slot.honor_level,
+                    full_size: slot.full_size,
+                    profile_honor_type: slot.profile_honor_type,
+                    bonds_honor_word_id: slot.bonds_honor_word_id,
+                    bonds_honor_view_type: slot.bonds_honor_view_type,
+                })
+                .collect(),
+            deck_members: value
+                .deck_members
+                .into_iter()
+                .map(|card| DeckMember {
+                    card_id: card.card_id,
+                    after_training: card.after_training,
+                    special_training_done: card.special_training_done,
+                    master_rank: card.master_rank,
+                    level: card.level,
+                })
+                .collect(),
+            music_results: value.music_results.map(|results| MusicResults {
+                easy: music_stats(results.easy),
+                normal: music_stats(results.normal),
+                hard: music_stats(results.hard),
+                expert: music_stats(results.expert),
+                master: music_stats(results.master),
+                append: music_stats(results.append),
+            }),
+            char_ranks: value
+                .character_ranks
+                .into_iter()
+                .map(character_rank)
+                .collect(),
+            challenge_ranks: value
+                .challenge_ranks
+                .into_iter()
+                .map(character_rank)
+                .collect(),
+            story_favorites: value
+                .story_favorites
+                .into_iter()
+                .map(|favorite| StoryFavoriteInfo {
+                    story_id: favorite.story_id,
+                    story_type: favorite.story_type,
+                    share_no: favorite.share_no,
+                })
+                .collect(),
+            user_honor_missions: value.honor_mission_progress.into_iter().collect(),
+            user_cards: value
+                .user_cards
+                .into_iter()
+                .map(|(card_id, card)| {
+                    (
+                        card_id,
                         UserCardInfo {
-                            after_training: di == "special_training",
-                            special_training_done: trained,
-                            master_rank: mr,
-                            level,
+                            after_training: card.after_training,
+                            special_training_done: card.special_training_done,
+                            master_rank: card.master_rank,
+                            level: card.level,
                         },
-                    );
-                }
-            }
+                    )
+                })
+                .collect(),
+            owned_honors: value.owned_honors,
         }
-        pd.user_cards = ucm.clone();
-
-        // deck_members + leader_card（type=3/5）
-        if let Some(deck) = body.get("userDeck") {
-            for i in 1..=5 {
-                let key = format!("member{i}");
-                if let Some(cid) = deck.get(&key).and_then(|v| v.as_i64()) {
-                    let info = ucm.get(&(cid as i32)).copied().unwrap_or(UserCardInfo {
-                        level: 60,
-                        ..UserCardInfo::default()
-                    });
-                    pd.deck_members.push(DeckMember {
-                        card_id: cid as i32,
-                        after_training: info.after_training,
-                        special_training_done: info.special_training_done,
-                        master_rank: info.master_rank,
-                        level: info.level,
-                    });
-                }
-            }
-            if let Some(lid) = deck.get("leader").and_then(|v| v.as_i64()) {
-                let info = ucm.get(&(lid as i32)).copied().unwrap_or(UserCardInfo {
-                    level: 60,
-                    ..UserCardInfo::default()
-                });
-                pd.leader_card = Some(LeaderCardInfo {
-                    card_id: lid as i32,
-                    after_training: info.after_training,
-                    master_rank: info.master_rank,
-                });
-            }
-        }
-
-        // honor_slots（type=6）
-        if let Some(ph) = body.get("userProfileHonors").and_then(|v| v.as_array()) {
-            for h in ph {
-                pd.honor_slots.push(HonorSlot {
-                    honor_id: h.get("honorId").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                    honor_level: h.get("honorLevel").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
-                    full_size: h.get("seq").and_then(|v| v.as_i64()).unwrap_or(0) == 2,
-                    profile_honor_type: h
-                        .get("profileHonorType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("normal")
-                        .into(),
-                    bonds_honor_word_id: h.get("bondsHonorWordId").and_then(|v| v.as_i64()),
-                    bonds_honor_view_type: h
-                        .get("bondsHonorViewType")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.into()),
-                });
-            }
-        }
-
-        // story_favorites（type=14）：只保留面板展示的剧情类型与有格位的条目，
-        // 规则与 core `ProfileData::from_json` 一致。
-        if let Some(sf) = body.get("userStoryFavorites").and_then(|v| v.as_array()) {
-            for s in sf {
-                let story_id = s.get("storyId").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let share_no = s.get("shareNo").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let Some(story_type) = s.get("storyType").and_then(|v| v.as_str()).filter(|v| {
-                    sekai_profile_renderer_core::profile_data::STORY_FAVORITE_TYPES.contains(v)
-                }) else {
-                    continue;
-                };
-                if story_id > 0 && share_no >= 1 {
-                    pd.story_favorites.push(StoryFavoriteInfo {
-                        story_id,
-                        story_type: story_type.into(),
-                        share_no,
-                    });
-                }
-            }
-        }
-
-        // user_honor_missions（live_master 称号进度）
-        if let Some(hm) = body.get("userHonorMissions").and_then(|v| v.as_array()) {
-            for m in hm {
-                if let (Some(mt), Some(prog)) = (
-                    m.get("honorMissionType").and_then(|v| v.as_str()),
-                    m.get("progress").and_then(|v| v.as_i64()),
-                ) {
-                    pd.user_honor_missions.insert(mt.to_string(), prog as i32);
-                }
-            }
-        }
-
-        pd
     }
 
     /// 查询指定卡牌的玩家状态信息。
@@ -547,9 +442,8 @@ impl ProfileData {
         self.user_cards.get(&card_id)
     }
 
-    /// Converts the production profile model into the backend-neutral model
-    /// consumed by the shared semantic resolver. The production parser remains
-    /// authoritative until the raw-profile parity corpus is complete.
+    /// Converts the production profile model back into the backend-neutral
+    /// model it was parsed from.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn to_core_profile(&self) -> sekai_profile_renderer_core::profile_data::ProfileData {
         use sekai_profile_renderer_core::profile_data as core;
@@ -721,6 +615,33 @@ mod interaction_profile_tests {
             "userMusicDifficultyClearCount": [
                 { "musicDifficultyType": "expert", "liveClear": 40, "fullCombo": 30, "allPerfect": 20 },
                 { "musicDifficultyType": "append", "liveClear": 4, "fullCombo": 3, "allPerfect": 2 }
+            ]
+        });
+        let production = ProfileData::from_json(&raw).to_core_profile();
+        let shared = sekai_profile_renderer_core::profile_data::ProfileData::from_json(&raw);
+        assert_eq!(production, shared);
+    }
+
+    #[test]
+    fn production_and_shared_profile_parsers_agree_on_out_of_range_values() {
+        let raw = serde_json::json!({
+            "userCards": [
+                { "cardId": 0, "defaultImage": "special_training", "level": 10 },
+                { "cardId": 5, "level": 40 }
+            ],
+            "userDeck": { "leader": 0, "member1": 5, "member2": 0 },
+            "userProfileHonors": [{ "honorId": 3, "honorLevel": 0, "seq": 1 }],
+            "userCharacters": [
+                { "characterId": 3, "characterRank": 5 },
+                { "characterId": 1, "characterRank": 9 },
+                { "characterId": 3, "characterRank": 7 },
+                { "characterId": 0, "characterRank": 2 }
+            ],
+            "userChallengeLiveSoloStages": [{ "characterId": 0, "rank": 4 }],
+            "userHonorMissions": [{ "honorMissionType": "live_master" }],
+            "userMusicDifficultyClearCount": [
+                { "musicDifficultyType": "hard", "liveClear": 1 },
+                { "musicDifficultyType": "hard", "liveClear": 2 }
             ]
         });
         let production = ProfileData::from_json(&raw).to_core_profile();

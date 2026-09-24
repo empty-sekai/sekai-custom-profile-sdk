@@ -277,11 +277,13 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     // - presets/  官方预设素材(游戏自带,免审核;私有 ACL,服务端用桶凭证直读)
     // 其余 uploads/ 子路径(如 _staging/、_pending_review/、越权猜测路径)不在白名单内,
     // 落到普通分支拼成读不到的路径,从而无法绕过审核渲染未通过/他人的对象。
-    if key.starts_with("ugc/editor_image/")
+    // 含空段、`.`/`..` 段或反斜杠的 key 同样不放行:经 URL 规范化后它们会指向白名单外。
+    if (key.starts_with("ugc/editor_image/")
         || key.starts_with("ugc/avatar/")
         || key.starts_with("uploads/editor_image/")
         || key.starts_with("uploads/avatar/")
-        || key.starts_with("presets/")
+        || key.starts_with("presets/"))
+        && is_plain_relative_key(key)
     {
         return key.to_string();
     }
@@ -293,6 +295,14 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     } else {
         format!("{prefix}{key}.png")
     }
+}
+
+/// 每一段都非空、不是 `.`/`..`，且不含反斜杠。
+fn is_plain_relative_key(key: &str) -> bool {
+    !key.contains('\\')
+        && key
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 /// Maps an indexed game-asset path back to the runtime key used by `AssetStore`.
@@ -357,6 +367,9 @@ mod tests {
             "uploads/editor_image", // 缺尾部斜杠,不匹配白名单
             "uploads/../secret",
             "uploads/other/abc",
+            // 已审前缀下的 `..` 段经 URL 规范化后会落到白名单外。
+            "ugc/editor_image/../../uploads/_pending_review/abc",
+            "presets/../uploads/_staging/abc",
         ] {
             let got = key_to_s3_path(key, PREFIX);
             assert_ne!(got, key, "未授权 key 不应原样返回: {key}");

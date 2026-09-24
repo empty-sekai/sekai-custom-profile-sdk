@@ -234,6 +234,13 @@ impl ImageLru {
             std::fs::write(&path, data).ok();
         }
     }
+
+    /// 删除磁盘上的原始字节。
+    fn remove_from_disk(&self, key: &str) {
+        if let Some(ref dir) = self.disk_cache_dir {
+            std::fs::remove_file(dir.join(&*normalize_disk_key(key))).ok();
+        }
+    }
 }
 
 /// 非 skia 构建的占位缓存。
@@ -315,6 +322,13 @@ impl ByteLru {
         self.cache.put(key, arc_data);
         self.current_bytes += data_len;
     }
+
+    /// 移出 LRU（释放字节预算）。
+    fn pop(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
+        let data = self.cache.pop(key)?;
+        self.current_bytes = self.current_bytes.saturating_sub(data.len());
+        Some(data)
+    }
 }
 
 /// 渲染用素材存储。
@@ -335,6 +349,9 @@ pub struct AssetStore {
     /// 静态素材常驻池（不走 LRU，启动时预解码，不占预算）
     #[cfg(feature = "skia-oracle")]
     pinned_images: Mutex<HashMap<String, skia_safe::Image>>,
+    /// 静态素材常驻池（非 skia 构建保存原始字节，不走 LRU，不占预算）
+    #[cfg(not(feature = "skia-oracle"))]
+    pinned_bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
     /// Missing image identities observed since the last audit drain. This is
     /// populated only on a real lookup miss and is therefore off the hit path.
@@ -376,11 +393,12 @@ impl AssetStore {
 
     /// 创建素材存储
     ///
-    /// `max_mb` 为总缓存预算（MB），所有 Image 共享此额度。
+    /// `max_mb` 为总缓存预算（MB），所有 Image 共享此额度；
+    /// 超出 `usize` 字节数的预算按不限处理。
     #[cfg(feature = "skia-oracle")]
     pub fn new(max_mb: usize) -> Self {
         Self {
-            cache: Mutex::new(ImageLru::new(max_mb * 1024 * 1024)),
+            cache: Mutex::new(ImageLru::new(max_mb.saturating_mul(1024 * 1024))),
             pinned_static_keys: Mutex::new(BTreeSet::new()),
             pinned_images: Mutex::new(HashMap::new()),
             shape_sdf_identities: Mutex::new(HashMap::new()),
@@ -391,8 +409,9 @@ impl AssetStore {
     #[cfg(not(feature = "skia-oracle"))]
     pub fn new(max_mb: usize) -> Self {
         Self {
-            cache: Mutex::new(ByteLru::new(max_mb * 1024 * 1024)),
+            cache: Mutex::new(ByteLru::new(max_mb.saturating_mul(1024 * 1024))),
             pinned_static_keys: Mutex::new(BTreeSet::new()),
+            pinned_bytes: Mutex::new(HashMap::new()),
             shape_sdf_identities: Mutex::new(HashMap::new()),
         }
     }
@@ -439,11 +458,13 @@ impl AssetStore {
             .set_disk_cache_dir(dir);
     }
 
-    /// 检查 key 是否存在于缓存或磁盘中。
+    /// 检查 key 是否存在于常驻池、缓存或磁盘中。
     pub fn contains(&self, key: &str) -> bool {
         #[cfg(feature = "skia-oracle")]
-        if self
-            .pinned_images
+        let pinned = &self.pinned_images;
+        #[cfg(not(feature = "skia-oracle"))]
+        let pinned = &self.pinned_bytes;
+        if pinned
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .contains_key(key)
@@ -464,15 +485,24 @@ impl AssetStore {
     }
 
     /// 将素材放入缓存（立即解码为 Image，原始字节写磁盘）。
+    ///
+    /// 解码失败的字节同样替换该 key 的旧内容：内存与磁盘里的旧图一并移除，
+    /// 此后 [`AssetStore::contains`] 与 [`AssetStore::get_image`] 都视其为缺失。
     #[cfg(feature = "skia-oracle")]
     pub fn put(&self, key: String, data: Vec<u8>) {
         self.record_shape_sdf_identity(&key, &data);
+        let image = decode_asset(&key, &data);
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        // 先写磁盘（持久化原始字节供重启后重新加载）
-        cache.write_to_disk(&key, &data);
-        // 立即解码
-        if let Some(image) = decode_asset(&key, &data) {
-            cache.put(key, image);
+        match image {
+            Some(image) => {
+                // 持久化原始字节供重启后重新加载
+                cache.write_to_disk(&key, &data);
+                cache.put(key, image);
+            }
+            None => {
+                cache.pop(&key);
+                cache.remove_from_disk(&key);
+            }
         }
         // data 在此处 drop，不保留原始字节
     }
@@ -490,9 +520,19 @@ impl AssetStore {
             .put(key, data);
     }
 
-    /// 从缓存获取原始字节（仅非 skia 构建使用）。
+    /// 获取原始字节（仅非 skia 构建使用）。
+    ///
+    /// 查找顺序：常驻池 → LRU 缓存 → 磁盘回退。
     #[cfg(not(feature = "skia-oracle"))]
     pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
+        if let Some(data) = self
+            .pinned_bytes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(key)
+        {
+            return Some(Arc::clone(data));
+        }
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -521,7 +561,10 @@ impl AssetStore {
         }
     }
 
-    /// 从静态素材目录加载打包资源并预解码到常驻池。
+    /// 从静态素材目录加载打包资源并放入常驻池。
+    ///
+    /// 返回读取的文件数。只有 PNG 进入常驻池（与解码路径接受的格式一致），
+    /// 常驻素材不受 LRU 预算约束，并由 [`AssetStore::is_pinned_static`] 报告。
     pub fn load_static_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
         let mut count = 0usize;
         let mut keys_and_data: Vec<(String, Vec<u8>)> = Vec::new();
@@ -530,11 +573,8 @@ impl AssetStore {
             std::fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败: {e}", dir.display()))?;
         Self::walk_static_dir_recursive(dir, entries, &mut count, &mut keys_and_data)?;
 
-        #[cfg(feature = "skia-oracle")]
-        {
-            let decoded = self.pre_decode_static(&keys_and_data);
-            tracing::info!(loaded = count, decoded, "静态素材预解码完成");
-        }
+        let pinned = self.pin_static(keys_and_data);
+        tracing::info!(loaded = count, pinned, "静态素材载入常驻池完成");
         Ok(count)
     }
 
@@ -690,28 +730,62 @@ impl AssetStore {
         Ok(identity)
     }
 
-    /// 将已加载的静态素材预解码并移入常驻池。
+    /// 将已加载的静态素材预解码并移入常驻池，返回进入常驻池的数量。
     ///
     /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
     #[cfg(feature = "skia-oracle")]
-    fn pre_decode_static(&self, keys_and_data: &[(String, Vec<u8>)]) -> usize {
-        for (key, data) in keys_and_data {
+    fn pin_static(&self, keys_and_data: Vec<(String, Vec<u8>)>) -> usize {
+        for (key, data) in &keys_and_data {
             self.record_shape_sdf_identity(key, data);
         }
         let mut count = 0usize;
         let mut pinned = self.pinned_images.lock().unwrap_or_else(|e| e.into_inner());
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         for (key, data) in keys_and_data {
-            if let Some(image) = decode_asset(key, data) {
+            if let Some(image) = decode_asset(&key, &data) {
                 // 先尝试从 LRU 取出（如果 put 已经放进去）
-                cache.pop(key);
-                pinned.insert(key.clone(), image);
+                cache.pop(&key);
                 self.pinned_static_keys
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .insert(key.clone());
+                pinned.insert(key, image);
                 count += 1;
             }
+        }
+        count
+    }
+
+    /// 将已加载的静态素材移入常驻池，返回进入常驻池的数量。
+    ///
+    /// 非 skia 构建保存原始字节，按解码器接受的 PNG 头校验后常驻；
+    /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
+    #[cfg(not(feature = "skia-oracle"))]
+    fn pin_static(&self, keys_and_data: Vec<(String, Vec<u8>)>) -> usize {
+        let mut count = 0usize;
+        let mut pinned = self.pinned_bytes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        for (key, data) in keys_and_data {
+            if let Err(error) = crate::codec::png::dimensions(&data) {
+                tracing::warn!(
+                    asset_key = key,
+                    bytes = data.len(),
+                    %error,
+                    "static asset is not a PNG the decoder accepts; not pinning it"
+                );
+                continue;
+            }
+            cache.pop(&key);
+            self.shape_sdf_identities
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&key);
+            self.pinned_static_keys
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(key.clone());
+            pinned.insert(key, Arc::new(data));
+            count += 1;
         }
         count
     }
@@ -744,5 +818,52 @@ mod tests {
             store.shape_sdf_source_identity_for_key("custom_profile/shape/absent"),
             Err(ShapeSourceIdentityError::Missing)
         );
+    }
+
+    #[test]
+    fn static_directory_images_are_stored_pinned_and_sized() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("honor")).expect("static subdirectory");
+        let encoded = crate::codec::png::encode_rgba(3, 2, &[255u8; 24]).expect("encode probe");
+        std::fs::write(dir.path().join("honor/frame_degree_m_1.png"), &encoded)
+            .expect("write probe");
+        // A budget of zero keeps at most the latest cached entry, so a pinned
+        // static image has to survive later stores.
+        let store = AssetStore::new(0);
+        assert_eq!(store.load_static_dir(dir.path()), Ok(1));
+        store.put(
+            "other".into(),
+            crate::codec::png::encode_rgba(1, 1, &[0, 0, 0, 255]).expect("encode other"),
+        );
+        let key = "honor/frame_degree_m_1";
+        assert!(store.contains(key));
+        assert!(store.is_pinned_static(key));
+        assert_eq!(store.image_size(key), Some((3, 2)));
+        assert_eq!(
+            store.get_premultiplied_rgba(key).map(|(w, h, _)| (w, h)),
+            Some((3, 2))
+        );
+    }
+
+    #[test]
+    fn budgets_too_large_to_count_in_bytes_saturate() {
+        let store = AssetStore::new(usize::MAX);
+        let encoded = crate::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("encode");
+        store.put("probe".into(), encoded);
+        assert_eq!(store.image_size("probe"), Some((1, 1)));
+    }
+
+    #[cfg(feature = "skia-oracle")]
+    #[test]
+    fn storing_undecodable_bytes_replaces_the_previous_image() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = AssetStore::new(4);
+        store.set_disk_cache_dir(dir.path().to_path_buf());
+        let encoded = crate::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("encode");
+        store.put("probe".into(), encoded);
+        assert!(store.get_image("probe").is_some());
+        store.put("probe".into(), b"not an image".to_vec());
+        assert!(store.get_image("probe").is_none());
+        assert!(!store.contains("probe"));
     }
 }

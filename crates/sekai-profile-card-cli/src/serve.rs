@@ -11,11 +11,12 @@
 //!
 //! `render` params：
 //!   card: CustomProfileCard 或 UserCustomProfileCard 数组（必填）
-//!   page: 数组时选页（可选）
-//!   profile: profile API 响应 JSON（可选）
+//!   page: 数组时按 seq 选页（可选，i32 整数）
+//!   profile: profile API 响应 JSON 对象（可选）
 //!   format: jpeg|png|png-transparent（默认 jpeg）
 //!   output: 输出文件路径（与 inline 二选一；都缺省时报错）
 //!   inline: true 时响应 data 字段返 base64（默认 false）
+//! 可选参数缺省或为 null 时取默认值；类型不符时该请求报错。
 //!
 //! `render` 响应：
 //!   {"id": 1, "ok": true, "result": {"path": "...", "bytes": 12345,
@@ -53,16 +54,50 @@ pub fn run(
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     tracing::info!("serve 模式就绪，等待 NDJSON 请求");
+    session(
+        stdin.lock(),
+        &mut stdout.lock(),
+        &renderer,
+        &assets,
+        &asset_urls,
+        region,
+    )
+}
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) => line,
+/// 逐行处理请求，直到输入结束或收到 `shutdown`。
+///
+/// 单行请求出错（非 UTF-8、非法 JSON、参数错误）只回报该请求的错误，
+/// 会话继续处理后续请求。
+fn session(
+    mut input: impl BufRead,
+    output: &mut impl Write,
+    renderer: &CustomProfileRenderer,
+    assets: &Arc<AssetStore>,
+    asset_urls: &AssetUrls,
+    region: Region,
+) -> ExitCode {
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        match input.read_until(b'\n', &mut buffer) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
                 tracing::error!("读取 stdin 失败: {err}");
                 break;
             }
+        }
+        let line = match std::str::from_utf8(&buffer) {
+            Ok(line) => line.trim(),
+            Err(err) => {
+                write_response(
+                    output,
+                    &json!({"id": null, "ok": false, "error": format!("请求不是合法 UTF-8: {err}")}),
+                );
+                continue;
+            }
         };
-        let line = line.trim();
         if line.is_empty() {
             continue;
         }
@@ -71,7 +106,7 @@ pub fn run(
             Ok(value) => value,
             Err(err) => {
                 write_response(
-                    &stdout,
+                    output,
                     &json!({"id": null, "ok": false, "error": format!("请求不是合法 JSON: {err}")}),
                 );
                 continue;
@@ -82,23 +117,23 @@ pub fn run(
 
         match method {
             "ping" => {
-                write_response(&stdout, &json!({"id": id, "ok": true, "result": "pong"}));
+                write_response(output, &json!({"id": id, "ok": true, "result": "pong"}));
             }
             "shutdown" => {
-                write_response(&stdout, &json!({"id": id, "ok": true, "result": "bye"}));
+                write_response(output, &json!({"id": id, "ok": true, "result": "bye"}));
                 return ExitCode::SUCCESS;
             }
             "reload_masterdata" => {
-                let result = handle_reload(&renderer, &request, region);
-                write_result(&stdout, id, result);
+                let result = handle_reload(renderer, &request, region);
+                write_result(output, id, result);
             }
             "render" => {
-                let result = handle_render(&renderer, &assets, &asset_urls, &request);
-                write_result(&stdout, id, result);
+                let result = handle_render(renderer, assets, asset_urls, &request);
+                write_result(output, id, result);
             }
             other => {
                 write_response(
-                    &stdout,
+                    output,
                     &json!({"id": id, "ok": false, "error": format!("未知方法: {other}")}),
                 );
             }
@@ -109,19 +144,18 @@ pub fn run(
     ExitCode::SUCCESS
 }
 
-fn write_result(stdout: &std::io::Stdout, id: Value, result: Result<Value, String>) {
+fn write_result(output: &mut impl Write, id: Value, result: Result<Value, String>) {
     match result {
-        Ok(result) => write_response(stdout, &json!({"id": id, "ok": true, "result": result})),
-        Err(error) => write_response(stdout, &json!({"id": id, "ok": false, "error": error})),
+        Ok(result) => write_response(output, &json!({"id": id, "ok": true, "result": result})),
+        Err(error) => write_response(output, &json!({"id": id, "ok": false, "error": error})),
     }
 }
 
-fn write_response(stdout: &std::io::Stdout, value: &Value) {
-    let mut lock = stdout.lock();
-    if let Err(err) = serde_json::to_writer(&mut lock, value)
+fn write_response(output: &mut impl Write, value: &Value) {
+    if let Err(err) = serde_json::to_writer(&mut *output, value)
         .map_err(std::io::Error::other)
-        .and_then(|_| lock.write_all(b"\n"))
-        .and_then(|_| lock.flush())
+        .and_then(|_| output.write_all(b"\n"))
+        .and_then(|_| output.flush())
     {
         tracing::error!("写 stdout 失败: {err}");
     }
@@ -153,28 +187,19 @@ fn handle_render(
         .get("card")
         .cloned()
         .ok_or("render 缺少 params.card")?;
-    let page = params
-        .get("page")
-        .and_then(|p| p.as_i64())
-        .map(|p| p as i32);
-    let format = params
-        .get("format")
-        .and_then(|f| f.as_str())
-        .unwrap_or("jpeg");
-    let inline = params
-        .get("inline")
-        .and_then(|i| i.as_bool())
-        .unwrap_or(false);
-    let output = params.get("output").and_then(|o| o.as_str());
+    let RenderParams {
+        page,
+        format,
+        inline,
+        output,
+        profile,
+    } = render_params(params)?;
     if !inline && output.is_none() {
         return Err("render 需要 params.output（或 inline:true）".into());
     }
 
     let card = crate::card_from_value(card_value, page)?;
-    let profile = params
-        .get("profile")
-        .filter(|p| !p.is_null())
-        .map(sekai_profile_renderer::profile::ProfileData::from_json);
+    let profile = profile.map(sekai_profile_renderer::profile::ProfileData::from_json);
 
     let warnings = renderer.validate_card(&card);
 
@@ -211,4 +236,125 @@ fn handle_render(
         result["data"] = json!(base64::engine::general_purpose::STANDARD.encode(&data));
     }
     Ok(result)
+}
+
+/// `render` 的可选参数。
+struct RenderParams<'a> {
+    page: Option<i32>,
+    format: &'a str,
+    inline: bool,
+    output: Option<&'a str>,
+    profile: Option<&'a Value>,
+}
+
+/// 读取 `render` 的可选参数。缺省或 `null` 取默认值；给出但类型或范围不符时报错，
+/// 不静默回落到默认值。
+fn render_params(params: &Value) -> Result<RenderParams<'_>, String> {
+    Ok(RenderParams {
+        page: optional_param(params, "page", "i32 范围内的整数", |value| {
+            value.as_i64().and_then(|page| i32::try_from(page).ok())
+        })?,
+        format: optional_param(params, "format", "字符串", Value::as_str)?.unwrap_or("jpeg"),
+        inline: optional_param(params, "inline", "布尔值", Value::as_bool)?.unwrap_or(false),
+        output: optional_param(params, "output", "字符串", Value::as_str)?,
+        profile: optional_param(params, "profile", "对象", |value| {
+            value.is_object().then_some(value)
+        })?,
+    })
+}
+
+fn optional_param<'a, T>(
+    params: &'a Value,
+    name: &str,
+    expected: &str,
+    read: impl FnOnce(&'a Value) -> Option<T>,
+) -> Result<Option<T>, String> {
+    match params.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => read(value)
+            .map(Some)
+            .ok_or_else(|| format!("render params.{name} 必须是{expected}，收到 {value}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_session(input: &[u8]) -> Vec<Value> {
+        let renderer = CustomProfileRenderer::new(Arc::new(JsonMasterDataProvider::empty()));
+        let assets = Arc::new(AssetStore::new(1));
+        let mut output = Vec::new();
+        let _ = session(
+            input,
+            &mut output,
+            &renderer,
+            &assets,
+            &AssetUrls::default(),
+            Region::Cn,
+        );
+        String::from_utf8(output)
+            .expect("responses are UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("response is JSON"))
+            .collect()
+    }
+
+    #[test]
+    fn a_request_line_that_is_not_utf8_is_answered_and_the_session_continues() {
+        let responses = run_session(b"\xff\xfe\n{\"id\": 1, \"method\": \"ping\"}\n");
+        assert_eq!(responses.len(), 2, "{responses:?}");
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert_eq!(responses[0]["ok"], false);
+        assert_eq!(responses[1]["id"], 1);
+        assert_eq!(responses[1]["result"], "pong");
+    }
+
+    #[test]
+    fn malformed_requests_are_answered_without_ending_the_session() {
+        let responses = run_session(
+            b"not json\n[1, 2]\n{\"id\": 2, \"method\": \"render\"}\n{\"id\": 3, \"method\": \"ping\"}\n",
+        );
+        assert_eq!(responses.len(), 4, "{responses:?}");
+        assert!(responses[..3]
+            .iter()
+            .all(|response| response["ok"] == false));
+        assert_eq!(responses[2]["id"], 2);
+        assert_eq!(responses[3]["result"], "pong");
+    }
+
+    #[test]
+    fn render_params_accept_absent_and_null_values() {
+        let absent = json!({ "page": null, "profile": null });
+        let params = render_params(&absent).expect("params");
+        assert_eq!(params.page, None);
+        assert_eq!(params.format, "jpeg");
+        assert!(!params.inline);
+        assert_eq!(params.output, None);
+        assert!(params.profile.is_none());
+        let given = json!({
+            "page": 3, "format": "png", "inline": true, "output": "out.png", "profile": {}
+        });
+        let params = render_params(&given).expect("params");
+        assert_eq!(params.page, Some(3));
+        assert_eq!(params.format, "png");
+        assert!(params.inline);
+        assert_eq!(params.output, Some("out.png"));
+        assert!(params.profile.is_some());
+    }
+
+    #[test]
+    fn render_params_of_the_wrong_type_or_range_are_rejected() {
+        for params in [
+            json!({ "page": 4_294_967_297_i64 }),
+            json!({ "page": "2" }),
+            json!({ "page": 1.5 }),
+            json!({ "format": 1 }),
+            json!({ "inline": "true" }),
+            json!({ "output": 7 }),
+            json!({ "profile": "profile.json" }),
+        ] {
+            assert!(render_params(&params).is_err(), "{params} was accepted");
+        }
+    }
 }

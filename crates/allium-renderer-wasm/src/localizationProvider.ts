@@ -56,6 +56,12 @@ export class LocalizationProviderManager {
     this.concurrency = concurrency;
   }
 
+  /**
+   * Resolves every unique request with at most `concurrency` provider calls in
+   * flight. The first failure rejects the call, starts no further requests and
+   * aborts the signal handed to the requests still in flight, as does an abort
+   * of `signal`.
+   */
   async resolve(
     requests: readonly LocalizationRequest[],
     signal: AbortSignal = new AbortController().signal,
@@ -68,25 +74,35 @@ export class LocalizationProviderManager {
     this.counters.requested += requests.length;
     this.counters.unique += unique.length;
     const values = new Map<string, string>();
+    const scope = new AbortController();
+    const forwardAbort = () => scope.abort(abortReason(signal));
+    if (signal.aborted) forwardAbort();
+    else signal.addEventListener("abort", forwardAbort, { once: true });
+    const fail: (error: unknown) => never = (error) => {
+      this.counters.failures += 1;
+      scope.abort(error);
+      throw error;
+    };
     let cursor = 0;
     const worker = async () => {
       while (cursor < unique.length) {
-        if (signal.aborted) throw abortReason(signal);
+        if (scope.signal.aborted) throw abortReason(scope.signal);
         const request = unique[cursor++];
         this.counters.active += 1;
         this.counters.peakActive = Math.max(this.counters.peakActive, this.counters.active);
         let value: string | null;
         try {
-          value = await this.provider.provide(request, { signal });
+          value = await this.provider.provide(request, { signal: scope.signal });
         } catch (error) {
-          this.counters.failures += 1;
-          throw error;
+          // A request cancelled by an earlier failure or by the caller is not
+          // a provider failure of its own.
+          if (scope.signal.aborted) throw error;
+          fail(error);
         } finally {
           this.counters.active -= 1;
         }
         if (typeof value !== "string") {
-          this.counters.failures += 1;
-          throw new Error(`localization provider returned no text for ${request.locale}:${request.key}`);
+          fail(new Error(`localization provider returned no text for ${request.locale}:${request.key}`));
         }
         this.counters.resolved += 1;
         values.set(request.key, value);
@@ -99,6 +115,7 @@ export class LocalizationProviderManager {
       ));
       return Object.fromEntries(values);
     } finally {
+      signal.removeEventListener("abort", forwardAbort);
       this.counters.resolveMs += performance.now() - started;
     }
   }

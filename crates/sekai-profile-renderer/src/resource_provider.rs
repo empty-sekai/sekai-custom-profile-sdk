@@ -23,9 +23,10 @@ pub struct ResourceProvider {
 impl ResourceProvider {
     /// 创建指定大小的资源缓存。
     ///
-    /// `max_mb` 为最大缓存大小（MB），超限时按 LRU 驱逐旧条目。
+    /// `max_mb` 为最大缓存大小（MB），超限时按 LRU 驱逐旧条目；
+    /// 超出 `usize` 字节数的预算按不限处理。
     pub fn new(max_mb: usize) -> Self {
-        Self::with_max_bytes(max_mb * 1024 * 1024)
+        Self::with_max_bytes(max_mb.saturating_mul(1024 * 1024))
     }
 
     /// 创建指定字节数的资源缓存。
@@ -121,5 +122,17 @@ impl ResourceProvider {
             let mut bytes = self.current_bytes.lock().unwrap_or_else(|e| e.into_inner());
             *bytes = bytes.saturating_sub(old.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResourceProvider;
+
+    #[test]
+    fn budgets_too_large_to_count_in_bytes_saturate() {
+        let provider = ResourceProvider::new(usize::MAX);
+        provider.put("probe".into(), vec![1, 2, 3]);
+        assert_eq!(provider.get("probe").as_deref(), Some(&vec![1, 2, 3]));
     }
 }

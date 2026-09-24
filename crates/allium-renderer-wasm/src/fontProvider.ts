@@ -61,6 +61,12 @@ export class FontProviderManager {
     this.concurrency = concurrency;
   }
 
+  /**
+   * Resolves every unique request with at most `concurrency` provider calls in
+   * flight. The first failure rejects the call, starts no further requests and
+   * aborts the signal handed to the requests still in flight, as does an abort
+   * of `signal`.
+   */
   async resolve(
     requests: readonly FontRequest[],
     signal: AbortSignal = new AbortController().signal,
@@ -73,33 +79,42 @@ export class FontProviderManager {
     this.counters.requested += requests.length;
     this.counters.unique += unique.length;
     const values = new Map<string, ArrayBuffer>();
+    const scope = new AbortController();
+    const forwardAbort = () => scope.abort(abortReason(signal));
+    if (signal.aborted) forwardAbort();
+    else signal.addEventListener("abort", forwardAbort, { once: true });
+    const fail: (error: unknown) => never = (error) => {
+      this.counters.failures += 1;
+      scope.abort(error);
+      throw error;
+    };
     let cursor = 0;
     const worker = async () => {
       while (cursor < unique.length) {
-        if (signal.aborted) throw abortReason(signal);
+        if (scope.signal.aborted) throw abortReason(scope.signal);
         const request = unique[cursor++];
         this.counters.active += 1;
         this.counters.peakActive = Math.max(this.counters.peakActive, this.counters.active);
         let provided: ProvidedFont | null;
         try {
-          provided = await this.provider.provide(request, { signal });
+          provided = await this.provider.provide(request, { signal: scope.signal });
         } catch (error) {
-          this.counters.failures += 1;
-          throw error;
+          // A request cancelled by an earlier failure or by the caller is not
+          // a provider failure of its own.
+          if (scope.signal.aborted) throw error;
+          fail(error);
         } finally {
           this.counters.active -= 1;
         }
         const bytes = provided?.bytes;
         if (!(bytes instanceof ArrayBuffer) && !(bytes instanceof Uint8Array)) {
-          this.counters.failures += 1;
-          throw new Error(`font provider returned no bytes for ${request.region}:${request.family}`);
+          fail(new Error(`font provider returned no bytes for ${request.region}:${request.family}`));
         }
         const snapshot = bytes instanceof ArrayBuffer
           ? bytes.slice(0)
           : Uint8Array.from(bytes).buffer;
         if (snapshot.byteLength === 0) {
-          this.counters.failures += 1;
-          throw new Error(`font provider returned an empty font for ${request.region}:${request.family}`);
+          fail(new Error(`font provider returned an empty font for ${request.region}:${request.family}`));
         }
         this.counters.loaded += 1;
         this.counters.bytes += snapshot.byteLength;
@@ -113,6 +128,7 @@ export class FontProviderManager {
       ));
       return values;
     } finally {
+      signal.removeEventListener("abort", forwardAbort);
       this.counters.resolveMs += performance.now() - started;
     }
   }
