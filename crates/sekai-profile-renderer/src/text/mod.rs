@@ -138,7 +138,7 @@ fn effective_vertex_alpha(markup_alpha: u8, base_alpha_u8: u8) -> f32 {
 }
 
 fn debug_text_probe_enabled() -> bool {
-    std::env::var("SCAPUS_DEBUG_TMP_PROBE")
+    std::env::var("SEKAI_PROFILE_DEBUG_TMP_PROBE")
         .ok()
         .map(|v| {
             let v = v.trim();
@@ -843,7 +843,7 @@ fn layout_text_ops(
     let capture_timing_enabled = timing_enabled;
     let rich_parse_started = capture_timing_enabled.then(std::time::Instant::now);
     let mut capture_timings = TextSdfCaptureTimings::default();
-    if std::env::var("SCAPUS_DEBUG_TEXT_CODEPOINTS")
+    if std::env::var("SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS")
         .ok()
         .map(|v| {
             let v = v.trim();

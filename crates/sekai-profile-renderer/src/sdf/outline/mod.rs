@@ -189,7 +189,7 @@ pub fn resolve_font_path(family: &str) -> Option<PathBuf> {
 }
 
 fn font_path_candidates(file_names: &[&str]) -> Vec<PathBuf> {
-    let configured_dirs = ["SCAPUS_FONT_DIR", "FONT_DIR"]
+    let configured_dirs = ["SEKAI_PROFILE_FONT_DIR", "FONT_DIR"]
         .into_iter()
         .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
         .collect::<Vec<_>>();
@@ -245,13 +245,13 @@ fn resolve_glyph_id(font_path: &Path, ch: char) -> Option<u32> {
 
 /// EDT 加速开关 + 超采样因子（运行时配置，默认关闭走解析法）。
 ///
-/// `SCAPUS_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，现有生产行为）。
+/// `SEKAI_PROFILE_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，现有生产行为）。
 /// 设为 1-4 → EDT 法，值即超采样因子（按该倍数的点阵光栅化后做距离变换，
 /// 倍数越高边缘越精确、光栅化越慢）。
 fn edt_supersample() -> Option<usize> {
     static CFG: OnceLock<Option<usize>> = OnceLock::new();
     *CFG.get_or_init(|| {
-        let raw = std::env::var("SCAPUS_SDF_EDT").ok()?;
+        let raw = std::env::var("SEKAI_PROFILE_SDF_EDT").ok()?;
         let ss: usize = raw.trim().parse().ok()?;
         (1..=4).contains(&ss).then_some(ss)
     })
@@ -290,7 +290,7 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
 
 /// 离线 atlas 构建使用的确定性生成方法。
 ///
-/// 该入口不读取 `SCAPUS_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，
+/// 该入口不读取 `SEKAI_PROFILE_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，
 /// 且同一进程可以构建不同方法的候选 atlas。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OfflineGenerationMethod {

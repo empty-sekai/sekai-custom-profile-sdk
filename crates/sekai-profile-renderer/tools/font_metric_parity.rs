@@ -47,7 +47,7 @@ fn main() {
 
     let Some(path) = resolve_font_path(&family) else {
         eprintln!("font family {family:?} did not resolve to a file on disk");
-        eprintln!("set FONT_DIR (or SCAPUS_FONT_DIR) to the directory holding it");
+        eprintln!("set FONT_DIR (or SEKAI_PROFILE_FONT_DIR) to the directory holding it");
         std::process::exit(2);
     };
     println!("family : {family}");

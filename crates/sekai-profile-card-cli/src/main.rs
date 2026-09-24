@@ -56,7 +56,7 @@ render-card：自定义名片渲染 CLI
                          bonds_honor character/word 的游戏资源目录结构
   --static-url <url>     静态素材 URL 前缀（边框/图标等，接 /<key>.png）；
                          省略时静态 key 也走 --assets-url
-  --font-dir <dir>       字体目录（等效 SCAPUS_FONT_DIR）
+  --font-dir <dir>       字体目录（等效 SEKAI_PROFILE_FONT_DIR）
   --format <fmt>         输出格式：jpeg（默认）/ png / png-transparent
   --region <code>        服务器 region：cn（默认）/ jp / tw / kr / en。
                          驱动字体 FOT→FZ 映射（仅 cn）、CJK fallback 字体族、
@@ -373,8 +373,8 @@ fn main() -> ExitCode {
     };
 
     if let Some(font_dir) = &args.font_dir {
-        // 引擎按 SCAPUS_FONT_DIR 解析字体文件。
-        std::env::set_var("SCAPUS_FONT_DIR", font_dir);
+        // 引擎按 SEKAI_PROFILE_FONT_DIR 解析字体文件。
+        std::env::set_var("SEKAI_PROFILE_FONT_DIR", font_dir);
     }
 
     // masterdata 来源：本地目录或 URL 前缀（二选一，目录优先）。

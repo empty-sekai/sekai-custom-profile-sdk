@@ -3240,7 +3240,7 @@ fn realtime_edt_pool() -> &'static rayon::ThreadPool {
     use std::sync::OnceLock;
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = std::env::var("SCAPUS_REALTIME_EDT_THREADS")
+        let threads = std::env::var("SEKAI_PROFILE_REALTIME_EDT_THREADS")
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .filter(|threads| (1..=4).contains(threads))

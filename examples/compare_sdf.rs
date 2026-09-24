@@ -6,7 +6,7 @@
 //! 例:
 //!   compare-sdf FOT-RodinNTLGPro-DB "永和あ国A1" 2
 //!
-//! 环境变量: SCAPUS_FONT_DIR 字体目录
+//! 环境变量: SEKAI_PROFILE_FONT_DIR 字体目录
 //!
 //! 解析法是当前生产用的、视觉正确的输出，作为真值。EDT 法误差越小越好。
 

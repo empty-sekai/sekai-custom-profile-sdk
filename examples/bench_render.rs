@@ -224,9 +224,9 @@ fn main() -> Result<(), String> {
     // 预热：填充 glyph/素材缓存，剔除冷启动噪声，测稳态渲染
     eprintln!("预热（首次渲染填充缓存）...");
 
-    // SCAPUS_DISABLE_DOWNSAMPLE=1 时关闭巨型字降采样（精确光栅化），
+    // SEKAI_PROFILE_DISABLE_DOWNSAMPLE=1 时关闭巨型字降采样（精确光栅化），
     // 与默认降采样在同一二进制内对比墙钟，消除 build-to-build 方差。
-    if std::env::var("SCAPUS_DISABLE_DOWNSAMPLE").as_deref() == Ok("1") {
+    if std::env::var("SEKAI_PROFILE_DISABLE_DOWNSAMPLE").as_deref() == Ok("1") {
         sekai_profile_renderer::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE
             .store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("[bench] DISABLE_DOWNSAMPLE=1 → 巨型字精确光栅化（不降采样）");
@@ -235,10 +235,10 @@ fn main() -> Result<(), String> {
     let warm = renderer.render_page_with_profile(&card.custom_profile_card, Some(&profile))?;
     eprintln!("预热完成，输出 {} bytes，元素数={elem_count}", warm.len());
 
-    // A/B 像素对比模式（SCAPUS_AB_COMPARE=1）：同一名片渲两遍，逐像素比对，
+    // A/B 像素对比模式（SEKAI_PROFILE_AB_COMPARE=1）：同一名片渲两遍，逐像素比对，
     // 量化巨型字降采样的视觉代价（精确光栅化 vs 降采样）。
     // 用无损 PNG 输出避免 JPEG 压缩噪声干扰对比。
-    if std::env::var("SCAPUS_AB_COMPARE").as_deref() == Ok("1") {
+    if std::env::var("SEKAI_PROFILE_AB_COMPARE").as_deref() == Ok("1") {
         use std::sync::atomic::Ordering;
         let flag = &sekai_profile_renderer::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE;
         let (name_a, name_b) = ("精确光栅化(不降采样)", "巨型字降采样");
