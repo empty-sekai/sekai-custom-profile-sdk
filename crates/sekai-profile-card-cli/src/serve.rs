@@ -170,11 +170,11 @@ fn handle_render(
         return Err("render 需要 params.output（或 inline:true）".into());
     }
 
-    let mut card = crate::card_from_value(card_value, page)?;
+    let card = crate::card_from_value(card_value, page)?;
     let profile = params
         .get("profile")
         .filter(|p| !p.is_null())
-        .map(|body| crate::enrich_from_profile_value(body, renderer, &mut card));
+        .map(sekai_profile_renderer::profile::ProfileData::from_json);
 
     let warnings = renderer.validate_card(&card);
 
@@ -194,7 +194,7 @@ fn handle_render(
         }
     }
 
-    let missing_assets = crate::missing_asset_keys(renderer, &card, assets);
+    let missing_assets = crate::missing_asset_keys(renderer, &card, profile.as_ref(), assets);
 
     let data = crate::render_with_format(renderer, &card, profile.as_ref(), format)?;
 

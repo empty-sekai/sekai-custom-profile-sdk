@@ -6,7 +6,8 @@
 //! ## 设计原则
 //! - 纯数据结构，不依赖 skia 或任何渲染逻辑
 //! - JSON → struct 转换逻辑只有这一份（`ProfileData::from_json`）
-//! - Honor level 注入逻辑只有这一份（`build_honor_maps`）
+//! - 名片上称号的等级与持有判定由 core 的
+//!   [`sekai_profile_renderer_core::profile_data::placed_honor_level`] 决定
 
 use std::collections::HashMap;
 
@@ -157,6 +158,8 @@ pub struct ProfileData {
     pub user_honor_missions: HashMap<String, i32>,
     /// 玩家拥有卡牌的运行时状态索引。
     pub user_cards: HashMap<i32, UserCardInfo>,
+    /// 玩家持有的称号与羁绊称号等级（userHonors / userBondsHonors）。
+    pub owned_honors: sekai_profile_renderer_core::profile_data::OwnedHonorLevels,
 }
 
 /// 中性预览用 Profile 数据。
@@ -292,6 +295,7 @@ pub fn neutral_preview_profile() -> ProfileData {
         ],
         user_honor_missions,
         user_cards,
+        owned_honors: Default::default(),
     }
 }
 
@@ -301,58 +305,6 @@ fn preview_music_stats(clear: i32, full_combo: i32, all_perfect: i32) -> MusicDi
         full_combo,
         all_perfect,
     }
-}
-
-// ============================================================
-// Honor Level Maps 构建（唯一一份）
-// ============================================================
-
-/// 从 profile JSON 提取 honor level 映射表
-///
-/// 返回 (honor_map, bonds_honor_map, char_rank_map)
-pub fn build_honor_maps(
-    body: &serde_json::Value,
-) -> (HashMap<i32, i32>, HashMap<i32, i32>, HashMap<i32, i32>) {
-    let mut honor_map = HashMap::new();
-    if let Some(arr) = body.get("userHonors").and_then(|v| v.as_array()) {
-        for h in arr {
-            if let Some(inner) = h.as_array() {
-                if inner.len() >= 2 {
-                    let id = inner[0].as_i64().unwrap_or(0) as i32;
-                    let lvl = inner[1].as_i64().unwrap_or(1) as i32;
-                    honor_map.insert(id, lvl);
-                }
-            }
-        }
-    }
-
-    let mut bh_map = HashMap::new();
-    if let Some(arr) = body.get("userBondsHonors").and_then(|v| v.as_array()) {
-        for b in arr {
-            if let (Some(id), Some(lvl)) = (
-                b.get("bondsHonorId").and_then(|x| x.as_i64()),
-                b.get("level").and_then(|x| x.as_i64()),
-            ) {
-                bh_map.insert(id as i32, lvl as i32);
-            }
-        }
-    }
-
-    // char_rank_map 从 ProfileData.char_ranks 构建更合适，
-    // 但 profile JSON 中也有 userCharacters，这里直接提取
-    let mut char_map = HashMap::new();
-    if let Some(chars) = body.get("userCharacters").and_then(|v| v.as_array()) {
-        for c in chars {
-            if let (Some(cid), Some(rank)) = (
-                c.get("characterId").and_then(|v| v.as_i64()),
-                c.get("characterRank").and_then(|v| v.as_i64()),
-            ) {
-                char_map.insert(cid as i32, rank as i32);
-            }
-        }
-    }
-
-    (honor_map, bh_map, char_map)
 }
 
 // ============================================================
@@ -381,6 +333,8 @@ impl ProfileData {
             pd.mvp = m.get("mvp").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             pd.superstar = m.get("superStar").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         }
+        pd.owned_honors =
+            sekai_profile_renderer_core::profile_data::OwnedHonorLevels::from_json(body);
         if let Some(ch) = body.get("userChallengeLiveSoloResult") {
             pd.challenge_score = ch.get("highScore").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             pd.challenge_character_id =
@@ -665,6 +619,7 @@ impl ProfileData {
                 .map(|(key, &value)| (key.clone(), value))
                 .collect(),
             user_cards,
+            owned_honors: self.owned_honors.clone(),
         }
     }
 }
@@ -725,6 +680,8 @@ mod interaction_profile_tests {
             "userChallengeLiveSoloStages": [{ "characterId": 2, "rank": 9 }],
             "userStoryFavorites": [{ "storyId": 30, "storyType": "event_story" }],
             "userHonorMissions": [{ "honorMissionType": "live_master", "progress": 50 }],
+            "userHonors": [[20, 4, null]],
+            "userBondsHonors": [{ "bondsHonorId": 21, "level": 2 }],
             "userMusicDifficultyClearCount": [
                 { "musicDifficultyType": "expert", "liveClear": 40, "fullCombo": 30, "allPerfect": 20 },
                 { "musicDifficultyType": "append", "liveClear": 4, "fullCombo": 3, "allPerfect": 2 }

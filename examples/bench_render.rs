@@ -19,7 +19,7 @@ use std::time::Instant;
 use sekai_profile_renderer::assets::AssetStore;
 use sekai_profile_renderer::init::install_fonts;
 use sekai_profile_renderer::masterdata::{MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo};
-use sekai_profile_renderer::profile::{build_honor_maps, ProfileData};
+use sekai_profile_renderer::profile::ProfileData;
 use sekai_profile_renderer::renderer::CustomProfileRenderer;
 use sekai_profile_renderer::types::{
     BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, HonorGroupEntry, StampEntry,
@@ -208,13 +208,9 @@ fn main() -> Result<(), String> {
     let body: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&input).map_err(|e| format!("read {}: {e}", input.display()))?)
             .map_err(|e| format!("parse: {e}"))?;
-    let mut cards: Vec<UserCustomProfileCard> = serde_json::from_value(
+    let cards: Vec<UserCustomProfileCard> = serde_json::from_value(
         body.get("userCustomProfileCards").cloned().ok_or("missing userCustomProfileCards")?,
     ).map_err(|e| format!("parse cards: {e}"))?;
-    let (hl, bl, cr) = build_honor_maps(&body);
-    for c in &mut cards {
-        renderer.enrich_honor_levels(&mut c.custom_profile_card, &hl, &bl, &cr);
-    }
     let profile = ProfileData::from_json(&body);
     let card = cards.iter().find(|c| c.seq == seq).ok_or_else(|| format!("seq {seq} not found"))?;
 

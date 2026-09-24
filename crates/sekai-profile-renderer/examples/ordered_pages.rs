@@ -142,12 +142,7 @@ fn main() -> Result<(), String> {
     let profile = profile_body.as_ref().map(ProfileData::from_json);
 
     for user_card in &cards {
-        let mut card = user_card.custom_profile_card.clone();
-        if let Some(body) = &profile_body {
-            let (honor_levels, bonds_levels, char_ranks) =
-                sekai_profile_renderer::profile::build_honor_maps(body);
-            renderer.enrich_honor_levels(&mut card, &honor_levels, &bonds_levels, &char_ranks);
-        }
+        let card = user_card.custom_profile_card.clone();
         match renderer.render_full_card_sdf_scalar_f32_candidate(&card, profile.as_ref()) {
             Ok(output) => {
                 let digest = hex::encode(Sha256::digest(&output.rgba));

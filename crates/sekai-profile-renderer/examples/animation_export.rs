@@ -208,12 +208,7 @@ fn main() -> Result<(), String> {
     }
 
     for user_card in &cards {
-        let mut card = user_card.custom_profile_card.clone();
-        if let Some(body) = &profile_body {
-            let (honor_levels, bonds_levels, char_ranks) =
-                sekai_profile_renderer::profile::build_honor_maps(body);
-            renderer.enrich_honor_levels(&mut card, &honor_levels, &bonds_levels, &char_ranks);
-        }
+        let card = user_card.custom_profile_card.clone();
         for format in &args.formats {
             let preset = resolve_preset(&args.preset, Some(*format))?;
             let document_key = format!("seq{}-{}", user_card.seq, preset.format.extension());

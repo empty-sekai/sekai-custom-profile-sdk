@@ -8,8 +8,8 @@ pub mod fonts {
     pub const EMPHASIS: &str = "FZZhengHei-EB-GBK";
     /// Family for the Live Master progress number.
     ///
-    /// That number is plain UI text in the game rather than TMP text, so it is
-    /// drawn with an open-licensed CJK sans instead of one of the game's own
-    /// display faces.
+    /// The game draws that number with digit sprites outside the static asset
+    /// set, so the engine draws it as plain text with an open-licensed CJK sans
+    /// instead of one of the game's own display faces.
     pub const LIVE_MASTER_PROGRESS: &str = "Source Han Sans SC";
 }

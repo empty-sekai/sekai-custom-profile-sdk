@@ -196,12 +196,12 @@ fn render_live_master_overlay(
     draw_live_master_progress_text(canvas, &progress.to_string(), cx, cy);
 }
 
-/// Draws Live Master progress with the same simple-text recipe as the game.
+/// Draws the Live Master clear count as plain centred text.
 ///
-/// This number is not TMP text: the game draws it with a plain UI text component,
-/// so it keeps a simple centred glyph fill rather than going through the SDF
-/// atlas. The face comes from the caller-supplied font directory like every other
-/// family the engine draws.
+/// The game draws this count with digit sprites that are not part of the
+/// static asset set, so the engine approximates it with a simple glyph fill
+/// rather than TMP text through the SDF atlas. The face comes from the
+/// caller-supplied font directory like every other family the engine draws.
 pub(crate) fn draw_live_master_progress_text(
     canvas: &Canvas,
     text: &str,
@@ -242,10 +242,7 @@ fn render_stars(
     }
 
     let paint = Paint::default();
-    let mut level = honor_level % 10;
-    if level == 0 && honor_level > 0 {
-        level = 10;
-    }
+    let level = sekai_profile_renderer_core::masterdata::honor_level_star_count(honor_level);
     let base_y = -h / 2.0 + 63.0;
     let base_x = if full_size { -w / 2.0 + 54.0 } else { -40.0 };
     let normal_count = level.min(5);

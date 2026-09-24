@@ -53,7 +53,7 @@ impl AssetRequirements {
 
 /// Collects possible asset keys, including alternatives that need not all exist.
 pub fn collect_card_asset_keys(card: &CustomProfileCard, md: &MasterData) -> Vec<String> {
-    card_asset_requirements(card, md).keys()
+    card_asset_requirements(card, None, md).keys()
 }
 
 /// Reports missing assets without treating an available frame fallback as missing.
@@ -62,10 +62,26 @@ pub fn missing_card_asset_keys(
     md: &MasterData,
     available: impl FnMut(&str) -> bool,
 ) -> Vec<String> {
-    card_asset_requirements(card, md).missing(available)
+    card_asset_requirements(card, None, md).missing(available)
 }
 
-fn card_asset_requirements(card: &CustomProfileCard, md: &MasterData) -> AssetRequirements {
+/// Same as [`missing_card_asset_keys`], with the card's honors taken at the
+/// levels the player owns; honors the player does not own are not drawn and
+/// need no assets.
+pub fn missing_card_asset_keys_with_profile(
+    card: &CustomProfileCard,
+    profile: Option<&ProfileData>,
+    md: &MasterData,
+    available: impl FnMut(&str) -> bool,
+) -> Vec<String> {
+    card_asset_requirements(card, profile, md).missing(available)
+}
+
+fn card_asset_requirements(
+    card: &CustomProfileCard,
+    profile: Option<&ProfileData>,
+    md: &MasterData,
+) -> AssetRequirements {
     let mut keys = AssetRequirements::default();
 
     for e in &card.stamps {
@@ -105,11 +121,27 @@ fn card_asset_requirements(card: &CustomProfileCard, md: &MasterData) -> AssetRe
         }
     }
 
+    let owned_honors = profile.map(|profile| &profile.owned_honors);
     for e in &card.honors {
-        collect_honor_keys(e.id, e.honor_level, e.full_size, md, &mut keys);
+        if let Some(level) = sekai_profile_renderer_core::profile_data::placed_honor_level(
+            owned_honors,
+            e.id,
+            e.honor_level,
+        ) {
+            collect_honor_keys(e.id, level, e.full_size, md, &mut keys);
+        }
     }
 
     for e in &card.bonds_honors {
+        if sekai_profile_renderer_core::profile_data::placed_bonds_honor_level(
+            owned_honors,
+            e.id,
+            e.honor_level,
+        )
+        .is_none()
+        {
+            continue;
+        }
         collect_bonds_honor_keys(
             e.id,
             e.full_size,
@@ -259,27 +291,16 @@ fn collect_bonds_honor_keys(
     md: &MasterData,
     keys: &mut AssetRequirements,
 ) {
-    let entry = match md.get_bonds_honor(bonds_honor_id) {
-        Some(e) => e,
-        None => return,
-    };
-    let (mut cid1, mut cid2) = if inverse {
-        (entry.game_character_unit_id2, entry.game_character_unit_id1)
-    } else {
-        (entry.game_character_unit_id1, entry.game_character_unit_id2)
-    };
-    if use_unit_vs {
-        cid1 = md.resolve_unit_vs_sd(cid1, cid2);
-        cid2 = md.resolve_unit_vs_sd(cid2, cid1);
-    }
-
-    keys.push(format!("bonds_honor/chr_sd_{:02}_01", cid1));
-    keys.push(format!("bonds_honor/chr_sd_{:02}_01", cid2));
-
-    if full_size {
-        if let Some(word) = md.get_bonds_honor_word(word_id) {
-            let abn = &word.assetbundle_name;
-            keys.push(format!("bonds_honor/word/{}_01", abn));
+    if let Some(plan) = sekai_profile_renderer_core::masterdata::bonds_honor_asset_plan(
+        md,
+        bonds_honor_id,
+        full_size,
+        word_id,
+        inverse,
+        use_unit_vs,
+    ) {
+        for key in plan.resources() {
+            keys.groups.push(vec![key.clone()]);
         }
     }
 }
@@ -404,6 +425,135 @@ mod tests {
             );
         }
     }
+    struct PairHonorProvider;
+
+    impl crate::masterdata::MasterDataProvider for PairHonorProvider {
+        fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _: i32) -> Option<crate::types::CardEntry> {
+            None
+        }
+        fn resolve_color(&self, _: i32) -> Option<crate::masterdata::ResolvedColor> {
+            None
+        }
+        fn resolve_font(&self, _: i32) -> Option<String> {
+            None
+        }
+        fn resolve_stamp(&self, _: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(&self, _: &str, _: i32) -> Option<crate::masterdata::ResourceInfo> {
+            None
+        }
+        fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, id: i32) -> Option<crate::types::BondsHonorEntry> {
+            Some(crate::types::BondsHonorEntry {
+                id,
+                game_character_unit_id1: 21,
+                game_character_unit_id2: 1,
+                honor_rarity: "middle".to_string(),
+                configurable_unit_virtual_singer: true,
+            })
+        }
+        fn get_bonds_honor_word(&self, id: i64) -> Option<crate::types::BondsHonorWordEntry> {
+            Some(crate::types::BondsHonorWordEntry {
+                id: id as i32,
+                assetbundle_name: "honorname_0121_01".to_string(),
+                bonds_group_id: 1,
+                seq: 1,
+            })
+        }
+        fn get_honor(&self, _: i32) -> Option<crate::types::HonorEntry> {
+            None
+        }
+        fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
+            match (self_id, partner_id) {
+                (21, 1) => 27,
+                // Only reachable when the partner was already substituted.
+                (1, 27) => 99,
+                _ => self_id,
+            }
+        }
+        fn font_count(&self) -> usize {
+            0
+        }
+        fn color_count(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn card_honors_follow_the_levels_the_player_owns() {
+        let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "bondsHonors": [
+                {
+                    "objectData": {
+                        "layer": 0, "lock": false, "visible": true,
+                        "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                        "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+                    },
+                    "id": 1, "wordId": 5, "fullSize": true, "inverse": false,
+                    "useUnitVirtualSinger": false
+                }
+            ]
+        }))
+        .expect("card fixture");
+        let md = crate::masterdata::MasterData::new(std::sync::Arc::new(PairHonorProvider));
+        let unowned = crate::profile::ProfileData::from_json(&serde_json::json!({
+            "userHonors": [],
+            "userBondsHonors": [{ "bondsHonorId": 2, "level": 3 }]
+        }));
+        assert!(
+            super::missing_card_asset_keys_with_profile(&card, Some(&unowned), &md, |_| false)
+                .is_empty()
+        );
+        let owned = crate::profile::ProfileData::from_json(&serde_json::json!({
+            "userBondsHonors": [{ "bondsHonorId": 1, "level": 3 }]
+        }));
+        assert!(
+            super::missing_card_asset_keys_with_profile(&card, Some(&owned), &md, |_| false)
+                .contains(&"honor/bonds/21".to_string())
+        );
+    }
+
+    #[test]
+    fn card_bonds_honors_request_every_layer_of_the_game_art() {
+        let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "bondsHonors": [{
+                "objectData": {
+                    "layer": 0, "lock": false, "visible": true,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+                },
+                "id": 1, "wordId": 5, "fullSize": true, "inverse": false,
+                "useUnitVirtualSinger": true
+            }]
+        }))
+        .expect("card fixture");
+        let md = crate::masterdata::MasterData::new(std::sync::Arc::new(PairHonorProvider));
+        let mut keys = super::collect_card_asset_keys(&card, &md);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "bonds_honor/chr_sd_01_01",
+                "bonds_honor/chr_sd_27_01",
+                "bonds_honor/word/honorname_0121_01_02",
+                "honor/bonds/1",
+                "honor/bonds/21",
+                "honor/frame_degree_m_2",
+                "honor/icon_degreeLv",
+                "honor/icon_degreeLv6",
+                "honor/mask_degree_main",
+            ]
+        );
+    }
+
     /// A character honor whose masterdata row carries neither a background
     /// bundle nor a frame still has to produce a downloadable key. The
     /// background falls back to the honor's own bundle name, so no key may

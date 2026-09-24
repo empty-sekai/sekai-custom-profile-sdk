@@ -76,6 +76,29 @@ impl ResolvedHonor {
             .asset_plan(self.honor_level, full_size)
     }
 
+    /// Wraps a core resolution with the level it was resolved for.
+    pub fn from_core(
+        value: sekai_profile_renderer_core::masterdata::ResolvedHonor,
+        honor_level: i32,
+    ) -> Self {
+        Self {
+            asset_bundle_name: value.asset_bundle_name,
+            honor_rarity: value.honor_rarity,
+            honor_type: value.honor_type,
+            background_asset_bundle_name: value.background_asset_bundle_name,
+            frame_name: value.frame_name,
+            is_live_master: value.is_live_master,
+            has_star: value.has_star,
+            honor_level,
+            honor_mission_type: value.honor_mission_type,
+        }
+    }
+
+    /// See [`sekai_profile_renderer_core::masterdata::ResolvedHonor::draws_level_stars`].
+    pub fn draws_level_stars(&self) -> bool {
+        self.clone().into_core().draws_level_stars()
+    }
+
     fn into_core(self) -> sekai_profile_renderer_core::masterdata::ResolvedHonor {
         sekai_profile_renderer_core::masterdata::ResolvedHonor {
             asset_bundle_name: self.asset_bundle_name,
@@ -134,7 +157,7 @@ mod resolved_honor_tests {
             resolved.effective_background_asset_bundle_name(),
             "honor_bg_event_cheerteam"
         );
-        assert!(resolved.has_rank_overlay());
+        assert!(!resolved.has_rank_overlay());
     }
 
     #[test]

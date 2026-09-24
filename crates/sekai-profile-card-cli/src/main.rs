@@ -192,30 +192,13 @@ fn card_from_value(
     }
 }
 
-/// 加载 profile 并填充称号等级。
-fn load_profile(
-    path: &PathBuf,
-    renderer: &CustomProfileRenderer,
-    card: &mut CustomProfileCard,
-) -> Result<ProfileData, String> {
+/// 加载 profile。名片上称号的等级由渲染时的 profile 决定。
+fn load_profile(path: &PathBuf) -> Result<ProfileData, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
     let body: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("解析 profile JSON 失败: {e}"))?;
-    Ok(enrich_from_profile_value(&body, renderer, card))
-}
-
-/// 从 profile JSON 值构建 ProfileData 并填充名片称号等级（serve 模式复用）。
-fn enrich_from_profile_value(
-    body: &serde_json::Value,
-    renderer: &CustomProfileRenderer,
-    card: &mut CustomProfileCard,
-) -> ProfileData {
-    let profile = ProfileData::from_json(body);
-    let (honor_levels, bonds_levels, char_ranks) =
-        sekai_profile_renderer::profile::build_honor_maps(body);
-    renderer.enrich_honor_levels(card, &honor_levels, &bonds_levels, &char_ranks);
-    profile
+    Ok(ProfileData::from_json(&body))
 }
 
 /// 按 --assets-dir 注入素材：key = 相对路径去掉 .png/.jpg 扩展名。
@@ -328,12 +311,16 @@ fn encode_candidate_png(
 fn missing_asset_keys(
     renderer: &CustomProfileRenderer,
     card: &CustomProfileCard,
+    profile: Option<&ProfileData>,
     store: &AssetStore,
 ) -> Vec<String> {
     let md = renderer.snapshot_masterdata();
-    sekai_profile_renderer::asset_keys::missing_card_asset_keys(card, &md, |key| {
-        store.contains(key)
-    })
+    sekai_profile_renderer::asset_keys::missing_card_asset_keys_with_profile(
+        card,
+        profile,
+        &md,
+        |key| store.contains(key),
+    )
 }
 
 /// 收集名片 + profile 所需但 AssetStore 中缺失的素材 key（URL 取材用）。
@@ -344,9 +331,12 @@ fn missing_asset_keys_with_profile(
     store: &AssetStore,
 ) -> Vec<String> {
     let md = renderer.snapshot_masterdata();
-    let mut keys = sekai_profile_renderer::asset_keys::missing_card_asset_keys(card, &md, |key| {
-        store.contains(key)
-    });
+    let mut keys = sekai_profile_renderer::asset_keys::missing_card_asset_keys_with_profile(
+        card,
+        profile,
+        &md,
+        |key| store.contains(key),
+    );
     if let Some(p) = profile {
         keys.extend(
             sekai_profile_renderer::asset_keys::missing_profile_asset_keys(p, &md, |key| {
@@ -487,7 +477,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let mut card = match load_card(card_path, args.page) {
+    let card = match load_card(card_path, args.page) {
         Ok(card) => card,
         Err(err) => {
             eprintln!("{err}");
@@ -496,7 +486,7 @@ fn main() -> ExitCode {
     };
 
     let profile = match &args.profile {
-        Some(path) => match load_profile(path, &renderer, &mut card) {
+        Some(path) => match load_profile(path) {
             Ok(profile) => Some(profile),
             Err(err) => {
                 eprintln!("{err}");
@@ -529,7 +519,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let missing_assets = missing_asset_keys(&renderer, &card, &assets);
+    let missing_assets = missing_asset_keys(&renderer, &card, profile.as_ref(), &assets);
     if !missing_assets.is_empty() {
         tracing::warn!(count = missing_assets.len(), keys = ?missing_assets, "缺失素材");
     }

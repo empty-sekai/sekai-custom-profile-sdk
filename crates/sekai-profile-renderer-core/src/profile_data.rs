@@ -90,6 +90,81 @@ pub struct ProfileData {
     pub story_favorites: Vec<StoryFavorite>,
     pub honor_mission_progress: BTreeMap<String, i32>,
     pub user_cards: BTreeMap<i32, CardState>,
+    #[serde(default)]
+    pub owned_honors: OwnedHonorLevels,
+}
+
+/// Levels of the honors a player owns, read from `userHonors` and
+/// `userBondsHonors`. A list the response does not carry stays `None`:
+/// ownership is then unknown rather than empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedHonorLevels {
+    pub honors: Option<BTreeMap<i32, i32>>,
+    pub bonds_honors: Option<BTreeMap<i32, i32>>,
+}
+
+impl OwnedHonorLevels {
+    pub fn from_json(body: &Value) -> Self {
+        Self {
+            honors: owned_levels(body.get("userHonors"), "honorId"),
+            bonds_honors: owned_levels(body.get("userBondsHonors"), "bondsHonorId"),
+        }
+    }
+}
+
+/// Level a standard honor placed on a card is drawn with.
+///
+/// The game draws a placed honor only when the player owns it, at the owned
+/// level; `None` means the element is not drawn. Without a `userHonors` list
+/// the element's own level is kept.
+pub fn placed_honor_level(
+    owned: Option<&OwnedHonorLevels>,
+    honor_id: i32,
+    element_level: i32,
+) -> Option<i32> {
+    placed_level(
+        owned.and_then(|value| value.honors.as_ref()),
+        honor_id,
+        element_level,
+    )
+}
+
+/// Level a bonds honor placed on a card is drawn with; the same ownership
+/// rule as [`placed_honor_level`] applied to `userBondsHonors`.
+pub fn placed_bonds_honor_level(
+    owned: Option<&OwnedHonorLevels>,
+    bonds_honor_id: i32,
+    element_level: i32,
+) -> Option<i32> {
+    placed_level(
+        owned.and_then(|value| value.bonds_honors.as_ref()),
+        bonds_honor_id,
+        element_level,
+    )
+}
+
+fn placed_level(levels: Option<&BTreeMap<i32, i32>>, id: i32, element_level: i32) -> Option<i32> {
+    match levels {
+        Some(levels) => levels.get(&id).copied(),
+        None => Some(element_level),
+    }
+}
+
+/// Reads `[id, level, obtainedAt]` rows, the compact form `userHonors` is
+/// sent in, and `{ "<id_field>": id, "level": level }` rows alike.
+fn owned_levels(value: Option<&Value>, id_field: &str) -> Option<BTreeMap<i32, i32>> {
+    let rows = value?.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let (id, level) = match row {
+                    Value::Array(fields) => (fields.first()?.as_i64()?, fields.get(1)?.as_i64()?),
+                    _ => (row.get(id_field)?.as_i64()?, row.get("level")?.as_i64()?),
+                };
+                Some((id as i32, level as i32))
+            })
+            .collect(),
+    )
 }
 
 impl ProfileData {
@@ -190,6 +265,7 @@ impl ProfileData {
             .get("userMusicDifficultyClearCount")
             .and_then(Value::as_array)
             .map(|rows| parse_music_results(rows));
+        output.owned_honors = OwnedHonorLevels::from_json(body);
         output
     }
 
@@ -280,6 +356,29 @@ mod tests {
         assert!(!serde_json::to_string(&profile)
             .unwrap()
             .contains("privateToken"));
+    }
+
+    #[test]
+    fn owned_honor_lists_decide_placed_honor_levels() {
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userHonors": [[5, 12, 1700000000000_i64], { "honorId": 6, "level": 2 }, ["bad"]],
+            "userBondsHonors": [{ "bondsHonorId": 7, "level": 3 }]
+        }));
+        let owned = Some(&profile.owned_honors);
+        assert_eq!(placed_honor_level(owned, 5, 1), Some(12));
+        assert_eq!(placed_honor_level(owned, 6, 1), Some(2));
+        assert_eq!(placed_honor_level(owned, 8, 1), None);
+        assert_eq!(placed_bonds_honor_level(owned, 7, 1), Some(3));
+        assert_eq!(placed_bonds_honor_level(owned, 5, 1), None);
+
+        // A response without the lists leaves ownership unknown.
+        let unknown = ProfileData::from_json(&serde_json::json!({}));
+        assert_eq!(unknown.owned_honors, OwnedHonorLevels::default());
+        assert_eq!(
+            placed_honor_level(Some(&unknown.owned_honors), 8, 4),
+            Some(4)
+        );
+        assert_eq!(placed_bonds_honor_level(None, 8, 2), Some(2));
     }
 
     #[test]

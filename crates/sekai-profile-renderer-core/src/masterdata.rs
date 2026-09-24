@@ -128,21 +128,40 @@ pub fn effective_honor_background_asset_bundle_name<'a>(
 }
 
 /// Returns whether a standard honor owns a rank/progress overlay layer.
+///
+/// Live Master honors draw their scroll and rank-match honors their rank
+/// plate. Otherwise only event and SEKAI ECHO honors draw the `rank_main` /
+/// `rank_sub` art of their own bundle; other honor types never show it,
+/// whatever their bundle contains.
 pub fn honor_has_rank_overlay(
     honor_type: &str,
     asset_bundle_name: &str,
     is_live_master: bool,
 ) -> bool {
     is_live_master
-        || matches!(honor_type, "rank_match" | "sekai_echo")
-        || [
-            "honor_top_",
-            "honor_shining",
-            "honor_memorial",
-            "honor_memory",
-        ]
-        .iter()
-        .any(|prefix| asset_bundle_name.starts_with(prefix))
+        || honor_type == "rank_match"
+        || (matches!(honor_type, "event" | "sekai_echo") && !asset_bundle_name.is_empty())
+}
+
+/// Number of level stars drawn for `level`. Levels 1 to 10 show that many
+/// stars and higher levels start over, so level 11 shows one star again;
+/// the sixth to tenth stars replace the first five with the upgraded star.
+pub fn honor_level_star_count(level: i32) -> i32 {
+    if level <= 0 {
+        0
+    } else {
+        (level - 1) % 10 + 1
+    }
+}
+
+/// Numeric suffix of an honor rarity in frame and word asset names.
+pub fn honor_rarity_number(rarity: &str) -> u8 {
+    match rarity {
+        "low" => 1,
+        "middle" => 2,
+        "high" => 3,
+        _ => 4,
+    }
 }
 
 /// Resource identities for one standard honor. Frame candidates are ordered
@@ -183,19 +202,17 @@ impl ResolvedHonor {
         } else {
             "honor"
         };
-        let rarity = match self.honor_rarity.as_str() {
-            "low" => 1,
-            "middle" => 2,
-            "high" => 3,
-            _ => 4,
-        };
+        let rarity = honor_rarity_number(&self.honor_rarity);
         let frame_candidates = [
-            self.frame_name.as_ref().map(|name| {
-                resource(
-                    "assets",
-                    format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"),
-                )
-            }),
+            self.frame_name
+                .as_ref()
+                .filter(|_| self.uses_dedicated_frame())
+                .map(|name| {
+                    resource(
+                        "assets",
+                        format!("honor_frame/{name}/frame_degree_{size_char}_{rarity}"),
+                    )
+                }),
             Some(resource(
                 "static",
                 format!("honor/frame_degree_{size_char}_{rarity}"),
@@ -214,13 +231,11 @@ impl ResolvedHonor {
                 format!("{directory}/{}/{name}", self.asset_bundle_name),
             )
         });
-        let mut star_level = level % 10;
-        if star_level == 0 && level > 0 {
-            star_level = 10;
-        }
-        let has_stars = self.has_star
-            && !self.is_live_master
-            && matches!(self.honor_type.as_str(), "character" | "achievement");
+        let star_count = if self.draws_level_stars() {
+            honor_level_star_count(level)
+        } else {
+            0
+        };
         StandardHonorAssetPlan {
             background: resource(
                 "assets",
@@ -231,10 +246,8 @@ impl ResolvedHonor {
             ),
             overlay,
             frame_candidates,
-            star: (has_stars && star_level > 0)
-                .then(|| resource("static", "honor/icon_degreeLv".into())),
-            star_high: (has_stars && star_level > 5)
-                .then(|| resource("static", "honor/icon_degreeLv6".into())),
+            star: (star_count > 0).then(|| resource("static", "honor/icon_degreeLv".into())),
+            star_high: (star_count > 5).then(|| resource("static", "honor/icon_degreeLv6".into())),
         }
     }
 
@@ -253,6 +266,174 @@ impl ResolvedHonor {
             self.is_live_master,
         )
     }
+
+    /// Whether the honor draws the shared level stars. Single-level honors,
+    /// Live Master honors (which show their clear count instead), event
+    /// honors and birthday honors (which carry their own level art) draw none.
+    pub fn draws_level_stars(&self) -> bool {
+        self.has_star
+            && !self.is_live_master
+            && !matches!(self.honor_type.as_str(), "event" | "birthday")
+    }
+
+    /// Whether the group's own frame replaces the shared rarity frame.
+    /// Birthday honors use it from the middle rarity up, every other honor
+    /// only at the high and highest rarities.
+    pub fn uses_dedicated_frame(&self) -> bool {
+        let rarity = honor_rarity_number(&self.honor_rarity);
+        self.frame_name
+            .as_deref()
+            .is_some_and(|name| !name.is_empty())
+            && if self.honor_type == "birthday" {
+                rarity >= 2
+            } else {
+                rarity >= 3
+            }
+    }
+}
+
+/// Resolves one `honors` row and its `honorGroups` row into render inputs.
+///
+/// Every master-data provider resolves honors through this function so the
+/// level, rarity and group fallbacks stay identical across backends.
+pub fn resolve_honor_rows(
+    honor: &Value,
+    group: Option<&Value>,
+    honor_level: i32,
+) -> Option<ResolvedHonor> {
+    let honor: HonorEntry = serde_json::from_value(honor.clone()).ok()?;
+    let live = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
+    // A level the masterdata does not know yet (data lagging behind player
+    // progress) falls back to the last known level, matching the game's
+    // lookup, rather than producing an empty asset bundle name.
+    let level = honor
+        .levels
+        .iter()
+        .find(|entry| entry.level == honor_level)
+        .or_else(|| honor.levels.last());
+    let group_text = |field: &str| {
+        group
+            .and_then(|value| value.get(field))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Some(ResolvedHonor {
+        asset_bundle_name: if live {
+            level
+                .and_then(|v| v.assetbundle_name.clone())
+                .unwrap_or_default()
+        } else {
+            honor.assetbundle_name.unwrap_or_default()
+        },
+        honor_rarity: if live {
+            level
+                .and_then(|v| v.honor_rarity.clone())
+                .unwrap_or_else(|| "low".into())
+        } else {
+            honor.honor_rarity.unwrap_or_else(|| "low".into())
+        },
+        honor_type: group_text("honorType").unwrap_or_else(|| "normal".into()),
+        background_asset_bundle_name: group_text("backgroundAssetbundleName"),
+        frame_name: group_text("frameName"),
+        is_live_master: live,
+        has_star: honor.levels.len() > 1,
+        honor_mission_type: honor.honor_mission_type,
+    })
+}
+
+/// Resource identities for one bonds honor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BondsHonorAssetPlan {
+    /// Character units in draw order after the optional virtual-singer
+    /// substitution, which only affects the character art.
+    pub character_ids: [i32; 2],
+    /// Left and right background halves, keyed by the listed character units.
+    pub backgrounds: [crate::ResourceKey; 2],
+    pub characters: [crate::ResourceKey; 2],
+    pub mask: crate::ResourceKey,
+    pub frame: crate::ResourceKey,
+    /// Word art; only the full-size slot shows it.
+    pub word: Option<crate::ResourceKey>,
+    pub star: crate::ResourceKey,
+    pub star_high: crate::ResourceKey,
+}
+
+impl BondsHonorAssetPlan {
+    /// Every source key the honor can draw.
+    pub fn resources(&self) -> impl Iterator<Item = &crate::ResourceKey> {
+        self.backgrounds
+            .iter()
+            .chain(self.characters.iter())
+            .chain([&self.mask, &self.frame])
+            .chain(self.word.iter())
+            .chain([&self.star, &self.star_high])
+    }
+}
+
+/// Plans the resources of one bonds honor, or `None` when the master data
+/// does not list it.
+pub fn bonds_honor_asset_plan(
+    masterdata: &(impl ProfileMasterData + ?Sized),
+    bonds_honor_id: i32,
+    full_size: bool,
+    word_id: i64,
+    inverse: bool,
+    use_unit_virtual_singer: bool,
+) -> Option<BondsHonorAssetPlan> {
+    let entry = masterdata.get_bonds_honor(bonds_honor_id)?;
+    let (first, second) = if inverse {
+        (entry.game_character_unit_id2, entry.game_character_unit_id1)
+    } else {
+        (entry.game_character_unit_id1, entry.game_character_unit_id2)
+    };
+    let character_ids = if use_unit_virtual_singer {
+        [
+            masterdata.resolve_unit_virtual_singer(first, second),
+            masterdata.resolve_unit_virtual_singer(second, first),
+        ]
+    } else {
+        [first, second]
+    };
+    let resource = |namespace: &str, key: String| crate::ResourceKey {
+        namespace: namespace.into(),
+        key,
+    };
+    let (size_char, slot) = if full_size {
+        ("m", "main")
+    } else {
+        ("s", "sub")
+    };
+    let background = |unit: i32| {
+        resource(
+            "static",
+            if full_size {
+                format!("honor/bonds/{unit}")
+            } else {
+                format!("honor/bonds/{unit}_sub")
+            },
+        )
+    };
+    let character = |unit: i32| resource("assets", format!("bonds_honor/chr_sd_{unit:02}_01"));
+    let rarity = honor_rarity_number(&entry.honor_rarity);
+    Some(BondsHonorAssetPlan {
+        character_ids,
+        backgrounds: [background(first), background(second)],
+        characters: [character(character_ids[0]), character(character_ids[1])],
+        mask: resource("static", format!("honor/mask_degree_{slot}")),
+        frame: resource("static", format!("honor/frame_degree_{size_char}_{rarity}")),
+        word: full_size
+            .then(|| masterdata.get_bonds_honor_word(word_id))
+            .flatten()
+            .map(|word| {
+                resource(
+                    "assets",
+                    format!("bonds_honor/word/{}_{rarity:02}", word.assetbundle_name),
+                )
+            }),
+        star: resource("static", "honor/icon_degreeLv".into()),
+        star_high: resource("static", "honor/icon_degreeLv6".into()),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,53 +619,12 @@ impl ProfileMasterData for JsonMasterData {
         })
     }
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
-        let honor: HonorEntry = self.table("honors")?.typed(honor_id.into())?;
-        let live = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
-        // A level the masterdata does not know yet (data lagging behind player
-        // progress) falls back to the last known level, matching the game's
-        // lookup, rather than producing an empty asset bundle name.
-        let level = honor
-            .levels
-            .iter()
-            .find(|entry| entry.level == honor_level)
-            .or_else(|| honor.levels.last());
+        let honor = self.table("honors")?.get(honor_id.into())?;
         let group = honor
-            .group_id
-            .and_then(|id| self.table("honorGroups")?.get(id.into()));
-        Some(ResolvedHonor {
-            asset_bundle_name: if live {
-                level
-                    .and_then(|v| v.assetbundle_name.clone())
-                    .unwrap_or_default()
-            } else {
-                honor.assetbundle_name.unwrap_or_default()
-            },
-            honor_rarity: if live {
-                level
-                    .and_then(|v| v.honor_rarity.clone())
-                    .unwrap_or_else(|| "low".into())
-            } else {
-                honor.honor_rarity.unwrap_or_else(|| "low".into())
-            },
-            honor_type: group
-                .and_then(|v| v.get("honorType"))
-                .and_then(Value::as_str)
-                .unwrap_or("normal")
-                .into(),
-            background_asset_bundle_name: group
-                .and_then(|v| v.get("backgroundAssetbundleName"))
-                .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned),
-            frame_name: group
-                .and_then(|v| v.get("frameName"))
-                .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned),
-            is_live_master: live,
-            has_star: honor.levels.len() > 1,
-            honor_mission_type: honor.honor_mission_type,
-        })
+            .get("groupId")
+            .and_then(Value::as_i64)
+            .and_then(|id| self.table("honorGroups")?.get(id));
+        resolve_honor_rows(honor, group, honor_level)
     }
     fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
         self.table("bondsHonors")?.typed(id.into())
@@ -556,19 +696,18 @@ mod tests {
                     .flatten()
                     .map(|key| (key.namespace.as_str(), key.key.clone()))
                     .collect::<Vec<_>>();
-                assert_eq!(
-                    frames,
-                    vec![
-                        (
-                            "assets",
-                            format!("honor_frame/custom_frame/frame_degree_{size}_{number}")
-                        ),
-                        ("static", format!("honor/frame_degree_{size}_{number}")),
-                    ]
-                );
+                let mut expected = Vec::new();
+                if number >= 3 {
+                    expected.push((
+                        "assets",
+                        format!("honor_frame/custom_frame/frame_degree_{size}_{number}"),
+                    ));
+                }
+                expected.push(("static", format!("honor/frame_degree_{size}_{number}")));
+                assert_eq!(frames, expected);
                 assert_eq!(plan.star.as_ref().unwrap().namespace, "static");
                 assert_eq!(plan.star_high.as_ref().unwrap().namespace, "static");
-                assert_eq!(plan.resources().count(), 5);
+                assert_eq!(plan.resources().count(), 3 + expected.len());
             }
         }
     }
@@ -593,7 +732,7 @@ mod tests {
                 "level={level}"
             );
         }
-        for honor_type in ["normal", "rank_match", "event"] {
+        for honor_type in ["event", "birthday"] {
             honor.honor_type = honor_type.into();
             let plan = honor.asset_plan(10, true);
             assert!(plan.star.is_none() && plan.star_high.is_none());
@@ -608,6 +747,76 @@ mod tests {
         assert!(plan.star.is_none() && plan.star_high.is_none());
         assert_eq!(plan.overlay.unwrap().key, "honor/honor_sample/scroll");
     }
+    #[test]
+    fn rank_overlay_follows_the_honor_type() {
+        let mut honor = planned_honor();
+        for (honor_type, bundle, expected) in [
+            ("event", "honor_0305", true),
+            ("event", "honor_top_000001", true),
+            ("sekai_echo", "honor_0182", true),
+            ("event", "", false),
+            ("limitevent", "honor_top_000020", false),
+            ("character", "honor_memorial_0001", false),
+            ("achievement", "honor_0105", false),
+        ] {
+            honor.honor_type = honor_type.into();
+            honor.asset_bundle_name = bundle.into();
+            assert_eq!(honor.has_rank_overlay(), expected, "{honor_type} {bundle}");
+            let overlay = honor.asset_plan(1, true).overlay;
+            assert_eq!(overlay.is_some(), expected, "{honor_type} {bundle}");
+            if let Some(overlay) = overlay {
+                assert_eq!(overlay.key, format!("honor/{bundle}/rank_main"));
+            }
+        }
+    }
+
+    #[test]
+    fn level_stars_follow_the_honor_type() {
+        let mut honor = planned_honor();
+        for (honor_type, expected) in [
+            ("character", true),
+            ("achievement", true),
+            ("limitevent", true),
+            ("normal", true),
+            ("event", false),
+            ("birthday", false),
+        ] {
+            honor.honor_type = honor_type.into();
+            let plan = honor.asset_plan(7, true);
+            assert_eq!(plan.star.is_some(), expected, "{honor_type}");
+            assert_eq!(plan.star_high.is_some(), expected, "{honor_type}");
+        }
+    }
+
+    #[test]
+    fn dedicated_frames_need_the_group_rarity() {
+        for (honor_type, rarity, dedicated) in [
+            ("event", "low", false),
+            ("event", "middle", false),
+            ("event", "high", true),
+            ("event", "highest", true),
+            ("birthday", "low", false),
+            ("birthday", "middle", true),
+            ("birthday", "high", true),
+            ("birthday", "highest", true),
+        ] {
+            let mut honor = planned_honor();
+            honor.honor_type = honor_type.into();
+            honor.honor_rarity = rarity.into();
+            let plan = honor.asset_plan(1, false);
+            assert_eq!(
+                plan.frame_candidates[0].is_some(),
+                dedicated,
+                "{honor_type} {rarity}"
+            );
+            assert!(plan.frame_candidates[1].is_some(), "{honor_type} {rarity}");
+        }
+        let mut honor = planned_honor();
+        honor.honor_rarity = "highest".into();
+        honor.frame_name = None;
+        assert!(honor.asset_plan(1, true).frame_candidates[0].is_none());
+    }
+
     #[test]
     fn json_provider_maps_fonts_by_region_without_mutating_source_tables() {
         let table = serde_json::json!([{ "id": 1, "fontName": "FOT-RodinNTLGPro-DB" }]);
@@ -631,10 +840,121 @@ mod tests {
         let honor = data.resolve_honor(3, 1).unwrap();
         assert_eq!(honor.background_asset_bundle_name, None);
         assert_eq!(honor.frame_name, None);
+
+        // Empty strings are treated like absent fields.
+        data.insert_value(
+            "honorGroups",
+            serde_json::json!([{ "id": 4, "honorType": "character", "backgroundAssetbundleName": "", "frameName": "" }]),
+        )
+        .unwrap();
+        let honor = data.resolve_honor(3, 1).unwrap();
+        assert_eq!(honor.background_asset_bundle_name, None);
+        assert_eq!(honor.frame_name, None);
     }
 
     #[test]
-    fn cn_limited_event_top_honor_resolves_shared_background_and_rank_overlay() {
+    fn level_star_count_wraps_every_ten_levels() {
+        for (level, stars) in [
+            (-3, 0),
+            (0, 0),
+            (1, 1),
+            (5, 5),
+            (10, 10),
+            (11, 1),
+            (20, 10),
+            (21, 1),
+            (27, 7),
+        ] {
+            assert_eq!(honor_level_star_count(level), stars, "level {level}");
+        }
+    }
+
+    struct PairData {
+        rarity: &'static str,
+    }
+
+    impl ProfileMasterData for PairData {
+        fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _: i32) -> Option<CardEntry> {
+            None
+        }
+        fn resolve_color(&self, _: i32) -> Option<ResolvedColor> {
+            None
+        }
+        fn resolve_font(&self, _: i32) -> Option<String> {
+            None
+        }
+        fn resolve_stamp(&self, _: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(&self, _: &str, _: i32) -> Option<ResourceInfo> {
+            None
+        }
+        fn resolve_honor(&self, _: i32, _: i32) -> Option<ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+            Some(BondsHonorEntry {
+                id,
+                game_character_unit_id1: 21,
+                game_character_unit_id2: 1,
+                honor_rarity: self.rarity.into(),
+            })
+        }
+        fn get_bonds_honor_word(&self, id: i64) -> Option<BondsHonorWordEntry> {
+            Some(BondsHonorWordEntry {
+                id,
+                assetbundle_name: "honorname_0121_01".into(),
+            })
+        }
+        fn resolve_unit_virtual_singer(&self, self_id: i32, partner_id: i32) -> i32 {
+            match (self_id, partner_id) {
+                (21, 1) => 27,
+                // Only reachable when the partner was already substituted.
+                (1, 27) => 99,
+                _ => self_id,
+            }
+        }
+    }
+
+    #[test]
+    fn bonds_plan_substitutes_only_the_character_art() {
+        let plan = bonds_honor_asset_plan(&PairData { rarity: "middle" }, 5, true, 3, false, true)
+            .unwrap();
+        let keys = plan
+            .resources()
+            .map(|key| (key.namespace.as_str(), key.key.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(plan.character_ids, [27, 1]);
+        assert_eq!(
+            keys,
+            vec![
+                ("static", "honor/bonds/21"),
+                ("static", "honor/bonds/1"),
+                ("assets", "bonds_honor/chr_sd_27_01"),
+                ("assets", "bonds_honor/chr_sd_01_01"),
+                ("static", "honor/mask_degree_main"),
+                ("static", "honor/frame_degree_m_2"),
+                ("assets", "bonds_honor/word/honorname_0121_01_02"),
+                ("static", "honor/icon_degreeLv"),
+                ("static", "honor/icon_degreeLv6"),
+            ]
+        );
+
+        let plan =
+            bonds_honor_asset_plan(&PairData { rarity: "low" }, 5, false, 3, true, false).unwrap();
+        assert_eq!(plan.character_ids, [1, 21]);
+        assert_eq!(plan.backgrounds[0].key, "honor/bonds/1_sub");
+        assert_eq!(plan.characters[1].key, "bonds_honor/chr_sd_21_01");
+        assert_eq!(plan.frame.key, "honor/frame_degree_s_1");
+        assert_eq!(plan.mask.key, "honor/mask_degree_sub");
+        assert_eq!(plan.word, None);
+    }
+
+    #[test]
+    fn cn_limited_event_top_honor_resolves_shared_background_without_rank_overlay() {
         let mut data = JsonMasterData::new("cn");
         data.insert_value("honors", serde_json::json!([{ "id": 10140, "assetbundleName": "honor_top_000020", "honorRarity": "low", "groupId": 10034, "levels": [{"level": 1}], "honorMissionType": null }])).unwrap();
         data.insert_value(
@@ -647,7 +967,7 @@ mod tests {
             honor.effective_background_asset_bundle_name(),
             "honor_bg_event_cheerteam"
         );
-        assert!(honor.has_rank_overlay());
+        assert!(!honor.has_rank_overlay());
     }
 
     #[test]

@@ -121,54 +121,16 @@ fn collect_bonds_honor_keys(
     let Some(masterdata) = ctx.masterdata else {
         return Vec::new();
     };
-    let Some(entry) = masterdata.get_bonds_honor(bonds_honor_id) else {
-        return Vec::new();
-    };
-
-    let (mut cid1, mut cid2) = if inverse {
-        (entry.game_character_unit_id2, entry.game_character_unit_id1)
-    } else {
-        (entry.game_character_unit_id1, entry.game_character_unit_id2)
-    };
-    if use_unit_virtual_singer {
-        let resolved1 = masterdata.resolve_unit_vs_sd(cid1, cid2);
-        let resolved2 = masterdata.resolve_unit_vs_sd(cid2, cid1);
-        cid1 = resolved1;
-        cid2 = resolved2;
-    }
-
-    let size_char = if full_size { "main" } else { "sub" };
-    let mut keys = vec![
-        format!("honor/mask_degree_{}", size_char),
-        format!("bonds_honor/chr_sd_{:02}_01", cid1),
-        format!("bonds_honor/chr_sd_{:02}_01", cid2),
-    ];
-
-    if full_size {
-        if let Some(word) = masterdata.get_bonds_honor_word(word_id) {
-            keys.push(format!("bonds_honor/word/{}_01", word.assetbundle_name));
-        }
-    }
-
-    let rarity_num = match entry.honor_rarity.as_str() {
-        "low" => 1,
-        "middle" => 2,
-        "high" => 3,
-        _ => 4,
-    };
-    let frame_size = if full_size { "m" } else { "s" };
-    keys.push(format!("honor/frame_degree_{}_{}", frame_size, rarity_num));
-    keys.push("honor/icon_degreeLv".to_string());
-    keys.push("honor/icon_degreeLv6".to_string());
-    if full_size {
-        keys.push(format!("honor/bonds/{}", cid1));
-        keys.push(format!("honor/bonds/{}", cid2));
-    } else {
-        keys.push(format!("honor/bonds/{}_sub", cid1));
-        keys.push(format!("honor/bonds/{}_sub", cid2));
-    }
-
-    keys
+    sekai_profile_renderer_core::masterdata::bonds_honor_asset_plan(
+        masterdata,
+        bonds_honor_id,
+        full_size,
+        word_id,
+        inverse,
+        use_unit_virtual_singer,
+    )
+    .map(|plan| plan.resources().map(|key| key.key.clone()).collect())
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -219,11 +181,17 @@ mod tests {
             })
         }
         fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+            // Honor 6 pairs a virtual singer (unit 21) with unit 1.
+            let (first, second, rarity) = if id == 6 {
+                (21, 1, "middle")
+            } else {
+                (1, 2, "high")
+            };
             Some(BondsHonorEntry {
                 id,
-                game_character_unit_id1: 1,
-                game_character_unit_id2: 2,
-                honor_rarity: "high".to_string(),
+                game_character_unit_id1: first,
+                game_character_unit_id2: second,
+                honor_rarity: rarity.to_string(),
                 configurable_unit_virtual_singer: false,
             })
         }
@@ -238,8 +206,13 @@ mod tests {
         fn get_honor(&self, _honor_id: i32) -> Option<HonorEntry> {
             None
         }
-        fn resolve_unit_vs_sd(&self, self_id: i32, _partner_id: i32) -> i32 {
-            self_id
+        fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
+            match (self_id, partner_id) {
+                (21, 1) => 27,
+                // Only reachable when the partner was already substituted.
+                (1, 27) => 99,
+                _ => self_id,
+            }
         }
         fn font_count(&self) -> usize {
             0
@@ -311,6 +284,35 @@ mod tests {
         assert!(keys
             .iter()
             .all(|key| !key.contains("live_master_honor_star")));
+    }
+
+    #[test]
+    fn bonds_honor_widget_keys_follow_the_game_asset_rules() {
+        let widget = BondsHonorWidget::from_element(&BondsHonorElement {
+            object_data: object_data(),
+            id: 6,
+            word_id: 9,
+            full_size: true,
+            inverse: false,
+            use_unit_virtual_singer: true,
+            honor_level: 3,
+        });
+        let keys = widget.asset_keys(&ctx());
+
+        // Backgrounds keep the listed units; only the character art switches
+        // to the unit's virtual-singer variant.
+        for key in [
+            "honor/bonds/21",
+            "honor/bonds/1",
+            "bonds_honor/chr_sd_27_01",
+            "bonds_honor/chr_sd_01_01",
+            "bonds_honor/word/word_test_02",
+            "honor/frame_degree_m_2",
+        ] {
+            assert!(keys.iter().any(|value| value == key), "{key} in {keys:?}");
+        }
+        assert!(!keys.iter().any(|value| value == "honor/bonds/27"));
+        assert!(!keys.iter().any(|value| value.contains("chr_sd_99")));
     }
 
     #[test]

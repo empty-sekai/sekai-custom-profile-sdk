@@ -518,37 +518,6 @@ impl CustomProfileRenderer {
         warnings
     }
 
-    /// 填充名片中的 Honor/BondsHonor 等级。
-    pub fn enrich_honor_levels(
-        &self,
-        card: &mut CustomProfileCard,
-        honor_levels: &std::collections::HashMap<i32, i32>,
-        bonds_levels: &std::collections::HashMap<i32, i32>,
-        char_ranks: &std::collections::HashMap<i32, i32>,
-    ) {
-        let md = self.snapshot();
-        for honor in &mut card.honors {
-            if let Some(&level) = honor_levels.get(&honor.id) {
-                honor.honor_level = level;
-            } else if let Some(res) = md.resolve_honor(honor.id, 1) {
-                if res.honor_type == "character" {
-                    if let Some(entry) = md.get_honor(honor.id) {
-                        if let Some(group_id) = entry.group_id {
-                            if let Some(&rank) = char_ranks.get(&group_id) {
-                                honor.honor_level = rank;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        for bond in &mut card.bonds_honors {
-            if let Some(&level) = bonds_levels.get(&bond.id) {
-                bond.honor_level = level;
-            }
-        }
-    }
-
     /// Decode and validate the fixed game Shape sources before the worker is
     /// declared ready. This keeps source RG8 hashing out of the first unseen
     /// profile request while preserving the atlas/source identity gate.

@@ -340,10 +340,17 @@ fn populate_resolve_snapshot_parts(
                     }
                 }
                 ProfileElementRef::Honor(honor) => {
+                    let Some(level) = sekai_profile_renderer_core::profile_data::placed_honor_level(
+                        profile.map(|profile| &profile.owned_honors),
+                        honor.id,
+                        honor.honor_level,
+                    ) else {
+                        continue;
+                    };
                     if let Some(visual) = build_standard_honor_visual(
                         "customProfile.honors",
                         honor.id,
-                        honor.honor_level,
+                        level,
                         honor.full_size,
                         profile,
                         md,
@@ -353,10 +360,19 @@ fn populate_resolve_snapshot_parts(
                     }
                 }
                 ProfileElementRef::BondsHonor(honor) => {
+                    let Some(level) =
+                        sekai_profile_renderer_core::profile_data::placed_bonds_honor_level(
+                            profile.map(|profile| &profile.owned_honors),
+                            honor.id,
+                            honor.honor_level,
+                        )
+                    else {
+                        continue;
+                    };
                     if let Some(visual) = build_bonds_honor_visual(
                         "customProfile.bondsHonors",
                         honor.id,
-                        honor.honor_level,
+                        level,
                         honor.full_size,
                         honor.word_id,
                         honor.inverse,
@@ -740,8 +756,8 @@ fn build_standard_honor_visual(
         honor_level,
         full_size,
         visual: HonorVisualKind::Standard {
+            has_star: resolved.draws_level_stars(),
             honor_type: resolved.honor_type,
-            has_star: resolved.has_star,
             is_live_master: resolved.is_live_master,
             progress,
             background,
@@ -783,7 +799,7 @@ fn build_bonds_honor_visual(
     md: &MasterData,
     resources: ResolveResourceContext<'_>,
 ) -> Option<HonorVisualSnapshot> {
-    let entry = md.get_bonds_honor(honor_id)?;
+    md.get_bonds_honor(honor_id)?;
     let object_key = crate::render_object::bonds_honor_object_key(
         honor_id,
         honor_level,
@@ -819,32 +835,22 @@ fn build_bonds_honor_visual(
             },
         });
     }
-    let (first, second) = if inverse {
-        (entry.game_character_unit_id2, entry.game_character_unit_id1)
+    let plan = sekai_profile_renderer_core::masterdata::bonds_honor_asset_plan(
+        md,
+        honor_id,
+        full_size,
+        word_id,
+        inverse,
+        use_unit_virtual_singer,
+    )?;
+    let (w, h) = if full_size {
+        (380.0, 80.0)
     } else {
-        (entry.game_character_unit_id1, entry.game_character_unit_id2)
+        (180.0, 80.0)
     };
-    let character_ids = if use_unit_virtual_singer {
-        [
-            md.resolve_unit_vs_sd(first, second),
-            md.resolve_unit_vs_sd(second, first),
-        ]
-    } else {
-        [first, second]
+    let descriptor = |key: &ResourceKey, size: (f32, f32), table: &str, id: i32| {
+        static_descriptor(key.key.clone(), size, table, id, resources)
     };
-    let (w, h, size_char) = if full_size {
-        (380.0, 80.0, "m")
-    } else {
-        (180.0, 80.0, "s")
-    };
-    let background_key = |id: i32| {
-        if full_size {
-            format!("honor/bonds/{id}")
-        } else {
-            format!("honor/bonds/{id}_sub")
-        }
-    };
-    let rarity = honor_rarity_number(&entry.honor_rarity);
     Some(HonorVisualSnapshot {
         source_field: source_field.into(),
         source_id: honor_id.to_string(),
@@ -852,94 +858,39 @@ fn build_bonds_honor_visual(
         honor_level,
         full_size,
         visual: HonorVisualKind::Bonds {
-            character_ids,
-            backgrounds: [
-                Some(static_descriptor(
-                    background_key(first),
-                    (w, h),
-                    "bonds_honor_background",
-                    honor_id,
-                    resources,
-                )),
-                Some(static_descriptor(
-                    background_key(second),
-                    (w, h),
-                    "bonds_honor_background",
-                    honor_id,
-                    resources,
-                )),
-            ],
-            characters: [
-                Some(static_descriptor(
-                    format!("bonds_honor/chr_sd_{:02}_01", character_ids[0]),
+            character_ids: plan.character_ids,
+            backgrounds: plan
+                .backgrounds
+                .each_ref()
+                .map(|key| Some(descriptor(key, (w, h), "bonds_honor_background", honor_id))),
+            characters: plan.characters.each_ref().map(|key| {
+                Some(descriptor(
+                    key,
                     (160.0, 160.0),
                     "bonds_honor_character",
                     honor_id,
-                    resources,
-                )),
-                Some(static_descriptor(
-                    format!("bonds_honor/chr_sd_{:02}_01", character_ids[1]),
-                    (160.0, 160.0),
-                    "bonds_honor_character",
-                    honor_id,
-                    resources,
-                )),
-            ],
-            mask: Some(static_descriptor(
-                if full_size {
-                    "honor/mask_degree_main".into()
-                } else {
-                    "honor/mask_degree_sub".into()
-                },
-                (w, h),
-                "honor_static",
-                honor_id,
-                resources,
-            )),
-            frame: Some(static_descriptor(
-                format!("honor/frame_degree_{size_char}_{rarity}"),
-                (w, h),
-                "honor_frame",
-                honor_id,
-                resources,
-            )),
-            word: full_size
-                .then(|| md.get_bonds_honor_word(word_id))
-                .flatten()
-                .map(|word| {
-                    static_descriptor(
-                        format!("bonds_honor/word/{}_01", word.assetbundle_name),
-                        (180.0, 40.0),
-                        "bonds_honor_word",
-                        word_id as i32,
-                        resources,
-                    )
-                }),
-            star: Some(static_descriptor(
-                "honor/icon_degreeLv".into(),
+                ))
+            }),
+            mask: Some(descriptor(&plan.mask, (w, h), "honor_static", honor_id)),
+            frame: Some(descriptor(&plan.frame, (w, h), "honor_frame", honor_id)),
+            word: plan
+                .word
+                .as_ref()
+                .map(|key| descriptor(key, (180.0, 40.0), "bonds_honor_word", word_id as i32)),
+            star: Some(descriptor(
+                &plan.star,
                 (16.0, 16.0),
                 "honor_static",
                 honor_id,
-                resources,
             )),
-            star_high: Some(static_descriptor(
-                "honor/icon_degreeLv6".into(),
+            star_high: Some(descriptor(
+                &plan.star_high,
                 (16.0, 16.0),
                 "honor_static",
                 honor_id,
-                resources,
             )),
         },
     })
-}
-
-fn honor_rarity_number(value: &str) -> i32 {
-    match value {
-        "low" => 1,
-        "middle" => 2,
-        "high" => 3,
-        _ => 4,
-    }
 }
 
 fn render_object_descriptor(
@@ -1366,6 +1317,55 @@ mod tests {
             .commands
             .iter()
             .any(|command| command.role.starts_with("honor-4242-live-star-")));
+    }
+
+    #[test]
+    fn placed_honors_follow_the_profile_honor_lists() {
+        let object = serde_json::json!({
+            "layer": 7, "lock": false,
+            "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+            "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+            "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+        });
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "honors": [{ "objectData": object, "id": 4242, "fullSize": true }]
+        }))
+        .expect("card fixture");
+        let md = MasterData::new(Arc::new(EmptyProvider));
+        let levels = |profile: Option<&ProfileData>| {
+            build_resolve_snapshot_parts(
+                &card,
+                &md,
+                "placed-honors",
+                profile,
+                "cn",
+                ResolveResourceContext::default(),
+                true,
+                false,
+            )
+            .honor_visuals
+            .values()
+            .map(|visual| visual.honor_level)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(levels(None), vec![1]);
+        let owned = ProfileData::from_json(&serde_json::json!({ "userHonors": [[4242, 3, null]] }));
+        assert_eq!(levels(Some(&owned)), vec![3]);
+        let unowned = ProfileData::from_json(&serde_json::json!({ "userHonors": [[7, 3, null]] }));
+        assert_eq!(levels(Some(&unowned)), Vec::<i32>::new());
+        let scene = resolve_card_commands_with_profile(
+            &card,
+            &md,
+            "placed-honors",
+            Some(&unowned),
+            "cn",
+            None,
+        )
+        .expect("scene");
+        assert!(!scene
+            .commands
+            .iter()
+            .any(|command| command.role.starts_with("honor-4242-")));
     }
 
     #[test]

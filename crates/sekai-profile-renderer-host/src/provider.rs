@@ -13,7 +13,7 @@ use sekai_profile_renderer::masterdata::{
 };
 use sekai_profile_renderer::region::Region;
 use sekai_profile_renderer::types::{
-    BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, HonorGroupEntry, StampEntry,
+    BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, StampEntry,
 };
 
 use crate::table::Table;
@@ -212,52 +212,13 @@ impl MasterDataProvider for JsonMasterDataProvider {
     }
 
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
-        let honor: HonorEntry = self.typed("honors", honor_id as i64)?;
-        let is_live_master = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
-        let (abn, rarity) = if is_live_master {
-            // A level the masterdata does not know yet falls back to the last
-            // known level, matching the game's lookup, instead of rendering
-            // from an empty asset bundle name.
-            let lvl = honor
-                .levels
-                .iter()
-                .find(|l| l.level == honor_level)
-                .or_else(|| honor.levels.last());
-            let a = lvl
-                .and_then(|l| l.assetbundle_name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            let r = lvl
-                .and_then(|l| l.honor_rarity.as_deref())
-                .unwrap_or("low")
-                .to_string();
-            (a, r)
-        } else {
-            (
-                honor.assetbundle_name.clone().unwrap_or_default(),
-                honor.honor_rarity.clone().unwrap_or_else(|| "low".into()),
-            )
-        };
-        let group: Option<HonorGroupEntry> = honor
-            .group_id
-            .and_then(|gid| self.typed("honorGroups", gid as i64));
-        Some(ResolvedHonor {
-            asset_bundle_name: abn,
-            honor_rarity: rarity,
-            honor_type: group
-                .as_ref()
-                .map(|g| g.honor_type.as_str())
-                .unwrap_or("normal")
-                .to_string(),
-            background_asset_bundle_name: group
-                .as_ref()
-                .and_then(|g| g.background_assetbundle_name.clone()),
-            frame_name: group.as_ref().and_then(|g| g.frame_name.clone()),
-            is_live_master,
-            has_star: honor.levels.len() > 1,
-            honor_level,
-            honor_mission_type: honor.honor_mission_type.clone(),
-        })
+        let honor = self.table("honors")?.by_id(honor_id as i64)?;
+        let group = honor
+            .get("groupId")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|id| self.table("honorGroups")?.by_id(id));
+        sekai_profile_renderer::core::masterdata::resolve_honor_rows(honor, group, honor_level)
+            .map(|value| ResolvedHonor::from_core(value, honor_level))
     }
 
     fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
@@ -394,5 +355,24 @@ mod tests {
         assert_eq!(honor.honor_rarity, "high");
         let honor = p.resolve_honor(7, 1).expect("honor");
         assert_eq!(honor.asset_bundle_name, "honor_live_1");
+        assert_eq!(honor.honor_level, 1);
+    }
+
+    #[test]
+    fn honor_groups_treat_empty_fields_as_absent() {
+        let mut p = provider_with(
+            "honors",
+            r#"[{"id": 3, "assetbundleName": "honor_0003", "honorRarity": "high", "groupId": 4,
+                 "levels": [{"level": 1}]}]"#,
+        );
+        p.insert_table(
+            "honorGroups",
+            r#"[{"id": 4, "honorType": "event", "backgroundAssetbundleName": "", "frameName": ""}]"#,
+        )
+        .unwrap();
+        let honor = p.resolve_honor(3, 1).expect("honor");
+        assert_eq!(honor.honor_type, "event");
+        assert_eq!(honor.background_asset_bundle_name, None);
+        assert_eq!(honor.frame_name, None);
     }
 }

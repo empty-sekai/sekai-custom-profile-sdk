@@ -3,7 +3,7 @@
 use super::common::draw_placeholder;
 use crate::assets::AssetStore;
 use crate::masterdata::MasterData;
-use crate::types::BondsHonorEntry;
+use sekai_profile_renderer_core::masterdata::BondsHonorAssetPlan;
 use skia_safe::{Canvas, Paint, Rect};
 
 /// 绘制羁绊称号。
@@ -18,57 +18,30 @@ pub fn render_bonds_honor(
     md: &MasterData,
     assets: &AssetStore,
 ) {
-    let bonds_entry = match md.get_bonds_honor(bonds_honor_id) {
-        Some(entry) => entry,
-        None => {
-            tracing::warn!(bonds_honor_id, "BondsHonor 未找到");
-            let (w, h) = if full_size {
-                (380.0, 80.0)
-            } else {
-                (180.0, 80.0)
-            };
-            draw_placeholder(canvas, "BondsHonor", bonds_honor_id, w, h);
-            return;
-        }
-    };
-
-    let (cid1, cid2) = if inverse {
-        (
-            bonds_entry.game_character_unit_id2,
-            bonds_entry.game_character_unit_id1,
-        )
-    } else {
-        (
-            bonds_entry.game_character_unit_id1,
-            bonds_entry.game_character_unit_id2,
-        )
-    };
-    let (sd_cid1, sd_cid2) = if use_unit_vs {
-        (
-            md.resolve_unit_vs_sd(cid1, cid2),
-            md.resolve_unit_vs_sd(cid2, cid1),
-        )
-    } else {
-        (cid1, cid2)
-    };
-
     let (w, h) = if full_size {
         (380.0, 80.0)
     } else {
         (180.0, 80.0)
     };
-    let mask_key = if full_size {
-        "honor/mask_degree_main"
-    } else {
-        "honor/mask_degree_sub"
+    let Some(plan) = sekai_profile_renderer_core::masterdata::bonds_honor_asset_plan(
+        md,
+        bonds_honor_id,
+        full_size,
+        word_id,
+        inverse,
+        use_unit_vs,
+    ) else {
+        tracing::warn!(bonds_honor_id, "BondsHonor 未找到");
+        draw_placeholder(canvas, "BondsHonor", bonds_honor_id, w, h);
+        return;
     };
 
     let layer_bounds = Rect::from_xywh(-w / 2.0, -h / 2.0, w, h);
     canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&layer_bounds));
-    render_bonds_bg(canvas, cid1, cid2, full_size, w, h, assets);
-    render_bonds_sd(canvas, sd_cid1, sd_cid2, full_size, w, h, assets);
+    render_bonds_bg(canvas, &plan, w, h, assets);
+    render_bonds_sd(canvas, &plan, full_size, w, h, assets);
 
-    if let Some(mask_img) = assets.get_image(mask_key) {
+    if let Some(mask_img) = assets.get_image(&plan.mask.key) {
         let mut mask_paint = Paint::default();
         mask_paint.set_blend_mode(skia_safe::BlendMode::DstIn);
         canvas.draw_image_rect(
@@ -80,42 +53,19 @@ pub fn render_bonds_honor(
     }
     canvas.restore();
 
-    render_bonds_frame_and_stars(
-        canvas,
-        &bonds_entry,
-        full_size,
-        word_id,
-        honor_level,
-        w,
-        h,
-        md,
-        assets,
-    );
+    render_bonds_frame_and_stars(canvas, &plan, full_size, honor_level, w, h, assets);
 }
 
 fn render_bonds_bg(
     canvas: &Canvas,
-    cid1: i32,
-    cid2: i32,
-    full_size: bool,
+    plan: &BondsHonorAssetPlan,
     w: f32,
     h: f32,
     assets: &AssetStore,
 ) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    let (bg1_key, bg2_key) = if full_size {
-        (
-            format!("honor/bonds/{}", cid1),
-            format!("honor/bonds/{}", cid2),
-        )
-    } else {
-        (
-            format!("honor/bonds/{}_sub", cid1),
-            format!("honor/bonds/{}_sub", cid2),
-        )
-    };
-    if let Some(bg1) = assets.get_image(&bg1_key) {
+    if let Some(bg1) = assets.get_image(&plan.backgrounds[0].key) {
         let iw = bg1.width() as f32;
         let ih = bg1.height() as f32;
         let half_iw = iw / 2.0;
@@ -130,7 +80,7 @@ fn render_bonds_bg(
             &paint,
         );
     }
-    if let Some(bg2) = assets.get_image(&bg2_key) {
+    if let Some(bg2) = assets.get_image(&plan.backgrounds[1].key) {
         let iw = bg2.width() as f32;
         let ih = bg2.height() as f32;
         let half_iw = iw / 2.0;
@@ -149,8 +99,7 @@ fn render_bonds_bg(
 
 fn render_bonds_sd(
     canvas: &Canvas,
-    cid1: i32,
-    cid2: i32,
+    plan: &BondsHonorAssetPlan,
     full_size: bool,
     _w: f32,
     h: f32,
@@ -158,8 +107,8 @@ fn render_bonds_sd(
 ) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
-    let sd1_key = format!("bonds_honor/chr_sd_{:02}_01", cid1);
-    let sd2_key = format!("bonds_honor/chr_sd_{:02}_01", cid2);
+    let [cid1, cid2] = plan.character_ids;
+    let [sd1_key, sd2_key] = plan.characters.each_ref().map(|key| key.key.as_str());
 
     // 对齐 Haruki 画法：每个 SD 角色按原始分辨率 0.8 倍缩放（保留角色间尺寸差异，
     // 不再统一拉到同一高度），脸部锚点在中线两侧 offset_to_mid 处，
@@ -168,7 +117,7 @@ fn render_bonds_sd(
     let offset_to_mid = if full_size { 120.0 } else { 30.0 };
 
     // 左角色：脸部锚在 x=-offset_to_mid，右缘不越过中线 (x=0)
-    if let Some(sd1) = assets.get_image(&sd1_key) {
+    if let Some(sd1) = assets.get_image(sd1_key) {
         let (nw, nh) = (sd1.width() as f32, sd1.height() as f32);
         let (sw, sh) = (nw * SCALE, nh * SCALE);
         let dst_left = -offset_to_mid - sw / 2.0;
@@ -205,7 +154,7 @@ fn render_bonds_sd(
     }
 
     // 右角色：脸部锚在 x=+offset_to_mid，左缘不越过中线 (x=0)
-    if let Some(sd2) = assets.get_image(&sd2_key) {
+    if let Some(sd2) = assets.get_image(sd2_key) {
         let (nw, nh) = (sd2.width() as f32, sd2.height() as f32);
         let (sw, sh) = (nw * SCALE, nh * SCALE);
         let dst_left = offset_to_mid - sw / 2.0;
@@ -244,25 +193,16 @@ fn render_bonds_sd(
 
 fn render_bonds_frame_and_stars(
     canvas: &Canvas,
-    entry: &BondsHonorEntry,
+    plan: &BondsHonorAssetPlan,
     full_size: bool,
-    word_id: i64,
     honor_level: i32,
     w: f32,
     h: f32,
-    md: &MasterData,
     assets: &AssetStore,
 ) {
     let paint = Paint::default();
-    let rarity_num = match entry.honor_rarity.as_str() {
-        "low" => 1,
-        "middle" => 2,
-        "high" => 3,
-        _ => 4,
-    };
-    let size_char = if full_size { "m" } else { "s" };
-    let frame_key = format!("honor/frame_degree_{}_{}", size_char, rarity_num);
-    if let Some(frame_img) = assets.get_image(&frame_key) {
+    let frame_key = &plan.frame.key;
+    if let Some(frame_img) = assets.get_image(frame_key) {
         let (fw, fh) = (frame_img.width() as f32, frame_img.height() as f32);
         // 按边框实际宽度水平居中。低稀有度 sub 边框比 honor 窄（164 vs 180），
         // 居中后两侧各留 8px；满宽边框（main 各稀有度、sub 中高稀有度）dx=0 不偏移。
@@ -270,7 +210,7 @@ fn render_bonds_frame_and_stars(
         let dx = (w - fw) / 2.0;
         let dst = Rect::from_xywh(-w / 2.0 + dx, -h / 2.0, fw, fh);
         tracing::debug!(
-            frame_key = %frame_key, full_size, rarity_num,
+            frame_key = %frame_key, full_size,
             frame_w = frame_img.width(), frame_h = frame_img.height(),
             honor_w = w, honor_h = h, dx,
             dst_x = dst.left, dst_y = dst.top, dst_right = dst.right, dst_bottom = dst.bottom,
@@ -287,30 +227,28 @@ fn render_bonds_frame_and_stars(
             &paint,
         );
     }
-    if full_size {
-        let word_key = if let Some(word) = md.get_bonds_honor_word(word_id) {
-            format!("bonds_honor/word/{}_01", word.assetbundle_name)
-        } else {
-            String::new()
-        };
-        if let Some(word_img) = assets.get_image(&word_key) {
-            let (ww, wh) = (word_img.width() as f32, word_img.height() as f32);
-            canvas.draw_image_rect(
-                word_img,
-                Some((
-                    &Rect::from_xywh(0.0, 0.0, ww, wh),
-                    skia_safe::canvas::SrcRectConstraint::Fast,
-                )),
-                Rect::from_xywh(-ww / 2.0, -wh / 2.0, ww, wh),
-                &paint,
-            );
-        }
+    if let Some(word_img) = plan
+        .word
+        .as_ref()
+        .and_then(|key| assets.get_image(&key.key))
+    {
+        let (ww, wh) = (word_img.width() as f32, word_img.height() as f32);
+        canvas.draw_image_rect(
+            word_img,
+            Some((
+                &Rect::from_xywh(0.0, 0.0, ww, wh),
+                skia_safe::canvas::SrcRectConstraint::Fast,
+            )),
+            Rect::from_xywh(-ww / 2.0, -wh / 2.0, ww, wh),
+            &paint,
+        );
     }
-    render_bonds_stars(canvas, honor_level, full_size, w, h, assets);
+    render_bonds_stars(canvas, plan, honor_level, full_size, w, h, assets);
 }
 
 fn render_bonds_stars(
     canvas: &Canvas,
+    plan: &BondsHonorAssetPlan,
     honor_level: i32,
     full_size: bool,
     w: f32,
@@ -318,14 +256,11 @@ fn render_bonds_stars(
     assets: &AssetStore,
 ) {
     let paint = Paint::default();
-    let mut level = honor_level;
-    if level > 10 {
-        level -= 10;
-    }
+    let level = sekai_profile_renderer_core::masterdata::honor_level_star_count(honor_level);
     let base_y = -h / 2.0 + 63.0;
     let base_x = if full_size { -w / 2.0 + 54.0 } else { -40.0 };
     let normal_count = level.min(5);
-    if let Some(s) = assets.get_image("honor/icon_degreeLv") {
+    if let Some(s) = assets.get_image(&plan.star.key) {
         let (sw, sh) = (s.width() as f32, s.height() as f32);
         for i in 0..normal_count {
             canvas.draw_image_rect(
@@ -340,7 +275,7 @@ fn render_bonds_stars(
         }
     }
     if level > 5 {
-        if let Some(s6) = assets.get_image("honor/icon_degreeLv6") {
+        if let Some(s6) = assets.get_image(&plan.star_high.key) {
             let (sw, sh) = (s6.width() as f32, s6.height() as f32);
             for i in 0..(level - 5) {
                 canvas.draw_image_rect(

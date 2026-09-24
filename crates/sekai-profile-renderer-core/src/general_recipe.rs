@@ -1982,7 +1982,7 @@ fn build_standard_honor_recipe(
             0.0,
             false,
         ));
-    } else if has_star && matches!(honor_type, "character" | "achievement") {
+    } else if has_star {
         build_honor_star_nodes(
             layer_id,
             source_key,
@@ -1991,7 +1991,6 @@ fn build_standard_honor_recipe(
             star_high,
             bounds,
             base + 16,
-            false,
             nodes,
         );
     }
@@ -2166,7 +2165,6 @@ fn build_bonds_honor_recipe(
         star_high,
         bounds,
         base + 16,
-        true,
         nodes,
     );
 }
@@ -2179,20 +2177,9 @@ fn build_honor_star_nodes(
     star_high: Option<&crate::profile_scene::ResourceDescriptor>,
     bounds: Rect,
     base: u32,
-    bonds: bool,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) {
-    let mut level = honor.honor_level;
-    if bonds {
-        if level > 10 {
-            level -= 10;
-        }
-    } else {
-        level %= 10;
-        if level == 0 && honor.honor_level > 0 {
-            level = 10;
-        }
-    }
+    let level = crate::masterdata::honor_level_star_count(honor.honor_level);
     let x = if honor.full_size {
         bounds.x + 54.0
     } else {
@@ -4335,12 +4322,13 @@ mod tests {
                 .count(),
             5
         );
+        // Level 27 wraps to seven stars: five slots, two of them upgraded.
         assert_eq!(
             roles
                 .iter()
                 .filter(|role| role.contains("star-high"))
                 .count(),
-            12
+            2
         );
         assert_eq!(
             recipe.nodes[begin].bounds,

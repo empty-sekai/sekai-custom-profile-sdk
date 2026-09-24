@@ -372,13 +372,21 @@ fn build_profile_snapshot_inner(
     )?;
     populate_card_member_visuals(card, profile, masterdata, document_key, &mut snapshot)?;
 
+    let owned_honors = profile.map(|profile| &profile.owned_honors);
     for element in ordered_profile_elements(card, document_key) {
         match element.value {
             ProfileElementRef::Honor(value) => {
+                let Some(level) = crate::profile_data::placed_honor_level(
+                    owned_honors,
+                    value.id,
+                    value.honor_level,
+                ) else {
+                    continue;
+                };
                 if let Some(visual) = standard_honor_visual(
                     "customProfile.honors",
                     value.id,
-                    value.honor_level,
+                    level,
                     value.full_size,
                     profile,
                     masterdata,
@@ -388,10 +396,17 @@ fn build_profile_snapshot_inner(
                 }
             }
             ProfileElementRef::BondsHonor(value) => {
+                let Some(level) = crate::profile_data::placed_bonds_honor_level(
+                    owned_honors,
+                    value.id,
+                    value.honor_level,
+                ) else {
+                    continue;
+                };
                 if let Some(visual) = bonds_honor_visual(
                     "customProfile.bondsHonors",
                     value.id,
-                    value.honor_level,
+                    level,
                     value.full_size,
                     value.word_id,
                     value.inverse,
@@ -1326,8 +1341,8 @@ fn standard_honor_visual(
         honor_level: level,
         full_size,
         visual: HonorVisualKind::Standard {
+            has_star: resolved.draws_level_stars(),
             honor_type: resolved.honor_type,
-            has_star: resolved.has_star,
             is_live_master: resolved.is_live_master,
             progress,
             background: descriptor(&plan.background, size, "honor_background"),
@@ -1371,57 +1386,40 @@ fn bonds_honor_visual(
     masterdata: &impl ProfileMasterData,
     metadata: &impl ResourceMetadata,
 ) -> Option<HonorVisualSnapshot> {
-    let entry = masterdata.get_bonds_honor(id)?;
-    let (first, second) = if inverse {
-        (entry.game_character_unit_id2, entry.game_character_unit_id1)
-    } else {
-        (entry.game_character_unit_id1, entry.game_character_unit_id2)
-    };
-    let characters = if use_unit_virtual_singer {
-        [
-            masterdata.resolve_unit_virtual_singer(first, second),
-            masterdata.resolve_unit_virtual_singer(second, first),
-        ]
-    } else {
-        [first, second]
-    };
-    let (width, size_char) = if full_size {
-        (380.0, "m")
-    } else {
-        (180.0, "s")
-    };
+    let plan = crate::masterdata::bonds_honor_asset_plan(
+        masterdata,
+        id,
+        full_size,
+        word_id,
+        inverse,
+        use_unit_virtual_singer,
+    )?;
     let size = ResourceMetric {
-        width,
+        width: if full_size { 380.0 } else { 180.0 },
         height: 80.0,
     };
-    let background = |character: i32| {
+    let star_size = ResourceMetric {
+        width: 16.0,
+        height: 16.0,
+    };
+    let descriptor = |resource: &ResourceKey, metric, table, table_id| {
         optional_descriptor(
-            "static",
-            if full_size {
-                format!("honor/bonds/{character}")
-            } else {
-                format!("honor/bonds/{character}_sub")
-            },
-            size,
-            "bonds_honor_background",
-            id,
+            &resource.namespace,
+            resource.key.clone(),
+            metric,
+            table,
+            table_id,
             metadata,
         )
     };
-    let character = |character: i32| {
-        optional_descriptor(
-            "assets",
-            format!("bonds_honor/chr_sd_{character:02}_01"),
-            ResourceMetric {
-                width: 160.0,
-                height: 160.0,
-            },
-            "bonds_honor_character",
-            id,
-            metadata,
-        )
+    let character_size = ResourceMetric {
+        width: 160.0,
+        height: 160.0,
     };
-    let rarity = honor_rarity_number(&entry.honor_rarity);
+    let word_size = ResourceMetric {
+        width: 180.0,
+        height: 40.0,
+    };
     Some(HonorVisualSnapshot {
         source_field: source_field.into(),
         source_id: id.to_string(),
@@ -1429,78 +1427,25 @@ fn bonds_honor_visual(
         honor_level: level,
         full_size,
         visual: HonorVisualKind::Bonds {
-            character_ids: characters,
-            backgrounds: [background(first), background(second)],
-            characters: [character(characters[0]), character(characters[1])],
-            mask: optional_descriptor(
-                "static",
-                if full_size {
-                    "honor/mask_degree_main".into()
-                } else {
-                    "honor/mask_degree_sub".into()
-                },
-                size,
-                "honor_static",
-                id,
-                metadata,
-            ),
-            frame: optional_descriptor(
-                "static",
-                format!("honor/frame_degree_{size_char}_{rarity}"),
-                size,
-                "honor_frame",
-                id,
-                metadata,
-            ),
-            word: full_size
-                .then(|| masterdata.get_bonds_honor_word(word_id))
-                .flatten()
-                .and_then(|word| {
-                    optional_descriptor(
-                        "assets",
-                        format!("bonds_honor/word/{}_01", word.assetbundle_name),
-                        ResourceMetric {
-                            width: 180.0,
-                            height: 40.0,
-                        },
-                        "bonds_honor_word",
-                        word_id as i32,
-                        metadata,
-                    )
-                }),
-            star: optional_descriptor(
-                "static",
-                "honor/icon_degreeLv".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
-            star_high: optional_descriptor(
-                "static",
-                "honor/icon_degreeLv6".into(),
-                ResourceMetric {
-                    width: 16.0,
-                    height: 16.0,
-                },
-                "honor_static",
-                id,
-                metadata,
-            ),
+            character_ids: plan.character_ids,
+            backgrounds: plan
+                .backgrounds
+                .each_ref()
+                .map(|key| descriptor(key, size, "bonds_honor_background", id)),
+            characters: plan
+                .characters
+                .each_ref()
+                .map(|key| descriptor(key, character_size, "bonds_honor_character", id)),
+            mask: descriptor(&plan.mask, size, "honor_static", id),
+            frame: descriptor(&plan.frame, size, "honor_frame", id),
+            word: plan
+                .word
+                .as_ref()
+                .and_then(|key| descriptor(key, word_size, "bonds_honor_word", word_id as i32)),
+            star: descriptor(&plan.star, star_size, "honor_static", id),
+            star_high: descriptor(&plan.star_high, star_size, "honor_static", id),
         },
     })
-}
-
-fn honor_rarity_number(value: &str) -> i32 {
-    match value {
-        "low" => 1,
-        "middle" => 2,
-        "high" => 3,
-        _ => 4,
-    }
 }
 
 fn optional_descriptor(
@@ -1727,7 +1672,7 @@ fn insert_color(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn low_rarity_honor_frames_resolve_custom_fallback_or_no_frame() {
+    fn honor_frames_resolve_custom_fallback_or_no_frame() {
         struct Available<'a>(&'a [&'a str]);
         impl super::ResourceMetadata for Available<'_> {
             fn metric(&self, _: &crate::ResourceKey) -> Option<super::ResourceMetric> {
@@ -1741,22 +1686,25 @@ mod tests {
                 }
             }
         }
-        let mut md = crate::masterdata::JsonMasterData::new("en");
-        md.insert_value(
-            "honors",
-            serde_json::json!([{
-                "id": 1, "assetbundleName": "honor_sample", "honorRarity": "low",
-                "groupId": 1, "levels": [{ "level": 1 }]
-            }]),
-        )
-        .unwrap();
-        md.insert_value(
-            "honorGroups",
-            serde_json::json!([{
-                "id": 1, "honorType": "character", "frameName": "custom_frame"
-            }]),
-        )
-        .unwrap();
+        let masterdata = |rarity: &str| {
+            let mut md = crate::masterdata::JsonMasterData::new("en");
+            md.insert_value(
+                "honors",
+                serde_json::json!([{
+                    "id": 1, "assetbundleName": "honor_sample", "honorRarity": rarity,
+                    "groupId": 1, "levels": [{ "level": 1 }]
+                }]),
+            )
+            .unwrap();
+            md.insert_value(
+                "honorGroups",
+                serde_json::json!([{
+                    "id": 1, "honorType": "event", "frameName": "custom_frame"
+                }]),
+            )
+            .unwrap();
+            md
+        };
         let card = serde_json::from_value(serde_json::json!({"honors": [{
             "objectData": {
                 "layer": 0, "lock": false, "visible": true,
@@ -1767,13 +1715,22 @@ mod tests {
             "id": 1, "honorLevel": 1, "fullSize": true
         }]}))
         .unwrap();
-        let custom = "honor_frame/custom_frame/frame_degree_m_1";
-        let fallback = "honor/frame_degree_m_1";
-        for (available, expected) in [
-            (vec![custom, fallback], Some(("assets", custom))),
-            (vec![custom], Some(("assets", custom))),
-            (vec![fallback], Some(("static", fallback))),
-            (vec![], None),
+        let custom = "honor_frame/custom_frame/frame_degree_m_3";
+        let fallback = "honor/frame_degree_m_3";
+        let low_custom = "honor_frame/custom_frame/frame_degree_m_1";
+        let low_fallback = "honor/frame_degree_m_1";
+        for (rarity, available, expected) in [
+            ("high", vec![custom, fallback], Some(("assets", custom))),
+            ("high", vec![custom], Some(("assets", custom))),
+            ("high", vec![fallback], Some(("static", fallback))),
+            ("high", vec![], None),
+            // Below the high rarity the group frame is never used.
+            (
+                "low",
+                vec![low_custom, low_fallback],
+                Some(("static", low_fallback)),
+            ),
+            ("low", vec![low_custom], None),
         ] {
             let visual = super::standard_honor_visual(
                 "honor",
@@ -1781,7 +1738,7 @@ mod tests {
                 1,
                 true,
                 None,
-                &md,
+                &masterdata(rarity),
                 &Available(&available),
             )
             .unwrap();
@@ -2494,6 +2451,125 @@ mod tests {
             .is_some_and(|image| image.descriptor.is_none()));
     }
 
+    fn honor_object() -> serde_json::Value {
+        serde_json::json!({
+            "layer": 1, "lock": false,
+            "position": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "rotation": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+            "scale": {"x": 1.0, "y": 1.0, "z": 1.0}, "visible": true
+        })
+    }
+
+    #[test]
+    fn bonds_honor_word_art_follows_the_honor_rarity() {
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "bondsHonors",
+            serde_json::json!([
+                { "id": 1, "gameCharacterUnitId1": 1, "gameCharacterUnitId2": 2, "honorRarity": "low" },
+                { "id": 2, "gameCharacterUnitId1": 1, "gameCharacterUnitId2": 2, "honorRarity": "middle" }
+            ]),
+        )
+        .unwrap();
+        data.insert_value(
+            "bondsHonorWords",
+            serde_json::json!([{ "id": 9, "assetbundleName": "honorname_0102_01" }]),
+        )
+        .unwrap();
+        for (id, expected) in [
+            (1, "bonds_honor/word/honorname_0102_01_01"),
+            (2, "bonds_honor/word/honorname_0102_01_02"),
+        ] {
+            let visual =
+                super::bonds_honor_visual("bonds", id, 1, true, 9, false, false, &data, &())
+                    .unwrap();
+            let HonorVisualKind::Bonds { word, .. } = visual.visual else {
+                panic!("bonds visual expected");
+            };
+            assert_eq!(word.unwrap().resource.key, expected);
+        }
+    }
+
+    #[test]
+    fn placed_honors_take_the_owned_level_and_skip_unowned_honors() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "honors": [
+                { "objectData": honor_object(), "id": 10, "fullSize": true },
+                { "objectData": honor_object(), "id": 11, "fullSize": false }
+            ],
+            "bondsHonors": [
+                { "objectData": honor_object(), "id": 20, "wordId": 0, "fullSize": false, "inverse": false, "useUnitVirtualSinger": false },
+                { "objectData": honor_object(), "id": 21, "wordId": 0, "fullSize": false, "inverse": false, "useUnitVirtualSinger": false }
+            ]
+        }))
+        .unwrap();
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "honors",
+            serde_json::json!([
+                { "id": 10, "assetbundleName": "honor_0010", "honorRarity": "low", "groupId": 1, "levels": [{"level": 1}, {"level": 2}] },
+                { "id": 11, "assetbundleName": "honor_0011", "honorRarity": "low", "groupId": 1, "levels": [{"level": 1}, {"level": 2}] }
+            ]),
+        )
+        .unwrap();
+        data.insert_value(
+            "honorGroups",
+            serde_json::json!([{ "id": 1, "honorType": "character" }]),
+        )
+        .unwrap();
+        data.insert_value(
+            "bondsHonors",
+            serde_json::json!([
+                { "id": 20, "gameCharacterUnitId1": 1, "gameCharacterUnitId2": 2, "honorRarity": "low" },
+                { "id": 21, "gameCharacterUnitId1": 1, "gameCharacterUnitId2": 3, "honorRarity": "low" }
+            ]),
+        )
+        .unwrap();
+        let levels = |snapshot: &crate::profile_scene::ProfileResolveSnapshot| {
+            snapshot
+                .honor_visuals
+                .values()
+                .map(|visual| (visual.honor_id, visual.honor_level))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let snapshot = |profile: Option<&ProfileData>| {
+            build_profile_snapshot(
+                &card,
+                profile,
+                &data,
+                "owned-honors",
+                "cn",
+                &(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+        };
+
+        // Without a profile the element's own level is kept.
+        assert_eq!(
+            levels(&snapshot(None)),
+            BTreeMap::from([(10, 1), (11, 1), (20, 1), (21, 1)])
+        );
+
+        // userHonors rows are [honorId, level, obtainedAt]; userBondsHonors rows
+        // are objects. Honors missing from either list are not drawn.
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userHonors": [[10, 34, 1700000000000_i64], [99, 2, null]],
+            "userBondsHonors": [{ "bondsHonorId": 21, "level": 7, "obtainedAt": 0 }]
+        }));
+        assert_eq!(
+            levels(&snapshot(Some(&profile))),
+            BTreeMap::from([(10, 34), (21, 7)])
+        );
+
+        // Object-shaped honor rows are read the same way.
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userHonors": [{ "honorId": 11, "level": 3 }],
+            "userBondsHonors": []
+        }));
+        assert_eq!(levels(&snapshot(Some(&profile))), BTreeMap::from([(11, 3)]));
+    }
+
     fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Vec<String> {
         let object = serde_json::json!({
             "layer": 1, "lock": false,
@@ -2527,12 +2603,12 @@ mod tests {
     }
 
     #[test]
-    fn standard_honor_bundles_do_not_request_absent_rank_overlays() {
+    fn honor_types_without_rank_art_request_no_rank_overlay() {
         for (honor_type, asset_bundle_name) in [
             ("character", "honor_0042"),
             ("achievement", "honor_0105"),
-            ("event", "honor_0245"),
             ("limitevent", "honor_se_ln_1"),
+            ("limitevent", "honor_top_000020"),
         ] {
             let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
             assert!(keys.iter().any(|key| key.ends_with("/degree_sub")));
@@ -2545,9 +2621,11 @@ mod tests {
 
     #[test]
     fn overlay_bearing_honor_bundles_request_rank_assets() {
-        for (honor_type, asset_bundle_name) in
-            [("sekai_echo", "honor_0182"), ("event", "honor_memorial")]
-        {
+        for (honor_type, asset_bundle_name) in [
+            ("sekai_echo", "honor_0182"),
+            ("event", "honor_memorial"),
+            ("event", "honor_0305"),
+        ] {
             let keys = prepared_honor_resource_keys(honor_type, asset_bundle_name);
             assert!(
                 keys.iter()
