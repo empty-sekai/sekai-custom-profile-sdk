@@ -19,8 +19,12 @@
 //! else. A new generation adds pages only for new codepoints and a new
 //! manifest; publishing it removes the superseded manifests, pages no manifest
 //! references and directories of other identities.
+//!
+//! A codepoint the font cannot supply is recorded in the manifest's
+//! generation failures rather than failing the generation, and counts as
+//! resolved from then on, so later requests do not generate it again.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,10 +35,10 @@ use sha2::{Digest, Sha256};
 use ttf_parser::Face;
 
 use super::atlas::{
-    MappedSdfAtlas, SdfAtlasGenerationReport, SdfAtlasGlyphManifest, SdfAtlasManifest,
-    SdfAtlasPageManifest, ATLAS_MANIFEST_SCHEMA, PROFILE_TEXT_FALLBACK_FONT_FAMILY,
-    SWIZZLED_BLOCK_HEIGHT, SWIZZLED_BLOCK_WIDTH, SWIZZLED_PAGE_HEADER_BYTES, SWIZZLED_PAGE_MAGIC,
-    SWIZZLED_PAGE_VERSION,
+    MappedSdfAtlas, SdfAtlasGenerationFailure, SdfAtlasGenerationReport, SdfAtlasGlyphManifest,
+    SdfAtlasManifest, SdfAtlasPageManifest, ATLAS_MANIFEST_SCHEMA,
+    PROFILE_TEXT_FALLBACK_FONT_FAMILY, SWIZZLED_BLOCK_HEIGHT, SWIZZLED_BLOCK_WIDTH,
+    SWIZZLED_PAGE_HEADER_BYTES, SWIZZLED_PAGE_MAGIC, SWIZZLED_PAGE_VERSION,
 };
 use super::outline::{self, OfflineAtlasGlyphGenerator, OfflineGenerationMethod, OutlineSdfGlyph};
 
@@ -53,8 +57,12 @@ const FALLBACK_SUPERSAMPLE: usize = 2;
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PersistentFallbackSdfCacheReport {
     pub requested_codepoint_count: u64,
+    /// Requested codepoints already resolved, as a glyph or as a codepoint
+    /// the font cannot supply.
     pub cache_hit_count: u64,
+    /// Requested codepoints that got a glyph in this call.
     pub generated_codepoint_count: u64,
+    /// Codepoints resolved after this call, glyphs and unsupported alike.
     pub total_cached_codepoint_count: u64,
     pub generated_file_bytes: u64,
     pub font_family: String,
@@ -81,14 +89,69 @@ struct Generation {
 }
 
 impl Generation {
+    /// Codepoints the generation resolved: its glyphs and the codepoints the
+    /// font could not supply.
     fn codepoints(&self) -> BTreeSet<u32> {
-        self.atlas
-            .manifest()
+        let manifest = self.atlas.manifest();
+        manifest
             .glyphs
             .iter()
             .map(|glyph| glyph.codepoint)
+            .chain(
+                manifest
+                    .generation
+                    .failures
+                    .iter()
+                    .map(|failure| failure.codepoint),
+            )
             .collect()
     }
+}
+
+/// What this process serves.
+#[derive(Default)]
+struct CacheState {
+    generation: Option<Generation>,
+    /// Codepoints the font could not supply that no published manifest
+    /// records yet, with the reason. An atlas needs at least one glyph, so a
+    /// generation of such codepoints alone is kept here instead; the next
+    /// published generation records them.
+    unpublished_failures: BTreeMap<u32, String>,
+}
+
+impl CacheState {
+    fn codepoints(&self) -> BTreeSet<u32> {
+        let mut codepoints = self
+            .generation
+            .as_ref()
+            .map(Generation::codepoints)
+            .unwrap_or_default();
+        codepoints.extend(self.unpublished_failures.keys().copied());
+        codepoints
+    }
+
+    /// Every failure a new generation carries over without trying again.
+    fn known_failures(&self) -> BTreeMap<u32, String> {
+        let mut failures = self
+            .generation
+            .iter()
+            .flat_map(|generation| &generation.atlas.manifest().generation.failures)
+            .map(|failure| (failure.codepoint, failure.reason.clone()))
+            .collect::<BTreeMap<_, _>>();
+        failures.extend(
+            self.unpublished_failures
+                .iter()
+                .map(|(codepoint, reason)| (*codepoint, reason.clone())),
+        );
+        failures
+    }
+}
+
+/// A generation built for a codepoint set.
+enum BuiltGeneration {
+    Published(Generation, u64),
+    /// Every codepoint failed, which leaves no atlas to publish.
+    NoGlyphs(Vec<SdfAtlasGenerationFailure>),
 }
 
 pub struct PersistentFallbackSdfCache {
@@ -99,7 +162,7 @@ pub struct PersistentFallbackSdfCache {
     generator_contract: String,
     identity: String,
     cmap_codepoint_count: u32,
-    current: Mutex<Option<Generation>>,
+    state: Mutex<CacheState>,
 }
 
 impl PersistentFallbackSdfCache {
@@ -141,7 +204,7 @@ impl PersistentFallbackSdfCache {
             generator_contract,
             identity,
             cmap_codepoint_count,
-            current: Mutex::new(None),
+            state: Mutex::new(CacheState::default()),
         };
         let current = {
             let _file_guard = CacheFileLock::acquire(&cache.root)?;
@@ -149,10 +212,11 @@ impl PersistentFallbackSdfCache {
                 .read_current_pointer()?
                 .and_then(|pointer| cache.open_generation(pointer.manifest, true))
         };
-        *cache
-            .current
+        cache
+            .state
             .lock()
-            .map_err(|_| "fallback cache process state is poisoned".to_string())? = current;
+            .map_err(|_| "fallback cache process state is poisoned".to_string())?
+            .generation = current;
         Ok(cache)
     }
 
@@ -165,9 +229,14 @@ impl PersistentFallbackSdfCache {
     }
 
     pub fn load_current(&self) -> Result<Option<Arc<MappedSdfAtlas>>, String> {
-        self.current
+        self.state
             .lock()
-            .map(|current| current.as_ref().map(|generation| generation.atlas.clone()))
+            .map(|state| {
+                state
+                    .generation
+                    .as_ref()
+                    .map(|generation| generation.atlas.clone())
+            })
             .map_err(|_| "fallback cache process state is poisoned".to_string())
     }
 
@@ -182,14 +251,11 @@ impl PersistentFallbackSdfCache {
         String,
     > {
         let started = Instant::now();
-        let mut process_current = self
-            .current
+        let mut state = self
+            .state
             .lock()
             .map_err(|_| "fallback cache process state is poisoned".to_string())?;
-        let existing = process_current
-            .as_ref()
-            .map(Generation::codepoints)
-            .unwrap_or_default();
+        let existing = state.codepoints();
         let mut report = PersistentFallbackSdfCacheReport {
             requested_codepoint_count: requested.len() as u64,
             cache_hit_count: requested.intersection(&existing).count() as u64,
@@ -199,7 +265,7 @@ impl PersistentFallbackSdfCache {
             ..PersistentFallbackSdfCacheReport::default()
         };
         if requested.is_subset(&existing) {
-            return Ok(finish(process_current.as_ref(), report, started));
+            return Ok(finish(state.generation.as_ref(), report, started));
         }
 
         // A missing in-process glyph may already have been published by
@@ -209,36 +275,49 @@ impl PersistentFallbackSdfCache {
         let published = match self.read_current_pointer()? {
             None => None,
             Some(pointer)
-                if process_current
+                if state
+                    .generation
                     .as_ref()
                     .is_some_and(|current| current.manifest == pointer.manifest) =>
             {
-                process_current.clone()
+                state.generation.clone()
             }
             Some(pointer) => self.open_generation(pointer.manifest, false),
         };
-        *process_current = published;
-        let existing = process_current
-            .as_ref()
-            .map(Generation::codepoints)
-            .unwrap_or_default();
+        state.generation = published;
+        let existing = state.codepoints();
         report.cache_hit_count = requested.intersection(&existing).count() as u64;
         report.total_cached_codepoint_count = existing.len() as u64;
-        let missing = requested.difference(&existing).count() as u64;
-        if missing == 0 {
-            return Ok(finish(process_current.as_ref(), report, started));
+        if requested.is_subset(&existing) {
+            return Ok(finish(state.generation.as_ref(), report, started));
         }
 
         let all_codepoints = existing.union(requested).copied().collect::<BTreeSet<_>>();
-        let (generation, generated_file_bytes) =
-            self.build_generation(&all_codepoints, process_current.as_ref())?;
-        self.publish(&generation)?;
-        self.collect_garbage(&generation);
-        report.generated_codepoint_count = missing;
-        report.total_cached_codepoint_count = all_codepoints.len() as u64;
-        report.generated_file_bytes = generated_file_bytes;
-        *process_current = Some(generation);
-        Ok(finish(process_current.as_ref(), report, started))
+        match self.build_generation(&all_codepoints, &state)? {
+            BuiltGeneration::Published(generation, generated_file_bytes) => {
+                self.publish(&generation)?;
+                self.collect_garbage(&generation);
+                report.generated_file_bytes = generated_file_bytes;
+                // The published manifest records them now.
+                state.unpublished_failures.clear();
+                state.generation = Some(generation);
+            }
+            BuiltGeneration::NoGlyphs(failures) => {
+                state.unpublished_failures.extend(
+                    failures
+                        .into_iter()
+                        .map(|failure| (failure.codepoint, failure.reason)),
+                );
+            }
+        }
+        report.generated_codepoint_count = state.generation.as_ref().map_or(0, |generation| {
+            requested
+                .difference(&existing)
+                .filter(|codepoint| generation.atlas.glyph(**codepoint).is_some())
+                .count() as u64
+        });
+        report.total_cached_codepoint_count = state.codepoints().len() as u64;
+        Ok(finish(state.generation.as_ref(), report, started))
     }
 
     /// The published pointer, or `None` when there is none or it belongs to
@@ -317,8 +396,8 @@ impl PersistentFallbackSdfCache {
     fn build_generation(
         &self,
         codepoints: &BTreeSet<u32>,
-        current: Option<&Generation>,
-    ) -> Result<(Generation, u64), String> {
+        state: &CacheState,
+    ) -> Result<BuiltGeneration, String> {
         let mut digest = Sha256::new();
         digest.update(self.identity.as_bytes());
         for codepoint in codepoints {
@@ -334,7 +413,7 @@ impl PersistentFallbackSdfCache {
             .open_generation(manifest.clone(), false)
             .filter(|generation| generation.codepoints() == *codepoints)
         {
-            return Ok((generation, 0));
+            return Ok(BuiltGeneration::Published(generation, 0));
         }
 
         let identity_dir = self.root.join(&self.identity);
@@ -348,8 +427,14 @@ impl PersistentFallbackSdfCache {
         let (atlas_manifest, mut generated_file_bytes) = self.write_pages(
             &pages_dir,
             codepoints,
-            current.map(|current| &*current.atlas),
+            state.generation.as_ref().map(|current| &*current.atlas),
+            &state.known_failures(),
         )?;
+        if atlas_manifest.glyphs.is_empty() {
+            return Ok(BuiltGeneration::NoGlyphs(
+                atlas_manifest.generation.failures,
+            ));
+        }
         let mut manifest_bytes = serde_json::to_vec_pretty(&atlas_manifest)
             .map_err(|error| format!("serialize fallback manifest failed: {error}"))?;
         manifest_bytes.push(b'\n');
@@ -365,7 +450,7 @@ impl PersistentFallbackSdfCache {
         if atlas.manifest() != &atlas_manifest {
             return Err("fallback manifest roundtrip mismatch".into());
         }
-        Ok((
+        Ok(BuiltGeneration::Published(
             Generation {
                 manifest,
                 atlas: Arc::new(atlas),
@@ -374,17 +459,21 @@ impl PersistentFallbackSdfCache {
         ))
     }
 
-    /// Writes a page for every codepoint `current` does not already hold and
-    /// returns the manifest of the complete set.
+    /// Writes a page for every codepoint neither `current` nor
+    /// `known_failures` already resolves and returns the manifest of the
+    /// complete set. A codepoint the font cannot supply becomes a generation
+    /// failure.
     fn write_pages(
         &self,
         pages_dir: &Path,
         codepoints: &BTreeSet<u32>,
         current: Option<&MappedSdfAtlas>,
+        known_failures: &BTreeMap<u32, String>,
     ) -> Result<(SdfAtlasManifest, u64), String> {
         let mut generator = None;
         let mut pages = Vec::with_capacity(codepoints.len());
         let mut glyphs = Vec::with_capacity(codepoints.len());
+        let mut failures = Vec::new();
         let mut analytic_fallback_codepoints = Vec::new();
         let mut generated_file_bytes = 0u64;
         for codepoint in codepoints.iter().copied() {
@@ -415,22 +504,37 @@ impl PersistentFallbackSdfCache {
                 }
                 continue;
             }
+            if let Some(reason) = known_failures.get(&codepoint) {
+                failures.push(SdfAtlasGenerationFailure {
+                    codepoint,
+                    reason: reason.clone(),
+                });
+                continue;
+            }
             let generator = match &mut generator {
                 Some(generator) => generator,
                 empty => empty.insert(OfflineAtlasGlyphGenerator::new_from_path(&self.font_path)?),
             };
             let ch = char::from_u32(codepoint)
                 .ok_or_else(|| format!("invalid fallback codepoint U+{codepoint:04X}"))?;
-            let (glyph, used_fallback) = generator
-                .generate(
-                    ch,
-                    OfflineGenerationMethod::Edt {
-                        supersample: FALLBACK_SUPERSAMPLE,
-                    },
-                )
-                .map_err(|error| {
-                    format!("generate fallback glyph U+{codepoint:04X} failed: {error}")
-                })?;
+            let (glyph, used_fallback) = match generator.generate(
+                ch,
+                OfflineGenerationMethod::Edt {
+                    supersample: FALLBACK_SUPERSAMPLE,
+                },
+            ) {
+                Ok(generated) => generated,
+                Err(reason) => {
+                    tracing::debug!(
+                        font_family = %self.font_family,
+                        codepoint = %format!("U+{codepoint:04X}"),
+                        %reason,
+                        "fallback font cannot supply the codepoint"
+                    );
+                    failures.push(SdfAtlasGenerationFailure { codepoint, reason });
+                    continue;
+                }
+            };
             let (page, page_bytes) = write_glyph_page(pages_dir, codepoint, &glyph)?;
             generated_file_bytes = generated_file_bytes.saturating_add(page_bytes);
             glyphs.push(SdfAtlasGlyphManifest {
@@ -463,13 +567,13 @@ impl PersistentFallbackSdfCache {
             generation: SdfAtlasGenerationReport {
                 cmap_codepoint_count: self.cmap_codepoint_count,
                 requested_codepoint_count: codepoints.len() as u32,
-                generated_glyph_count: codepoints.len() as u32,
-                failed_glyph_count: 0,
+                generated_glyph_count: glyphs.len() as u32,
+                failed_glyph_count: failures.len() as u32,
                 analytic_fallback_count: analytic_fallback_codepoints.len() as u32,
                 page_width: pages.iter().map(|page| page.width).max().unwrap_or(0),
                 page_height: pages.iter().map(|page| page.height).max().unwrap_or(0),
                 gutter: 0,
-                failures: Vec::new(),
+                failures,
                 analytic_fallback_codepoints,
             },
             pages,
@@ -833,6 +937,74 @@ mod tests {
             .expect("cache state")
             .expect("persisted atlas");
         assert_eq!(current.manifest().glyphs.len(), 3);
+    }
+
+    #[test]
+    fn codepoints_the_font_lacks_are_recorded_instead_of_failing_the_generation() {
+        if !fonts_available() {
+            return;
+        }
+        let root = tempfile::tempdir().expect("fallback cache tempdir");
+        let cache = PersistentFallbackSdfCache::new(root.path(), REGULAR, "test-fallback")
+            .expect("create fallback cache");
+        // DejaVu Sans has no CJK ideographs.
+        let requested = codepoints("A\u{6F22}");
+        let (atlas, report) = cache
+            .ensure_codepoints(&requested)
+            .expect("a codepoint the font lacks must not fail the generation");
+        let atlas = atlas.expect("fallback atlas");
+        assert!(atlas.glyph(u32::from('A')).is_some());
+        assert!(atlas.glyph(0x6F22).is_none());
+        let failures = atlas
+            .manifest()
+            .generation
+            .failures
+            .iter()
+            .map(|failure| failure.codepoint)
+            .collect::<Vec<_>>();
+        assert_eq!(failures, vec![0x6F22]);
+        assert_eq!(report.generated_codepoint_count, 1);
+
+        // The recorded codepoint counts as resolved: asking again, in this
+        // process or after a restart, generates nothing.
+        let (again, report) = cache
+            .ensure_codepoints(&requested)
+            .expect("repeated request");
+        assert_eq!(
+            (report.cache_hit_count, report.generated_codepoint_count),
+            (2, 0)
+        );
+        assert_eq!(
+            again.expect("fallback atlas").manifest_sha256(),
+            atlas.manifest_sha256()
+        );
+        let reopened = PersistentFallbackSdfCache::new(root.path(), REGULAR, "test-fallback")
+            .expect("reopen fallback cache");
+        let (_, report) = reopened
+            .ensure_codepoints(&requested)
+            .expect("request after reopening");
+        assert_eq!(
+            (report.cache_hit_count, report.generated_codepoint_count),
+            (2, 0)
+        );
+
+        // With no glyph at all there is no atlas to publish, and the codepoint
+        // is still not generated again.
+        let root = tempfile::tempdir().expect("second fallback cache tempdir");
+        let cache = PersistentFallbackSdfCache::new(root.path(), REGULAR, "test-fallback")
+            .expect("create second fallback cache");
+        let unavailable = codepoints("\u{6F22}");
+        let (atlas, _) = cache
+            .ensure_codepoints(&unavailable)
+            .expect("a request of unavailable codepoints only");
+        assert!(atlas.is_none());
+        let (_, report) = cache
+            .ensure_codepoints(&unavailable)
+            .expect("repeated unavailable request");
+        assert_eq!(
+            (report.cache_hit_count, report.generated_codepoint_count),
+            (1, 0)
+        );
     }
 
     #[test]

@@ -30,6 +30,45 @@ impl RenderObjectGenerationPin {
     }
 }
 
+/// Adds the codepoints the profile fallback font has to supply for `text`,
+/// whose primary atlas holds the codepoints `primary_has` accepts.
+///
+/// TextMesh Pro draws a character from the primary face when the face has
+/// it or its same-face stand-in. Otherwise the fallback font is searched for
+/// the character and then its stand-in, and when that font has neither, the
+/// missing-glyph square is drawn instead, from the primary face if it has
+/// one. Characters that draw nothing, markup and control characters need no
+/// glyph.
+fn extend_profile_fallback_codepoints(
+    requested: &mut std::collections::BTreeSet<u32>,
+    text: &str,
+    primary_has: impl Fn(u32) -> bool,
+) {
+    use sekai_profile_renderer_core::tmp_text::{glyph, parse_segments};
+
+    let has = |ch: char| primary_has(u32::from(ch));
+    let mut needs_fallback = false;
+    for segment in parse_segments(text, 0.0) {
+        for source in segment.text.chars() {
+            let (ch, _) = segment.transform_char(source);
+            if !glyph::is_drawn(ch) || ch.is_control() || has(ch) {
+                continue;
+            }
+            let alternate =
+                glyph::same_face_alternate(ch).filter(|alternate| glyph::is_drawn(*alternate));
+            if alternate.is_some_and(has) {
+                continue;
+            }
+            requested.insert(u32::from(ch));
+            requested.extend(alternate.map(u32::from));
+            needs_fallback = true;
+        }
+    }
+    if needs_fallback && !has(glyph::MISSING_GLYPH_CHARACTER) {
+        requested.insert(u32::from(glyph::MISSING_GLYPH_CHARACTER));
+    }
+}
+
 /// 自定义名片渲染器。
 pub struct CustomProfileRenderer {
     md_source: RwLock<Arc<dyn MasterDataProvider>>,
@@ -363,12 +402,9 @@ impl CustomProfileRenderer {
                     | TextSource::MasterData { value, .. }
                     | TextSource::Localized { value, .. } => value,
                 };
-                requested.extend(value.chars().filter_map(|ch| {
-                    (!ch.is_whitespace()
-                        && !ch.is_control()
-                        && primary_atlas.glyph(u32::from(ch)).is_none())
-                    .then_some(u32::from(ch))
-                }));
+                extend_profile_fallback_codepoints(&mut requested, value, |codepoint| {
+                    primary_atlas.glyph(codepoint).is_some()
+                });
             }
         }
         self.ensure_profile_fallback_codepoints(requested, cache, &atlases)
@@ -414,12 +450,9 @@ impl CustomProfileRenderer {
             let Some((_, primary_atlas)) = atlases.atlas_for_font_family(&primary_family) else {
                 continue;
             };
-            requested.extend(text.text.chars().filter_map(|ch| {
-                (!ch.is_whitespace()
-                    && !ch.is_control()
-                    && primary_atlas.glyph(u32::from(ch)).is_none())
-                .then_some(u32::from(ch))
-            }));
+            extend_profile_fallback_codepoints(&mut requested, &text.text, |codepoint| {
+                primary_atlas.glyph(codepoint).is_some()
+            });
         }
         self.ensure_profile_fallback_codepoints(requested, cache, &atlases)
     }
@@ -5027,6 +5060,45 @@ mod tests {
     use crate::types::{
         CustomProfileCard, ObjectData, Quaternion, StampElement, TextElement, Vec3,
     };
+
+    #[test]
+    fn fallback_requests_follow_the_text_mesh_pro_glyph_chain() {
+        let request = |text: &str, primary_has: &dyn Fn(u32) -> bool| {
+            let mut requested = std::collections::BTreeSet::new();
+            extend_profile_fallback_codepoints(&mut requested, text, primary_has);
+            requested
+                .into_iter()
+                .filter_map(char::from_u32)
+                .collect::<String>()
+        };
+        let ascii = |codepoint: u32| (0x21..=0x7e).contains(&codepoint);
+        let ascii_and_square = |codepoint: u32| ascii(codepoint) || codepoint == 0x25a1;
+
+        // Hyphen stand-ins come from the primary face; characters that draw
+        // nothing need no glyph at all.
+        assert_eq!(
+            request(
+                "A\u{2011}B\u{00AD}C\u{200B}D\u{00A0}E\u{3000}F",
+                &ascii_and_square
+            ),
+            ""
+        );
+        // Markup is not drawn, and case tags change the character drawn.
+        assert_eq!(
+            request(
+                "<color=#ff0000>\u{6F22}</color><lowercase>\u{00C4}</lowercase>",
+                &|codepoint| ascii_and_square(codepoint) || codepoint == 0xe4
+            ),
+            "\u{6F22}"
+        );
+        // A primary face without the stand-in or the missing-glyph square
+        // takes both from the fallback font.
+        assert_eq!(
+            request("A\u{2011}\u{6F22}", &|codepoint| ascii(codepoint)
+                && codepoint != u32::from('-')),
+            "-\u{2011}\u{25A1}\u{6F22}"
+        );
+    }
 
     fn magnification_command(
         atlas_width: u32,
