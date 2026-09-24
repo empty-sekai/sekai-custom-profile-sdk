@@ -390,12 +390,16 @@ pub enum PageExecution {
 }
 
 pub fn plan_page_execution(animated: bool, static_policy: &str) -> Result<PageExecution, String> {
-    match (animated, static_policy) {
-        (true, _) => Ok(PageExecution::Animation),
-        (false, "passthrough") => Ok(PageExecution::StaticPassthrough),
-        (false, "wrap") => Ok(PageExecution::StaticWrap),
-        (_, value) => Err(format!("unsupported static_policy={value}")),
-    }
+    let static_execution = match static_policy {
+        "passthrough" => PageExecution::StaticPassthrough,
+        "wrap" => PageExecution::StaticWrap,
+        value => return Err(format!("unsupported static_policy={value}")),
+    };
+    Ok(if animated {
+        PageExecution::Animation
+    } else {
+        static_execution
+    })
 }
 
 struct RasterLayer {
@@ -1082,7 +1086,7 @@ pub(crate) fn export_profile_animation(
     } else {
         (content_width, content_height)
     };
-    let frame_bytes = width as usize * height as usize * 4;
+    let frame_bytes = frame_byte_len(width, height)?;
     let retained_layer_budget = preset
         .export_memory_budget_bytes
         .saturating_sub(frame_bytes.saturating_mul(2));
@@ -1362,7 +1366,8 @@ fn rasterize_animation_groups(
         )?
     } else {
         return Err(
-            "the animation backend selection resolved to the retired legacy layer raster;              request SDF executors"
+            "the animation backend selection resolved to the retired legacy layer raster; \
+             request SDF executors"
                 .into(),
         );
     };
@@ -1748,10 +1753,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
         deferred_cache_budget: usize,
     ) -> Result<Self, String> {
-        let bytes = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| "animation compositor canvas size overflow".to_string())?;
+        let bytes = frame_byte_len(width, height)?;
         Ok(Self {
             renderer,
             canvas: vec![0; bytes],
@@ -1760,7 +1762,7 @@ impl<'a> AnimationFrameCompositor<'a> {
             scale,
             previous_index: None,
             previous_states: Vec::new(),
-            rgba: vec![0; width as usize * height as usize * 4],
+            rgba: vec![0; bytes],
             readback_scratch: Vec::new(),
             changed_macroblock_flags: Vec::new(),
             telemetry: FrameCompositeTelemetry::default(),
@@ -2250,10 +2252,7 @@ fn composite_frame(
     height: u32,
     scale: f32,
 ) -> Result<Vec<u8>, String> {
-    let bytes = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "animation frame size overflow".to_string())?;
+    let bytes = frame_byte_len(width, height)?;
     let mut canvas = vec![0u8; bytes];
     let full = PixelRect::full(width, height);
     // The game always renders a complete custom-profile card over its default
@@ -2391,7 +2390,7 @@ where
     F: FnMut(u32) -> Result<Vec<u8>, String>,
 {
     validate_spec(spec)?;
-    let expected = spec.width as usize * spec.height as usize * 4;
+    let expected = frame_byte_len(spec.width, spec.height)?;
     let mut telemetry = AnimationEncodeTelemetry::default();
     let data = match format {
         AnimationFormat::Gif => encode_gif(
@@ -2416,11 +2415,7 @@ fn finish_encoded_animation(
     data: Vec<u8>,
 ) -> Result<EncodedAnimation, String> {
     if data.len() > spec.output_budget_bytes {
-        return Err(format!(
-            "OUTPUT_BUDGET_EXCEEDED: {} > {}",
-            data.len(),
-            spec.output_budget_bytes
-        ));
+        return Err(output_budget_exceeded(data.len(), spec.output_budget_bytes));
     }
     validate_magic(format, &data)?;
     Ok(EncodedAnimation {
@@ -2459,10 +2454,7 @@ pub fn wrap_static_png(
     let scale = (preset.maximum_long_edge as f32 / source_width.max(source_height) as f32).min(1.0);
     let width = (source_width as f32 * scale).round() as u32;
     let height = (source_height as f32 * scale).round() as u32;
-    let bytes = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "static wrap size overflow".to_string())?;
+    let bytes = frame_byte_len(width, height)?;
     // The decoder yields non-premultiplied samples; the blit composites in
     // premultiplied space, so premultiply on the way in and recover on the way
     // out.
@@ -2509,7 +2501,20 @@ fn validate_spec(spec: &AnimationEncodeSpec) -> Result<(), String> {
     if spec.fps > 60 {
         return Err("animation fps must not exceed the 60Hz core clock".into());
     }
+    frame_byte_len(spec.width, spec.height)?;
     Ok(())
+}
+
+/// Bytes in one tight RGBA8 frame.
+fn frame_byte_len(width: u32, height: u32) -> Result<usize, String> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| format!("animation frame size overflow: {width}x{height}"))
+}
+
+fn output_budget_exceeded(bytes: usize, budget: usize) -> String {
+    format!("OUTPUT_BUDGET_EXCEEDED: {bytes} > {budget}")
 }
 
 fn checked_frame<F>(frame_at: &mut F, index: u32, expected: usize) -> Result<Vec<u8>, String>
@@ -2771,6 +2776,13 @@ where
     F: FnMut(u32) -> Result<Vec<u8>, String>,
 {
     const MAX_PALETTE_SAMPLE_PIXELS: usize = 65_536;
+    // The logical screen and every image descriptor store 16-bit extents.
+    if spec.width > u32::from(u16::MAX) || spec.height > u32::from(u16::MAX) {
+        return Err(format!(
+            "GIF frames are limited to 65535x65535 pixels, got {}x{}",
+            spec.width, spec.height
+        ));
+    }
     let pixels_per_frame = (MAX_PALETTE_SAMPLE_PIXELS / spec.frame_count as usize).max(1);
     let mut quantization_pixels = Vec::with_capacity(MAX_PALETTE_SAMPLE_PIXELS * 4);
     let palette_sample_started = std::time::Instant::now();
@@ -2886,15 +2898,12 @@ where
                         spec.height,
                         &palette,
                         &mut palette_lookup,
+                        &mut previous_indexed,
                     )
                 } else {
-                    (
-                        0,
-                        0,
-                        spec.width,
-                        spec.height,
-                        index_gif_pixels(&rgba, &palette, &mut palette_lookup),
-                    )
+                    let pixels = index_gif_pixels(&rgba, &palette, &mut palette_lookup);
+                    previous_indexed.clone_from(&pixels);
+                    (0, 0, spec.width, spec.height, pixels)
                 };
                 previous = Some(rgba);
                 result
@@ -2924,6 +2933,11 @@ where
             telemetry.gif_lzw_ns = telemetry
                 .gif_lzw_ns
                 .saturating_add(lzw_started.elapsed().as_nanos() as u64);
+            // The stream only grows, so stop as soon as it crosses the budget.
+            let written = encoder.get_ref().len();
+            if written > spec.output_budget_bytes {
+                return Err(output_budget_exceeded(written, spec.output_budget_bytes));
+            }
         }
     }
     Ok(output)
@@ -3004,11 +3018,7 @@ fn gif_retained_indexed(
             let mut rgba_index = 0usize;
             let indexed_changed = index_gif_pixels(rgba, palette, palette_lookup);
             let pixel_count = width.saturating_mul(*height) as usize;
-            let mut pixels = vec![255u8; pixel_count];
-            let mut min_x = *width;
-            let mut min_y = *height;
-            let mut max_x = 0u32;
-            let mut max_y = 0u32;
+            let mut delta = GifIndexDelta::new(*left, *top, *width, *height);
             for (byte_index, &byte) in changed.iter().enumerate() {
                 let mut bits = byte;
                 while bits != 0 {
@@ -3018,45 +3028,105 @@ fn gif_retained_indexed(
                     if index >= pixel_count {
                         continue;
                     }
-                    let x = index as u32 % *width;
-                    let y = index as u32 / *width;
                     let value = indexed_changed[rgba_index / 4];
                     rgba_index += 4;
-                    let canvas_index = ((*top + y) * spec.width + *left + x) as usize;
-                    if previous_indexed[canvas_index] != value {
-                        previous_indexed[canvas_index] = value;
-                        pixels[index] = value;
-                        min_x = min_x.min(x);
-                        min_y = min_y.min(y);
-                        max_x = max_x.max(x);
-                        max_y = max_y.max(y);
-                    }
+                    delta.update(
+                        index as u32 % *width,
+                        index as u32 / *width,
+                        value,
+                        spec.width,
+                        previous_indexed,
+                    );
                 }
             }
             debug_assert_eq!(rgba_index, rgba.len());
-            if min_x == *width || min_y == *height {
-                return (0, 0, 1, 1, vec![255]);
-            }
-            if min_x != 0 || min_y != 0 || max_x + 1 != *width || max_y + 1 != *height {
-                let cropped_width = max_x - min_x + 1;
-                let cropped_height = max_y - min_y + 1;
-                let mut cropped =
-                    Vec::with_capacity(cropped_width as usize * cropped_height as usize);
-                for y in min_y..=max_y {
-                    let start = (y * *width + min_x) as usize;
-                    cropped.extend_from_slice(&pixels[start..start + cropped_width as usize]);
-                }
-                return (
-                    *left + min_x,
-                    *top + min_y,
-                    cropped_width,
-                    cropped_height,
-                    cropped,
-                );
-            }
-            (*left, *top, *width, *height, pixels)
+            delta.finish()
         }
         GifRetainedFrame::Unchanged => (0, 0, 1, 1, vec![255]),
+    }
+}
+
+/// One delta frame in palette-index space.
+///
+/// Only pixels whose index differs from the index already on the canvas are
+/// written; everything else stays transparent, and the frame is cropped to
+/// the written pixels. The retained and the streamed encode pass both build
+/// their deltas through this type, so the bytes do not depend on which pass
+/// ran.
+struct GifIndexDelta {
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+}
+
+impl GifIndexDelta {
+    fn new(left: u32, top: u32, width: u32, height: u32) -> Self {
+        Self {
+            left,
+            top,
+            width,
+            height,
+            pixels: vec![255u8; width as usize * height as usize],
+            min_x: width,
+            min_y: height,
+            max_x: 0,
+            max_y: 0,
+        }
+    }
+
+    /// Records the index of a pixel whose RGBA changed, at `(x, y)` inside
+    /// the delta rectangle, against the indices already on the canvas.
+    fn update(&mut self, x: u32, y: u32, value: u8, canvas_width: u32, canvas: &mut [u8]) {
+        let canvas_index = ((self.top + y) * canvas_width + self.left + x) as usize;
+        if canvas[canvas_index] == value {
+            return;
+        }
+        canvas[canvas_index] = value;
+        self.pixels[(y * self.width + x) as usize] = value;
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn finish(self) -> (u32, u32, u32, u32, Vec<u8>) {
+        let Self {
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        } = self;
+        if min_x == width || min_y == height {
+            return (0, 0, 1, 1, vec![255]);
+        }
+        if min_x != 0 || min_y != 0 || max_x + 1 != width || max_y + 1 != height {
+            let cropped_width = max_x - min_x + 1;
+            let cropped_height = max_y - min_y + 1;
+            let mut cropped = Vec::with_capacity(cropped_width as usize * cropped_height as usize);
+            for y in min_y..=max_y {
+                let start = (y * width + min_x) as usize;
+                cropped.extend_from_slice(&pixels[start..start + cropped_width as usize]);
+            }
+            return (
+                left + min_x,
+                top + min_y,
+                cropped_width,
+                cropped_height,
+                cropped,
+            );
+        }
+        (left, top, width, height, pixels)
     }
 }
 
@@ -3190,6 +3260,7 @@ where
     config.validate()?;
     let mut encoder = DirectX264Encoder::new(spec, config)?;
     let mut access_units = Vec::with_capacity(spec.frame_count as usize);
+    let mut sample_bytes = 0usize;
     let mut yuv = Vec::new();
     let mut rgba = Vec::new();
     let mut mb_info = Vec::new();
@@ -3240,10 +3311,19 @@ where
         if access_unit.is_empty() {
             return Err(format!("direct libx264 delayed frame {index}"));
         }
+        sample_bytes = sample_bytes.saturating_add(avc_sample_len(&access_unit));
         access_units.push(access_unit);
         telemetry.h264_direct_encode_ns = telemetry
             .h264_direct_encode_ns
             .saturating_add(encode_started.elapsed().as_nanos() as u64);
+        // The muxed file holds every sample byte, so stop as soon as the
+        // samples alone cross the budget.
+        if sample_bytes > spec.output_budget_bytes {
+            return Err(output_budget_exceeded(
+                sample_bytes,
+                spec.output_budget_bytes,
+            ));
+        }
     }
     let mut delayed = Vec::new();
     encoder.flush(&mut delayed)?;
@@ -3318,11 +3398,10 @@ fn mux_avc_mp4(
                 8 => {
                     pps.get_or_insert_with(|| nal.to_vec());
                 }
-                9 => continue,
                 5 => sync = true,
                 _ => {}
             };
-            if matches!(nal[0] & 0x1f, 7 | 8) {
+            if !is_avc_sample_nal(nal) {
                 continue;
             }
             mp4_u32(
@@ -3391,6 +3470,22 @@ fn mux_avc_mp4(
     }
     output.extend_from_slice(&moov);
     Ok(output)
+}
+
+/// Whether a NAL unit is stored in the MP4 sample. Parameter sets live in the
+/// `avcC` box and access unit delimiters are dropped.
+fn is_avc_sample_nal(nal: &[u8]) -> bool {
+    nal.first()
+        .is_some_and(|header| !matches!(header & 0x1f, 7..=9))
+}
+
+/// Bytes the access unit occupies as a length-prefixed MP4 sample.
+fn avc_sample_len(access_unit: &[u8]) -> usize {
+    annex_b_nals(access_unit)
+        .into_iter()
+        .filter(|nal| is_avc_sample_nal(nal))
+        .map(|nal| 4 + nal.len())
+        .sum()
 }
 
 fn annex_b_nals(data: &[u8]) -> Vec<&[u8]> {
@@ -4151,6 +4246,8 @@ fn gif_delay_centiseconds(frame_index: u32, fps: u32) -> u16 {
     (end - start).max(1) as u16
 }
 
+/// Streams one delta frame: indexes the pixels whose RGBA changed since
+/// `previous`, and keeps those whose index differs from `previous_indexed`.
 fn gif_delta_indexed(
     previous: &[u8],
     current: &[u8],
@@ -4158,47 +4255,25 @@ fn gif_delta_indexed(
     height: u32,
     palette: &[u8],
     palette_lookup: &mut GifPaletteLookup,
+    previous_indexed: &mut [u8],
 ) -> (u32, u32, u32, u32, Vec<u8>) {
     let Some((min_x, min_y, max_x, max_y)) = gif_changed_bounds(previous, current, width, height)
     else {
         return (0, 0, 1, 1, vec![255]);
     };
-    gif_delta_indexed_for_bounds(
-        previous,
-        current,
-        width,
-        (min_x, min_y, max_x, max_y),
-        palette,
-        palette_lookup,
-    )
-}
-
-fn gif_delta_indexed_for_bounds(
-    previous: &[u8],
-    current: &[u8],
-    width: u32,
-    (min_x, min_y, max_x, max_y): (u32, u32, u32, u32),
-    palette: &[u8],
-    palette_lookup: &mut GifPaletteLookup,
-) -> (u32, u32, u32, u32, Vec<u8>) {
-    let rect_width = max_x - min_x + 1;
-    let rect_height = max_y - min_y + 1;
-    let mut pixels = Vec::with_capacity(rect_width as usize * rect_height as usize);
+    let mut delta = GifIndexDelta::new(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let index = (y * width + x) as usize * 4;
             if previous[index..index + 4] == current[index..index + 4] {
-                pixels.push(255);
-            } else {
-                pixels.push(nearest_gif_palette_index(
-                    &current[index..index + 4],
-                    palette,
-                    palette_lookup,
-                ));
+                continue;
             }
+            let value =
+                nearest_gif_palette_index(&current[index..index + 4], palette, palette_lookup);
+            delta.update(x - min_x, y - min_y, value, width, previous_indexed);
         }
     }
-    (min_x, min_y, rect_width, rect_height, pixels)
+    delta.finish()
 }
 
 fn gif_changed_bounds(
@@ -4600,6 +4675,13 @@ where
             write_png_chunk(&mut output, b"fdAT", &fdat);
         }
         previous = Some(rgba);
+        // The stream only grows, so stop as soon as it crosses the budget.
+        if output.len() > spec.output_budget_bytes {
+            return Err(output_budget_exceeded(
+                output.len(),
+                spec.output_budget_bytes,
+            ));
+        }
     }
     write_png_chunk(&mut output, b"IEND", &[]);
     Ok(output)
@@ -5973,8 +6055,9 @@ mod tests {
         let rgba = vec![12, 34, 56, 255];
         let palette = vec![0; 256 * 3];
         let mut lookup = GifPaletteLookup::new(0, 255);
+        let mut indexed = vec![0];
         assert_eq!(
-            gif_delta_indexed(&rgba, &rgba, 1, 1, &palette, &mut lookup),
+            gif_delta_indexed(&rgba, &rgba, 1, 1, &palette, &mut lookup, &mut indexed),
             (0, 0, 1, 1, vec![255])
         );
     }
@@ -6414,5 +6497,268 @@ mod tests {
             cursor = end + (size & 1);
         }
         None
+    }
+
+    #[test]
+    fn gif_rejects_frames_wider_or_taller_than_its_16_bit_screen() {
+        for (width, height) in [(65_536u32, 1u32), (1, 65_536)] {
+            let spec = AnimationEncodeSpec {
+                width,
+                height,
+                fps: 20,
+                frame_count: 1,
+                looped: false,
+                output_budget_bytes: usize::MAX,
+                gif_quality: 80,
+            };
+            let error = encode_rgba_frames(AnimationFormat::Gif, &spec, |_| {
+                Ok([255, 0, 0, 255].repeat(65_536))
+            })
+            .expect_err("a GIF extent beyond 16 bits is rejected");
+            assert!(error.contains("65535"), "{width}x{height}: {error}");
+        }
+
+        let widest = AnimationEncodeSpec {
+            width: 65_535,
+            height: 1,
+            fps: 20,
+            frame_count: 1,
+            looped: false,
+            output_budget_bytes: usize::MAX,
+            gif_quality: 80,
+        };
+        let encoded = encode_rgba_frames(AnimationFormat::Gif, &widest, |_| {
+            Ok([255, 0, 0, 255].repeat(65_535))
+        })
+        .expect("the widest GIF encodes");
+        let mut decoder = gif::DecodeOptions::new()
+            .read_info(Cursor::new(&encoded.data))
+            .expect("the widest GIF decodes");
+        assert_eq!(decoder.width(), 65_535);
+        let frame = decoder
+            .read_next_frame()
+            .expect("the widest GIF frame decodes")
+            .expect("the widest GIF has a frame");
+        assert_eq!(frame.width, 65_535);
+    }
+
+    #[test]
+    fn frame_byte_size_overflow_is_reported_instead_of_wrapping() {
+        let spec = AnimationEncodeSpec {
+            width: u32::MAX,
+            height: u32::MAX,
+            fps: 20,
+            frame_count: 1,
+            looped: false,
+            output_budget_bytes: usize::MAX,
+            gif_quality: 80,
+        };
+        for format in [
+            AnimationFormat::Gif,
+            AnimationFormat::Webp,
+            AnimationFormat::Apng,
+            AnimationFormat::Mp4,
+        ] {
+            let mut requested = false;
+            let error = encode_rgba_frames(format, &spec, |_| {
+                requested = true;
+                Ok(Vec::new())
+            })
+            .expect_err("an unrepresentable frame size is rejected");
+            assert!(error.contains("overflow"), "{format:?}: {error}");
+            assert!(!requested, "{format:?} asked for a frame it cannot hold");
+        }
+    }
+
+    fn assert_gif_paths_agree(spec: &AnimationEncodeSpec, frames: &[Vec<u8>]) {
+        let (streamed, streamed_telemetry) = encode_rgba_frames_with_h264_and_telemetry(
+            AnimationFormat::Gif,
+            spec,
+            &H264EncoderConfig::default(),
+            0,
+            |index| Ok(frames[index as usize].clone()),
+        )
+        .expect("the streamed pass encodes");
+        let (retained, retained_telemetry) = encode_rgba_frames_with_h264_and_telemetry(
+            AnimationFormat::Gif,
+            spec,
+            &H264EncoderConfig::default(),
+            usize::MAX,
+            |index| Ok(frames[index as usize].clone()),
+        )
+        .expect("the retained pass encodes");
+        assert!(streamed_telemetry.gif_second_frame_pass);
+        assert!(!retained_telemetry.gif_second_frame_pass);
+        assert_eq!(
+            retained.data, streamed.data,
+            "the GIF bytes depend on which memory path encoded them"
+        );
+    }
+
+    #[test]
+    fn gif_retained_and_streamed_deltas_agree_when_only_alpha_changes() {
+        // An alpha-only change keeps the RGB key, so the palette index stays.
+        let spec = AnimationEncodeSpec {
+            width: 2,
+            height: 1,
+            fps: 20,
+            frame_count: 2,
+            looped: true,
+            output_budget_bytes: usize::MAX,
+            gif_quality: 80,
+        };
+        assert_gif_paths_agree(
+            &spec,
+            &[
+                vec![255, 0, 0, 255, 0, 0, 255, 255],
+                vec![255, 0, 0, 255, 0, 0, 255, 200],
+            ],
+        );
+    }
+
+    #[test]
+    fn gif_retained_and_streamed_deltas_agree_when_quantized_colors_share_an_entry() {
+        // More than 255 opaque colors go through the quantizer, which maps
+        // neighbouring colors to one palette entry.
+        let (width, height) = (32u32, 16u32);
+        let first = (0..width * height)
+            .flat_map(|index| {
+                [
+                    (index % width * 8) as u8,
+                    (index / width * 16) as u8,
+                    128,
+                    255,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut second = first.clone();
+        second[..4].copy_from_slice(&[1, 0, 128, 255]);
+        let spec = AnimationEncodeSpec {
+            width,
+            height,
+            fps: 20,
+            frame_count: 2,
+            looped: true,
+            output_budget_bytes: usize::MAX,
+            gif_quality: 80,
+        };
+        assert_gif_paths_agree(&spec, &[first, second]);
+    }
+
+    #[test]
+    fn unsupported_static_policy_is_rejected_for_animated_pages_too() {
+        for animated in [false, true] {
+            assert!(
+                plan_page_execution(animated, "passthru")
+                    .expect_err("an unknown static policy is rejected")
+                    .contains("static_policy=passthru"),
+                "animated={animated}"
+            );
+        }
+        assert_eq!(
+            plan_page_execution(true, "wrap"),
+            Ok(PageExecution::Animation)
+        );
+    }
+
+    #[test]
+    fn a_selection_without_sdf_executors_reports_a_readable_error() {
+        let renderer =
+            crate::renderer::CustomProfileRenderer::new(std::sync::Arc::new(SingleShapeProvider));
+        let md = renderer.snapshot_masterdata();
+        let card: CustomProfileCard =
+            serde_json::from_value(serde_json::json!({})).expect("empty card");
+        let error = match rasterize_animation_groups(
+            &renderer,
+            &card,
+            None,
+            &md,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            &[],
+            Some(crate::profile_backend::ProfileBackendConfig::default()),
+            None,
+            usize::MAX,
+        ) {
+            Ok(_) => panic!("a legacy-only selection must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("request SDF executors"), "{error}");
+        assert!(!error.contains("  "), "{error:?}");
+    }
+
+    #[test]
+    fn encoders_stop_pulling_frames_once_the_output_budget_is_exceeded() {
+        let (width, height, frame_count) = (64u32, 64u32, 12u32);
+        let frame = |index: u32| {
+            let mut rgba = deterministic_rgba(width as usize, height as usize);
+            for (offset, byte) in rgba.iter_mut().enumerate() {
+                *byte = byte
+                    .wrapping_mul(index as u8 * 2 + 3)
+                    .wrapping_add(offset as u8);
+            }
+            for alpha in rgba.iter_mut().skip(3).step_by(4) {
+                *alpha = 255;
+            }
+            rgba
+        };
+        let spec = AnimationEncodeSpec {
+            width,
+            height,
+            fps: 20,
+            frame_count,
+            looped: true,
+            output_budget_bytes: 8 * 1024,
+            gif_quality: 80,
+        };
+
+        let (full, _) = encode_rgba_frames_with_h264_and_telemetry(
+            AnimationFormat::Gif,
+            &AnimationEncodeSpec {
+                output_budget_bytes: usize::MAX,
+                ..spec.clone()
+            },
+            &H264EncoderConfig::default(),
+            0,
+            |index| Ok(frame(index)),
+        )
+        .expect("the unbounded GIF encodes");
+        assert!(full.data.len() > 4 * spec.output_budget_bytes);
+
+        let mut gif_calls = 0u32;
+        let error = encode_rgba_frames_with_h264_and_telemetry(
+            AnimationFormat::Gif,
+            &spec,
+            &H264EncoderConfig::default(),
+            0,
+            |index| {
+                gif_calls += 1;
+                Ok(frame(index))
+            },
+        )
+        .expect_err("the GIF crosses its budget");
+        assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+        // One analysis pass over every frame, then the encode pass stops at
+        // the first frame that crosses the budget.
+        assert!(gif_calls < 2 * frame_count, "GIF pulled {gif_calls} frames");
+
+        let mut apng_calls = 0u32;
+        let error = encode_rgba_frames(AnimationFormat::Apng, &spec, |index| {
+            apng_calls += 1;
+            Ok(frame(index))
+        })
+        .expect_err("the APNG crosses its budget");
+        assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+        assert!(apng_calls < frame_count, "APNG pulled {apng_calls} frames");
+
+        let mut mp4_calls = 0u32;
+        let error = encode_rgba_frames(AnimationFormat::Mp4, &spec, |index| {
+            mp4_calls += 1;
+            Ok(frame(index))
+        })
+        .expect_err("the MP4 crosses its budget");
+        assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+        assert!(mp4_calls < frame_count, "MP4 pulled {mp4_calls} frames");
     }
 }
