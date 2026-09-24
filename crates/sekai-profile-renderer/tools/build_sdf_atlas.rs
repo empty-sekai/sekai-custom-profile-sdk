@@ -208,15 +208,6 @@ fn parse_codepoints(value: &str) -> Result<BTreeSet<u32>, String> {
     Ok(result)
 }
 
-fn method_contract(method: OfflineGenerationMethod) -> String {
-    match method {
-        OfflineGenerationMethod::Analytic => "outline-analytic-v1".into(),
-        OfflineGenerationMethod::Edt { supersample } => {
-            format!("outline-edt-v1:ss={supersample}:fallback=analytic-v1")
-        }
-    }
-}
-
 fn enumerate_codepoints(font_bytes: &[u8]) -> Result<BTreeSet<u32>, String> {
     let face =
         Face::parse(font_bytes, 0).map_err(|error| format!("parse font failed: {error:?}"))?;
@@ -405,7 +396,7 @@ fn build(args: &Args) -> Result<PathBuf, String> {
         u32::try_from(glyphs.len()).map_err(|_| "generated glyph count exceeds u32".to_string())?;
     let manifest = SdfAtlasManifest {
         schema: ATLAS_MANIFEST_SCHEMA.into(),
-        generator_contract: method_contract(args.method),
+        generator_contract: args.method.contract(),
         font_family: args.font_family.clone(),
         font_sha256,
         point_size: args.point_size,
@@ -527,5 +518,19 @@ mod tests {
         assert_eq!(page.place(16, 5, 4, 1), Some([1, 1]));
         assert_eq!(page.place(16, 5, 4, 1), Some([8, 1]));
         assert_eq!(page.place(16, 5, 4, 1), Some([1, 7]));
+    }
+
+    /// The browser's prebuilt atlas provider serves this output unchanged:
+    /// it expects `page-NNN.r8swz` files whose hash covers the whole file.
+    #[test]
+    fn pages_are_named_and_hashed_as_browser_packages_expect() {
+        let output = tempfile::tempdir().expect("output directory");
+        let page = write_page(output.path(), 7, 16, &[0; 16 * 16]).expect("page");
+        assert_eq!(page.file, "page-007.r8swz");
+        assert_eq!((page.width, page.height), (16, 16));
+        let bytes = fs::read(output.path().join(&page.file)).expect("page bytes");
+        assert_eq!(bytes.len(), SWIZZLED_PAGE_HEADER_BYTES + 16 * 16);
+        assert_eq!(&bytes[..SWIZZLED_PAGE_MAGIC.len()], SWIZZLED_PAGE_MAGIC);
+        assert_eq!(page.file_sha256, hex::encode(Sha256::digest(&bytes)));
     }
 }

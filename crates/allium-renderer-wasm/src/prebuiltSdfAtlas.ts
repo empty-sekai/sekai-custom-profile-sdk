@@ -29,6 +29,13 @@ export type PrebuiltSdfAtlasManifest = {
   glyphs: PrebuiltSdfAtlasGlyph[];
 };
 
+/**
+ * Source of prebuilt atlas packages.
+ *
+ * `manifest()` is asked again for every scene, so an install or removal is
+ * picked up by the next scene; implementations cache as they see fit. `null`
+ * means the family has no package and its glyphs are generated at runtime.
+ */
 export interface PrebuiltSdfAtlasProvider {
   manifest(family: string, context: { signal: AbortSignal }): Promise<PrebuiltSdfAtlasManifest | null>;
   page(family: string, file: string, context: { signal: AbortSignal }): Promise<ArrayBuffer>;
@@ -41,25 +48,44 @@ export type PrebuiltFontContract = {
 };
 
 type PrebuiltProviderCache = {
-  manifests: Map<string, PrebuiltSdfAtlasManifest | null>;
   decodedPages: Map<string, Uint8Array>;
 };
 
 const MAX_DECODED_PAGES_PER_PROVIDER = 6;
+/** Largest page edge every WebGL2 device can hold in one texture layer. */
+const MAX_PREBUILT_PAGE_SIZE = 2048;
+const R8SWZ_HEADER_BYTES = 64;
+const PAGE_FILE_PATTERN = /^page-\d{3,}\.r8swz(\.br)?$/;
 const providerCaches = new WeakMap<PrebuiltSdfAtlasProvider, PrebuiltProviderCache>();
 
+/** Size of a decoded page file: the R8SWZ header plus one byte per texel. */
+export function prebuiltPageByteLength(page: Pick<PrebuiltSdfAtlasPage, "width" | "height">): number {
+  return R8SWZ_HEADER_BYTES + page.width * page.height;
+}
+
+/**
+ * Serves packages from `<baseUrl>/<family>/manifest.json` and the page files
+ * next to it. Page hashes cover the decoded page bytes, so pages stored
+ * pre-compressed as `page-NNN.r8swz.br` must be served with
+ * `Content-Encoding: br`.
+ */
 export function createHttpPrebuiltSdfAtlasProvider(baseUrl: string): PrebuiltSdfAtlasProvider {
   const root = baseUrl.replace(/\/+$/, "");
   const familyPath = (family: string) => encodeURIComponent(family);
+  const manifests = new Map<string, PrebuiltSdfAtlasManifest>();
   return {
     async manifest(family, { signal }) {
+      const cached = manifests.get(family);
+      if (cached) return cached;
       const response = await fetch(`${root}/${familyPath(family)}/manifest.json`, { signal, cache: "force-cache" });
       if (response.status === 404) return null;
       if (!response.ok) throw new Error(`prebuilt atlas manifest ${family}: HTTP ${response.status}`);
-      return response.json() as Promise<PrebuiltSdfAtlasManifest>;
+      const manifest = await response.json() as PrebuiltSdfAtlasManifest;
+      manifests.set(family, manifest);
+      return manifest;
     },
     async page(family, file, { signal }) {
-      if (!/^page-\d{3}\.r8swz\.br$/.test(file)) throw new Error(`invalid prebuilt atlas page path ${file}`);
+      if (!PAGE_FILE_PATTERN.test(file)) throw new Error(`invalid prebuilt atlas page path ${file}`);
       const response = await fetch(`${root}/${familyPath(family)}/${file}`, { signal, cache: "force-cache" });
       if (!response.ok) throw new Error(`prebuilt atlas page ${family}/${file}: HTTP ${response.status}`);
       return response.arrayBuffer();
@@ -75,7 +101,7 @@ export async function resolvePrebuiltFontContracts(
 ): Promise<PrebuiltFontContract[]> {
   const contracts: PrebuiltFontContract[] = [];
   for (const family of new Set(families)) {
-    const manifest = await cachedManifest(provider, family, signal);
+    const manifest = await currentManifest(provider, family, signal);
     if (!manifest || !isValidPrebuiltSdfAtlasManifest(manifest, family)) continue;
     contracts.push({ region, family, sourceHash: manifest.font_sha256 });
   }
@@ -90,9 +116,21 @@ export async function buildPrebuiltSdfAtlas(
   const families = [...new Set(requests.map((request) => request.family))];
   const manifests = new Map<string, PrebuiltSdfAtlasManifest>();
   for (const family of families) {
-    const manifest = await cachedManifest(provider, family, signal);
+    const manifest = await currentManifest(provider, family, signal);
     if (!manifest || !isValidPrebuiltSdfAtlasManifest(manifest, family)) return null;
     manifests.set(family, manifest);
+  }
+  // One atlas has one sampling size, spread and page size; families built
+  // with different parameters are generated at runtime instead.
+  const first = manifests.values().next().value as PrebuiltSdfAtlasManifest;
+  const { width: pageWidth, height: pageHeight } = first.pages[0];
+  for (const manifest of manifests.values()) {
+    if (
+      manifest.point_size !== first.point_size
+      || manifest.spread !== first.spread
+      || manifest.pages[0].width !== pageWidth
+      || manifest.pages[0].height !== pageHeight
+    ) return null;
   }
   const glyphByFamily = new Map([...manifests].map(([family, manifest]) => [
     family,
@@ -158,11 +196,10 @@ export async function buildPrebuiltSdfAtlas(
       drawable: width > 0 && height > 0,
     }] as const;
   }));
-  const first = manifests.values().next().value as PrebuiltSdfAtlasManifest;
   const contractId = `prebuilt:${[...manifests.values()].map((manifest) => manifest.font_sha256).join(":")}:${sourcePages.map((page) => `${page.family}:${page.sourcePage}`).join(",")}`;
   return {
-    width: 2048,
-    height: 2048,
+    width: pageWidth,
+    height: pageHeight,
     depth: sourcePages.length,
     baseSize: first.point_size,
     spread: first.spread,
@@ -181,7 +218,7 @@ export async function buildPrebuiltSdfAtlas(
       totalPixelCount: 0,
       worker: emptyWorkerStats(),
       cache: {
-        hits: glyphs.size, misses: 0, generations: 0, bytes: sourcePages.length * 2048 * 2048,
+        hits: glyphs.size, misses: 0, generations: 0, bytes: sourcePages.length * pageWidth * pageHeight,
         sessionHits: glyphs.size, persistentHits: 0, persistentMisses: 0,
         persistentWritesQueued: 0, pages: sourcePages.length, pinnedPages: sourcePages.length, pageEvictions: 0,
       },
@@ -191,7 +228,7 @@ export async function buildPrebuiltSdfAtlas(
       for (let page = 0; page < sourcePages.length; page += 1) {
         if ((revisions.get(page) ?? 0) >= 1) continue;
         updates.push({
-          page, pageWidth: 2048, pageEpoch: 1, revision: 1, fullUpload: true,
+          page, pageWidth, pageEpoch: 1, revision: 1, fullUpload: true,
           pixels: await pagePixels(page), dirtyRects: [],
         });
       }
@@ -210,22 +247,20 @@ export async function buildPrebuiltSdfAtlas(
 function providerCache(provider: PrebuiltSdfAtlasProvider): PrebuiltProviderCache {
   let cache = providerCaches.get(provider);
   if (!cache) {
-    cache = { manifests: new Map(), decodedPages: new Map() };
+    cache = { decodedPages: new Map() };
     providerCaches.set(provider, cache);
   }
   return cache;
 }
 
-async function cachedManifest(
+async function currentManifest(
   provider: PrebuiltSdfAtlasProvider,
   family: string,
   signal: AbortSignal,
 ): Promise<PrebuiltSdfAtlasManifest | null> {
   if (signal.aborted) throw abortReason(signal);
-  const cache = providerCache(provider).manifests;
-  if (cache.has(family)) return cache.get(family) ?? null;
   const manifest = await provider.manifest(family, { signal });
-  if (!signal.aborted) cache.set(family, manifest);
+  if (signal.aborted) throw abortReason(signal);
   return manifest;
 }
 
@@ -262,14 +297,27 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
+/**
+ * Accepts manifests as `build-sdf-atlas` writes them: `page-NNN.r8swz` files
+ * (optionally stored as `page-NNN.r8swz.br`), all of one size that is a
+ * multiple of 8 and at most 2048 texels on each edge.
+ */
 export function isValidPrebuiltSdfAtlasManifest(manifest: PrebuiltSdfAtlasManifest, family: string): boolean {
+  const first = manifest.pages[0];
   return manifest.schema === "allium.sdf-atlas-manifest.v1"
     && manifest.font_family === family
     && manifest.font_sha256.length === 64
     && Number.isFinite(manifest.point_size) && manifest.point_size > 0
     && Number.isFinite(manifest.spread) && manifest.spread > 0
-    && manifest.pages.length > 0
-    && manifest.pages.every((page) => page.width === 2048 && page.height === 2048 && /^page-\d{3}\.r8swz\.br$/.test(page.file));
+    && first != null
+    && isPageEdge(first.width) && isPageEdge(first.height)
+    && manifest.pages.every((page) => page.width === first.width
+      && page.height === first.height
+      && PAGE_FILE_PATTERN.test(page.file));
+}
+
+function isPageEdge(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value % 8 === 0 && value <= MAX_PREBUILT_PAGE_SIZE;
 }
 
 function singleCodepoint(value: string): number | null {
@@ -278,9 +326,9 @@ function singleCodepoint(value: string): number | null {
 }
 
 function unswizzleR8(bytes: Uint8Array, width: number, height: number): Uint8Array {
-  const header = 64;
+  const header = R8SWZ_HEADER_BYTES;
   const payloadLength = width * height;
-  if (bytes.byteLength !== header + payloadLength) throw new Error(`invalid R8SWZ page length ${bytes.byteLength}`);
+  if (bytes.byteLength !== prebuiltPageByteLength({ width, height })) throw new Error(`invalid R8SWZ page length ${bytes.byteLength}`);
   if (new TextDecoder().decode(bytes.subarray(0, 10)) !== "ALLIUMSWZ8") throw new Error("invalid R8SWZ page magic");
   const output = new Uint8Array(payloadLength);
   const blocksPerRow = width / 8;

@@ -35,11 +35,11 @@ test("the worker protocol exposes atlas sessions without a TypeScript packer", a
   assert.doesNotMatch(facade, /SessionSdfAtlas|putGlyph|placeAndPin/);
 });
 
-test("atlas pages remain 2048 square R8 with bounded four-to-six page budgets", async () => {
+test("atlas pages remain 2048 square R8 with a bounded six-page budget", async () => {
   const atlas = await source("src/atlas.rs");
   assert.match(atlas, /page_width: 2048/);
   assert.match(atlas, /page_height: 2048/);
-  assert.match(atlas, /soft_pages: 4/);
+  assert.doesNotMatch(atlas, /soft_pages/);
   assert.match(atlas, /hard_pages: 6/);
   assert.match(atlas, /MEMORY_BUDGET_EXCEEDED/);
 });

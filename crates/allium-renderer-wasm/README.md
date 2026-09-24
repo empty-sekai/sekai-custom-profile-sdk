@@ -328,6 +328,16 @@ const renderer = await BrowserRenderer.create({
 
 不需要浏览器持久化时，可以把 `createHttpPrebuiltSdfAtlasProvider()` 的结果直接传给 `BrowserRenderer.create()`，由应用自己的本地文件、Service Worker 或 HTTP cache 管理生命周期。
 
+atlas 包即 native crate 自带 `build-sdf-atlas` 工具的输出目录，原样发布为 `<baseUrl>/<family>/manifest.json` 及其页文件：
+
+```sh
+FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
+  --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
+  --output font-atlases/FZLanTingHei-DB-GBK
+```
+
+目录名与 manifest 的 `font_family` 必须等于 scene 请求的 family 名。每页的 `file_sha256` 针对解压后的页内容，因此页文件可以预压缩为 `page-NNN.r8swz.br`（manifest 中的文件名同步改名），前提是服务端以 `Content-Encoding: br` 返回。页尺寸最大 2048×2048。同一 scene 用到的各 family 必须使用相同的 `--point-size`、`--spread` 与 `--page-size`，否则该 scene 改为按需生成 glyph。每个 scene 都会重新向 provider 查询 manifest，安装或移除从下一个 scene 起生效。
+
 ## Scene 状态
 
 ```ts

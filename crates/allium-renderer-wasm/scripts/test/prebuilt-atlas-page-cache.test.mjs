@@ -9,7 +9,9 @@ const index = await readFile(new URL("../../src/index.ts", import.meta.url), "ut
 test("decoded prebuilt atlas pages are reused per provider with a bounded cache", () => {
   assert.match(source, /const providerCaches = new WeakMap<PrebuiltSdfAtlasProvider, PrebuiltProviderCache>\(\)/);
   assert.match(source, /const MAX_DECODED_PAGES_PER_PROVIDER = 6/);
-  assert.match(source, /cachedManifest\(provider, family, signal\)/);
+  // Manifests are asked for per scene so installs and removals apply at once.
+  assert.match(source, /currentManifest\(provider, family, signal\)/);
+  assert.doesNotMatch(source, /manifests: Map<string, PrebuiltSdfAtlasManifest \| null>/);
   assert.match(source, /cachedDecodedPage\(provider, source\.family, descriptor, combined\.signal\)/);
   assert.match(source, /const key = `\$\{family\}\\0\$\{descriptor\.file\}\\0\$\{descriptor\.file_sha256\}`/);
   assert.match(source, /while \(cache\.size > MAX_DECODED_PAGES_PER_PROVIDER\)/);

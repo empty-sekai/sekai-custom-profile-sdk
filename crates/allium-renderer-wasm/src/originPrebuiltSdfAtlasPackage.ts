@@ -1,5 +1,6 @@
 import {
   isValidPrebuiltSdfAtlasManifest,
+  prebuiltPageByteLength,
   type PrebuiltSdfAtlasManifest,
   type PrebuiltSdfAtlasProvider,
 } from "./prebuiltSdfAtlas.js";
@@ -35,6 +36,7 @@ export type OriginPrebuiltSdfAtlasPackage = {
   readonly namespace: string;
   readonly provider: PrebuiltSdfAtlasProvider;
   install(families: readonly string[], options?: PrebuiltSdfAtlasInstallOptions): Promise<PrebuiltSdfAtlasPackageStatus>;
+  /** Removes the listed families, or every family of the namespace when called without an argument. */
   remove(families?: readonly string[]): Promise<void>;
   status(families: readonly string[]): Promise<PrebuiltSdfAtlasPackageStatus>;
   close(): void;
@@ -162,6 +164,10 @@ export function createOriginPrebuiltSdfAtlasPackage(options: {
       }
 
       const totalPages = [...manifests.values()].reduce((sum, manifest) => sum + manifest.pages.length, 0);
+      const totalBytes = [...manifests.values()].reduce(
+        (sum, manifest) => sum + manifest.pages.reduce((pages, page) => pages + prebuiltPageByteLength(page), 0),
+        0,
+      );
       if (installOptions.requestPersistence) await requestOriginPersistence();
 
       await storage.remove(namespace, missing);
@@ -202,7 +208,7 @@ export function createOriginPrebuiltSdfAtlasPackage(options: {
               completedPages,
               totalPages,
               storedBytes,
-              totalBytes: storedBytes,
+              totalBytes,
             });
           }
         }));
@@ -225,7 +231,12 @@ export function createOriginPrebuiltSdfAtlasPackage(options: {
     async remove(families) {
       manifestCache.clear();
       if (!storage.available) return;
-      await storage.remove(namespace, families == null ? undefined : uniqueFamilies(families));
+      if (families == null) {
+        await storage.remove(namespace, null);
+        return;
+      }
+      const requested = uniqueFamilies(families);
+      if (requested.length > 0) await storage.remove(namespace, requested);
     },
     close() {
       manifestCache.clear();
@@ -273,11 +284,14 @@ class OriginPrebuiltAtlasStorage {
     await transactionDone(transaction);
   }
 
-  async remove(namespace: string, families?: readonly string[]): Promise<void> {
+  /** Deletes the listed families, or the whole namespace when `families` is null. */
+  async remove(namespace: string, families: readonly string[] | null): Promise<void> {
     const database = await this.database();
     const transaction = database.transaction(ENTRY_STORE, "readwrite");
     const store = transaction.objectStore(ENTRY_STORE);
-    const prefixes = (families?.length ? families : [""]).map((family) => familyPrefix(namespace, family));
+    const prefixes = families == null
+      ? [namespacePrefix(namespace)]
+      : families.map((family) => familyPrefix(namespace, family));
     await deletePrefixes(store, prefixes);
     await transactionDone(transaction);
   }
@@ -323,8 +337,12 @@ function uniqueFamilies(families: readonly string[]): string[] {
   return [...new Set(families.map((family) => family.trim()).filter(Boolean))];
 }
 
+function namespacePrefix(namespace: string): string {
+  return `${namespace}\0`;
+}
+
 function familyPrefix(namespace: string, family: string): string {
-  return family ? `${namespace}\0${family}\0` : `${namespace}\0`;
+  return `${namespacePrefix(namespace)}${family}\0`;
 }
 
 function manifestKey(namespace: string, family: string): string {

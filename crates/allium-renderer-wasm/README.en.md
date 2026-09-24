@@ -326,6 +326,16 @@ const renderer = await BrowserRenderer.create({
 
 When browser persistence is unnecessary, pass `createHttpPrebuiltSdfAtlasProvider()` directly to `BrowserRenderer.create()` and let the host's local files, Service Worker, or HTTP cache own the lifecycle.
 
+Packages are the output of the native crate's `build-sdf-atlas` tool, served unchanged as `<baseUrl>/<family>/manifest.json` plus its page files:
+
+```sh
+FONT_DIR=/path/to/fonts cargo run -p sekai-profile-renderer --features dev --release \
+  --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
+  --output font-atlases/FZLanTingHei-DB-GBK
+```
+
+The directory name and the manifest's `font_family` must be the family name scenes request. Each page's `file_sha256` covers the decoded page, so a page may be stored pre-compressed as `page-NNN.r8swz.br` (with the manifest entry renamed to match) when the server sends it with `Content-Encoding: br`. Pages may be at most 2048×2048. All families one scene uses must share `--point-size`, `--spread`, and `--page-size`; otherwise that scene generates its glyphs on demand. Providers are asked for manifests on every scene, so an installation or removal takes effect with the next scene.
+
 ## Scene state
 
 ```ts

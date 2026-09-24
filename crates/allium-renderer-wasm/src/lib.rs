@@ -1,6 +1,5 @@
 mod atlas;
 mod authoring_runtime;
-mod edt;
 mod geometry;
 mod glyph_plan;
 mod layout;
@@ -15,7 +14,7 @@ use std::sync::Once;
 
 use base64::Engine;
 use freetype::{face::LoadFlag, Library, RenderMode};
-use sekai_profile_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
+use sekai_profile_renderer_core::sdf_glyph::{self, CoverageBitmap, GlyphSdfGrid};
 use serde::Serialize;
 use web_time::Instant;
 
@@ -699,7 +698,7 @@ unsafe fn build_glyph_batch_json(
         return Err("null font or codepoint pointer".to_string());
     }
     let t0 = Instant::now();
-    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
+    let font_bytes = Rc::new(slice::from_raw_parts(font_ptr, font_len).to_vec());
     let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
     let region = read_c_string(region_ptr)?;
     let family = read_c_string(family_ptr)?;
@@ -707,11 +706,17 @@ unsafe fn build_glyph_batch_json(
 
     let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
     let t1 = Instant::now();
-    let face = library
-        .new_memory_face(Rc::new(font_bytes), 0)
-        .map_err(|err| format!("load memory face failed: {err:?}"))?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
-        .map_err(|err| format!("set char size failed: {err:?}"))?;
+    let face = open_memory_face(&library, &font_bytes, TMP_POINT_SIZE)?;
+    let raster_face = if supersample > 1 {
+        Some(open_memory_face(
+            &library,
+            &font_bytes,
+            TMP_POINT_SIZE * supersample as f32,
+        )?)
+    } else {
+        None
+    };
+    let raster_face = raster_face.as_ref().unwrap_or(&face);
     let t2 = Instant::now();
 
     let mut glyphs = Vec::new();
@@ -728,8 +733,16 @@ unsafe fn build_glyph_batch_json(
         }
         let g0 = Instant::now();
         let glyph_result = if supersample > 0 {
-            build_glyph_edt(&face, &region, &family, &font_source_hash, ch, supersample)
-                .or_else(|_| build_glyph(&face, &region, &family, &font_source_hash, ch))
+            build_glyph_edt(
+                &face,
+                raster_face,
+                &region,
+                &family,
+                &font_source_hash,
+                ch,
+                supersample,
+            )
+            .or_else(|_| build_glyph(&face, &region, &family, &font_source_hash, ch))
         } else {
             build_glyph(&face, &region, &family, &font_source_hash, ch)
         };
@@ -848,6 +861,57 @@ fn into_c_string(value: String) -> *mut c_char {
         .into_raw()
 }
 
+/// Glyph metrics in pixels at the sampling point size.
+#[derive(Clone, Copy)]
+struct SamplingMetrics {
+    bearing_x: f32,
+    bearing_y: f32,
+    width: f32,
+    height: f32,
+    advance: f32,
+}
+
+impl SamplingMetrics {
+    fn from_slot(slot: &freetype::GlyphSlot) -> Self {
+        let metrics = slot.metrics();
+        Self {
+            bearing_x: metrics.horiBearingX as f32 / 64.0,
+            bearing_y: metrics.horiBearingY as f32 / 64.0,
+            width: metrics.width as f32 / 64.0,
+            height: metrics.height as f32 / 64.0,
+            advance: metrics.horiAdvance as f32 / 64.0,
+        }
+    }
+
+    fn grid(self) -> GlyphSdfGrid {
+        GlyphSdfGrid::from_metrics(
+            self.bearing_x,
+            self.bearing_y,
+            self.width,
+            self.height,
+            TMP_SPREAD,
+        )
+    }
+}
+
+fn open_memory_face(
+    library: &Library,
+    font_bytes: &Rc<Vec<u8>>,
+    point_size: f32,
+) -> Result<freetype::Face, String> {
+    let face = library
+        .new_memory_face(Rc::clone(font_bytes), 0)
+        .map_err(|err| format!("load memory face failed: {err:?}"))?;
+    face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
+        .map_err(|err| format!("set char size failed: {err:?}"))?;
+    Ok(face)
+}
+
+fn has_outline(slot: &freetype::GlyphSlot) -> bool {
+    let outline = &slot.raw().outline;
+    outline.n_contours > 0 && outline.n_points > 0
+}
+
 fn build_glyph(
     face: &freetype::Face,
     region: &str,
@@ -861,27 +925,19 @@ fn build_glyph(
     face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
         .map_err(|err| format!("load glyph failed: {err:?}"))?;
 
-    let glyph = face.glyph();
-    let metrics = glyph.metrics();
-    let bear_x = metrics.horiBearingX as f32 / 64.0;
-    let bear_y = metrics.horiBearingY as f32 / 64.0;
-    let met_w = metrics.width as f32 / 64.0;
-    let met_h = metrics.height as f32 / 64.0;
-    let advance = metrics.horiAdvance as f32 / 64.0;
-
-    let outline = &glyph.raw().outline;
-    if outline.n_contours <= 0 || outline.n_points <= 0 {
+    let slot = face.glyph();
+    let metrics = SamplingMetrics::from_slot(slot);
+    if !has_outline(slot) {
         return Ok(empty_metric_glyph(
             region,
             family,
             font_source_hash,
             ch,
             glyph_id,
-            advance,
+            metrics.advance,
         ));
     }
-
-    let contours = unsafe { extract_segments(outline) };
+    let contours = unsafe { extract_segments(&slot.raw().outline) };
     if contours.is_empty() {
         return Ok(empty_metric_glyph(
             region,
@@ -889,64 +945,29 @@ fn build_glyph(
             font_source_hash,
             ch,
             glyph_id,
-            advance,
+            metrics.advance,
         ));
     }
-
-    let rect_left_px = bear_x.floor();
-    let rect_top_px = bear_y.ceil();
-    let rect_right_px = (bear_x + met_w).ceil();
-    let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = TMP_SPREAD.ceil();
-    let sample_left_px = rect_left_px - spread_px;
-    let sample_top_px = rect_top_px + spread_px;
-    let sample_right_px = rect_right_px + spread_px;
-    let sample_bottom_px = rect_bottom_px - spread_px;
-
-    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
-    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
-    let rect_left_26_6 = sample_left_px * 64.0;
-    let rect_top_26_6 = sample_top_px * 64.0;
-
-    let distance_field = AnalyticDistanceField::new(&contours);
-    let mut pixels = vec![0u8; width * height];
-    for py in 0..height {
-        for px in 0..width {
-            let point = Vec2::new(
-                rect_left_26_6 + (px as f32 + 0.5) * 64.0,
-                rect_top_26_6 - (py as f32 + 0.5) * 64.0,
-            );
-            let signed_distance_px = distance_field.signed_distance(point) / 64.0;
-            let gray = (0.5 - signed_distance_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
-            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok(GlyphSdf {
-        key: glyph_key(region, family, font_source_hash, ch),
-        region: region.to_string(),
-        family: family.to_string(),
-        font_source_hash: font_source_hash.to_string(),
-        ch: ch.to_string(),
-        glyph_index: glyph_id,
-        width,
-        height,
-        bearing_x: sample_left_px,
-        bearing_y: sample_top_px,
-        x_offset: sample_left_px,
-        y_offset: -sample_top_px,
-        advance,
-        plane_bearing_x: bear_x,
-        plane_bearing_y: bear_y,
-        plane_width: met_w.max(1.0 / 64.0),
-        plane_height: met_h.max(1.0 / 64.0),
-        drawable: true,
-        pixels_base64: encode_pixels(&pixels),
-    })
+    let grid = metrics.grid();
+    let pixels = sdf_glyph::analytic_sdf(&contours, grid, TMP_SPREAD);
+    Ok(glyph_sdf(
+        region,
+        family,
+        font_source_hash,
+        ch,
+        glyph_id,
+        metrics,
+        grid,
+        &pixels,
+    ))
 }
 
+/// `face` is at the sampling point size and supplies the metrics and grid;
+/// `raster_face` is at `supersample` times that size, so its coverage bitmap
+/// lines up with the grid's supersampled cells.
 fn build_glyph_edt(
     face: &freetype::Face,
+    raster_face: &freetype::Face,
     region: &str,
     family: &str,
     font_source_hash: &str,
@@ -959,109 +980,89 @@ fn build_glyph_edt(
     face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
         .map_err(|err| format!("load glyph failed: {err:?}"))?;
 
-    let glyph = face.glyph();
-    let metrics = glyph.metrics();
-    let bear_x = metrics.horiBearingX as f32 / 64.0;
-    let bear_y = metrics.horiBearingY as f32 / 64.0;
-    let met_w = metrics.width as f32 / 64.0;
-    let met_h = metrics.height as f32 / 64.0;
-    let advance = metrics.horiAdvance as f32 / 64.0;
-
-    let outline = &glyph.raw().outline;
-    if outline.n_contours <= 0 || outline.n_points <= 0 {
+    let slot = face.glyph();
+    let metrics = SamplingMetrics::from_slot(slot);
+    if !has_outline(slot) {
         return Ok(empty_metric_glyph(
             region,
             family,
             font_source_hash,
             ch,
             glyph_id,
-            advance,
+            metrics.advance,
         ));
     }
+    let grid = metrics.grid();
 
-    let rect_left_px = bear_x.floor();
-    let rect_top_px = bear_y.ceil();
-    let rect_right_px = (bear_x + met_w).ceil();
-    let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = TMP_SPREAD.ceil();
-    let sample_left_px = rect_left_px - spread_px;
-    let sample_top_px = rect_top_px + spread_px;
-    let sample_right_px = rect_right_px + spread_px;
-    let sample_bottom_px = rect_bottom_px - spread_px;
-
-    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
-    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
-
-    let ss = supersample.max(1);
-    let raster_w = width * ss;
-    let raster_h = height * ss;
-    glyph
+    raster_face
+        .load_glyph(glyph_id, LoadFlag::NO_HINTING)
+        .map_err(|err| format!("load glyph failed: {err:?}"))?;
+    let raster = raster_face.glyph();
+    raster
         .render_glyph(RenderMode::Normal)
         .map_err(|err| format!("render glyph failed: {err:?}"))?;
-    let bitmap = glyph.bitmap();
-    let bm_w = bitmap.width() as usize;
-    let bm_h = bitmap.rows() as usize;
-    let bm_left = glyph.bitmap_left();
-    let bm_top = glyph.bitmap_top();
+    let bitmap = raster.bitmap();
+    let width = bitmap.width().max(0) as usize;
+    let rows = bitmap.rows().max(0) as usize;
+    let coverage = CoverageBitmap {
+        buffer: if width > 0 && rows > 0 {
+            bitmap.buffer()
+        } else {
+            &[]
+        },
+        width,
+        rows,
+        pitch: bitmap.pitch().unsigned_abs() as usize,
+        left: raster.bitmap_left(),
+        top: raster.bitmap_top(),
+    };
+    let pixels = sdf_glyph::edt_sdf(&coverage, grid, supersample, TMP_SPREAD);
+    Ok(glyph_sdf(
+        region,
+        family,
+        font_source_hash,
+        ch,
+        glyph_id,
+        metrics,
+        grid,
+        &pixels,
+    ))
+}
 
-    let mut inside = vec![false; raster_w * raster_h];
-    if bm_w > 0 && bm_h > 0 {
-        let buffer = bitmap.buffer();
-        let pitch = bitmap.pitch().unsigned_abs() as usize;
-        for ry in 0..raster_h {
-            for rx in 0..raster_w {
-                let px_26_6 = (sample_left_px + (rx as f32 + 0.5) / ss as f32) * 64.0;
-                let py_26_6 = (sample_top_px - (ry as f32 + 0.5) / ss as f32) * 64.0;
-                let bx = ((px_26_6 / 64.0) - bm_left as f32).floor() as isize;
-                let by = (bm_top as f32 - (py_26_6 / 64.0)).floor() as isize;
-                if bx >= 0 && by >= 0 && (bx as usize) < bm_w && (by as usize) < bm_h {
-                    let coverage = buffer[by as usize * pitch + bx as usize];
-                    inside[ry * raster_w + rx] = coverage >= 128;
-                }
-            }
-        }
-    }
-
-    let sd_ss = edt::signed_distance_from_mask(&inside, raster_w, raster_h);
-
-    let mut pixels = vec![0u8; width * height];
-    for py in 0..height {
-        for px in 0..width {
-            let mut sum = 0.0f32;
-            for sy in 0..ss {
-                for sx in 0..ss {
-                    let idx = (py * ss + sy) * raster_w + (px * ss + sx);
-                    sum += sd_ss[idx];
-                }
-            }
-            let dist_px = sum / (ss * ss) as f32 / ss as f32;
-            let gray = (0.5 - dist_px / (2.0 * TMP_SPREAD)).clamp(0.0, 1.0);
-            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok(GlyphSdf {
+#[allow(clippy::too_many_arguments)]
+fn glyph_sdf(
+    region: &str,
+    family: &str,
+    font_source_hash: &str,
+    ch: char,
+    glyph_index: u32,
+    metrics: SamplingMetrics,
+    grid: GlyphSdfGrid,
+    pixels: &[u8],
+) -> GlyphSdf {
+    GlyphSdf {
         key: glyph_key(region, family, font_source_hash, ch),
         region: region.to_string(),
         family: family.to_string(),
         font_source_hash: font_source_hash.to_string(),
         ch: ch.to_string(),
-        glyph_index: glyph_id,
-        width,
-        height,
-        bearing_x: sample_left_px,
-        bearing_y: sample_top_px,
-        x_offset: sample_left_px,
-        y_offset: -sample_top_px,
-        advance,
-        plane_bearing_x: bear_x,
-        plane_bearing_y: bear_y,
-        plane_width: met_w.max(1.0 / 64.0),
-        plane_height: met_h.max(1.0 / 64.0),
+        glyph_index,
+        width: grid.width,
+        height: grid.height,
+        bearing_x: grid.left,
+        bearing_y: grid.top,
+        x_offset: grid.left,
+        y_offset: -grid.top,
+        advance: metrics.advance,
+        plane_bearing_x: metrics.bearing_x,
+        plane_bearing_y: metrics.bearing_y,
+        plane_width: metrics.width.max(1.0 / 64.0),
+        plane_height: metrics.height.max(1.0 / 64.0),
         drawable: true,
-        pixels_base64: encode_pixels(&pixels),
-    })
+        pixels_base64: encode_pixels(pixels),
+    }
 }
+
 fn empty_metric_glyph(
     region: &str,
     family: &str,
@@ -1175,269 +1176,48 @@ struct GlyphSdf {
     pixels_base64: String,
 }
 
-// ===== Mask batch (for WebGPU SDF path) =====
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[derive(Serialize)]
-struct GlyphMaskBatch {
-    region: String,
-    family: String,
-    font_source_hash: String,
-    base_size: f32,
-    spread: f32,
-    glyphs: Vec<GlyphMask>,
-    missing: Vec<String>,
-    perf: GlyphBatchPerf,
-}
+    const TEST_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
-#[derive(Serialize)]
-struct GlyphMask {
-    key: String,
-    region: String,
-    family: String,
-    font_source_hash: String,
-    ch: String,
-    width: usize,
-    height: usize,
-    raster_width: usize,
-    raster_height: usize,
-    supersample: usize,
-    bearing_x: f32,
-    bearing_y: f32,
-    x_offset: f32,
-    y_offset: f32,
-    advance: f32,
-    plane_bearing_x: f32,
-    plane_bearing_y: f32,
-    plane_width: f32,
-    plane_height: f32,
-    drawable: bool,
-    mask_base64: String,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn sdf_layout_freetype_build_mask_json(
-    font_ptr: *const u8,
-    font_len: usize,
-    codepoints_ptr: *const u32,
-    codepoints_len: usize,
-    region_ptr: *const c_char,
-    family_ptr: *const c_char,
-    font_source_hash_ptr: *const c_char,
-    supersample: usize,
-) -> *mut c_char {
-    install_panic_hook();
-    let result = build_glyph_batch_mask_json(
-        font_ptr,
-        font_len,
-        codepoints_ptr,
-        codepoints_len,
-        region_ptr,
-        family_ptr,
-        font_source_hash_ptr,
-        supersample.clamp(1, 4),
-    );
-    into_c_string(result.unwrap_or_else(|message| {
-        serde_json::to_string(&GlyphBatchError { error: message })
-            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
-    }))
-}
-
-unsafe fn build_glyph_batch_mask_json(
-    font_ptr: *const u8,
-    font_len: usize,
-    codepoints_ptr: *const u32,
-    codepoints_len: usize,
-    region_ptr: *const c_char,
-    family_ptr: *const c_char,
-    font_source_hash_ptr: *const c_char,
-    supersample: usize,
-) -> Result<String, String> {
-    if font_ptr.is_null() || codepoints_ptr.is_null() {
-        return Err("null font or codepoint pointer".to_string());
+    fn pixels(glyph: &GlyphSdf) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(&glyph.pixels_base64)
+            .expect("glyph pixels are base64")
     }
-    let t0 = Instant::now();
-    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
-    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
-    let region = read_c_string(region_ptr)?;
-    let family = read_c_string(family_ptr)?;
-    let font_source_hash = read_c_string(font_source_hash_ptr)?;
 
-    let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
-    let t1 = Instant::now();
-    let face = library
-        .new_memory_face(Rc::new(font_bytes), 0)
-        .map_err(|err| format!("load memory face failed: {err:?}"))?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
-        .map_err(|err| format!("set char size failed: {err:?}"))?;
-    let t2 = Instant::now();
-
-    let mut glyphs = Vec::new();
-    let mut missing = Vec::new();
-    let mut glyph_total_ms = 0.0f64;
-    let mut total_pixel_count: usize = 0;
-    for codepoint in codepoints {
-        let Some(ch) = char::from_u32(*codepoint) else {
-            missing.push(format!("U+{codepoint:04X}"));
-            continue;
+    #[test]
+    fn supersampled_edt_tracks_the_analytic_field_on_the_same_grid() {
+        let Ok(bytes) = std::fs::read(TEST_FONT) else {
+            eprintln!("skipping: {TEST_FONT} is not installed");
+            return;
         };
-        if ch == '\n' || ch == '\r' {
-            continue;
-        }
-        let g0 = Instant::now();
-        match build_glyph_mask(&face, &region, &family, &font_source_hash, ch, supersample) {
-            Ok(glyph) => {
-                total_pixel_count += glyph.raster_width * glyph.raster_height;
-                glyphs.push(glyph);
-            }
-            Err(message) => missing.push(format!("{family}:{ch}:{message}")),
-        }
-        glyph_total_ms += g0.elapsed().as_secs_f64() * 1000.0;
-    }
-    let t3 = Instant::now();
-
-    let glyph_count = glyphs.len();
-    serde_json::to_string(&GlyphMaskBatch {
-        region,
-        family,
-        font_source_hash,
-        base_size: TMP_POINT_SIZE,
-        spread: TMP_SPREAD,
-        glyphs,
-        missing,
-        perf: GlyphBatchPerf {
-            total_ms: duration_ms(t0, t3),
-            face_load_ms: duration_ms(t1, t2),
-            glyph_total_ms,
-            glyph_count,
-            per_glyph_avg_ms: if glyph_count > 0 {
-                glyph_total_ms / glyph_count as f64
-            } else {
-                0.0
-            },
-            total_pixel_count,
-            avg_pixels_per_glyph: if glyph_count > 0 {
-                total_pixel_count as f64 / glyph_count as f64
-            } else {
-                0.0
-            },
-        },
-    })
-    .map_err(|err| format!("serialize mask batch failed: {err}"))
-}
-
-fn build_glyph_mask(
-    face: &freetype::Face,
-    region: &str,
-    family: &str,
-    font_source_hash: &str,
-    ch: char,
-    supersample: usize,
-) -> Result<GlyphMask, String> {
-    let glyph_id = face
-        .get_char_index(ch as usize)
-        .ok_or_else(|| "missing cmap entry".to_string())?;
-    face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
-        .map_err(|err| format!("load glyph failed: {err:?}"))?;
-
-    let glyph = face.glyph();
-    let metrics = glyph.metrics();
-    let bear_x = metrics.horiBearingX as f32 / 64.0;
-    let bear_y = metrics.horiBearingY as f32 / 64.0;
-    let met_w = metrics.width as f32 / 64.0;
-    let met_h = metrics.height as f32 / 64.0;
-    let advance = metrics.horiAdvance as f32 / 64.0;
-
-    let outline = &glyph.raw().outline;
-    if outline.n_contours <= 0 || outline.n_points <= 0 {
-        return Ok(GlyphMask {
-            key: glyph_key(region, family, font_source_hash, ch),
-            region: region.to_string(),
-            family: family.to_string(),
-            font_source_hash: font_source_hash.to_string(),
-            ch: ch.to_string(),
-            width: 1,
-            height: 1,
-            raster_width: 1,
-            raster_height: 1,
-            supersample,
-            bearing_x: 0.0,
-            bearing_y: 0.0,
-            x_offset: 0.0,
-            y_offset: 0.0,
-            advance,
-            plane_bearing_x: 0.0,
-            plane_bearing_y: 0.0,
-            plane_width: advance.max(1.0 / 64.0),
-            plane_height: 0.0,
-            drawable: false,
-            mask_base64: encode_pixels(&[0]),
-        });
-    }
-
-    let rect_left_px = bear_x.floor();
-    let rect_top_px = bear_y.ceil();
-    let rect_right_px = (bear_x + met_w).ceil();
-    let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = TMP_SPREAD.ceil();
-    let sample_left_px = rect_left_px - spread_px;
-    let sample_top_px = rect_top_px + spread_px;
-    let sample_right_px = rect_right_px + spread_px;
-    let sample_bottom_px = rect_bottom_px - spread_px;
-
-    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
-    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
-
-    let ss = supersample.max(1);
-    let raster_w = width * ss;
-    let raster_h = height * ss;
-    glyph
-        .render_glyph(RenderMode::Normal)
-        .map_err(|err| format!("render glyph failed: {err:?}"))?;
-    let bitmap = glyph.bitmap();
-    let bm_w = bitmap.width() as usize;
-    let bm_h = bitmap.rows() as usize;
-    let bm_left = glyph.bitmap_left();
-    let bm_top = glyph.bitmap_top();
-
-    let mut mask = vec![0u8; raster_w * raster_h];
-    if bm_w > 0 && bm_h > 0 {
-        let buffer = bitmap.buffer();
-        let pitch = bitmap.pitch().unsigned_abs() as usize;
-        for ry in 0..raster_h {
-            for rx in 0..raster_w {
-                let px_26_6 = (sample_left_px + (rx as f32 + 0.5) / ss as f32) * 64.0;
-                let py_26_6 = (sample_top_px - (ry as f32 + 0.5) / ss as f32) * 64.0;
-                let bx = ((px_26_6 / 64.0) - bm_left as f32).floor() as isize;
-                let by = (bm_top as f32 - (py_26_6 / 64.0)).floor() as isize;
-                if bx >= 0 && by >= 0 && (bx as usize) < bm_w && (by as usize) < bm_h {
-                    let coverage = buffer[by as usize * pitch + bx as usize];
-                    mask[ry * raster_w + rx] = if coverage >= 128 { 1 } else { 0 };
+        let bytes = Rc::new(bytes);
+        let library = Library::init().expect("FreeType");
+        let face = open_memory_face(&library, &bytes, TMP_POINT_SIZE).expect("face");
+        let raster_face =
+            open_memory_face(&library, &bytes, TMP_POINT_SIZE * 4.0).expect("raster face");
+        for ch in ['O', 'g'] {
+            let exact = build_glyph(&face, "cn", "test", "hash", ch).expect("analytic glyph");
+            let edt = build_glyph_edt(&face, &raster_face, "cn", "test", "hash", ch, 4)
+                .expect("EDT glyph");
+            assert_eq!((edt.width, edt.height), (exact.width, exact.height));
+            assert_eq!(
+                (edt.bearing_x, edt.bearing_y, edt.advance),
+                (exact.bearing_x, exact.bearing_y, exact.advance)
+            );
+            let (mut sum, mut count) = (0.0f32, 0usize);
+            for (&value, &reference) in pixels(&edt).iter().zip(&pixels(&exact)) {
+                if reference == 0 || reference == 255 {
+                    continue;
                 }
+                sum += (f32::from(value) - f32::from(reference)).abs();
+                count += 1;
             }
+            let mean = sum / count as f32;
+            assert!(mean < 2.5, "{ch}: ss4 mean gray error {mean}");
         }
     }
-
-    Ok(GlyphMask {
-        key: glyph_key(region, family, font_source_hash, ch),
-        region: region.to_string(),
-        family: family.to_string(),
-        font_source_hash: font_source_hash.to_string(),
-        ch: ch.to_string(),
-        width,
-        height,
-        raster_width: raster_w,
-        raster_height: raster_h,
-        supersample: ss,
-        bearing_x: sample_left_px,
-        bearing_y: sample_top_px,
-        x_offset: sample_left_px,
-        y_offset: -sample_top_px,
-        advance,
-        plane_bearing_x: bear_x,
-        plane_bearing_y: bear_y,
-        plane_width: met_w.max(1.0 / 64.0),
-        plane_height: met_h.max(1.0 / 64.0),
-        drawable: true,
-        mask_base64: encode_pixels(&mask),
-    })
 }

@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 pub struct AtlasConfig {
     pub page_width: usize,
     pub page_height: usize,
-    pub soft_pages: usize,
     pub hard_pages: usize,
 }
 
@@ -18,7 +17,6 @@ impl Default for AtlasConfig {
         Self {
             page_width: 2048,
             page_height: 2048,
-            soft_pages: 4,
             hard_pages: 6,
         }
     }
@@ -183,8 +181,7 @@ impl AtlasSession {
     pub fn new(config: AtlasConfig) -> Result<Self, AtlasError> {
         if config.page_width < 3
             || config.page_height < 3
-            || config.soft_pages < 1
-            || config.hard_pages < config.soft_pages
+            || config.hard_pages < 1
             || config
                 .page_width
                 .checked_mul(config.page_height)
@@ -574,7 +571,6 @@ mod tests {
         let mut atlas = AtlasSession::new(AtlasConfig {
             page_width: 8,
             page_height: 8,
-            soft_pages: 1,
             hard_pages: 2,
         })
         .unwrap();
@@ -590,7 +586,6 @@ mod tests {
         let mut dirty = AtlasSession::new(AtlasConfig {
             page_width: 8,
             page_height: 8,
-            soft_pages: 1,
             hard_pages: 1,
         })
         .unwrap();
@@ -630,7 +625,6 @@ mod tests {
         let mut atlas = AtlasSession::new(AtlasConfig {
             page_width: 8,
             page_height: 8,
-            soft_pages: 1,
             hard_pages: 2,
         })
         .unwrap();

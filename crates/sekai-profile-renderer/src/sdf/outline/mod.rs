@@ -1,8 +1,8 @@
 //! 基于 FreeType `NO_HINTING` 轮廓的动态 SDF glyph 生成器。
 
-mod edt;
 mod geometry;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::num::NonZeroUsize;
@@ -11,13 +11,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use freetype::{face::LoadFlag, Library, RenderMode};
 use lru::LruCache;
-use sekai_profile_renderer_core::sdf_geometry::{AnalyticDistanceField, Vec2};
+use sekai_profile_renderer_core::sdf_glyph::{self, CoverageBitmap, GlyphSdfGrid};
 use ttf_parser::Face as TtfFace;
 
 use self::geometry::extract_segments;
 
 const TMP_POINT_SIZE: f32 = 75.0;
-const TMP_ATLAS_PADDING: usize = 5;
+/// TextMesh Pro 的 gradient scale：atlas padding（5）加一个 texel。
 const TMP_SPREAD: f32 = 6.0;
 
 const FONT_FILE_MAP: [(&str, &[&str]); 12] = [
@@ -102,13 +102,6 @@ impl OutlineSdfGlyph {
     pub fn plane_height(&self) -> f32 {
         self.plane_height
     }
-    /// SDF rect X 方向 padding（ceil/floor 舍入导致的非对称偏移）。
-    /// TMP 的 unsheared center_x 包含此项。
-    pub fn sdf_pad_x(&self) -> f32 {
-        let rect_left = self.plane_bearing_x.floor();
-        let rect_right = (self.plane_bearing_x + self.plane_width).ceil();
-        ((rect_right - rect_left) - self.plane_width) / 2.0
-    }
     pub fn plane_advance_x(&self) -> f32 {
         self.plane_advance_x
     }
@@ -133,13 +126,6 @@ impl OutlineSdfGlyph {
         let top = v00 + (v10 - v00) * tx;
         let bottom = v01 + (v11 - v01) * tx;
         top + (bottom - top) * ty
-    }
-
-    pub fn sample_gray_or_zero(&self, x: f32, y: f32) -> f32 {
-        if x < 0.0 || y < 0.0 || x > self.width as f32 - 1.0 || y > self.height as f32 - 1.0 {
-            return 0.0;
-        }
-        self.sample_gray(x, y)
     }
 
     fn pixel_gray(&self, x: usize, y: usize) -> f32 {
@@ -260,8 +246,8 @@ fn resolve_glyph_id(font_path: &Path, ch: char) -> Option<u32> {
 /// EDT 加速开关 + 超采样因子（运行时配置，默认关闭走解析法）。
 ///
 /// `SCAPUS_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，现有生产行为）。
-/// 设为 1-4 → EDT 法，值即超采样因子（实测 2x 为精度/性能甜点，
-/// MAE≈1.9%，误差 90% 落在抗锯齿边缘带，加速 5-8x）。
+/// 设为 1-4 → EDT 法，值即超采样因子（按该倍数的点阵光栅化后做距离变换，
+/// 倍数越高边缘越精确、光栅化越慢）。
 fn edt_supersample() -> Option<usize> {
     static CFG: OnceLock<Option<usize>> = OnceLock::new();
     *CFG.get_or_init(|| {
@@ -312,14 +298,29 @@ pub enum OfflineGenerationMethod {
     Edt { supersample: usize },
 }
 
+impl OfflineGenerationMethod {
+    /// 写入 atlas manifest 的生成契约；生成算法改变输出时随之变化。
+    pub fn contract(self) -> String {
+        match self {
+            Self::Analytic => "outline-analytic-v1".into(),
+            Self::Edt { supersample } => {
+                format!("outline-edt-v2:ss={supersample}:fallback=analytic-v1")
+            }
+        }
+    }
+}
+
 /// 持久化 FreeType library/face 的离线 atlas glyph 生成器。
 ///
 /// 全字体构建会依次处理数万个 cmap codepoint；复用 face 避免每个 glyph 重开字体文件。
+/// EDT 光栅化用的超采样 face 按超采样因子首次使用时打开并复用。
 /// 该类型不进入请求期，也不共享给动态 glyph cache。
 pub struct OfflineAtlasGlyphGenerator {
-    // Face 先声明以确保它先于最后一个 Library owner 释放。
     face: freetype::Face,
-    _library: Library,
+    supersampled_faces: RefCell<Vec<(usize, freetype::Face)>>,
+    library: Library,
+    path: PathBuf,
+    point_size: f32,
     spread: f32,
 }
 
@@ -333,12 +334,6 @@ impl OfflineAtlasGlyphGenerator {
         point_size: f32,
         spread: f32,
     ) -> Result<Self, String> {
-        if !point_size.is_finite() || point_size <= 0.0 {
-            return Err("离线 atlas point size 非法".into());
-        }
-        if !spread.is_finite() || spread <= 0.0 {
-            return Err("离线 atlas spread 非法".into());
-        }
         let path = resolve_font_path(font_family)
             .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
         Self::new_from_path_at_sampling(&path, point_size, spread)
@@ -353,15 +348,20 @@ impl OfflineAtlasGlyphGenerator {
         point_size: f32,
         spread: f32,
     ) -> Result<Self, String> {
+        if !point_size.is_finite() || point_size <= 0.0 {
+            return Err("离线 atlas point size 非法".into());
+        }
+        if !spread.is_finite() || spread <= 0.0 {
+            return Err("离线 atlas spread 非法".into());
+        }
         let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
-        let face = library
-            .new_face(path, 0)
-            .map_err(|err| format!("加载字体失败: {err:?}"))?;
-        face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
-            .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
+        let face = open_face(&library, path, point_size)?;
         Ok(Self {
             face,
-            _library: library,
+            supersampled_faces: RefCell::new(Vec::new()),
+            library,
+            path: path.to_path_buf(),
+            point_size,
             spread,
         })
     }
@@ -377,36 +377,55 @@ impl OfflineAtlasGlyphGenerator {
             .face
             .get_char_index(ch as usize)
             .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
-        match method {
-            OfflineGenerationMethod::Analytic => {
-                generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
-                    .map(|glyph| (glyph, false))
-            }
-            OfflineGenerationMethod::Edt { supersample } => {
-                if !(1..=4).contains(&supersample) {
-                    return Err(format!(
-                        "EDT supersample 必须在 1..=4，实际为 {supersample}"
-                    ));
+        let OfflineGenerationMethod::Edt { supersample } = method else {
+            return generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
+                .map(|glyph| (glyph, false));
+        };
+        if !(1..=4).contains(&supersample) {
+            return Err(format!(
+                "EDT supersample 必须在 1..=4，实际为 {supersample}"
+            ));
+        }
+        let edt = if supersample == 1 {
+            generate_outline_sdf_edt_with_faces(
+                &self.face,
+                &self.face,
+                glyph_id,
+                ch,
+                supersample,
+                self.spread,
+            )
+        } else {
+            let mut faces = self.supersampled_faces.borrow_mut();
+            let index = match faces.iter().position(|(factor, _)| *factor == supersample) {
+                Some(index) => index,
+                None => {
+                    let face = open_face(
+                        &self.library,
+                        &self.path,
+                        self.point_size * supersample as f32,
+                    )?;
+                    faces.push((supersample, face));
+                    faces.len() - 1
                 }
-                match generate_outline_sdf_edt_with_face(
-                    &self.face,
-                    glyph_id,
-                    ch,
-                    supersample,
-                    self.spread,
-                ) {
-                    Ok(glyph) => Ok((glyph, false)),
-                    Err(edt_error) => generate_outline_sdf_with_face_at_spread(
-                        &self.face,
-                        glyph_id,
-                        ch,
-                        self.spread,
-                    )
+            };
+            generate_outline_sdf_edt_with_faces(
+                &self.face,
+                &faces[index].1,
+                glyph_id,
+                ch,
+                supersample,
+                self.spread,
+            )
+        };
+        match edt {
+            Ok(glyph) => Ok((glyph, false)),
+            Err(edt_error) => {
+                generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
                     .map(|glyph| (glyph, true))
                     .map_err(|analytic_error| {
                         format!("EDT 失败: {edt_error}; 解析法回退也失败: {analytic_error}")
-                    }),
-                }
+                    })
             }
         }
     }
@@ -439,27 +458,77 @@ pub fn benchmark_methods(
     Some((analytic, analytic_dur, edt, edt_dur))
 }
 
-fn generate_outline_sdf(font_path: &Path, ch: char) -> Result<OutlineSdfGlyph, String> {
-    let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+/// 以 72 dpi 打开字体并设置采样点阵大小。
+fn open_face(
+    library: &Library,
+    font_path: &Path,
+    point_size: f32,
+) -> Result<freetype::Face, String> {
     let face = library
         .new_face(font_path, 0)
         .map_err(|err| format!("加载字体失败: {err:?}"))?;
-    face.set_char_size((TMP_POINT_SIZE as isize) * 64, 0, 72, 72)
+    face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
         .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
+    Ok(face)
+}
 
+/// 采样点阵下的 glyph metrics（像素）。
+#[derive(Clone, Copy)]
+struct SamplingMetrics {
+    bearing_x: f32,
+    bearing_y: f32,
+    width: f32,
+    height: f32,
+    advance_x: f32,
+}
+
+impl SamplingMetrics {
+    fn from_slot(slot: &freetype::GlyphSlot) -> Self {
+        let metrics = slot.metrics();
+        Self {
+            bearing_x: metrics.horiBearingX as f32 / 64.0,
+            bearing_y: metrics.horiBearingY as f32 / 64.0,
+            width: metrics.width as f32 / 64.0,
+            height: metrics.height as f32 / 64.0,
+            advance_x: metrics.horiAdvance as f32 / 64.0,
+        }
+    }
+
+    fn grid(self, spread: f32) -> GlyphSdfGrid {
+        GlyphSdfGrid::from_metrics(
+            self.bearing_x,
+            self.bearing_y,
+            self.width,
+            self.height,
+            spread,
+        )
+    }
+
+    fn into_glyph(self, grid: GlyphSdfGrid, pixels: Vec<u8>) -> OutlineSdfGlyph {
+        OutlineSdfGlyph {
+            width: grid.width,
+            height: grid.height,
+            bearing_x: grid.left,
+            bearing_y: grid.top,
+            plane_bearing_x: self.bearing_x,
+            plane_bearing_y: self.bearing_y,
+            plane_width: self.width.max(1.0 / 64.0),
+            plane_height: self.height.max(1.0 / 64.0),
+            plane_advance_x: self.advance_x,
+            pixels,
+        }
+    }
+}
+
+fn generate_outline_sdf(font_path: &Path, ch: char) -> Result<OutlineSdfGlyph, String> {
+    let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+    let face = open_face(&library, font_path, TMP_POINT_SIZE)?;
     let glyph_id = resolve_glyph_id(font_path, ch)
         .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
-    generate_outline_sdf_with_face(&face, glyph_id, ch)
+    generate_outline_sdf_with_face_at_spread(&face, glyph_id, ch, TMP_SPREAD)
 }
 
-fn generate_outline_sdf_with_face(
-    face: &freetype::Face,
-    glyph_id: u32,
-    ch: char,
-) -> Result<OutlineSdfGlyph, String> {
-    generate_outline_sdf_with_face_at_spread(face, glyph_id, ch, TMP_SPREAD)
-}
-
+/// 解析法：对轮廓求每个 texel 中心的精确符号距离。
 fn generate_outline_sdf_with_face_at_spread(
     face: &freetype::Face,
     glyph_id: u32,
@@ -474,67 +543,20 @@ fn generate_outline_sdf_with_face_at_spread(
     if outline.n_contours <= 0 || outline.n_points <= 0 {
         return Err(format!("字符无轮廓: {ch}"));
     }
-
     let contours = unsafe { extract_segments(outline) };
     if contours.is_empty() {
         return Err(format!("字符轮廓为空: {ch}"));
     }
-
-    let metrics = glyph.metrics();
-    let bear_x = metrics.horiBearingX as f32 / 64.0;
-    let bear_y = metrics.horiBearingY as f32 / 64.0;
-    let met_w = metrics.width as f32 / 64.0;
-    let met_h = metrics.height as f32 / 64.0;
-
-    let rect_left_px = bear_x.floor();
-    let rect_top_px = bear_y.ceil();
-    let rect_right_px = (bear_x + met_w).ceil();
-    let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = spread.ceil();
-    let sample_left_px = rect_left_px - spread_px;
-    let sample_top_px = rect_top_px + spread_px;
-    let sample_right_px = rect_right_px + spread_px;
-    let sample_bottom_px = rect_bottom_px - spread_px;
-
-    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
-    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
-    let bearing_x = sample_left_px;
-    let bearing_y = sample_top_px;
-    let rect_left_26_6 = sample_left_px * 64.0;
-    let rect_top_26_6 = sample_top_px * 64.0;
-
-    let distance_field = AnalyticDistanceField::new(&contours);
-    let mut pixels = vec![0u8; width * height];
-    for py in 0..height {
-        for px in 0..width {
-            let point = Vec2::new(
-                rect_left_26_6 + (px as f32 + 0.5) * 64.0,
-                rect_top_26_6 - (py as f32 + 0.5) * 64.0,
-            );
-            let signed_distance_px = distance_field.signed_distance(point) / 64.0;
-            let gray = (0.5 - signed_distance_px / (2.0 * spread)).clamp(0.0, 1.0);
-            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok(OutlineSdfGlyph {
-        width,
-        height,
-        bearing_x,
-        bearing_y,
-        plane_bearing_x: bear_x,
-        plane_bearing_y: bear_y,
-        plane_width: met_w.max(1.0 / 64.0),
-        plane_height: met_h.max(1.0 / 64.0),
-        plane_advance_x: (metrics.horiAdvance as f32) / 64.0,
-        pixels,
-    })
+    let metrics = SamplingMetrics::from_slot(glyph);
+    let grid = metrics.grid(spread);
+    Ok(metrics.into_glyph(grid, sdf_glyph::analytic_sdf(&contours, grid, spread)))
 }
 
-/// EDT 版 SDF 生成（基于 FreeType 光栅化 + 欧几里得距离变换）。
+/// EDT 版 SDF 生成（FreeType 超采样光栅化 + 欧几里得距离变换）。
 ///
 /// 与解析法对齐到相同的 width/height/bearing 网格，仅像素填充算法不同。
-/// `supersample` 为超采样因子（1=无超采样，2/4=提升精度但增加计算量）。
+/// `supersample` 为超采样因子：按该倍数的点阵光栅化，每个 texel 由
+/// `supersample`² 个单元求得，倍数越高边缘越精确。
 fn generate_outline_sdf_edt(
     font_path: &Path,
     ch: char,
@@ -576,140 +598,73 @@ fn generate_outline_sdf_edt_at_point_size(
     spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
     let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
-    let face = library
-        .new_face(font_path, 0)
-        .map_err(|err| format!("加载字体失败: {err:?}"))?;
-    face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
-        .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
-
+    let face = open_face(&library, font_path, point_size)?;
+    let supersample = supersample.max(1);
+    let supersampled_face = if supersample > 1 {
+        Some(open_face(
+            &library,
+            font_path,
+            point_size * supersample as f32,
+        )?)
+    } else {
+        None
+    };
     let glyph_id = resolve_glyph_id(font_path, ch)
         .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
-    generate_outline_sdf_edt_with_face(&face, glyph_id, ch, supersample, spread)
+    generate_outline_sdf_edt_with_faces(
+        &face,
+        supersampled_face.as_ref().unwrap_or(&face),
+        glyph_id,
+        ch,
+        supersample,
+        spread,
+    )
 }
 
-fn generate_outline_sdf_edt_with_face(
+/// `face` 处于采样点阵，提供 metrics 与网格；`raster_face` 处于
+/// `supersample` 倍点阵，其覆盖率位图的像素与网格的超采样单元一一对齐。
+fn generate_outline_sdf_edt_with_faces(
     face: &freetype::Face,
+    raster_face: &freetype::Face,
     glyph_id: u32,
     ch: char,
     supersample: usize,
     spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
     // 与解析法一致用 NO_HINTING，保证 metrics 和轮廓网格对齐（hinting 会
-    // 网格对齐字形、改变 width/height，导致与解析法尺寸不匹配 + 不公平对比）。
+    // 网格对齐字形、改变 width/height，导致与解析法尺寸不匹配）。
     face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
         .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
+    let metrics = SamplingMetrics::from_slot(face.glyph());
+    let grid = metrics.grid(spread);
 
-    let glyph = face.glyph();
-    let metrics = glyph.metrics();
-    let bear_x = metrics.horiBearingX as f32 / 64.0;
-    let bear_y = metrics.horiBearingY as f32 / 64.0;
-    let met_w = metrics.width as f32 / 64.0;
-    let met_h = metrics.height as f32 / 64.0;
-
-    // 与解析法相同的 SDF 采样网格
-    let rect_left_px = bear_x.floor();
-    let rect_top_px = bear_y.ceil();
-    let rect_right_px = (bear_x + met_w).ceil();
-    let rect_bottom_px = (bear_y - met_h).floor();
-    let spread_px = spread.ceil();
-    let sample_left_px = rect_left_px - spread_px;
-    let sample_top_px = rect_top_px + spread_px;
-    let sample_right_px = rect_right_px + spread_px;
-    let sample_bottom_px = rect_bottom_px - spread_px;
-
-    let width = (sample_right_px - sample_left_px).max(1.0) as usize;
-    let height = (sample_top_px - sample_bottom_px).max(1.0) as usize;
-    let bearing_x = sample_left_px;
-    let bearing_y = sample_top_px;
-
-    // 光栅化到超采样分辨率
-    let ss = supersample.max(1);
-    let raster_w = width * ss;
-    let raster_h = height * ss;
-    glyph
-        .render_glyph(RenderMode::Normal)
-        .map_err(|err| format!("光栅化失败: {err:?}"))?;
-    let bitmap = glyph.bitmap();
-    let bm_w = bitmap.width() as usize;
-    let bm_h = bitmap.rows() as usize;
-    let bm_left = glyph.bitmap_left();
-    let bm_top = glyph.bitmap_top();
-
-    // 构建超采样覆盖率位图（inside[i] = 该像素是否在字形内部）
-    let mut inside = vec![false; raster_w * raster_h];
-    let mut nonzero_cov = 0usize;
-    if bm_w > 0 && bm_h > 0 {
-        let buffer = bitmap.buffer();
-        let pitch = bitmap.pitch().abs() as usize;
-        for &b in buffer.iter() {
-            if b > 0 {
-                nonzero_cov += 1;
-            }
-        }
-        for ry in 0..raster_h {
-            for rx in 0..raster_w {
-                // 超采样像素中心在 26.6 坐标系的位置
-                let px_26_6 = (sample_left_px + (rx as f32 + 0.5) / ss as f32) * 64.0;
-                let py_26_6 = (sample_top_px - (ry as f32 + 0.5) / ss as f32) * 64.0;
-                // 映射到 bitmap 坐标（左上角原点，Y 向下）
-                let bx = ((px_26_6 / 64.0) - bm_left as f32).floor() as isize;
-                let by = (bm_top as f32 - (py_26_6 / 64.0)).floor() as isize;
-                if bx >= 0 && by >= 0 && (bx as usize) < bm_w && (by as usize) < bm_h {
-                    let coverage = buffer[by as usize * pitch + bx as usize];
-                    inside[ry * raster_w + rx] = coverage >= 128;
-                }
-            }
-        }
-    }
-
-    let inside_count = inside.iter().filter(|&&b| b).count();
-    tracing::debug!(
-        ch = %ch, bm_w, bm_h, bm_left, bm_top,
-        sample_left_px, sample_top_px, raster_w, raster_h,
-        nonzero_cov, inside_count,
-        "EDT 光栅化诊断"
-    );
-
-    // EDT 计算签名距离（单位：超采样像素）
-    let sd_ss = edt::signed_distance_from_mask(&inside, raster_w, raster_h);
-
-    // 下采样到目标分辨率 + 归一化到 [0,1] gray
-    let mut pixels = vec![0u8; width * height];
-    for py in 0..height {
-        for px in 0..width {
-            // 超采样区域平均
-            let mut sum = 0.0;
-            for sy in 0..ss {
-                for sx in 0..ss {
-                    let idx = (py * ss + sy) * raster_w + (px * ss + sx);
-                    sum += sd_ss[idx];
-                }
-            }
-            let dist_px = sum / (ss * ss) as f32 / ss as f32; // 还原到物理像素单位
-            let gray = (0.5 - dist_px / (2.0 * spread)).clamp(0.0, 1.0);
-            pixels[py * width + px] = (gray * 255.0).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok(OutlineSdfGlyph {
+    raster_face
+        .load_glyph(glyph_id, LoadFlag::NO_HINTING)
+        .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
+    let slot = raster_face.glyph();
+    slot.render_glyph(RenderMode::Normal)
+        .map_err(|err| format!("光栅化失败 ({ch}): {err:?}"))?;
+    let bitmap = slot.bitmap();
+    let width = bitmap.width().max(0) as usize;
+    let rows = bitmap.rows().max(0) as usize;
+    let coverage = CoverageBitmap {
+        buffer: if width > 0 && rows > 0 {
+            bitmap.buffer()
+        } else {
+            &[]
+        },
         width,
-        height,
-        bearing_x,
-        bearing_y,
-        plane_bearing_x: bear_x,
-        plane_bearing_y: bear_y,
-        plane_width: met_w.max(1.0 / 64.0),
-        plane_height: met_h.max(1.0 / 64.0),
-        plane_advance_x: (metrics.horiAdvance as f32) / 64.0,
-        pixels,
-    })
+        rows,
+        pitch: bitmap.pitch().unsigned_abs() as usize,
+        left: slot.bitmap_left(),
+        top: slot.bitmap_top(),
+    };
+    let pixels = sdf_glyph::edt_sdf(&coverage, grid, supersample, spread);
+    Ok(metrics.into_glyph(grid, pixels))
 }
 
 pub fn sampling_point_size() -> f32 {
     TMP_POINT_SIZE
-}
-pub fn atlas_padding() -> f32 {
-    TMP_ATLAS_PADDING as f32
 }
 pub fn sampling_spread() -> f32 {
     TMP_SPREAD
@@ -794,15 +749,15 @@ mod tests {
 
     #[test]
     fn persistent_offline_face_matches_one_shot_generation() {
-        if resolve_font_path("FZLanTingHei-DB-GBK").is_none() {
-            eprintln!("skipping: FONT_DIR does not provide the test family");
+        let Some((family, path)) = ["FZLanTingHei-DB-GBK", "DejaVu Sans"]
+            .into_iter()
+            .find_map(|family| resolve_font_path(family).map(|path| (family, path)))
+        else {
+            eprintln!("skipping: no test family is installed");
             return;
-        }
-
-        let family = "FZLanTingHei-DB-GBK";
-        let path = resolve_font_path(family).expect("test font must exist");
+        };
         let generator = OfflineAtlasGlyphGenerator::new(family).expect("offline generator");
-        for ch in ['A', '一'] {
+        for ch in ['A', 'g'] {
             let analytic_one_shot = generate_outline_sdf(&path, ch).expect("analytic one-shot");
             let (analytic_persistent, analytic_fallback) = generator
                 .generate(ch, OfflineGenerationMethod::Analytic)
@@ -810,12 +765,15 @@ mod tests {
             assert!(!analytic_fallback);
             assert_glyph_exact(&analytic_persistent, &analytic_one_shot);
 
-            let edt_one_shot = generate_outline_sdf_edt(&path, ch, 2).expect("EDT2 one-shot");
-            let (edt_persistent, edt_fallback) = generator
-                .generate(ch, OfflineGenerationMethod::Edt { supersample: 2 })
-                .expect("EDT2 persistent");
-            assert!(!edt_fallback);
-            assert_glyph_exact(&edt_persistent, &edt_one_shot);
+            for supersample in [1, 2, 4] {
+                let edt_one_shot =
+                    generate_outline_sdf_edt(&path, ch, supersample).expect("EDT one-shot");
+                let (edt_persistent, edt_fallback) = generator
+                    .generate(ch, OfflineGenerationMethod::Edt { supersample })
+                    .expect("EDT persistent");
+                assert!(!edt_fallback);
+                assert_glyph_exact(&edt_persistent, &edt_one_shot);
+            }
         }
     }
 
@@ -833,6 +791,55 @@ mod tests {
             assert!(huge.width() > normal.width() * 2);
             assert!(huge.height() > normal.height() * 2);
             assert!(huge.pixels().iter().any(|&value| value != 0));
+        }
+    }
+
+    /// Mean and maximum absolute gray difference over the texels where the
+    /// exact field is not saturated, i.e. inside the encoded distance band.
+    fn band_error(actual: &OutlineSdfGlyph, exact: &OutlineSdfGlyph) -> (f32, f32) {
+        assert_eq!((actual.width, actual.height), (exact.width, exact.height));
+        let mut sum = 0.0f32;
+        let mut max = 0.0f32;
+        let mut count = 0usize;
+        for (&value, &reference) in actual.pixels.iter().zip(&exact.pixels) {
+            if reference == 0 || reference == 255 {
+                continue;
+            }
+            let error = (f32::from(value) - f32::from(reference)).abs();
+            sum += error;
+            max = max.max(error);
+            count += 1;
+        }
+        assert!(
+            count > 0,
+            "the glyph must have texels inside the distance band"
+        );
+        (sum / count as f32, max)
+    }
+
+    #[test]
+    fn edt_supersampling_converges_on_the_analytic_field() {
+        let family = "DejaVu Sans";
+        let Some(path) = resolve_font_path(family) else {
+            eprintln!("skipping: DejaVu Sans is not installed");
+            return;
+        };
+        for ch in ['O', 'a', 'g'] {
+            let exact = generate_outline_sdf(&path, ch).expect("analytic glyph");
+            let error = |supersample| {
+                let glyph = generate_outline_sdf_edt(&path, ch, supersample).expect("EDT glyph");
+                band_error(&glyph, &exact)
+            };
+            let (mean_2, _) = error(2);
+            let (mean_4, max_4) = error(4);
+            // Real supersampling resolves the edge more finely each time the
+            // factor doubles; replicating a 1x mask would leave it unchanged.
+            assert!(
+                mean_4 < mean_2 * 0.7,
+                "{ch}: ss4 mean {mean_4} is not clearly below ss2 mean {mean_2}"
+            );
+            assert!(mean_4 < 2.5, "{ch}: ss4 mean gray error {mean_4}");
+            assert!(max_4 < 10.0, "{ch}: ss4 max gray error {max_4}");
         }
     }
 

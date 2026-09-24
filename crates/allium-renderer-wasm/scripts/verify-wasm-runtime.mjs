@@ -117,7 +117,6 @@ assert.equal(module.ccall("sdf_renderer_authoring_destroy", "number", ["number"]
 const atlas = callJsonInput("sdf_atlas_create_json", {
   pageWidth: 2048,
   pageHeight: 2048,
-  softPages: 4,
   hardPages: 6,
 });
 assert.ok(Number.isInteger(atlas.handle) && atlas.handle > 0);

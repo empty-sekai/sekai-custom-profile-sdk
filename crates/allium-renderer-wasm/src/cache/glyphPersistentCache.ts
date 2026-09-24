@@ -74,6 +74,12 @@ export type PersistentWriteToken = { epoch: number; startedAtMs: number };
 export interface GlyphRecordStore {
   getMany(keys: readonly string[]): Promise<PersistentGlyphRecord[]>;
   putMany(records: readonly PersistentGlyphRecord[], token?: PersistentWriteToken): Promise<boolean>;
+  /**
+   * Raises `lastAccessDay` of the stored records among `keys` that are older.
+   * Keys with no stored record stay absent, and nothing is written when the
+   * store was cleared after `token` started.
+   */
+  touch(keys: readonly string[], lastAccessDay: number, token: PersistentWriteToken): Promise<void>;
   deleteMany(keys: readonly string[]): Promise<void>;
   stats(): Promise<PersistentStoreStats>;
   trimLruTo(maxBytes: number, protectedKeys?: ReadonlySet<string>): Promise<number>;
@@ -218,10 +224,13 @@ export class GlyphPersistentCache {
       return new Map();
     }
     try {
+      const token = this.beginWrite();
+      const today = dayBucket(token.startedAtMs);
       const expected = new Map(identities.map((identity) => [identity.opaqueKey, identity]));
       const records = await this.store!.getMany([...expected.keys()]);
       const valid = new Map<string, PersistentGlyphRecord>();
       const corruptKeys: string[] = [];
+      const staleKeys: string[] = [];
       for (const record of records) {
         const identity = expected.get(record.opaqueKey);
         if (!identity || !(await validateRecord(record, identity))) {
@@ -229,11 +238,16 @@ export class GlyphPersistentCache {
           this.counters.corruptions += 1;
           continue;
         }
-        record.lastAccessDay = dayBucket(this.now());
+        if (record.lastAccessDay < today) {
+          staleKeys.push(record.opaqueKey);
+          record.lastAccessDay = today;
+        }
         valid.set(record.opaqueKey, record);
       }
       if (corruptKeys.length > 0) await this.store!.deleteMany(corruptKeys);
-      if (valid.size > 0) await this.store!.putMany([...valid.values()]);
+      if (staleKeys.length > 0 && token.epoch === this.writeEpoch) {
+        await this.store!.touch(staleKeys, today, token);
+      }
       this.counters.hits += valid.size;
       this.counters.misses += identities.length - valid.size;
       return valid;
@@ -366,6 +380,15 @@ export class MemoryGlyphRecordStore implements GlyphRecordStore {
     if (token && token.startedAtMs <= this.lastClearMs) return false;
     for (const record of records) this.records.set(record.opaqueKey, cloneRecord(record));
     return true;
+  }
+
+  async touch(keys: readonly string[], lastAccessDay: number, token: PersistentWriteToken): Promise<void> {
+    if (this.failWrites) throw new Error("simulated write failure");
+    if (token.startedAtMs <= this.lastClearMs) return;
+    for (const key of keys) {
+      const record = this.records.get(key);
+      if (record && record.lastAccessDay < lastAccessDay) record.lastAccessDay = lastAccessDay;
+    }
   }
 
   async deleteMany(keys: readonly string[]): Promise<void> {

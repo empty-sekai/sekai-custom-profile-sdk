@@ -58,6 +58,26 @@ export class IndexedDbGlyphRecordStore implements GlyphRecordStore {
     return true;
   }
 
+  async touch(keys: readonly string[], lastAccessDay: number, token: PersistentWriteToken): Promise<void> {
+    if (keys.length === 0) return;
+    const database = await this.database();
+    const transaction = database.transaction([GLYPH_STORE, META_STORE], "readwrite", { durability: "relaxed" });
+    const glyphs = transaction.objectStore(GLYPH_STORE);
+    const totals = await readTotals(transaction.objectStore(META_STORE));
+    if (token.startedAtMs <= totals.lastClearMs) {
+      transaction.abort();
+      try { await transactionDone(transaction); } catch { /* intentional abort */ }
+      return;
+    }
+    for (const key of keys) {
+      const existing = await request<PersistentGlyphRecord | undefined>(glyphs.get(key));
+      if (!existing || existing.lastAccessDay >= lastAccessDay) continue;
+      existing.lastAccessDay = lastAccessDay;
+      glyphs.put(existing);
+    }
+    await transactionDone(transaction);
+  }
+
   async deleteMany(keys: readonly string[]): Promise<void> {
     if (keys.length === 0) return;
     const database = await this.database();
