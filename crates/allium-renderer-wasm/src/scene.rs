@@ -174,6 +174,8 @@ struct LineIndentCreateInput {
     line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
+    #[serde(default)]
+    alignment: u8,
 }
 
 pub fn create(input: &str) -> Result<String, String> {
@@ -228,6 +230,7 @@ pub fn create(input: &str) -> Result<String, String> {
                     line_advances_tmp: program.line_advances_tmp,
                     rotation_deg: program.rotation_deg,
                     scale_x: program.scale_x,
+                    alignment: program.alignment,
                 }),
             }
         })

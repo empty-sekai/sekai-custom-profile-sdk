@@ -1,8 +1,13 @@
-//! Read-only native adapter for the v0.2 text scene contract.
+//! Native construction of core [`Scene`]s from a card.
 //!
-//! This deliberately does not participate in the production Skia pixel path. It lets server
-//! diagnostics and parity gates consume the same dynamic/state contract as browser WASM while
-//! text layout migration is still in progress.
+//! [`build_scene`] and [`build_scene_with_resolved`] lower every authored element through the
+//! shared semantic resolver, giving the same scene the browser WASM runtime builds.
+//! [`build_text_scene`] and [`build_text_scene_with_atlases`] build only the text layers and
+//! their line-indent programs.
+//!
+//! The scenes back native scene dumps, animation preflight and animation export: export
+//! samples each dynamic layer's transform from them tick by tick, using the text-only scene
+//! when the card has no general panels. Rasterization itself happens elsewhere.
 
 use std::collections::BTreeMap;
 
@@ -84,6 +89,7 @@ pub fn build_text_scene_with_atlases(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
 ) -> Result<Scene, sekai_profile_renderer_core::CoreError> {
     let scene_id = StableId::derive("scene-v1", document_key.as_bytes());
+    let region = md.region().as_str();
     let mut layers =
         sekai_profile_renderer_core::profile_scene::ordered_profile_elements(card, document_key)
             .into_iter()
@@ -99,7 +105,10 @@ pub fn build_text_scene_with_atlases(
                     let (x, y, rotation_deg, scale_x, scale_y) =
                         transform::extract_transform(object);
                     let theta = rotation_deg.to_radians();
-                    let point_quad: Quad = [[x, y], [x, y], [x, y], [x, y]];
+                    // Text layout is not measured here, so the layer has no area:
+                    // its layer-local geometry collapses to the origin, which the
+                    // matrix places at the text's canvas position.
+                    let point_quad: Quad = [[0.0; 2]; 4];
                     let mut parameters = BTreeMap::new();
                     parameters.insert("font_id".into(), ParameterValue::I64(text.font_id.into()));
                     parameters.insert(
@@ -159,12 +168,7 @@ pub fn build_text_scene_with_atlases(
                         authored_visible: object.visible,
                         source_content: text.text.clone(),
                         resolved_parameters: parameters,
-                        bounds: Rect {
-                            x,
-                            y,
-                            width: 0.0,
-                            height: 0.0,
-                        },
+                        bounds: Rect::default(),
                         quad: point_quad,
                         matrix: [
                             theta.cos() * scale_x,
@@ -183,7 +187,7 @@ pub fn build_text_scene_with_atlases(
     layers.sort_by_key(|layer| layer.z);
     Scene::new(SceneSource {
         scene_id,
-        region: "cn".into(),
+        region: region.into(),
         font_engine_fingerprint: "native-skia-freetype-shadow-v1".into(),
         raster_contract: "production-sdf-shadow-v1".into(),
         layers,

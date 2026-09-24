@@ -598,6 +598,7 @@ fn layout_layer(
         line_advances_tmp,
         rotation_deg: dynamic_rotation_deg,
         scale_x: dynamic_scale_x,
+        alignment: (layer.text_type & 0x07) as u8,
     });
     (instances, dynamic_program)
 }
@@ -1884,6 +1885,7 @@ struct DynamicProgramDescriptor {
     line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
+    alignment: u8,
 }
 
 #[derive(Serialize)]

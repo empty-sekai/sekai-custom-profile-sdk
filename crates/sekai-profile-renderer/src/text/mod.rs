@@ -210,6 +210,7 @@ fn line_indent_program_with_optional_atlases(
         line_advances_tmp: measure_line_advances_tmp(text, md, &segments, atlases)?,
         rotation_deg: 0.0,
         scale_x: 1.0,
+        alignment: (text.text_type & 0x07) as u8,
     })
 }
 

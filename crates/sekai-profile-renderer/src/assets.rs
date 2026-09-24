@@ -476,6 +476,28 @@ impl AssetStore {
             .get(key)
     }
 
+    /// Pixel size of an image asset, whichever decode path this build carries.
+    ///
+    /// With a raster backend it is the cached image's size. Without one the
+    /// store holds encoded bytes and the size comes from the PNG header, under
+    /// the same format rules the decoder applies. Either way it is the size
+    /// the image draws at when nothing else sizes it.
+    pub fn image_size(&self, key: &str) -> Option<(u32, u32)> {
+        #[cfg(feature = "skia-oracle")]
+        {
+            let image = self.get_image(key)?;
+            Some((
+                u32::try_from(image.width()).ok()?,
+                u32::try_from(image.height()).ok()?,
+            ))
+        }
+        #[cfg(not(feature = "skia-oracle"))]
+        {
+            let encoded = self.get(key)?;
+            crate::codec::png::dimensions(&encoded).ok()
+        }
+    }
+
     /// 从静态素材目录加载打包资源并预解码到常驻池。
     pub fn load_static_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
         let mut count = 0usize;

@@ -92,6 +92,8 @@ struct DynamicProgramInput {
     line_advances_tmp: Vec<Vec<f32>>,
     rotation_deg: f32,
     scale_x: f32,
+    #[serde(default)]
+    alignment: u8,
 }
 
 #[derive(Deserialize)]
@@ -283,6 +285,7 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
                 line_advances_tmp: program.line_advances_tmp,
                 rotation_deg: program.rotation_deg,
                 scale_x: program.scale_x,
+                alignment: program.alignment,
             };
             if line_indent
                 .insert(program.layer_id.clone(), source)

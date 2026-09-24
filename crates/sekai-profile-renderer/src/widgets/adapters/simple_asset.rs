@@ -218,14 +218,12 @@ impl Widget for StoryBgWidget {
     }
 }
 
-fn image_size(_ctx: &RenderContext<'_>, _asset_key: &str) -> (f32, f32) {
-    #[cfg(feature = "skia-oracle")]
-    {
-        if let Some(image) = _ctx.assets.get_image(_asset_key) {
-            return (image.width() as f32, image.height() as f32);
-        }
-    }
-    (100.0, 100.0)
+fn image_size(ctx: &RenderContext<'_>, asset_key: &str) -> (f32, f32) {
+    ctx.assets
+        .image_size(asset_key)
+        .map_or((100.0, 100.0), |(width, height)| {
+            (width as f32, height as f32)
+        })
 }
 
 #[cfg(test)]
@@ -272,5 +270,18 @@ mod tests {
         assert_eq!(widget.name(), "stamp");
         assert_eq!(widget.asset_keys(&ctx), vec!["stamp/stamp0007/stamp0007"]);
         assert_eq!(widget.measure(&ctx), (100.0, 100.0));
+    }
+
+    #[test]
+    fn stamp_widget_measures_the_cached_image_at_its_pixel_size() {
+        let assets = AssetStore::new(8);
+        assets.put(
+            "stamp/stamp0007/stamp0007".into(),
+            crate::codec::png::encode_rgba(37, 21, &[0, 0, 0, 255].repeat(37 * 21)).expect("png"),
+        );
+        let ctx = RenderContext::new(&assets);
+        let widget = StampWidget::from_element(&stamp_element(), &ctx);
+
+        assert_eq!(widget.measure(&ctx), (37.0, 21.0));
     }
 }

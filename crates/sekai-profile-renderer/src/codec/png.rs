@@ -80,6 +80,80 @@ fn be_u32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
+/// Splits the chunk that starts at `pos` into its type and body after
+/// checking its CRC, and returns the offset of the next chunk.
+fn read_chunk(data: &[u8], pos: usize) -> Result<(&[u8], &[u8], usize), CodecError> {
+    let length = be_u32(&data[pos..pos + 4]) as usize;
+    let kind = &data[pos + 4..pos + 8];
+    let body_start = pos + 8;
+    let body_end = body_start
+        .checked_add(length)
+        .ok_or(CodecError::Format("chunk length overflow"))?;
+    if body_end + 4 > data.len() {
+        return Err(CodecError::Format("chunk extends past end of file"));
+    }
+    let body = &data[body_start..body_end];
+    let stored_crc = be_u32(&data[body_end..body_end + 4]);
+    if crc32(&data[pos + 4..body_end]) != stored_crc {
+        return Err(CodecError::Format("chunk CRC mismatch"));
+    }
+    Ok((kind, body, body_end + 4))
+}
+
+/// Validates an `IHDR` body against what [`decode`] supports.
+fn parse_ihdr(body: &[u8]) -> Result<Header, CodecError> {
+    if body.len() != 13 {
+        return Err(CodecError::Format("IHDR must be 13 bytes"));
+    }
+    let width = be_u32(&body[0..4]);
+    let height = be_u32(&body[4..8]);
+    let bit_depth = body[8];
+    let color_type = ColorType::from_byte(body[9])?;
+    let compression = body[10];
+    let filter = body[11];
+    let interlace = body[12];
+    if width == 0 || height == 0 {
+        return Err(CodecError::Format("zero-sized image"));
+    }
+    if bit_depth != 8 {
+        return Err(CodecError::Unsupported("PNG bit depth other than 8"));
+    }
+    if compression != 0 {
+        return Err(CodecError::Format("unknown PNG compression method"));
+    }
+    if filter != 0 {
+        return Err(CodecError::Format("unknown PNG filter method"));
+    }
+    if interlace != 0 {
+        return Err(CodecError::Unsupported("Adam7 interlaced PNG"));
+    }
+    Ok(Header {
+        width,
+        height,
+        color_type,
+    })
+}
+
+/// Reads a PNG's pixel size from its header without decoding the image data.
+///
+/// The header is held to the same rules as in [`decode`], so a size is only
+/// reported for an image whose format `decode` supports.
+pub fn dimensions(data: &[u8]) -> Result<(u32, u32), CodecError> {
+    if !is_png(data) {
+        return Err(CodecError::Format("missing PNG signature"));
+    }
+    let mut pos = 8usize;
+    while pos + 8 <= data.len() {
+        let (kind, body, next) = read_chunk(data, pos)?;
+        if kind == b"IHDR" {
+            let header = parse_ihdr(body)?;
+            return Ok((header.width, header.height));
+        }
+        pos = next;
+    }
+    Err(CodecError::Format("missing IHDR"))
+}
+
 /// Decodes a PNG into non-premultiplied RGBA8.
 pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     if !is_png(data) {
@@ -95,54 +169,9 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     let mut idat: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
-        let length = be_u32(&data[pos..pos + 4]) as usize;
-        let kind = &data[pos + 4..pos + 8];
-        let body_start = pos + 8;
-        let body_end = body_start
-            .checked_add(length)
-            .ok_or(CodecError::Format("chunk length overflow"))?;
-        if body_end + 4 > data.len() {
-            return Err(CodecError::Format("chunk extends past end of file"));
-        }
-        let body = &data[body_start..body_end];
-        let stored_crc = be_u32(&data[body_end..body_end + 4]);
-        if crc32(&data[pos + 4..body_end]) != stored_crc {
-            return Err(CodecError::Format("chunk CRC mismatch"));
-        }
-
+        let (kind, body, next) = read_chunk(data, pos)?;
         match kind {
-            b"IHDR" => {
-                if body.len() != 13 {
-                    return Err(CodecError::Format("IHDR must be 13 bytes"));
-                }
-                let width = be_u32(&body[0..4]);
-                let height = be_u32(&body[4..8]);
-                let bit_depth = body[8];
-                let color_type = ColorType::from_byte(body[9])?;
-                let compression = body[10];
-                let filter = body[11];
-                let interlace = body[12];
-                if width == 0 || height == 0 {
-                    return Err(CodecError::Format("zero-sized image"));
-                }
-                if bit_depth != 8 {
-                    return Err(CodecError::Unsupported("PNG bit depth other than 8"));
-                }
-                if compression != 0 {
-                    return Err(CodecError::Format("unknown PNG compression method"));
-                }
-                if filter != 0 {
-                    return Err(CodecError::Format("unknown PNG filter method"));
-                }
-                if interlace != 0 {
-                    return Err(CodecError::Unsupported("Adam7 interlaced PNG"));
-                }
-                header = Some(Header {
-                    width,
-                    height,
-                    color_type,
-                });
-            }
+            b"IHDR" => header = Some(parse_ihdr(body)?),
             b"PLTE" => {
                 if body.len() % 3 != 0 {
                     return Err(CodecError::Format("PLTE length is not a multiple of 3"));
@@ -183,7 +212,7 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
             b"IEND" => break,
             _ => {}
         }
-        pos = body_end + 4;
+        pos = next;
     }
 
     let header = header.ok_or(CodecError::Format("missing IHDR"))?;
@@ -629,6 +658,31 @@ mod tests {
         chunk(&mut data, b"IHDR", &ihdr);
         chunk(&mut data, b"IEND", &[]);
         assert!(matches!(decode(&data), Err(CodecError::Unsupported(_))));
+    }
+
+    #[test]
+    fn dimensions_come_from_a_header_the_decoder_accepts() {
+        let encoded = encode_rgba(5, 3, &gradient(5, 3)).expect("encode");
+        assert_eq!(dimensions(&encoded).expect("dimensions"), (5, 3));
+
+        let mut corrupt = encoded.clone();
+        corrupt[20] ^= 0xFF;
+        assert!(matches!(dimensions(&corrupt), Err(CodecError::Format(_))));
+
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&2u32.to_be_bytes());
+        ihdr.extend_from_slice(&[16, 6, 0, 0, 0]);
+        let mut sixteen_bit = Vec::new();
+        sixteen_bit.extend_from_slice(&SIGNATURE);
+        chunk(&mut sixteen_bit, b"IHDR", &ihdr);
+        chunk(&mut sixteen_bit, b"IEND", &[]);
+        assert!(matches!(
+            dimensions(&sixteen_bit),
+            Err(CodecError::Unsupported(_))
+        ));
+
+        assert!(dimensions(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F']).is_err());
     }
 
     #[test]

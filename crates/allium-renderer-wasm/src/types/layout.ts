@@ -6,6 +6,7 @@ export type CoreDynamicProgramDescriptor = {
   lineAdvancesTmp: number[][];
   rotationDeg: number;
   scaleX: number;
+  alignment: number;
 };
 
 export type WasmLayoutBatch = {

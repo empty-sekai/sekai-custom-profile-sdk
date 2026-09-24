@@ -47,12 +47,13 @@ pub mod tmp_text;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use bincode::{Decode, Encode};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const SCHEMA_MAJOR: u16 = 1;
-pub const SCHEMA_MINOR: u16 = 14;
+pub const SCHEMA_MINOR: u16 = 15;
 pub const TICKS_PER_SECOND: u32 = 60;
 pub const TMP_PAD: f32 = 64.0;
 pub const TMP_SEED_WIDTH: f32 = 8.46;
@@ -61,7 +62,7 @@ pub const CONVERGENCE_EPSILON: f32 = 0.05;
 pub const STATIC_FINAL_ANALYSIS_TICKS: u64 = 20_000;
 pub const TWO_CYCLE_EPSILON: f32 = 0.02;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Encode, Decode)]
 pub struct StableId(pub u64);
 
 pub type SceneId = StableId;
@@ -116,7 +117,7 @@ impl<'de> Deserialize<'de> for StableId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -127,7 +128,7 @@ pub struct Rect {
 pub type Matrix2d = [f32; 6];
 pub type Quad = [[f32; 2]; 4];
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ParameterValue {
     Bool(bool),
@@ -138,7 +139,7 @@ pub enum ParameterValue {
     Color([f32; 4]),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerKind {
     Text,
@@ -147,7 +148,20 @@ pub enum LayerKind {
     Composite,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    Encode,
+    Decode,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthoredElementKind {
     #[default]
@@ -165,13 +179,13 @@ pub enum AuthoredElementKind {
     StoryBackground,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum FontRole {
     RegionFontId(i32),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TextSource {
     Authored {
@@ -193,13 +207,13 @@ pub enum TextSource {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct ResourceKey {
     pub namespace: String,
     pub key: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
     SrcOver,
@@ -216,7 +230,7 @@ impl Default for BlendMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositeOperation {
     #[default]
@@ -225,7 +239,7 @@ pub enum CompositeOperation {
     EndIsolation,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapePrimitive {
     Rect,
@@ -234,7 +248,7 @@ pub enum ShapePrimitive {
     AssetMask { resource: ResourceKey },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct LinearGradient {
     /// Normalized shape-space coordinates.
     pub start: [f32; 2],
@@ -243,14 +257,14 @@ pub struct LinearGradient {
     pub end_color: [f32; 4],
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageClip {
     RoundedRect { radius: [f32; 2] },
     Ellipse,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommandControlBinding {
     TabOption { control_id: StableId, value: String },
@@ -259,7 +273,7 @@ pub enum CommandControlBinding {
     ScrollViewport { control_id: StableId },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SemanticCommandPayload {
     Text {
@@ -301,13 +315,13 @@ pub enum SemanticCommandPayload {
 
 /// Backend-neutral post-layout placement. The TMP layout output remains
 /// unchanged; backends translate completed glyph geometry to this anchor.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct TextRenderPlacementSource {
     pub anchor_x: f32,
     pub baseline: Option<f32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct SemanticCommandSource {
     pub id: CommandId,
     pub layer_id: LayerId,
@@ -323,6 +337,7 @@ pub struct SemanticCommandSource {
     #[serde(default)]
     pub metadata: BTreeMap<String, ParameterValue>,
     #[serde(default)]
+    #[bincode(with_serde)]
     pub numeric_text_runs: Vec<tmp_text::NumericTextRun>,
     #[serde(default)]
     pub render_placement: Option<TextRenderPlacementSource>,
@@ -518,7 +533,7 @@ pub struct InteractionRegionSource {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct InteractionRegionSnapshot {
     pub id: StableId,
     pub layer_id: StableId,
@@ -535,15 +550,20 @@ pub struct InteractionRegionSnapshot {
     pub render_mask: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct LineIndentSource {
     pub percent: f32,
     pub line_advances_tmp: Vec<Vec<f32>>,
     pub rotation_deg: f32,
     pub scale_x: f32,
+    /// Horizontal alignment of the text, encoded like the text command's
+    /// `alignment`: 2 centres, 4 right-aligns, and any other value lays the
+    /// lines out from the left edge.
+    #[serde(default)]
+    pub alignment: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct LayerSource {
     pub id: LayerId,
     pub parent_id: Option<LayerId>,
@@ -597,7 +617,7 @@ pub enum DynamicStatus {
     Held,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct TransformDelta {
     pub dx: f32,
     pub dy: f32,
@@ -632,9 +652,14 @@ struct LineIndentRuntime {
     static_width_tmp: f32,
     width_tmp: f32,
     produced_ticks: u64,
+    sample_count: u64,
+    /// The most recent samples, oldest first, at most [`LINE_INDENT_SAMPLE_WINDOW`].
     samples: Vec<f32>,
     state: DynamicLayerState,
 }
+
+/// Samples a two-cycle has to repeat over before it is reported as periodic.
+const LINE_INDENT_SAMPLE_WINDOW: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct LineIndentMetrics {
@@ -691,7 +716,8 @@ impl LineIndentRuntime {
             static_width_tmp,
             width_tmp: TMP_SEED_WIDTH,
             produced_ticks: 0,
-            samples: Vec::with_capacity(32),
+            sample_count: 0,
+            samples: Vec::with_capacity(LINE_INDENT_SAMPLE_WINDOW),
             state: DynamicLayerState {
                 status: DynamicStatus::Running,
                 transform: TransformDelta::default(),
@@ -705,6 +731,7 @@ impl LineIndentRuntime {
     fn reset(&mut self) {
         self.width_tmp = TMP_SEED_WIDTH;
         self.produced_ticks = 0;
+        self.sample_count = 0;
         self.samples.clear();
         self.state.status = DynamicStatus::Running;
         self.state.transform = TransformDelta::default();
@@ -739,7 +766,8 @@ impl LineIndentRuntime {
             return;
         }
         if self.produced_ticks >= WARMUP_TICKS {
-            let local = (pct - 0.5) * (self.width_tmp - self.static_width_tmp);
+            let local = line_indent_shift_per_width(pct, self.source.alignment)
+                * (self.width_tmp - self.static_width_tmp);
             if !local.is_finite() {
                 self.state.status = DynamicStatus::Held;
                 self.produced_ticks += 1;
@@ -750,18 +778,22 @@ impl LineIndentRuntime {
                 dx: local * theta.cos() * self.source.scale_x,
                 dy: local * theta.sin() * self.source.scale_x,
             };
-            if self.samples.len() < 32 {
-                self.samples.push(local);
+            let previous = self.samples.last().copied();
+            if self.samples.len() == LINE_INDENT_SAMPLE_WINDOW {
+                self.samples.remove(0);
             }
-            if (0.0..1.0).contains(&pct)
-                && self.samples.len() >= 2
-                && local.abs() <= CONVERGENCE_EPSILON
-            {
+            self.samples.push(local);
+            self.sample_count += 1;
+            if previous.is_some_and(|previous| line_indent_settled(pct, local, previous)) {
                 self.state.status = DynamicStatus::Settled;
-            } else if self.samples.len() >= 4 && is_two_cycle(&self.samples) {
+            } else if self.state.status == DynamicStatus::Running
+                && pct.abs() >= 1.0
+                && self.samples.len() == LINE_INDENT_SAMPLE_WINDOW
+                && is_two_cycle(&self.samples)
+            {
                 self.state.status = DynamicStatus::Periodic;
                 self.state.timeline = Some(TimelineDescriptor {
-                    loop_start_tick: 0,
+                    loop_start_tick: self.sample_count - LINE_INDENT_SAMPLE_WINDOW as u64,
                     period_ticks: 2,
                 });
             }
@@ -896,6 +928,41 @@ pub fn materialize_line_indent(
     })
 }
 
+/// How far the first glyph moves per unit of text-rect width change.
+///
+/// The rect is centred on the layer. TMP starts a left-aligned line at the
+/// left edge, a centred one half the free width in, and a right-aligned one
+/// all of the free width in, where the free width is the rect width minus the
+/// line advance and the advance includes the `pct * width` indent. Measured
+/// from the centre that puts the first glyph at `(pct - 0.5) * w`,
+/// `(pct * w - natural) / 2` and `w / 2 - natural`.
+fn line_indent_shift_per_width(pct: f32, alignment: u8) -> f32 {
+    match alignment {
+        2 => pct / 2.0,
+        4 => 0.5,
+        _ => pct - 0.5,
+    }
+}
+
+/// Whether a line-indent program has come to rest after producing `local`
+/// following `previous`.
+///
+/// Each frame feeds the preferred width back into the rect, and every branch
+/// of that map scales width changes by `|pct|`. With `|pct| < 1` the loop
+/// therefore contracts to a single rest point. For a non-negative percentage
+/// the rest point is the static layout, so the offset itself has to reach
+/// zero. A negative percentage can rest elsewhere, because an indent that
+/// pulls a line's advance below its last glyph makes the preferred width grow
+/// again; there the remaining travel, at most `|pct| / (1 - |pct|)` times the
+/// last step, has to fall under the epsilon.
+fn line_indent_settled(pct: f32, local: f32, previous: f32) -> bool {
+    if pct >= 0.0 {
+        return pct < 1.0 && local.abs() <= CONVERGENCE_EPSILON;
+    }
+    let rate = -pct;
+    rate < 1.0 && (local - previous).abs() * rate <= CONVERGENCE_EPSILON * (1.0 - rate)
+}
+
 fn is_two_cycle(samples: &[f32]) -> bool {
     let Some((&a, rest)) = samples.split_first() else {
         return false;
@@ -908,7 +975,7 @@ fn is_two_cycle(samples: &[f32]) -> bool {
     })
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct Revisions {
     pub scene: u64,
     pub source: u64,
@@ -951,7 +1018,7 @@ pub struct LayerPatch {
     pub transform: Option<TransformDelta>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct CommandState {
     pub command_id: CommandId,
     pub slot: u32,
@@ -991,7 +1058,7 @@ pub struct SceneDelta {
     pub command_patches: Vec<CommandPatch>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct LayerCommand {
     pub command_id: CommandId,
     pub layer_id: LayerId,
@@ -1001,7 +1068,7 @@ pub struct LayerCommand {
     pub command_count: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct GlyphCommand {
     pub command_id: CommandId,
     pub glyph_id: GlyphId,
@@ -1010,7 +1077,7 @@ pub struct GlyphCommand {
     pub quad: Quad,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct CoreTelemetry {
     pub dynamic_evaluations: u64,
     pub dirty_layers: u32,
@@ -1020,7 +1087,7 @@ pub struct CoreTelemetry {
     pub serialized_bytes: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct SceneSnapshot {
     pub schema_major: u16,
     pub schema_minor: u16,
@@ -1039,7 +1106,7 @@ pub struct SceneSnapshot {
     pub telemetry: CoreTelemetry,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct LayerTableEntry {
     pub layer_id: LayerId,
     pub parent_id: Option<LayerId>,
@@ -1939,16 +2006,23 @@ impl Scene {
         }
     }
 
+    /// Encodes the current [`SceneSnapshot`] into the compact binary form.
+    ///
+    /// The binary form is positional: enums are written by variant index
+    /// rather than by the `kind` tags the JSON form uses, so every command
+    /// payload, text source, control binding and control state reads back.
     pub fn encode_snapshot(&mut self) -> Result<Vec<u8>, CoreError> {
-        let bytes = bincode::serde::encode_to_vec(self.snapshot(), bincode::config::standard())
+        let bytes = bincode::encode_to_vec(self.snapshot(), bincode::config::standard())
             .map_err(|error| CoreError::Codec(error.to_string()))?;
         self.telemetry.serialized_bytes += bytes.len() as u64;
         Ok(bytes)
     }
 
+    /// Decodes bytes produced by [`Scene::encode_snapshot`], rejecting a
+    /// snapshot from another schema major version.
     pub fn decode_snapshot(bytes: &[u8]) -> Result<SceneSnapshot, CoreError> {
         let (snapshot, _): (SceneSnapshot, usize) =
-            bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            bincode::decode_from_slice(bytes, bincode::config::standard())
                 .map_err(|error| CoreError::Codec(error.to_string()))?;
         if snapshot.schema_major != SCHEMA_MAJOR {
             return Err(CoreError::IncompatibleSchema {
@@ -2095,6 +2169,96 @@ impl Scene {
             .collect()
     }
 }
+
+// Component controls travel in the binary snapshot next to the commands that
+// bind to them. Their JSON form is tagged by `kind`; the binary form writes the
+// fields in declaration order behind a variant index, like every other enum in
+// the snapshot.
+impl Encode for profile_scene::ComponentControlSource {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        self.id.encode(encoder)?;
+        self.layer_id.encode(encoder)?;
+        self.role.encode(encoder)?;
+        self.state.encode(encoder)
+    }
+}
+
+impl<Context> Decode<Context> for profile_scene::ComponentControlSource {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        Ok(Self {
+            id: Decode::decode(decoder)?,
+            layer_id: Decode::decode(decoder)?,
+            role: Decode::decode(decoder)?,
+            state: Decode::decode(decoder)?,
+        })
+    }
+}
+
+bincode::impl_borrow_decode!(profile_scene::ComponentControlSource);
+
+impl Encode for profile_scene::ComponentControlState {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode::error::EncodeError> {
+        match self {
+            Self::Tabs { options, active } => {
+                0u32.encode(encoder)?;
+                options.encode(encoder)?;
+                active.encode(encoder)
+            }
+            Self::Scroll {
+                offset,
+                min,
+                max,
+                viewport_extent,
+                content_extent,
+                step,
+            } => {
+                1u32.encode(encoder)?;
+                offset.encode(encoder)?;
+                min.encode(encoder)?;
+                max.encode(encoder)?;
+                viewport_extent.encode(encoder)?;
+                content_extent.encode(encoder)?;
+                step.encode(encoder)
+            }
+        }
+    }
+}
+
+impl<Context> Decode<Context> for profile_scene::ComponentControlState {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode::error::DecodeError> {
+        match u32::decode(decoder)? {
+            0 => Ok(Self::Tabs {
+                options: Decode::decode(decoder)?,
+                active: Decode::decode(decoder)?,
+            }),
+            1 => Ok(Self::Scroll {
+                offset: Decode::decode(decoder)?,
+                min: Decode::decode(decoder)?,
+                max: Decode::decode(decoder)?,
+                viewport_extent: Decode::decode(decoder)?,
+                content_extent: Decode::decode(decoder)?,
+                step: Decode::decode(decoder)?,
+            }),
+            found => Err(bincode::error::DecodeError::UnexpectedVariant {
+                type_name: "ComponentControlState",
+                allowed: &bincode::error::AllowedEnumVariants::Range { min: 0, max: 1 },
+                found,
+            }),
+        }
+    }
+}
+
+bincode::impl_borrow_decode!(profile_scene::ComponentControlState);
 
 fn validate_component_control(
     control: &profile_scene::ComponentControlSource,
@@ -2418,6 +2582,7 @@ mod tests {
                 line_advances_tmp: vec![vec![20.0, 20.0, 20.0]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
+                alignment: 1,
             }),
         }
     }
@@ -2461,7 +2626,9 @@ mod tests {
     #[test]
     fn periodic_program_exposes_a_proven_timeline_descriptor() {
         let mut source = scene().source.clone();
-        source.layers[0].line_indent.as_mut().unwrap().percent = -5.0;
+        let dynamic = source.layers[0].line_indent.as_mut().unwrap();
+        dynamic.percent = -100.0;
+        dynamic.line_advances_tmp = vec![vec![48.0; 6]];
         let mut scene = Scene::new(source).unwrap();
         scene.advance_to_tick(8);
         let dynamic = scene.state(StableId(1)).unwrap().dynamic.as_ref().unwrap();
@@ -2845,11 +3012,321 @@ mod tests {
         assert_eq!(decoded.scene_id, StableId(9));
         let mut bad = decoded;
         bad.schema_major += 1;
-        let bytes = bincode::serde::encode_to_vec(bad, bincode::config::standard()).unwrap();
+        let bytes = bincode::encode_to_vec(bad, bincode::config::standard()).unwrap();
         assert!(matches!(
             Scene::decode_snapshot(&bytes),
             Err(CoreError::IncompatibleSchema { .. })
         ));
+    }
+
+    /// A scene that exercises every tagged value the snapshot carries:
+    /// each command payload and text source, every control binding and
+    /// control kind, every parameter value, clips, glyphs and a dynamic layer.
+    fn snapshot_fixture_scene() -> (Scene, StableId, StableId) {
+        let parent_id = StableId(71);
+        let child_id = StableId(72);
+        let tab_id = StableId(7100);
+        let scroll_id = StableId(7200);
+        let parameters = BTreeMap::from([
+            ("bool".to_string(), ParameterValue::Bool(true)),
+            ("i64".to_string(), ParameterValue::I64(-7)),
+            ("f64".to_string(), ParameterValue::F64(0.25)),
+            ("text".to_string(), ParameterValue::Text("rank".into())),
+            ("vec2".to_string(), ParameterValue::Vec2([3.0, 4.0])),
+            (
+                "color".to_string(),
+                ParameterValue::Color([0.1, 0.2, 0.3, 1.0]),
+            ),
+        ]);
+        let mut parent = layer(71, true);
+        parent.kind = LayerKind::Composite;
+        parent.authored_kind = AuthoredElementKind::General;
+        parent.resolved_parameters = parameters.clone();
+        let mut child = layer(72, false);
+        child.parent_id = Some(parent_id);
+        child.kind = LayerKind::Image;
+        child.authored_kind = AuthoredElementKind::Other;
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 60.0,
+        };
+        let bounds = Rect {
+            x: 2.0,
+            y: 4.0,
+            width: 20.0,
+            height: 10.0,
+        };
+
+        let mut title = SemanticCommandSource::text(
+            StableId(7101),
+            parent_id,
+            "title",
+            "Rank 12",
+            FontRole::RegionFontId(1),
+        );
+        title.render_placement = Some(TextRenderPlacementSource {
+            anchor_x: -5.0,
+            baseline: Some(3.5),
+        });
+        title
+            .control_bindings
+            .push(CommandControlBinding::TabOption {
+                control_id: tab_id,
+                value: "rank".into(),
+            });
+        let mut field = SemanticCommandSource::profile_text(
+            StableId(7102),
+            parent_id,
+            "field",
+            "userProfile.word",
+            "hello 42",
+            FontRole::RegionFontId(2),
+        );
+        field.clip = Some(crate::profile_scene::rect_quad(viewport));
+        field
+            .control_bindings
+            .push(CommandControlBinding::ScrollContent {
+                control_id: scroll_id,
+            });
+        let label = SemanticCommandSource::localized_text(
+            StableId(7103),
+            parent_id,
+            "label",
+            "general.title",
+            "ja-JP",
+            "タイトル",
+            FontRole::RegionFontId(1),
+        );
+        let mut master = SemanticCommandSource::text(
+            StableId(7104),
+            parent_id,
+            "master",
+            "Stage 3",
+            FontRole::RegionFontId(1),
+        );
+        if let SemanticCommandPayload::Text { source, .. } = &mut master.payload {
+            *source = TextSource::MasterData {
+                table: "musics".into(),
+                key: "3".into(),
+                value: "Stage 3".into(),
+            };
+        }
+        let mut image = SemanticCommandSource::image(
+            StableId(7201),
+            child_id,
+            "artwork",
+            ResourceKey {
+                namespace: "assets".into(),
+                key: "other/artwork".into(),
+            },
+            bounds,
+        );
+        image.blend_mode = BlendMode::Multiply;
+        image.metadata = parameters.clone();
+        if let SemanticCommandPayload::Image {
+            clip, alpha_mask, ..
+        } = &mut image.payload
+        {
+            *clip = Some(ImageClip::RoundedRect { radius: [4.0, 4.0] });
+            *alpha_mask = Some(ResourceKey {
+                namespace: "static".into(),
+                key: "mask/round".into(),
+            });
+        }
+        let mut avatar = SemanticCommandSource::image(
+            StableId(7202),
+            child_id,
+            "avatar",
+            ResourceKey {
+                namespace: "assets".into(),
+                key: "other/avatar".into(),
+            },
+            bounds,
+        );
+        if let SemanticCommandPayload::Image { clip, .. } = &mut avatar.payload {
+            *clip = Some(ImageClip::Ellipse);
+        }
+        let mut track = SemanticCommandSource::shape(
+            StableId(7301),
+            parent_id,
+            "scroll-track",
+            viewport,
+            ShapePrimitive::RoundedRect { radius: [2.0, 2.0] },
+        );
+        track
+            .control_bindings
+            .push(CommandControlBinding::ScrollViewport {
+                control_id: scroll_id,
+            });
+        let mut thumb = SemanticCommandSource::shape(
+            StableId(7302),
+            parent_id,
+            "scroll-thumb",
+            bounds,
+            ShapePrimitive::Ellipse,
+        );
+        thumb
+            .control_bindings
+            .push(CommandControlBinding::ScrollThumb {
+                control_id: scroll_id,
+            });
+        let masked = SemanticCommandSource::shape(
+            StableId(7303),
+            parent_id,
+            "masked",
+            bounds,
+            ShapePrimitive::AssetMask {
+                resource: ResourceKey {
+                    namespace: "static".into(),
+                    key: "shape/mask".into(),
+                },
+            },
+        );
+        let mut gradient = SemanticCommandSource::shape(
+            StableId(7304),
+            parent_id,
+            "gradient",
+            bounds,
+            ShapePrimitive::Rect,
+        );
+        if let SemanticCommandPayload::Shape {
+            gradient: target,
+            stroke,
+            stroke_width,
+            ..
+        } = &mut gradient.payload
+        {
+            *target = Some(LinearGradient {
+                start: [0.0, 0.0],
+                end: [1.0, 0.0],
+                start_color: [1.0, 0.0, 0.0, 1.0],
+                end_color: [0.0, 0.0, 1.0, 1.0],
+            });
+            *stroke = [0.0, 0.0, 0.0, 1.0];
+            *stroke_width = 1.5;
+        }
+        let mut commands = vec![
+            title, field, label, master, image, avatar, track, thumb, masked, gradient,
+        ];
+        for (index, operation) in [
+            CompositeOperation::BeginIsolation,
+            CompositeOperation::Marker,
+            CompositeOperation::EndIsolation,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut composite = SemanticCommandSource::composite(
+                StableId(7401 + index as u64),
+                parent_id,
+                format!("group-{index}"),
+                bounds,
+            );
+            if let SemanticCommandPayload::Composite {
+                operation: target,
+                opacity,
+                clip,
+            } = &mut composite.payload
+            {
+                *target = operation;
+                *opacity = 0.5;
+                *clip = Some(crate::profile_scene::rect_quad(viewport));
+            }
+            commands.push(composite);
+        }
+
+        let region =
+            |id: u64, role: &str, bindings: Vec<CommandControlBinding>| InteractionRegionSource {
+                id: StableId(id),
+                layer_id: parent_id,
+                role: role.into(),
+                bounds,
+                quad: crate::profile_scene::rect_quad(bounds),
+                matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                hit_geometry: crate::profile_scene::rect_quad(bounds),
+                clip: Some(crate::profile_scene::rect_quad(viewport)),
+                control_bindings: bindings,
+                resolved_data: parameters.clone(),
+                capabilities: vec!["inspect".into(), "activate".into()],
+            };
+        let scene = Scene::new(SceneSource {
+            scene_id: StableId(70),
+            region: "jp".into(),
+            font_engine_fingerprint: "ft".into(),
+            raster_contract: "sdf".into(),
+            layers: vec![parent, child],
+            glyphs: vec![GlyphSource {
+                id: StableId(7501),
+                layer_id: parent_id,
+                output_ordinal: 0,
+                source_span: [0, 1],
+                bounds,
+                quad: crate::profile_scene::rect_quad(bounds),
+            }],
+            semantic_commands: commands,
+            interaction_regions: vec![
+                region(
+                    7601,
+                    "rank-tab",
+                    vec![CommandControlBinding::TabOption {
+                        control_id: tab_id,
+                        value: "rank".into(),
+                    }],
+                ),
+                region(
+                    7602,
+                    "item",
+                    vec![CommandControlBinding::ScrollContent {
+                        control_id: scroll_id,
+                    }],
+                ),
+            ],
+            component_controls: vec![
+                crate::profile_scene::ComponentControlSource {
+                    id: tab_id,
+                    layer_id: parent_id,
+                    role: "mode-tabs".into(),
+                    state: crate::profile_scene::ComponentControlState::Tabs {
+                        options: vec!["rank".into(), "challenge".into()],
+                        active: "rank".into(),
+                    },
+                },
+                crate::profile_scene::ComponentControlSource {
+                    id: scroll_id,
+                    layer_id: parent_id,
+                    role: "scroll".into(),
+                    state: crate::profile_scene::ComponentControlState::Scroll {
+                        offset: 0.0,
+                        min: 0.0,
+                        max: 30.0,
+                        viewport_extent: 60.0,
+                        content_extent: 90.0,
+                        step: 5.0,
+                    },
+                },
+            ],
+        })
+        .unwrap();
+        (scene, tab_id, scroll_id)
+    }
+
+    #[test]
+    fn snapshot_round_trips_semantic_commands_controls_and_regions() {
+        let (mut scene, tab_id, scroll_id) = snapshot_fixture_scene();
+        scene.advance_to_tick(6);
+        scene.set_tab(tab_id, "challenge").unwrap();
+        scene.scroll_by(scroll_id, 10.0).unwrap();
+        let expected = scene.snapshot();
+        assert!(!expected.semantic_commands.is_empty());
+        assert_eq!(expected.component_controls.len(), 2);
+        assert_eq!(expected.interaction_regions.len(), 2);
+
+        let bytes = scene.encode_snapshot().unwrap();
+        let decoded = Scene::decode_snapshot(&bytes).unwrap();
+
+        assert_eq!(decoded, expected);
     }
 
     #[test]
@@ -3494,6 +3971,173 @@ mod tests {
             crate::profile_scene::lower_identity_general(13, layer_id, "x", &missing_font),
             Err(crate::profile_scene::ProfileResolveError::MissingRegionFont(1))
         ));
+    }
+
+    #[test]
+    fn profile_text_regions_follow_their_command_tabs_scroll_and_viewport() {
+        let snapshot = crate::profile_scene::ProfileComponentSnapshot {
+            locale: "en-US".into(),
+            region_fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            localized_text: BTreeMap::from([
+                (
+                    "custom_profile.general.character_rank.title".into(),
+                    "Character rank".into(),
+                ),
+                (
+                    "custom_profile.general.character_rank.challenge".into(),
+                    "Challenge rank".into(),
+                ),
+            ]),
+            character_ranks: (1..=26)
+                .map(|character_id| crate::profile_scene::CharacterRankSnapshot {
+                    character_id,
+                    rank: 10 + character_id,
+                    challenge_rank: Some(20 + character_id),
+                    avatar: crate::profile_scene::ComponentImageSnapshot {
+                        source_field: "userProfile.characterRanks".into(),
+                        source_id: character_id.to_string(),
+                        descriptor: None,
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let layer_id = StableId(15);
+        let lowering =
+            crate::profile_scene::lower_identity_general(15, layer_id, "general:15", &snapshot)
+                .unwrap()
+                .unwrap();
+        let roles = [
+            "character-21-character_rank",
+            "character-21-challenge_live_rank",
+        ];
+        for role in roles {
+            let command = lowering
+                .commands
+                .iter()
+                .find(|command| command.role == role)
+                .unwrap();
+            let region = lowering
+                .interaction_regions
+                .iter()
+                .find(|region| region.role == role)
+                .unwrap();
+            assert_eq!(region.control_bindings, command.control_bindings);
+            assert!(region.clip.is_some());
+            assert_eq!(region.clip, command.clip);
+        }
+
+        let mut layer = layer(15, false);
+        layer.kind = LayerKind::Composite;
+        layer.authored_kind = AuthoredElementKind::General;
+        let mut scene = Scene::new(SceneSource {
+            scene_id: StableId(1500),
+            region: "cn".into(),
+            font_engine_fingerprint: "ft".into(),
+            raster_contract: "sdf".into(),
+            layers: vec![layer],
+            glyphs: Vec::new(),
+            semantic_commands: lowering.commands.clone(),
+            interaction_regions: lowering.interaction_regions.clone(),
+            component_controls: lowering.controls.clone(),
+        })
+        .unwrap();
+        let find = |snapshot: &SceneSnapshot, role: &str| {
+            snapshot
+                .interaction_regions
+                .iter()
+                .find(|region| region.role == role)
+                .cloned()
+                .unwrap()
+        };
+        let before = scene.snapshot();
+        let visible = roles
+            .iter()
+            .filter(|role| find(&before, role).render_mask)
+            .count();
+        assert_eq!(visible, 1);
+
+        let scroll_id = lowering
+            .controls
+            .iter()
+            .find(|control| {
+                matches!(
+                    control.state,
+                    crate::profile_scene::ComponentControlState::Scroll { .. }
+                )
+            })
+            .unwrap()
+            .id;
+        scene.scroll_by(scroll_id, 40.0).unwrap();
+        let after = scene.snapshot();
+        for role in roles {
+            let (from, to) = (find(&before, role), find(&after, role));
+            assert!(
+                from.bounds.y - to.bounds.y > 0.0,
+                "{role} follows the scroll"
+            );
+            assert_eq!(from.clip, to.clip, "{role} keeps the viewport clip");
+        }
+    }
+
+    #[test]
+    fn zero_area_layer_regions_stay_at_the_layer_origin() {
+        let card: crate::profile_source::CustomProfileCard =
+            serde_json::from_value(serde_json::json!({
+                "texts": [{
+                    "objectData": {
+                        "layer": 1, "lock": false,
+                        "position": { "x": 100.0, "y": 50.0, "z": 0.0 },
+                        "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                        "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+                    },
+                    "colorId": 1, "fontId": 1, "lineSpacing": 0.0, "outlineColorId": 1,
+                    "outlineSize": 0.0, "size": 24.0, "text": "A", "type": 1
+                }]
+            }))
+            .unwrap();
+        let snapshot = crate::profile_scene::ProfileResolveSnapshot {
+            fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            colors: BTreeMap::from([(1, [0.0, 0.0, 0.0, 1.0])]),
+            ..Default::default()
+        };
+        let resolved =
+            crate::profile_scene::resolve_profile_scene(&card, "document", &snapshot).unwrap();
+        let layer = resolved.layers[0].clone();
+        assert_eq!(layer.bounds, Rect::default());
+        assert_eq!(layer.hit_geometry, [[0.0; 2]; 4]);
+        assert_eq!(layer.quad, [[0.0; 2]; 4]);
+
+        let scene = Scene::new(SceneSource {
+            scene_id: StableId(1600),
+            region: "cn".into(),
+            font_engine_fingerprint: "ft".into(),
+            raster_contract: "sdf".into(),
+            layers: resolved.layers,
+            glyphs: Vec::new(),
+            semantic_commands: resolved.commands,
+            interaction_regions: resolved.interaction_regions,
+            component_controls: resolved.controls,
+        })
+        .unwrap();
+        let primary = scene
+            .snapshot()
+            .interaction_regions
+            .into_iter()
+            .find(|region| region.role == "primary")
+            .unwrap();
+        let origin = [layer.matrix[4], layer.matrix[5]];
+        assert_eq!(primary.hit_geometry, [origin; 4]);
+        assert_eq!(primary.quad, [origin; 4]);
+        assert_eq!(
+            primary.bounds,
+            Rect {
+                x: origin[0],
+                y: origin[1],
+                width: 0.0,
+                height: 0.0,
+            }
+        );
     }
 
     #[test]
@@ -4206,12 +4850,13 @@ mod tests {
 
     #[test]
     fn materialized_dynamic_matches_pre_core_production_formula() {
-        for percent in [-50.0, 0.0, 25.0, 50.0, 99.0, 100.0] {
+        for percent in [0.0, 25.0, 50.0, 99.0, 100.0] {
             let source = LineIndentSource {
                 percent,
                 line_advances_tmp: vec![vec![17.5, 31.25, 22.0, 19.75]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
+                alignment: 1,
             };
             let max_frames = if (0.0..100.0).contains(&percent) {
                 20_000
@@ -4235,6 +4880,7 @@ mod tests {
                 line_advances_tmp: vec![vec![17.5, 31.25, 22.0, 19.75]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
+                alignment: 1,
             },
             1_800,
         )
@@ -4247,6 +4893,102 @@ mod tests {
     }
 
     #[test]
+    fn line_indent_shift_follows_horizontal_alignment() {
+        // Around the centre pivot the first glyph sits at (pct - 0.5) * w when
+        // left aligned, (pct * w - natural) / 2 when centred and w / 2 - natural
+        // when right aligned, so a width change moves it by pct - 0.5, pct / 2
+        // and 0.5 of that change respectively.
+        let pct = 0.75;
+        for (alignment, coefficient) in [(1, pct - 0.5), (0, pct - 0.5), (2, pct / 2.0), (4, 0.5)] {
+            let mut runtime = LineIndentRuntime::new(LineIndentSource {
+                percent: pct * 100.0,
+                line_advances_tmp: vec![vec![20.0, 20.0, 20.0]],
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+                alignment,
+            })
+            .unwrap();
+            for tick in 0..4 {
+                assert_eq!(runtime.state.status, DynamicStatus::Running);
+                let width = runtime.width_tmp;
+                runtime.advance_one();
+                let expected = coefficient * (width - runtime.static_width_tmp);
+                assert!(
+                    (runtime.state.transform.dx - expected).abs() <= 1e-4,
+                    "alignment={alignment} tick={tick}: {} != {expected}",
+                    runtime.state.transform.dx
+                );
+                assert!(expected.abs() > CONVERGENCE_EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn contracting_negative_percent_programs_settle_at_their_limit() {
+        for (percent, line_advances_tmp) in [
+            (-25.0, vec![vec![20.0, 20.0, 20.0]]),
+            (-25.0, vec![vec![30.0, 10.0], vec![5.0, 5.0, 5.0, 50.0]]),
+            (-50.0, vec![vec![48.0; 6]]),
+            (-95.0, vec![vec![80.0, 80.0, 10.0, 80.0]]),
+        ] {
+            let source = LineIndentSource {
+                percent,
+                line_advances_tmp,
+                rotation_deg: 0.0,
+                scale_x: 1.0,
+                alignment: 1,
+            };
+            let mut runtime = LineIndentRuntime::new(source.clone()).unwrap();
+            for _ in 0..2_000 {
+                if runtime.state.status != DynamicStatus::Running {
+                    break;
+                }
+                runtime.advance_one();
+            }
+            assert_eq!(
+                runtime.state.status,
+                DynamicStatus::Settled,
+                "percent={percent}"
+            );
+            let mut reference = LineIndentRuntime::new(source).unwrap();
+            for _ in 0..5_000 {
+                reference.state.status = DynamicStatus::Running;
+                reference.advance_one();
+            }
+            assert!(
+                (runtime.state.transform.dx - reference.state.transform.dx).abs()
+                    <= CONVERGENCE_EPSILON,
+                "percent={percent}: settled at {} but the loop ends at {}",
+                runtime.state.transform.dx,
+                reference.state.transform.dx
+            );
+        }
+    }
+
+    #[test]
+    fn two_cycle_reached_after_a_transient_is_periodic_from_its_first_repeat() {
+        let mut runtime = LineIndentRuntime::new(LineIndentSource {
+            percent: -100.0,
+            line_advances_tmp: vec![vec![60.0, 30.0, 20.0, 20.0]],
+            rotation_deg: 0.0,
+            scale_x: 1.0,
+            alignment: 1,
+        })
+        .unwrap();
+        for _ in 0..16 {
+            runtime.advance_one();
+        }
+        assert_eq!(runtime.state.status, DynamicStatus::Periodic);
+        assert_eq!(
+            runtime.state.timeline,
+            Some(TimelineDescriptor {
+                loop_start_tick: 1,
+                period_ticks: 2,
+            })
+        );
+    }
+
+    #[test]
     fn multiline_line_indent_feedback_uses_global_preferred_width() {
         let multiline = materialize_line_indent(
             LineIndentSource {
@@ -4254,6 +4996,7 @@ mod tests {
                 line_advances_tmp: vec![vec![10.0], vec![20.0, 20.0]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
+                alignment: 1,
             },
             512,
         )
@@ -4264,6 +5007,7 @@ mod tests {
                 line_advances_tmp: vec![vec![20.0, 20.0]],
                 rotation_deg: 0.0,
                 scale_x: 1.0,
+                alignment: 1,
             },
             512,
         )

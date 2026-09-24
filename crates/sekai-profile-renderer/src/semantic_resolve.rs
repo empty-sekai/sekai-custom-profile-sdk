@@ -1109,11 +1109,8 @@ fn asset_size(
     if let Some(metadata) = timed_resource_metadata(resources, namespace, key) {
         return Some((metadata.width as f32, metadata.height as f32));
     }
-    #[cfg(feature = "skia-oracle")]
-    if let Some(image) = resources.assets.and_then(|assets| assets.get_image(key)) {
-        return Some((image.width() as f32, image.height() as f32));
-    }
-    None
+    let (width, height) = resources.assets?.image_size(key)?;
+    Some((width as f32, height as f32))
 }
 
 fn resource_is_static(resources: ResolveResourceContext<'_>, key: &str) -> bool {
@@ -1733,5 +1730,123 @@ mod tests {
             ResolveResourceContext::default(),
         )
         .is_some());
+    }
+
+    #[test]
+    fn text_scene_layers_keep_layer_local_geometry() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "texts": [{
+                "objectData": {
+                    "layer": 1, "lock": false,
+                    "position": { "x": 100.0, "y": 50.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+                },
+                "colorId": 1, "fontId": 1, "lineSpacing": 0.0, "outlineColorId": 1,
+                "outlineSize": 0.0, "size": 24.0, "text": "A", "type": 1
+            }]
+        }))
+        .expect("text card");
+        let md = MasterData::new(Arc::new(EmptyProvider));
+        let dump = crate::core_shadow::build_text_scene(&card, &md, "fixture")
+            .expect("text scene")
+            .dump();
+        let layer = &dump.layers[0];
+        assert_eq!(layer.bounds, sekai_profile_renderer_core::Rect::default());
+        assert_eq!(layer.quad, [[0.0; 2]; 4]);
+        assert_eq!(layer.hit_geometry, [[0.0; 2]; 4]);
+        assert_eq!((layer.matrix[4], layer.matrix[5]), (1015.0, 356.0));
+    }
+
+    #[test]
+    fn source_images_draw_at_their_pixel_size_without_a_baked_object() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "others": [{
+                "objectData": {
+                    "layer": 1, "lock": false,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+                },
+                "id": 1
+            }]
+        }))
+        .expect("image card");
+        let md = MasterData::new(Arc::new(EmptyProvider));
+        let (width, height) = (64u32, 36u32);
+        let assets = crate::assets::AssetStore::new(8);
+        assets.put(
+            "etc/1".into(),
+            crate::codec::png::encode_rgba(width, height, &[255, 0, 0, 255].repeat(64 * 36))
+                .expect("png"),
+        );
+
+        let resolved =
+            resolve_card_commands_with_profile(&card, &md, "fixture", None, "und", Some(&assets))
+                .expect("resolved scene");
+        let layer = &resolved.layers[0];
+        assert_eq!(
+            (layer.bounds.width, layer.bounds.height),
+            (width as f32, height as f32)
+        );
+
+        // The store holds an unrelated object only, so the image falls back to
+        // the asset store's source bytes.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut writer = crate::render_object::RenderObjectStoreWriter::create(
+            temp.path().join("store"),
+            "fixture",
+            4096,
+        )
+        .expect("store writer");
+        writer
+            .add(crate::render_object::RenderObjectWrite {
+                key: "unrelated",
+                kind: crate::render_object::RenderObjectKind::Texture,
+                source_sha256: &"0".repeat(64),
+                width: 1,
+                height: 1,
+                row_bytes: 4,
+                pixels: &[0; 4],
+            })
+            .expect("store object");
+        let manifest = writer.finish().expect("store manifest");
+        let store = crate::render_object::MappedRenderObjectStore::open(manifest).expect("store");
+        let (canvas_width, canvas_height) = (
+            sekai_profile_renderer_core::profile_transform::CANVAS_WIDTH as u32,
+            sekai_profile_renderer_core::profile_transform::CANVAS_HEIGHT as u32,
+        );
+        let mut pixels = vec![0u8; canvas_width as usize * canvas_height as usize * 4];
+        let stats = crate::profile_compositor::render_authored_profile_into_scalar(
+            &resolved,
+            &store,
+            None,
+            &md,
+            Some(&assets),
+            sekai_profile_renderer_core::AuthoredElementKind::Other,
+            0,
+            &mut pixels,
+            canvas_width,
+            canvas_height,
+        )
+        .expect("composited element");
+        assert_eq!(stats.source_fallback_object_count, 1);
+
+        let painted = pixels
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .enumerate()
+            .filter(|(_, alpha)| **alpha > 0)
+            .map(|(index, _)| (index as u32 % canvas_width, index as u32 / canvas_width))
+            .collect::<Vec<_>>();
+        assert_eq!(painted.len(), (width * height) as usize);
+        let (min_x, min_y, max_x, max_y) = painted.iter().fold(
+            (u32::MAX, u32::MAX, 0, 0),
+            |(min_x, min_y, max_x, max_y), &(x, y)| {
+                (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+            },
+        );
+        assert_eq!((max_x - min_x + 1, max_y - min_y + 1), (width, height));
     }
 }

@@ -376,10 +376,12 @@ pub fn assemble_profile_layer(
         y,
     ];
     let bounds = union_command_bounds(commands);
+    // Geometry is layer-local; the layer matrix places it on the canvas. A
+    // layer without drawn area collapses to its own origin.
     let hit_geometry = if bounds.width > 0.0 && bounds.height > 0.0 {
         rect_quad(bounds)
     } else {
-        [[x, y], [x, y], [x, y], [x, y]]
+        [[0.0; 2]; 4]
     };
     LayerSource {
         id: element.layer_id,
@@ -472,20 +474,14 @@ pub fn lower_identity_general(
         recipe
             .nodes
             .iter()
-            .filter_map(|node| match &node.payload {
+            .zip(&commands)
+            .filter_map(|(node, command)| match &node.payload {
                 crate::general_recipe::GeneralRecipePayload::Text {
                     source: crate::TextSource::ProfileField { field, .. },
                     ..
-                } => Some(profile_text_interaction_region_from_bounds(
-                    source_key,
-                    node.layer_id,
-                    &node.role,
-                    node.bounds,
-                    field,
-                )),
+                } => Some(profile_text_interaction_region(source_key, command, field)),
                 _ => None,
-            })
-            .collect::<Vec<_>>(),
+            }),
     );
     Ok(Some(ProfileComponentLowering {
         commands,
@@ -777,23 +773,24 @@ fn general_recipe_node_to_command(
     }
 }
 
-fn profile_text_interaction_region_from_bounds(
+/// Selection region for a profile-field text command. It shares the command's
+/// tab and scroll bindings and its viewport clip, so it is hit-testable exactly
+/// where and when the text is drawn.
+fn profile_text_interaction_region(
     source_key: &str,
-    layer_id: StableId,
-    role: &str,
-    bounds: Rect,
+    command: &SemanticCommandSource,
     field: &str,
 ) -> InteractionRegionSource {
     InteractionRegionSource {
-        id: interaction_region_id(source_key, role, 0),
-        layer_id,
-        role: role.into(),
-        bounds,
-        quad: rect_quad(bounds),
+        id: interaction_region_id(source_key, &command.role, 0),
+        layer_id: command.layer_id,
+        role: command.role.clone(),
+        bounds: command.bounds,
+        quad: rect_quad(command.bounds),
         matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        hit_geometry: rect_quad(bounds),
-        clip: Some(rect_quad(bounds)),
-        control_bindings: Vec::new(),
+        hit_geometry: rect_quad(command.bounds),
+        clip: command.clip,
+        control_bindings: command.control_bindings.clone(),
         resolved_data: BTreeMap::from([("field".into(), ParameterValue::Text(field.into()))]),
         capabilities: vec!["inspect".into(), "select_text".into(), "edit_text".into()],
     }
