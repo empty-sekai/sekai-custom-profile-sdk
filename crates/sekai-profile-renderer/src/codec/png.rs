@@ -11,9 +11,13 @@
 //!
 //! Encoding always emits 8-bit RGBA, non-interlaced, filter type 0.
 
-use super::{crc32, deflate::zlib_compress, inflate::zlib_decompress, CodecError};
+use super::{crc32, deflate::zlib_compress, inflate::zlib_decompress_exact, CodecError};
 
 const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Width and height are PNG four-byte unsigned integers, which the format
+/// limits to 2^31 - 1.
+const MAX_DIMENSION: u32 = 0x7FFF_FFFF;
 
 /// A decoded image: tightly packed, non-premultiplied 8-bit RGBA.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +119,9 @@ fn parse_ihdr(body: &[u8]) -> Result<Header, CodecError> {
     if width == 0 || height == 0 {
         return Err(CodecError::Format("zero-sized image"));
     }
+    if width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(CodecError::Format("image dimension exceeds 2^31 - 1"));
+    }
     if bit_depth != 8 {
         return Err(CodecError::Unsupported("PNG bit depth other than 8"));
     }
@@ -134,88 +141,86 @@ fn parse_ihdr(body: &[u8]) -> Result<Header, CodecError> {
     })
 }
 
+/// Reads the signature and the `IHDR` chunk, which has to come first, and
+/// returns the header with the offset of the chunk after it.
+fn read_header(data: &[u8]) -> Result<(Header, usize), CodecError> {
+    if !is_png(data) {
+        return Err(CodecError::Format("missing PNG signature"));
+    }
+    if data.len() < 16 {
+        return Err(CodecError::Format("missing IHDR"));
+    }
+    let (kind, body, next) = read_chunk(data, 8)?;
+    if kind != b"IHDR" {
+        return Err(CodecError::Format("IHDR is not the first chunk"));
+    }
+    Ok((parse_ihdr(body)?, next))
+}
+
 /// Reads a PNG's pixel size from its header without decoding the image data.
 ///
 /// The header is held to the same rules as in [`decode`], so a size is only
 /// reported for an image whose format `decode` supports.
 pub fn dimensions(data: &[u8]) -> Result<(u32, u32), CodecError> {
-    if !is_png(data) {
-        return Err(CodecError::Format("missing PNG signature"));
-    }
-    let mut pos = 8usize;
-    while pos + 8 <= data.len() {
-        let (kind, body, next) = read_chunk(data, pos)?;
-        if kind == b"IHDR" {
-            let header = parse_ihdr(body)?;
-            return Ok((header.width, header.height));
-        }
-        pos = next;
-    }
-    Err(CodecError::Format("missing IHDR"))
+    let (header, _) = read_header(data)?;
+    Ok((header.width, header.height))
 }
 
 /// Decodes a PNG into non-premultiplied RGBA8.
 pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
-    if !is_png(data) {
-        return Err(CodecError::Format("missing PNG signature"));
-    }
-
-    let mut pos = 8usize;
-    let mut header: Option<Header> = None;
+    let (header, mut pos) = read_header(data)?;
     let mut palette: Vec<[u8; 3]> = Vec::new();
     let mut trns_palette: Vec<u8> = Vec::new();
-    let mut trns_gray: Option<u16> = None;
-    let mut trns_rgb: Option<[u16; 3]> = None;
+    let mut trns_gray: Option<u8> = None;
+    let mut trns_rgb: Option<[u8; 3]> = None;
     let mut idat: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
         let (kind, body, next) = read_chunk(data, pos)?;
         match kind {
-            b"IHDR" => header = Some(parse_ihdr(body)?),
+            b"IHDR" => return Err(CodecError::Format("duplicate IHDR")),
             b"PLTE" => {
                 if body.len() % 3 != 0 {
                     return Err(CodecError::Format("PLTE length is not a multiple of 3"));
                 }
                 palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             }
-            b"tRNS" => {
-                let Some(h) = header.as_ref() else {
-                    return Err(CodecError::Format("tRNS before IHDR"));
-                };
-                match h.color_type {
-                    ColorType::Palette => trns_palette = body.to_vec(),
-                    ColorType::Gray => {
-                        if body.len() < 2 {
-                            return Err(CodecError::Format("grayscale tRNS too short"));
-                        }
-                        trns_gray = Some(u16::from_be_bytes([body[0], body[1]]));
+            // A colour key is stored in two bytes per sample. At bit depth 8
+            // only the low byte applies; the high one is masked off.
+            b"tRNS" => match header.color_type {
+                ColorType::Palette => trns_palette = body.to_vec(),
+                ColorType::Gray => {
+                    if body.len() < 2 {
+                        return Err(CodecError::Format("grayscale tRNS too short"));
                     }
-                    ColorType::Rgb => {
-                        if body.len() < 6 {
-                            return Err(CodecError::Format("RGB tRNS too short"));
-                        }
-                        trns_rgb = Some([
-                            u16::from_be_bytes([body[0], body[1]]),
-                            u16::from_be_bytes([body[2], body[3]]),
-                            u16::from_be_bytes([body[4], body[5]]),
-                        ]);
-                    }
-                    // tRNS is meaningless for colour types that already carry alpha.
-                    ColorType::GrayAlpha | ColorType::Rgba => {}
+                    trns_gray = Some(body[1]);
                 }
-            }
+                ColorType::Rgb => {
+                    if body.len() < 6 {
+                        return Err(CodecError::Format("RGB tRNS too short"));
+                    }
+                    trns_rgb = Some([body[1], body[3], body[5]]);
+                }
+                // tRNS is meaningless for colour types that already carry alpha.
+                ColorType::GrayAlpha | ColorType::Rgba => {}
+            },
             b"IDAT" => idat.extend_from_slice(body),
             // IEND carries no data, so it is only an early exit here. Its
             // absence is not treated as corruption: the checks below prove the
             // pixel data is complete on its own, and real encoders do ship files
             // that stop after the last frame chunk.
             b"IEND" => break,
+            // A lowercase first letter marks a chunk ancillary. An unknown
+            // critical chunk may change how the image data reads, so it
+            // cannot be skipped.
+            _ if kind[0] & 0x20 == 0 => {
+                return Err(CodecError::Unsupported("unknown critical PNG chunk"))
+            }
             _ => {}
         }
         pos = next;
     }
 
-    let header = header.ok_or(CodecError::Format("missing IHDR"))?;
     if idat.is_empty() {
         return Err(CodecError::Format("missing IDAT"));
     }
@@ -234,10 +239,11 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
         .and_then(|s| s.checked_mul(height))
         .ok_or(CodecError::Format("image size overflow"))?;
 
-    let raw = zlib_decompress(&idat, expected)?;
-    if raw.len() != expected {
-        return Err(CodecError::Format("IDAT size does not match IHDR"));
-    }
+    let raw = zlib_decompress_exact(
+        &idat,
+        expected,
+        CodecError::Format("IDAT size does not match IHDR"),
+    )?;
 
     let unfiltered = unfilter(&raw, stride, height, channels)?;
 
@@ -346,18 +352,15 @@ fn expand_row(
     color_type: ColorType,
     palette: &[[u8; 3]],
     trns_palette: &[u8],
-    trns_gray: Option<u16>,
-    trns_rgb: Option<[u16; 3]>,
+    trns_gray: Option<u8>,
+    trns_rgb: Option<[u8; 3]>,
 ) -> Result<(), CodecError> {
     for x in 0..width {
         let out = &mut dst[x * 4..x * 4 + 4];
         match color_type {
             ColorType::Gray => {
                 let g = src[x];
-                let a = match trns_gray {
-                    Some(key) if u16::from(g) == key => 0,
-                    _ => 255,
-                };
+                let a = if trns_gray == Some(g) { 0 } else { 255 };
                 out.copy_from_slice(&[g, g, g, a]);
             }
             ColorType::GrayAlpha => {
@@ -368,16 +371,7 @@ fn expand_row(
                 let r = src[x * 3];
                 let g = src[x * 3 + 1];
                 let b = src[x * 3 + 2];
-                let a = match trns_rgb {
-                    Some(key)
-                        if u16::from(r) == key[0]
-                            && u16::from(g) == key[1]
-                            && u16::from(b) == key[2] =>
-                    {
-                        0
-                    }
-                    _ => 255,
-                };
+                let a = if trns_rgb == Some([r, g, b]) { 0 } else { 255 };
                 out.copy_from_slice(&[r, g, b, a]);
             }
             ColorType::Rgba => {
@@ -791,5 +785,244 @@ mod tests {
         chunk(&mut data, b"IDAT", &zlib_compress(&raw).expect("compress"));
         chunk(&mut data, b"IEND", &[]);
         assert_eq!(decode(&data).expect("decode").pixels, original);
+    }
+
+    fn header(width: u32, height: u32, color_type: u8) -> Vec<u8> {
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, color_type, 0, 0, 0]);
+        ihdr
+    }
+
+    /// A PNG made of exactly these chunks, in this order.
+    fn assemble(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut data = SIGNATURE.to_vec();
+        for (kind, body) in chunks {
+            chunk(&mut data, kind, body);
+        }
+        data
+    }
+
+    /// Image data for unfiltered scanlines.
+    fn scanlines(rows: &[&[u8]]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for row in rows {
+            raw.push(0);
+            raw.extend_from_slice(row);
+        }
+        zlib_compress(&raw).expect("compress")
+    }
+
+    /// A zlib stream of at least `min_len` zero bytes: one literal, then
+    /// fixed-code matches of 258 bytes at distance 1, 13 bits each.
+    fn zero_run_stream(min_len: usize) -> Vec<u8> {
+        struct Bits {
+            out: Vec<u8>,
+            pending: u64,
+            count: u32,
+        }
+        impl Bits {
+            fn put(&mut self, value: u32, count: u32) {
+                self.pending |= u64::from(value) << self.count;
+                self.count += count;
+                while self.count >= 8 {
+                    self.out.push(self.pending as u8);
+                    self.pending >>= 8;
+                    self.count -= 8;
+                }
+            }
+            /// Huffman codes are packed most significant bit first.
+            fn code(&mut self, code: u32, count: u32) {
+                for bit in (0..count).rev() {
+                    self.put((code >> bit) & 1, 1);
+                }
+            }
+        }
+        let mut bits = Bits {
+            out: vec![0x78, 0x01],
+            pending: 0,
+            count: 0,
+        };
+        bits.put(1, 1);
+        bits.put(1, 2);
+        bits.code(0x30, 8);
+        let matches = min_len.saturating_sub(1).div_ceil(258);
+        for _ in 0..matches {
+            bits.code(0xC5, 8);
+            bits.code(0, 5);
+        }
+        bits.code(0, 7);
+        if bits.count > 0 {
+            bits.out.push(bits.pending as u8);
+        }
+        let len = 1 + matches * 258;
+        let adler = (((len % 65_521) as u32) << 16) | 1;
+        bits.out.extend_from_slice(&adler.to_be_bytes());
+        bits.out
+    }
+
+    #[test]
+    fn the_zero_run_fixture_is_a_valid_stream() {
+        use super::super::inflate::zlib_decompress;
+        let stream = zero_run_stream(1000);
+        assert_eq!(
+            zlib_decompress(&stream, 0).expect("inflate"),
+            vec![0u8; 1033]
+        );
+    }
+
+    /// The header's size is only a claim until the image data backs it: a
+    /// header declaring an enormous image over a few bytes of data has to be
+    /// refused, not trusted with an allocation.
+    #[test]
+    fn a_header_larger_than_its_image_data_is_refused() {
+        let data = assemble(&[
+            (b"IHDR", &header(0x7FFF_FFFF, 0x7FFF_FFFF, 6)),
+            (b"IDAT", &scanlines(&[&[0, 0, 0, 0]])),
+            (b"IEND", &[]),
+        ]);
+        assert!(matches!(decode(&data), Err(CodecError::Format(_))));
+    }
+
+    /// A 1x1 image needs five bytes of image data. Data that inflates far past
+    /// that has to be refused once it passes the declared size, not after it
+    /// has all been inflated.
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn image_data_that_inflates_past_the_header_stops_at_the_declared_size() {
+        crate::codec::address_space::run_in_child(
+            "codec::png::tests::inflation_past_the_header_child",
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[ignore = "runs under a capped address space in a child process"]
+    fn inflation_past_the_header_child() {
+        use crate::codec::address_space;
+        if !address_space::in_child() {
+            return;
+        }
+        let data = assemble(&[
+            (b"IHDR", &header(1, 1, 6)),
+            (b"IDAT", &zero_run_stream(256 << 20)),
+            (b"IEND", &[]),
+        ]);
+        match address_space::with_budget(64 << 20, || decode(&data)) {
+            Ok(image) => panic!("decoded a {}x{} image", image.width, image.height),
+            Err(error) => assert!(matches!(error, CodecError::Format(_)), "{error}"),
+        }
+    }
+
+    #[test]
+    fn the_header_has_to_be_the_first_chunk() {
+        let data = assemble(&[
+            (b"tEXt", b"Comment\0first"),
+            (b"IHDR", &header(1, 1, 6)),
+            (b"IDAT", &scanlines(&[&[1, 2, 3, 4]])),
+            (b"IEND", &[]),
+        ]);
+        assert!(matches!(decode(&data), Err(CodecError::Format(_))));
+        assert!(matches!(dimensions(&data), Err(CodecError::Format(_))));
+    }
+
+    /// `dimensions` reports the first header, so decoding must not size the
+    /// image from a later one.
+    #[test]
+    fn a_second_header_is_rejected() {
+        let data = assemble(&[
+            (b"IHDR", &header(1, 1, 6)),
+            (b"IHDR", &header(2, 1, 6)),
+            (b"IDAT", &scanlines(&[&[1, 2, 3, 4, 5, 6, 7, 8]])),
+            (b"IEND", &[]),
+        ]);
+        assert_eq!(dimensions(&data).expect("dimensions"), (1, 1));
+        assert!(matches!(decode(&data), Err(CodecError::Format(_))));
+    }
+
+    /// Width and height are PNG four-byte integers, which stop at 2^31 - 1.
+    #[test]
+    fn dimensions_beyond_the_png_integer_range_are_rejected() {
+        for (width, height) in [
+            (0x8000_0000u32, 1u32),
+            (1, 0x8000_0000),
+            (u32::MAX, u32::MAX),
+        ] {
+            let data = assemble(&[(b"IHDR", &header(width, height, 6)), (b"IEND", &[])]);
+            assert!(
+                matches!(dimensions(&data), Err(CodecError::Format(_))),
+                "{width}x{height}"
+            );
+            assert!(
+                matches!(decode(&data), Err(CodecError::Format(_))),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// The case of a chunk type's first letter marks it ancillary (lowercase,
+    /// safe to skip) or critical (uppercase, needed to read the image).
+    #[test]
+    fn an_unknown_critical_chunk_stops_the_decode() {
+        let pixels = [1, 2, 3, 4];
+        let image_data = scanlines(&[&pixels]);
+        let with = |kind: &[u8; 4]| {
+            assemble(&[
+                (b"IHDR", &header(1, 1, 6)),
+                (kind, b"?"),
+                (b"IDAT", &image_data),
+                (b"IEND", &[]),
+            ])
+        };
+        assert_eq!(
+            decode(&with(b"prVt")).expect("ancillary chunk").pixels,
+            pixels
+        );
+        assert!(matches!(
+            decode(&with(b"PRVT")),
+            Err(CodecError::Unsupported(_))
+        ));
+    }
+
+    /// Some encoders leave unused bytes after the compressed image data;
+    /// decoders are expected to ignore them.
+    #[test]
+    fn trailing_bytes_after_the_image_data_stream_are_ignored() {
+        let pixels = gradient(3, 2);
+        let mut image_data = scanlines(&[&pixels[..12], &pixels[12..]]);
+        image_data.extend_from_slice(&[0; 5]);
+        let data = assemble(&[
+            (b"IHDR", &header(3, 2, 6)),
+            (b"IDAT", &image_data),
+            (b"IEND", &[]),
+        ]);
+        assert_eq!(decode(&data).expect("decode").pixels, pixels);
+    }
+
+    /// A tRNS colour key is stored in two bytes per sample; at bit depth 8 only
+    /// the low byte applies and the rest has to be masked off before comparing.
+    #[test]
+    fn transparent_colour_keys_use_only_the_low_eight_bits() {
+        let gray = assemble(&[
+            (b"IHDR", &header(2, 1, 0)),
+            (b"tRNS", &[0x01, 7]),
+            (b"IDAT", &scanlines(&[&[7, 8]])),
+            (b"IEND", &[]),
+        ]);
+        assert_eq!(
+            decode(&gray).expect("gray").pixels,
+            [7, 7, 7, 0, 8, 8, 8, 255]
+        );
+        let rgb = assemble(&[
+            (b"IHDR", &header(2, 1, 2)),
+            (b"tRNS", &[0x01, 10, 0x02, 20, 0x03, 30]),
+            (b"IDAT", &scanlines(&[&[10, 20, 30, 10, 20, 31]])),
+            (b"IEND", &[]),
+        ]);
+        assert_eq!(
+            decode(&rgb).expect("rgb").pixels,
+            [10, 20, 30, 0, 10, 20, 31, 255]
+        );
     }
 }

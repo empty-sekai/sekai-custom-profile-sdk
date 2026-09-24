@@ -10,15 +10,20 @@
 //!   3. Skia reads our re-encoded file exactly as it reads the original.
 //!
 //! Note on (1): skia decodes to its premultiplied internal form, so reading it
-//! back as Unpremul loses up to 1/255 per channel on semi-transparent pixels.
-//! Our decoder returns the true PNG samples instead, so the unpremultiplied
-//! buffers legitimately differ; the premultiplied ones must not.
+//! back as Unpremul is lossy on semi-transparent pixels, and more so as alpha
+//! falls (see `codec::unpremultiply_channel_like_skia`). Our decoder returns the
+//! true PNG samples instead, so the unpremultiplied buffers legitimately differ;
+//! the premultiplied ones must not.
 //!
 //! Usage:
 //!
 //! ```text
 //! png-parity <dir> [more dirs...]
+//! png-parity --exhaustive
 //! ```
+//!
+//! `--exhaustive` skips the corpus and checks every (channel value, alpha)
+//! pair instead.
 //!
 //! Exit status is non-zero if any file mismatches, so it can gate a change.
 

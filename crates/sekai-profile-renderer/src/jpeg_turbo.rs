@@ -550,4 +550,55 @@ mod tests {
             .expect("reused raw YUV420 JPEG");
         assert_eq!(first, second);
     }
+
+    fn noise(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// Noise barely compresses, so encoding it grows the output buffer many
+    /// times over; capping memory makes one of the later growths fail.
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn running_out_of_memory_mid_encode_is_reported_as_an_error() {
+        crate::codec::address_space::run_in_child(
+            "jpeg_turbo::tests::out_of_memory_mid_encode_child",
+        );
+    }
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[ignore = "runs under a capped address space in a child process"]
+    fn out_of_memory_mid_encode_child() {
+        use crate::codec::address_space;
+        if !address_space::in_child() {
+            return;
+        }
+        let (width, height) = (2048u32, 2048u32);
+        let rgba = noise(width as usize * height as usize * 4);
+        match address_space::with_budget(6 << 20, || encode_rgba(&rgba, width, height, 100)) {
+            Ok(encoded) => panic!("the capped encode produced {} bytes", encoded.len()),
+            Err(error) => assert!(error.contains("memory"), "{error}"),
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+        {
+            let mut scratch = vec![0u8; yuv420_scratch_len(width, height).expect("scratch length")];
+            match address_space::with_budget(6 << 20, || {
+                encode_rgba_avx512_yuv420_with_scratch(&rgba, width, height, 100, &mut scratch)
+            }) {
+                Ok(encoded) => panic!("the capped raw YUV encode produced {} bytes", encoded.len()),
+                Err(error) => assert!(error.contains("memory"), "{error}"),
+            }
+        }
+    }
 }

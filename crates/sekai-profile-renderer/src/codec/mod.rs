@@ -105,6 +105,100 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Test support for code that has to fail cleanly when memory runs out.
+///
+/// A test cannot cap its own process without starving the tests running next
+/// to it, so the capped body runs in a fresh copy of the test binary: the
+/// visible test calls [`run_in_child`](address_space::run_in_child) with the
+/// name of an ignored test, and that test wraps its body in
+/// [`with_budget`](address_space::with_budget).
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+pub(crate) mod address_space {
+    use std::process::Command;
+
+    const CHILD_ENV: &str = "SEKAI_PROFILE_RENDERER_ADDRESS_SPACE_CHILD";
+    const RLIMIT_AS: i32 = 9;
+
+    #[repr(C)]
+    struct RLimit {
+        current: u64,
+        maximum: u64,
+    }
+
+    unsafe extern "C" {
+        fn getrlimit(resource: i32, limit: *mut RLimit) -> i32;
+        fn setrlimit(resource: i32, limit: *const RLimit) -> i32;
+    }
+
+    fn mapped_bytes() -> u64 {
+        let status = std::fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
+        let kib: u64 = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmSize:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .expect("VmSize in /proc/self/status");
+        kib * 1024
+    }
+
+    /// True inside a child started by [`run_in_child`]. Capped tests return
+    /// early otherwise, so running ignored tests in-process cannot cap the
+    /// whole harness.
+    pub(crate) fn in_child() -> bool {
+        std::env::var_os(CHILD_ENV).is_some()
+    }
+
+    /// Runs `body` with at most `budget` more bytes of address space than the
+    /// process has mapped when it starts, then lifts the cap again.
+    pub(crate) fn with_budget<T>(budget: u64, body: impl FnOnce() -> T) -> T {
+        assert!(in_child(), "a capped body must run through run_in_child");
+        let mut saved = RLimit {
+            current: 0,
+            maximum: 0,
+        };
+        assert_eq!(unsafe { getrlimit(RLIMIT_AS, &mut saved) }, 0, "getrlimit");
+        let capped = RLimit {
+            current: (mapped_bytes() + budget).min(saved.maximum),
+            maximum: saved.maximum,
+        };
+        assert_eq!(unsafe { setrlimit(RLIMIT_AS, &capped) }, 0, "setrlimit");
+        let result = body();
+        assert_eq!(unsafe { setrlimit(RLIMIT_AS, &saved) }, 0, "restore rlimit");
+        result
+    }
+
+    /// Runs the ignored test `name` in a fresh copy of this test binary and
+    /// asserts that it ran and passed.
+    pub(crate) fn run_in_child(name: &str) {
+        let output = Command::new(std::env::current_exe().expect("test binary path"))
+            .args([
+                "--exact",
+                name,
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            // One malloc arena, so every allocation has to come out of the
+            // capped address space instead of a per-thread heap reserved
+            // before the cap applied.
+            .env("MALLOC_ARENA_MAX", "1")
+            .output()
+            .expect("spawn child test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{name} failed in its child process ({}):\n{stdout}\n{stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "{name} did not run in its child process:\n{stdout}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

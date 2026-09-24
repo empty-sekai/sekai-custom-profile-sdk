@@ -10,7 +10,6 @@
 typedef struct {
   struct jpeg_error_mgr base;
   jmp_buf jump;
-  unsigned char **output;
   char *message;
   size_t message_capacity;
 } allium_jpeg_error;
@@ -21,11 +20,25 @@ static void allium_jpeg_error_exit(j_common_ptr common) {
     common->err->format_message(common, error->message);
     error->message[error->message_capacity - 1] = '\0';
   }
-  if (error->output != NULL && *error->output != NULL) {
-    free(*error->output);
-    *error->output = NULL;
-  }
   longjmp(error->jump, 1);
+}
+
+/* Frees the output buffer of an encode that did not finish. The memory
+ * destination replaces its buffer each time it grows and only writes the
+ * current one back through `output` when compression finishes, so until then
+ * `output` can point at a buffer it has already freed. `term_destination`
+ * writes the live buffer back first; it is only valid once jpeg_mem_dest has
+ * returned. */
+static void allium_jpeg_discard_output(j_compress_ptr encoder,
+                                       int destination_ready,
+                                       unsigned char **output,
+                                       unsigned long *output_length) {
+  if (destination_ready) {
+    encoder->dest->term_destination(encoder);
+  }
+  free(*output);
+  *output = NULL;
+  *output_length = 0;
 }
 
 int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
@@ -41,16 +54,18 @@ int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
   struct jpeg_compress_struct encoder;
   allium_jpeg_error error;
   volatile int encoder_created = 0;
+  volatile int destination_ready = 0;
   memset(&encoder, 0, sizeof(encoder));
   memset(&error, 0, sizeof(error));
   *output = NULL;
   *output_length = 0;
   encoder.err = jpeg_std_error(&error.base);
   error.base.error_exit = allium_jpeg_error_exit;
-  error.output = output;
   error.message = error_message;
   error.message_capacity = error_capacity;
   if (setjmp(error.jump) != 0) {
+    allium_jpeg_discard_output(&encoder, destination_ready, output,
+                               output_length);
     if (encoder_created) {
       jpeg_destroy_compress(&encoder);
     }
@@ -60,6 +75,7 @@ int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
   jpeg_create_compress(&encoder);
   encoder_created = 1;
   jpeg_mem_dest(&encoder, output, output_length);
+  destination_ready = 1;
   encoder.image_width = width;
   encoder.image_height = height;
   encoder.input_components = 4;
@@ -96,16 +112,18 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
   struct jpeg_compress_struct encoder;
   allium_jpeg_error error;
   volatile int encoder_created = 0;
+  volatile int destination_ready = 0;
   memset(&encoder, 0, sizeof(encoder));
   memset(&error, 0, sizeof(error));
   *output = NULL;
   *output_length = 0;
   encoder.err = jpeg_std_error(&error.base);
   error.base.error_exit = allium_jpeg_error_exit;
-  error.output = output;
   error.message = error_message;
   error.message_capacity = error_capacity;
   if (setjmp(error.jump) != 0) {
+    allium_jpeg_discard_output(&encoder, destination_ready, output,
+                               output_length);
     if (encoder_created) {
       jpeg_destroy_compress(&encoder);
     }
@@ -115,6 +133,7 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
   jpeg_create_compress(&encoder);
   encoder_created = 1;
   jpeg_mem_dest(&encoder, output, output_length);
+  destination_ready = 1;
   encoder.image_width = width;
   encoder.image_height = height;
   encoder.input_components = 3;
@@ -153,11 +172,8 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
           (JSAMPROW)(cr_plane + (size_t)source_row * chroma_stride);
     }
     if (jpeg_write_raw_data(&encoder, planes, 16) != 16) {
+      allium_jpeg_discard_output(&encoder, 1, output, output_length);
       jpeg_destroy_compress(&encoder);
-      if (*output != NULL) {
-        free(*output);
-        *output = NULL;
-      }
       return 3;
     }
   }

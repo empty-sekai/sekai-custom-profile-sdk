@@ -160,10 +160,33 @@ fn fixed_tables() -> Result<(Huffman, Huffman), CodecError> {
     Ok((Huffman::new(&lit)?, Huffman::new(&dist)?))
 }
 
-/// Inflates a raw DEFLATE stream. `size_hint` preallocates the output buffer.
+/// The most output one byte of DEFLATE input can produce. The cheapest symbol
+/// pair is a one-bit length code for a 258-byte match plus a one-bit distance
+/// code, so every byte of input yields at most four such matches.
+const MAX_EXPANSION: usize = 4 * 258;
+
+/// Raised internally when the output would grow past the caller's limit.
+const OUTPUT_LIMIT: CodecError = CodecError::Deflate("inflated data exceeds the expected size");
+
+/// Output capacity to reserve up front: the caller's estimate, but never more
+/// than `input_len` bytes of DEFLATE data could inflate to.
+fn initial_capacity(input_len: usize, size_hint: usize) -> usize {
+    size_hint.min(input_len.saturating_mul(MAX_EXPANSION))
+}
+
+/// Inflates a raw DEFLATE stream. `size_hint` preallocates the output buffer,
+/// up to what `data` could possibly inflate to.
 pub fn inflate(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecError> {
+    let mut out = Vec::with_capacity(initial_capacity(data.len(), size_hint));
+    inflate_into(data, &mut out, usize::MAX)?;
+    Ok(out)
+}
+
+/// Inflates `data` onto the empty `out`, failing with [`OUTPUT_LIMIT`] before
+/// the output grows past `limit` bytes. Returns how many input bytes the
+/// stream occupies, counting the final partial byte.
+fn inflate_into(data: &[u8], out: &mut Vec<u8>, limit: usize) -> Result<usize, CodecError> {
     let mut reader = BitReader::new(data);
-    let mut out = Vec::with_capacity(size_hint);
     loop {
         let last = reader.bits(1)?;
         let kind = reader.bits(2)?;
@@ -177,6 +200,9 @@ pub fn inflate(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecError> {
                 if len ^ 0xFFFF != nlen {
                     return Err(CodecError::Deflate("stored block length check failed"));
                 }
+                if len > limit - out.len() {
+                    return Err(OUTPUT_LIMIT);
+                }
                 for _ in 0..len {
                     out.push(reader.bits(8)? as u8);
                 }
@@ -187,7 +213,7 @@ pub fn inflate(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecError> {
                 } else {
                     read_dynamic_tables(&mut reader)?
                 };
-                inflate_block(&mut reader, &lit, &dist, &mut out)?;
+                inflate_block(&mut reader, &lit, &dist, out, limit)?;
             }
             _ => return Err(CodecError::Deflate("reserved deflate block type")),
         }
@@ -195,7 +221,9 @@ pub fn inflate(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecError> {
             break;
         }
     }
-    Ok(out)
+    // Every read leaves fewer than eight bits buffered, so the bytes pulled
+    // in so far end exactly at the stream's last, partially used byte.
+    Ok(reader.pos)
 }
 
 fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(Huffman, Huffman), CodecError> {
@@ -259,16 +287,25 @@ fn inflate_block(
     lit: &Huffman,
     dist: &Huffman,
     out: &mut Vec<u8>,
+    limit: usize,
 ) -> Result<(), CodecError> {
     loop {
         let sym = reader.symbol(lit)?;
         match sym {
-            0..=255 => out.push(sym as u8),
+            0..=255 => {
+                if out.len() == limit {
+                    return Err(OUTPUT_LIMIT);
+                }
+                out.push(sym as u8);
+            }
             256 => return Ok(()),
             257..=285 => {
                 let idx = usize::from(sym) - 257;
                 let length = usize::from(LENGTH_BASE[idx])
                     + reader.bits(u32::from(LENGTH_EXTRA[idx]))? as usize;
+                if length > limit - out.len() {
+                    return Err(OUTPUT_LIMIT);
+                }
                 let dsym = usize::from(reader.symbol(dist)?);
                 if dsym >= DIST_BASE.len() {
                     return Err(CodecError::Deflate("invalid distance symbol"));
@@ -290,7 +327,38 @@ fn inflate_block(
 }
 
 /// Reads a zlib stream (RFC 1950): 2-byte header, DEFLATE payload, Adler-32.
+///
+/// `size_hint` preallocates the output buffer, up to what the stream could
+/// possibly inflate to. The checksum is read where the compressed data ends;
+/// bytes after it are not part of the stream and are ignored.
 pub fn zlib_decompress(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecError> {
+    zlib_decompress_within(data, size_hint, usize::MAX)
+}
+
+/// Reads a zlib stream that has to inflate to exactly `len` bytes, failing
+/// with `mismatch` otherwise.
+///
+/// Inflation stops as soon as the output would pass `len`, so a stream that
+/// expands further than its container declares costs no more than the
+/// declared size.
+pub(crate) fn zlib_decompress_exact(
+    data: &[u8],
+    len: usize,
+    mismatch: CodecError,
+) -> Result<Vec<u8>, CodecError> {
+    match zlib_decompress_within(data, len, len) {
+        Ok(out) if out.len() == len => Ok(out),
+        Ok(_) => Err(mismatch),
+        Err(error) if error == OUTPUT_LIMIT => Err(mismatch),
+        Err(error) => Err(error),
+    }
+}
+
+fn zlib_decompress_within(
+    data: &[u8],
+    size_hint: usize,
+    limit: usize,
+) -> Result<Vec<u8>, CodecError> {
     if data.len() < 6 {
         return Err(CodecError::Deflate("zlib stream too short"));
     }
@@ -299,16 +367,25 @@ pub fn zlib_decompress(data: &[u8], size_hint: usize) -> Result<Vec<u8>, CodecEr
     if cmf & 0x0F != 8 {
         return Err(CodecError::Deflate("unsupported zlib compression method"));
     }
+    // CINFO is the base-2 logarithm of the window size minus eight; RFC 1950
+    // stops at 7, a 32K window.
+    if cmf >> 4 > 7 {
+        return Err(CodecError::Deflate("zlib window size exceeds 32K"));
+    }
     if ((u16::from(cmf) << 8) | u16::from(flg)) % 31 != 0 {
         return Err(CodecError::Deflate("zlib header check failed"));
     }
     if flg & 0x20 != 0 {
         return Err(CodecError::Deflate("preset dictionary is not supported"));
     }
-    let out = inflate(&data[2..], size_hint)?;
+    let body = &data[2..];
+    let mut out = Vec::with_capacity(initial_capacity(body.len(), size_hint));
+    let used = inflate_into(body, &mut out, limit)?;
     // The trailing Adler-32 is the stream's own integrity claim; verifying it
     // makes a truncated or corrupted asset fail loudly.
-    let trailer = &data[data.len() - 4..];
+    let trailer = body
+        .get(used..used + 4)
+        .ok_or(CodecError::Deflate("zlib stream ends before its Adler-32"))?;
     let expected = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
     if expected != super::adler32(&out) {
         return Err(CodecError::Deflate("zlib Adler-32 mismatch"));
@@ -347,5 +424,48 @@ mod tests {
     fn reserved_block_type_is_rejected() {
         // BFINAL=1, BTYPE=11
         assert!(inflate(&[0x07], 0).is_err());
+    }
+
+    /// The hint is only a guess at the output size; a guess the stream could
+    /// never reach must not be allocated up front.
+    #[test]
+    fn a_size_hint_the_stream_cannot_reach_is_not_preallocated() {
+        let stream = [0x01, 0x03, 0x00, 0xFC, 0xFF, b'a', b'b', b'c'];
+        assert_eq!(inflate(&stream, usize::MAX).expect("inflate"), b"abc");
+        let zlib = super::super::deflate::zlib_compress(b"abc").expect("compress");
+        assert_eq!(
+            zlib_decompress(&zlib, usize::MAX).expect("decompress"),
+            b"abc"
+        );
+    }
+
+    /// RFC 1950 allows window sizes up to 32K (CINFO 7) and requires the
+    /// decompressor to reject anything larger.
+    #[test]
+    fn a_window_size_above_32k_is_rejected() {
+        let mut stream = super::super::deflate::zlib_compress(b"abc").expect("compress");
+        // CMF 0x88 declares a 64K window; FLG keeps the header check valid.
+        stream[0] = 0x88;
+        stream[1] = 0x1C;
+        assert_eq!((u16::from(stream[0]) << 8 | u16::from(stream[1])) % 31, 0);
+        assert!(zlib_decompress(&stream, 3).is_err());
+    }
+
+    /// The checksum sits right after the compressed data. Bytes after it are
+    /// not part of the stream, and bytes between the two are not the checksum.
+    #[test]
+    fn the_checksum_is_read_where_the_deflate_stream_ends() {
+        let stream = super::super::deflate::zlib_compress(b"hello").expect("compress");
+        let mut padded = stream.clone();
+        padded.extend_from_slice(&[0, 0, 0]);
+        assert_eq!(zlib_decompress(&padded, 5).expect("decompress"), b"hello");
+
+        let (body, checksum) = stream.split_at(stream.len() - 4);
+        let mut displaced = body.to_vec();
+        displaced.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        displaced.extend_from_slice(checksum);
+        assert!(zlib_decompress(&displaced, 5).is_err());
+
+        assert!(zlib_decompress(body, 5).is_err());
     }
 }
