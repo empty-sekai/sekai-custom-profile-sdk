@@ -1,25 +1,22 @@
 //! 文本渲染相关模块。
+//!
+//! 富文本规则、断行与缺字替换都来自 core 的 `tmp_text`；这里只做度量与字形排布。
 
-mod font;
-mod measure;
-pub mod richtext;
 pub(crate) mod simple_raster;
 
 use crate::masterdata::{MasterData, ResolvedColor};
 use crate::sdf::outline::{self as sdf_outline, lookup_or_generate};
-use crate::text::font::resolve_tmp_face_info_constants;
-use crate::text::measure::{
-    resolve_indent_value, resolve_segment_font_size, segments_to_global, transform_char_for_segment,
-};
-use crate::text::richtext::{
-    parse_rich_segments, Indent, InlineAlign, LineHeight, LineIndent, TextSegment,
-};
 use crate::types::TextElement;
+use sekai_profile_renderer_core::tmp_text::{
+    self, glyph, layout as tmp_layout,
+    markup::{CaretCommand, InlineAlign, TextSegment},
+    DEFAULT_LINE_SPACING_FACTOR, PROFILE_FACE,
+};
 #[cfg(feature = "skia-oracle")]
 use skia_safe::Matrix;
 
 /// TMP FontAsset 全局缩放因子 (m_FaceInfo.m_Scale)。
-pub const TEXT_SCALE: f32 = 2.0;
+pub const TEXT_SCALE: f32 = PROFILE_FACE.scale;
 
 /// Final draw-space placement for text that has already been laid out by the
 /// TMP-compatible path. This never changes parsing, advances, line breaks,
@@ -31,12 +28,12 @@ pub struct TextRenderPlacement {
     pub baseline: Option<f32>,
 }
 
-/// Loads the font bytes and immutable TMP face constants for every installed
-/// profile atlas family before a worker announces READY.
+/// Loads the font bytes for every installed profile atlas family before a
+/// worker announces READY.
 ///
-/// Both are process-lifetime caches, so warming them here keeps the first
-/// request from paying a disk read. This does not inspect request text and does
-/// not generate glyphs.
+/// The bytes are a process-lifetime cache, so warming them here keeps the
+/// first request from paying a disk read. This does not inspect request text
+/// and does not generate glyphs.
 pub fn prewarm_profile_font_families<'a>(
     families: impl IntoIterator<Item = &'a str>,
 ) -> Result<(u64, u64), String> {
@@ -45,7 +42,6 @@ pub fn prewarm_profile_font_families<'a>(
     for family in families {
         sdf_outline::load_font_bytes_for_family(family)
             .ok_or_else(|| format!("profile font prewarm could not resolve family {family}"))?;
-        let _ = resolve_tmp_face_info_constants(Some(family));
         count = count.saturating_add(1);
     }
     Ok((count, capture_elapsed_ns(Some(started))))
@@ -84,17 +80,61 @@ fn freetype_advance_x(
         })
 }
 
-fn effective_vertex_alpha_u8(alpha_override: Option<f32>, base_alpha_u8: u8) -> u8 {
-    let override_u8 =
-        alpha_override.map(|alpha| (alpha.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8);
-    override_u8
-        .map(|alpha| alpha.min(base_alpha_u8))
-        .unwrap_or(base_alpha_u8)
+/// The glyph TextMesh Pro draws for `ch`: the declared family first, then
+/// the profile fallback families when atlases are installed, then the
+/// missing-glyph square and the space. `None` leaves nothing to draw.
+fn resolve_draw_char(
+    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    family: Option<&str>,
+    ch: char,
+) -> Option<char> {
+    let family = family?;
+    let fallbacks: &[&str] = if atlases.is_some() {
+        crate::sdf::atlas::PROFILE_TEXT_FALLBACK_FONT_FAMILIES
+    } else {
+        &[]
+    };
+    let face = |index: usize| {
+        if index == 0 {
+            family
+        } else {
+            fallbacks[index - 1]
+        }
+    };
+    glyph::resolve_glyph(ch, 1 + fallbacks.len(), |index, candidate| {
+        let face = face(index);
+        atlases
+            .and_then(|set| set.atlas_for_font_family(face))
+            .is_some_and(|(_, atlas)| atlas.glyph(u32::from(candidate)).is_some())
+            || sdf_outline::glyph_advance_x(Some(face), candidate).is_some()
+    })
+    .map(|choice| choice.glyph)
+}
+
+/// Caret advance of `ch`, drawn as `display`, at `size`.
+fn layout_advance(
+    atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    family: Option<&str>,
+    ch: char,
+    display: char,
+    size: f32,
+) -> f32 {
+    if !glyph::advances_caret(ch) {
+        return 0.0;
+    }
+    resolve_draw_char(atlases, family, display)
+        .and_then(|glyph| freetype_advance_x(atlases, family, glyph, glyph, size))
+        .unwrap_or(0.0)
+}
+
+/// Vertex alpha: the markup alpha caps the element alpha.
+fn effective_vertex_alpha_u8(markup_alpha: u8, base_alpha_u8: u8) -> u8 {
+    markup_alpha.min(base_alpha_u8)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn effective_vertex_alpha(alpha_override: Option<f32>, base_alpha_u8: u8) -> f32 {
-    effective_vertex_alpha_u8(alpha_override, base_alpha_u8) as f32 / 255.0
+fn effective_vertex_alpha(markup_alpha: u8, base_alpha_u8: u8) -> f32 {
+    effective_vertex_alpha_u8(markup_alpha, base_alpha_u8) as f32 / 255.0
 }
 
 fn debug_text_probe_enabled() -> bool {
@@ -118,24 +158,6 @@ pub struct TextLineIndentAnimation {
 pub struct TextLineIndentFrame {
     pub frame: u32,
     pub dx_local: f32,
-}
-
-fn update_cpv_width(max_width_tmp: &mut f32, cpv_xadv_tmp: f32, glyph_hadv_tmp: f32) {
-    *max_width_tmp = (*max_width_tmp).max(cpv_xadv_tmp.abs() + glyph_hadv_tmp);
-}
-
-fn update_cpv_width_for_char(
-    max_width_tmp: &mut f32,
-    cpv_xadv_tmp: f32,
-    glyph_hadv_tmp: f32,
-    ch: char,
-) {
-    // TMP advances the caret through whitespace, but preferredWidth stops at
-    // the last visible glyph. Internal whitespace is captured when the next
-    // visible glyph updates the extent from its post-whitespace xAdvance.
-    if !ch.is_whitespace() {
-        update_cpv_width(max_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp);
-    }
 }
 
 pub fn line_indent_x_animation(
@@ -189,24 +211,10 @@ fn line_indent_program_with_optional_atlases(
     md: &MasterData,
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
 ) -> Option<sekai_profile_renderer_core::LineIndentSource> {
-    let segments = parse_rich_segments(&text.text);
-    let mut percent = None;
-    for segment in segments
-        .iter()
-        .filter(|segment| segment.text.chars().any(|ch| !ch.is_whitespace()))
-    {
-        let LineIndent::Percent(value) = segment.line_indent? else {
-            return None;
-        };
-        if !value.is_finite()
-            || percent.is_some_and(|current: f32| (current - value).abs() > f32::EPSILON)
-        {
-            return None;
-        }
-        percent = Some(value);
-    }
+    let segments = tmp_text::parse_segments(&text.text, text.size);
+    let percent = tmp_layout::uniform_line_indent_percent(&segments)?;
     Some(sekai_profile_renderer_core::LineIndentSource {
-        percent: percent?,
+        percent,
         line_advances_tmp: measure_line_advances_tmp(text, md, &segments, atlases)?,
         rotation_deg: 0.0,
         scale_x: 1.0,
@@ -220,7 +228,9 @@ fn measure_line_advances_tmp(
     segments: &[TextSegment],
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
 ) -> Option<Vec<Vec<f32>>> {
-    let units = measure_text_units_tmp(text, md, segments, atlases)?;
+    // TMP's preferred width, which the line-indent feedback reads, ignores
+    // `<scale>`; only the drawn advance is stretched.
+    let units = measure_text_units_tmp(text, md, segments, atlases, false);
     let authored_lines = segments
         .iter()
         .flat_map(|segment| segment.text.chars())
@@ -254,73 +264,59 @@ fn group_line_advances_tmp(
     (!lines.is_empty()).then_some(lines)
 }
 
+/// One TMP-unit advance per visible character, in the order
+/// [`tmp_text::visible_scalars`] reports them. A caret advance is carried by
+/// the character that follows it. `scaled` applies `<scale>` to the advances.
 fn measure_text_units_tmp(
     text: &TextElement,
     md: &MasterData,
     segments: &[TextSegment],
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-) -> Option<Vec<sekai_profile_renderer_core::MeasuredTextUnit>> {
+    scaled: bool,
+) -> Vec<sekai_profile_renderer_core::MeasuredTextUnit> {
     let family = md.resolve_font(text.font_id);
-    let base_size = text.size;
     let mut units = Vec::new();
-
+    let mut pending_advance = 0.0f32;
     for seg in segments {
-        if seg.text.is_empty() {
-            continue;
+        match seg.caret {
+            Some(CaretCommand::Advance(advance)) => {
+                pending_advance += advance;
+                continue;
+            }
+            Some(CaretCommand::MoveTo(_)) => continue,
+            None => {}
         }
-        let seg_size = resolve_segment_font_size(seg.size, text.size);
-        let measure_size = if seg.subscript || seg.superscript {
-            seg_size * 0.5
+        let measure_size = seg.render_size();
+        let seg_scale = if scaled {
+            seg.scale.unwrap_or(1.0)
         } else {
-            seg_size
+            1.0
         };
-        let seg_scale = seg.scale.unwrap_or(1.0);
-        let cspace_raw_tmp = seg.cspace.unwrap_or(0.0);
-
         for ch in seg.text.chars() {
             if ch == '\n' {
                 units.push(sekai_profile_renderer_core::MeasuredTextUnit {
                     advance: 0.0,
                     hard_break: true,
                 });
+                pending_advance = 0.0;
                 continue;
             }
-            let (display, char_scale) = transform_char_for_segment(ch, seg);
-            let display_char = display.chars().next().unwrap_or(ch);
-            let ft_hadv =
-                freetype_advance_x(atlases, family.as_deref(), ch, display_char, measure_size);
-            // A codepoint absent from the font has no advance and nothing to
-            // draw; it is skipped rather than measured by another engine.
-            let advance = ft_hadv?;
-            let advance_tmp = advance * char_scale * seg_scale * TEXT_SCALE + cspace_raw_tmp;
+            let (display, char_scale) = seg.transform_char(ch);
+            let advance = layout_advance(
+                atlases,
+                family.as_deref(),
+                ch,
+                display,
+                measure_size * char_scale,
+            );
             units.push(sekai_profile_renderer_core::MeasuredTextUnit {
-                advance: advance_tmp,
+                advance: advance * seg_scale * TEXT_SCALE + seg.character_spacing + pending_advance,
                 hard_break: false,
             });
+            pending_advance = 0.0;
         }
     }
-
-    if units.is_empty() && !text.text.is_empty() {
-        for ch in text.text.chars() {
-            if ch == '\n' {
-                units.push(sekai_profile_renderer_core::MeasuredTextUnit {
-                    advance: 0.0,
-                    hard_break: true,
-                });
-                continue;
-            }
-            if ch == '<' || ch == '>' {
-                return None;
-            }
-            units.push(sekai_profile_renderer_core::MeasuredTextUnit {
-                advance: freetype_advance_x(atlases, family.as_deref(), ch, ch, base_size)?
-                    * TEXT_SCALE,
-                hard_break: false,
-            });
-        }
-    }
-
-    Some(units)
+    units
 }
 
 pub fn wrap_rich_text_to_width(
@@ -328,8 +324,8 @@ pub fn wrap_rich_text_to_width(
     md: &MasterData,
     max_width: f32,
 ) -> Option<String> {
-    let segments = parse_rich_segments(&text.text);
-    let units = measure_text_units_tmp(text, md, &segments, None)?;
+    let segments = tmp_text::parse_segments(&text.text, text.size);
+    let units = measure_text_units_tmp(text, md, &segments, None, true);
     sekai_profile_renderer_core::wrap_tmp_markup(&text.text, &units, max_width).ok()
 }
 
@@ -339,8 +335,8 @@ pub(crate) fn wrap_rich_text_to_width_with_atlases(
     max_width: f32,
     atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
 ) -> Option<String> {
-    let segments = parse_rich_segments(&text.text);
-    let units = measure_text_units_tmp(text, md, &segments, Some(atlases))?;
+    let segments = tmp_text::parse_segments(&text.text, text.size);
+    let units = measure_text_units_tmp(text, md, &segments, Some(atlases), true);
     sekai_profile_renderer_core::wrap_tmp_markup(&text.text, &units, max_width).ok()
 }
 
@@ -353,7 +349,6 @@ struct TmpDebugCharProbe {
     seg_scale: f32,
     char_scale: f32,
     baseline_offset_tmp: f32,
-    pos_tmp: Option<f32>,
     x_advance_before_tmp: f32,
     glyph_advance_tmp_for_layout: f32,
     glyph_advance_tmp_for_caret: f32,
@@ -549,8 +544,8 @@ fn capture_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
 /// 对 canvas 施加的链式调用保持**逐字节同源**。debug 顶点输出与渲染都只走这一处，
 /// 保证 debug 数值 == 实际渲染。
 ///
-/// 复合顺序对齐游戏真机（il2cpp FX 块 `v' = C + M·(v−C)`，`M = Rotate·Scale`）：
-/// 绕 glyph center（= anchor）施加 **R 外层、S 内层**，italic skew 最内层（真机
+/// 复合顺序对齐 TMP 的 FX 矩阵（`v' = C + M·(v−C)`，`M = Rotate·Scale`）：
+/// 绕 glyph center（= anchor）施加 **R 外层、S 内层**，italic skew 最内层（TMP
 /// 在 FX 前先改顶点）。即：
 ///   T(anchor) · R(-rotate_deg) · S(scale_x,1) · Skew(skew_x)
 /// 字形随后画在 (-pivot_x, -pivot_y)，使 glyph center 落在 anchor 上。
@@ -570,7 +565,7 @@ fn glyph_local_matrix(op: &DrawCharOp) -> Matrix {
     }
     m.pre_scale((op.scale_x, 1.0), None); // S 内层（先把字形横向拉成矩形）
     if op.skew_x != 0.0 {
-        // italic skew 最内层：真机在 FX 块前先改顶点。
+        // italic skew 最内层：TMP 在 FX 矩阵前先改顶点。
         m.pre_concat(&Matrix::from_affine(&[1.0, 0.0, op.skew_x, 1.0, 0.0, 0.0]));
     }
     m
@@ -695,42 +690,12 @@ fn resolve_text_sdf_glyph_from_affine(
     })
 }
 
-/// One decoration draw a layout run produced alongside its glyph stream. The
-/// SDF paths do not render decorations yet; the layout still records them so
-/// the TMP semantics stay captured for the renderer that will.
-#[allow(dead_code)]
-struct TextDecorationOp {
-    /// Straight (non-premultiplied) RGBA in unit range.
-    rgba: [f32; 4],
-    kind: TextDecorationKind,
-}
-
-#[allow(dead_code)]
-enum TextDecorationKind {
-    /// `<mark>` background rectangle.
-    MarkRect {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    },
-    /// Underline / strikethrough stroke from `(x0, y)` to `(x1, y)`.
-    Line {
-        x0: f32,
-        x1: f32,
-        y: f32,
-        stroke_width: f32,
-    },
-}
-
-/// A completed TMP-compatible layout: the glyph operations, the decoration
-/// draws, and the timings of the phases that produced them. Rendering and
-/// capture both consume this one stream.
+/// A completed TMP-compatible layout: the glyph operations and the timings of
+/// the phases that produced them. Rendering and capture both consume this one
+/// stream.
 struct TextLayoutRun {
     font_family: Option<String>,
     draw_ops: Vec<DrawCharOp>,
-    #[allow(dead_code)]
-    decorations: Vec<TextDecorationOp>,
     timings: TextSdfCaptureTimings,
 }
 
@@ -754,7 +719,7 @@ pub(crate) fn capture_text_sdf_from_affine(
     };
     let emit_started = Some(std::time::Instant::now());
     for op in &run.draw_ops {
-        if op.ch.chars().all(char::is_whitespace) {
+        if !op.ch.chars().any(glyph::is_drawn) {
             continue;
         }
         observer(resolve_text_sdf_glyph_from_base_affine(
@@ -790,7 +755,7 @@ pub(crate) fn capture_text_sdf_with_placement(
     };
     let emit_started = Some(std::time::Instant::now());
     for op in &run.draw_ops {
-        if op.ch.chars().all(char::is_whitespace) {
+        if !op.ch.chars().any(glyph::is_drawn) {
             continue;
         }
         observer(resolve_text_sdf_glyph_from_base_affine(
@@ -848,7 +813,7 @@ fn validate_sdf_text_segments(segments: &[TextSegment]) -> Result<(), TextSdfCap
         if !segment.text.chars().any(|ch| ch != '\n') {
             continue;
         }
-        let feature = if segment.mark_color.is_some() {
+        let feature = if segment.mark.is_some() {
             Some("text mark")
         } else if segment.underline {
             Some("text underline")
@@ -901,18 +866,18 @@ fn layout_text_ops(
         );
     }
 
-    let segments = parse_rich_segments(&text.text);
+    let segments = tmp_text::parse_segments(&text.text, text.size);
     validate_sdf_text_segments(&segments)?;
-    let global = segments_to_global(&segments);
+    let lines = tmp_text::split_lines(&segments);
     let debug_probe = debug_text_probe_enabled();
     tracing::debug!(
         font_id = text.font_id,
         color_id = text.color_id,
         size = text.size,
         seg_count = segments.len(),
+        line_count = lines.len(),
         raw_len = text.text.len(),
         raw_text = %text.text.chars().take(80).collect::<String>(),
-        clean_text = %global.clean.chars().take(80).collect::<String>(),
         "draw_text 入口"
     );
     capture_timings.rich_parse_ns = capture_elapsed_ns(rich_parse_started);
@@ -936,7 +901,6 @@ fn layout_text_ops(
         return Ok(TextLayoutRun {
             font_family: resolved_name,
             draw_ops: Vec::new(),
-            decorations: Vec::new(),
             timings: capture_timings,
         });
     }
@@ -945,15 +909,7 @@ fn layout_text_ops(
     capture_timings.font_resolve_ns = capture_elapsed_ns(font_resolve_started);
 
     let layout_setup_started = capture_timing_enabled.then(std::time::Instant::now);
-    const TMP_POINT_SIZE: f32 = 75.0;
-    const TMP_ASCENT_RATIO: f32 = 66.0 / 75.0;
-    const TMP_DESCENT_RATIO: f32 = 9.0 / 75.0;
-    const SDF_DILATE_SCALE: f32 = 4.5;
-    const TMP_POINT_SIZE_OUTLINE: f32 = 75.0;
-
-    let tmp_ascent = -(TMP_ASCENT_RATIO * base_size);
-    let tmp_descent = TMP_DESCENT_RATIO * base_size;
-    let _base_font_h = -tmp_ascent + tmp_descent;
+    let face = PROFILE_FACE;
     let align = text.text_type & 0x07;
 
     let def_color = md.resolve_color(text.color_id).unwrap_or(ResolvedColor {
@@ -971,42 +927,27 @@ fn layout_text_ops(
         "draw_text 颜色解析"
     );
 
-    let clean_owned: String;
-    let clean: &str = match global.clean.strip_suffix('\n') {
-        Some(s) => {
-            clean_owned = s.to_string();
-            &clean_owned
-        }
-        None => &global.clean,
-    };
-    let line_texts: Vec<&str> = clean.split('\n').collect();
-    tracing::debug!(lines=%line_texts.len(), clean_bytes=%clean.len(), clean_escaped=%clean.escape_debug().to_string().chars().take(200).collect::<String>(), "text_lines");
+    // Font size of each line feed: a line without characters takes its
+    // metrics from the line feed that ends it.
+    let line_feed_sizes: Vec<f32> = segments
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .text
+                .chars()
+                .filter(|ch| *ch == '\n')
+                .map(|_| segment.font_size)
+        })
+        .collect();
+    let first_size = segments
+        .first()
+        .map_or(base_size, |segment| segment.font_size);
 
-    let mut line_segs: Vec<Vec<&TextSegment>> = vec![Vec::new()];
-    for seg in &segments {
-        for (j, part) in seg.text.split('\n').enumerate() {
-            if j > 0 {
-                line_segs.push(Vec::new());
-            }
-            if !part.is_empty() {
-                line_segs
-                    .last_mut()
-                    .expect("line_segs 应至少有一行")
-                    .push(seg);
-            }
-        }
-    }
-
-    let mut line_widths: Vec<f32> = Vec::new();
-    let mut rect_widths: Vec<f32> = Vec::new();
-    let mut line_max_sizes: Vec<f32> = Vec::new();
+    let mut line_widths: Vec<f32> = Vec::with_capacity(lines.len());
+    let mut rect_widths: Vec<f32> = Vec::with_capacity(lines.len());
+    let mut line_max_sizes: Vec<f32> = Vec::with_capacity(lines.len());
     let mut tmp_line_probes: Vec<TmpDebugLineProbe> = Vec::new();
     let mut tmp_char_probes: Vec<TmpDebugCharProbe> = Vec::new();
-    let seg_cleans: Vec<String> = segments
-        .iter()
-        .map(|s| s.text.chars().filter(|c| *c != '\n').collect())
-        .collect();
-    let mut seg_consumed: Vec<usize> = vec![0; segments.len()];
 
     // 独立 caret 链：追踪 TMP 真实 xAdvance（乘 scale），与 CPV preferredWidth 链分离。
     let mut final_caret_xadv_tmp = 0.0f32;
@@ -1016,148 +957,93 @@ fn layout_text_ops(
     capture_timings.layout_setup_ns = capture_elapsed_ns(layout_setup_started);
 
     let measure_started = capture_timing_enabled.then(std::time::Instant::now);
-    for (line_idx, line_str) in line_texts.iter().enumerate() {
+    for (line_idx, line) in lines.iter().enumerate() {
         let mut w_scaled = 0.0f32;
         let mut max_seg_size = 0.0f32;
-        let mut remaining = *line_str;
         let mut prev_cspace: Option<f32> = None;
         let mut cpv_xadv_tmp = 0.0f32;
         let mut max_cpv_width_tmp = 0.0f32;
         let mut has_chars = false;
-        // TMP CPV 在每个可见字符前用当前 xAdvance 计算宽度；<pos> 只改 caret。
-        let mut current_position: Option<Indent> = None;
         // caret 链：<scale> 影响字符前进，与 CPV width 链独立。
         let mut caret_xadv_tmp = 0.0f32;
-        let mut caret_position: Option<Indent> = None;
+        let mut line_text = String::new();
 
-        for (si, seg) in segments.iter().enumerate() {
-            if remaining.is_empty() {
-                break;
-            }
-            if let Some(fixed_advance) = seg.fixed_advance {
-                let seg_font_size = resolve_segment_font_size(seg.size, text.size);
-                if seg.position != current_position {
-                    if let Some(pos_shift) = resolve_indent_value(seg.position, seg_font_size, 0.0)
-                    {
-                        cpv_xadv_tmp = pos_shift * TEXT_SCALE;
-                        caret_xadv_tmp = pos_shift * TEXT_SCALE;
+        for piece in line {
+            let seg = piece.segment;
+            match seg.caret {
+                Some(CaretCommand::Advance(advance)) => {
+                    w_scaled += advance / TEXT_SCALE;
+                    cpv_xadv_tmp += advance;
+                    caret_xadv_tmp += advance;
+                    if advance >= 0.0 {
+                        max_cpv_width_tmp = tmp_layout::extend_preferred_width(
+                            max_cpv_width_tmp,
+                            cpv_xadv_tmp,
+                            0.0,
+                        );
+                        has_chars = true;
+                        max_seg_size = max_seg_size.max(seg.font_size);
+                    } else {
+                        // `</cspace>` already took the trailing spacing back.
+                        prev_cspace = None;
                     }
-                    current_position = seg.position;
-                    caret_position = seg.position;
+                    continue;
                 }
-                let adv = fixed_advance / TEXT_SCALE;
-                w_scaled += adv;
-                cpv_xadv_tmp += fixed_advance;
-                caret_xadv_tmp += fixed_advance;
-                update_cpv_width(&mut max_cpv_width_tmp, cpv_xadv_tmp, 0.0);
-                has_chars = true;
-                if seg_font_size > max_seg_size {
-                    max_seg_size = seg_font_size;
-                }
-                continue;
-            }
-            let sc = &seg_cleans[si];
-            if sc.is_empty() || seg_consumed[si] >= sc.len() {
-                continue;
-            }
-
-            let seg_rest = &sc[seg_consumed[si]..];
-            let part = if remaining.starts_with(seg_rest) {
-                remaining = &remaining[seg_rest.len()..];
-                seg_consumed[si] = sc.len();
-                seg_rest.to_string()
-            } else if seg_rest.starts_with(remaining) {
-                let p = remaining.to_string();
-                seg_consumed[si] += remaining.len();
-                remaining = "";
-                p
-            } else {
-                continue;
-            };
-            if part.is_empty() {
-                continue;
-            }
-
-            let seg_size = resolve_segment_font_size(seg.size, text.size);
-            if seg.position != current_position {
-                if let Some(pos_shift) = resolve_indent_value(seg.position, seg_size, 0.0) {
-                    cpv_xadv_tmp = pos_shift * TEXT_SCALE;
-                    // TMP 在 <pos> 处重置 preferredWidth 追踪
+                Some(CaretCommand::MoveTo(offset)) => {
+                    // TMP 在 <pos> 处重置 preferredWidth 追踪；百分比在此阶段没有容器宽度。
+                    let shift = tmp_layout::offset_draw_units(offset, 0.0) * TEXT_SCALE;
+                    cpv_xadv_tmp = shift;
+                    caret_xadv_tmp = shift;
                     max_cpv_width_tmp = 0.0;
+                    continue;
                 }
-                current_position = seg.position;
+                None => {}
             }
-            if seg.position != caret_position {
-                if let Some(pos_shift) = resolve_indent_value(seg.position, seg_size, 0.0) {
-                    caret_xadv_tmp = pos_shift * TEXT_SCALE;
-                }
-                caret_position = seg.position;
-            }
-            let measure_size = if seg.subscript || seg.superscript {
-                seg_size * 0.5
-            } else {
-                seg_size
-            };
-            let part_chars: Vec<char> = part.chars().collect();
-            let cspace_raw_tmp = seg.cspace.unwrap_or(0.0);
+
+            let measure_size = seg.render_size();
+            let cspace_raw_tmp = seg.character_spacing;
             let seg_scale = seg.scale.unwrap_or(1.0);
             // voffset 用于 vertical bounds 追踪（TMP 单位，Y-up）。
-            let voffset_tmp = seg.voffset.unwrap_or(0.0);
+            let voffset_tmp = seg.baseline_offset;
+            let glyph_asc_tmp = face.font_scale(measure_size) * face.ascent_line;
+            let glyph_des_tmp = -face.font_scale(measure_size) * face.descent_line;
             let mut measured = 0.0f32;
-            for ch in &part_chars {
-                let (display, char_scale) = transform_char_for_segment(*ch, seg);
+            let mut n_chars = 0usize;
+            for ch in piece.text.chars() {
+                let (display, char_scale) = seg.transform_char(ch);
                 // Advances come from FreeType only: it is the engine TMP itself
-                // uses, and it reports the true subpixel advance. Skia rounds
-                // every advance to a whole pixel (up to 0.5px per glyph), which
-                // accumulates along a run and visibly deforms arc-laid text.
-                // Codepoints the declared atlas lacks are pre-warmed into the
-                // fallback atlas before rendering, so the atlas is authoritative
-                // here and on-demand generation stays off the request path.
-                let ft_hadv = freetype_advance_x(
+                // uses, and it reports the true subpixel advance. Codepoints the
+                // declared atlas lacks are pre-warmed into the fallback atlas
+                // before rendering, so the atlas is authoritative here and
+                // on-demand generation stays off the request path.
+                let glyph_hadv_tmp_layout = layout_advance(
                     capture_atlases,
                     resolved_name_ref,
-                    *ch,
-                    display.chars().next().unwrap_or(*ch),
-                    measure_size,
-                );
-                let glyph_hadv_tmp_layout = ft_hadv.unwrap_or(0.0) * char_scale * TEXT_SCALE;
+                    ch,
+                    display,
+                    measure_size * char_scale,
+                ) * TEXT_SCALE;
                 measured += glyph_hadv_tmp_layout * seg_scale / TEXT_SCALE;
-                update_cpv_width_for_char(
-                    &mut max_cpv_width_tmp,
+                max_cpv_width_tmp = tmp_layout::extend_preferred_width_for_char(
+                    max_cpv_width_tmp,
                     cpv_xadv_tmp,
                     glyph_hadv_tmp_layout,
-                    *ch,
+                    ch,
                 );
                 // caret 链：字符前进乘以 scale。
                 let glyph_hadv_tmp_caret = glyph_hadv_tmp_layout * seg_scale;
-                // vertical bounds：字形在 voffset 偏移后的上下极值。
-                // TMP 中 ascent = seg_size * (ASCENT_LINE / POINT_SIZE) * TEXT_SCALE，
-                // descent 同理。voffset 向上为正（Y-up）。
-                let glyph_asc_tmp = measure_size * (66.0 / 75.0) * TEXT_SCALE;
-                let glyph_des_tmp = measure_size * (9.0 / 75.0) * TEXT_SCALE;
-                let glyph_top = voffset_tmp + glyph_asc_tmp;
-                let glyph_bottom = voffset_tmp - glyph_des_tmp;
-                if glyph_top > vbounds_max_top_tmp {
-                    vbounds_max_top_tmp = glyph_top;
-                }
-                if glyph_bottom < vbounds_min_bottom_tmp {
-                    vbounds_min_bottom_tmp = glyph_bottom;
-                }
+                vbounds_max_top_tmp = vbounds_max_top_tmp.max(voffset_tmp + glyph_asc_tmp);
+                vbounds_min_bottom_tmp = vbounds_min_bottom_tmp.min(voffset_tmp - glyph_des_tmp);
                 if debug_probe {
                     let before = cpv_xadv_tmp;
                     let after = cpv_xadv_tmp + glyph_hadv_tmp_layout + cspace_raw_tmp;
                     tmp_char_probes.push(TmpDebugCharProbe {
                         line_index: line_idx,
-                        ch: display.clone(),
+                        ch: display.to_string(),
                         seg_size_tmp: measure_size,
                         seg_scale,
                         char_scale,
                         baseline_offset_tmp: voffset_tmp,
-                        pos_tmp: seg.position.and_then(|pos| match pos {
-                            Indent::Pixels(v) => Some(v),
-                            Indent::Em(v) => Some(v * text.size),
-                            Indent::Percent(_) => None,
-                        }),
                         x_advance_before_tmp: before,
                         glyph_advance_tmp_for_layout: glyph_hadv_tmp_layout,
                         glyph_advance_tmp_for_caret: glyph_hadv_tmp_caret,
@@ -1165,61 +1051,30 @@ fn layout_text_ops(
                         preferred_width_candidate_tmp: before.abs() + glyph_hadv_tmp_layout,
                     });
                 }
-                cpv_xadv_tmp = cpv_xadv_tmp + glyph_hadv_tmp_layout + cspace_raw_tmp;
-                caret_xadv_tmp = caret_xadv_tmp + glyph_hadv_tmp_caret + cspace_raw_tmp;
+                cpv_xadv_tmp += glyph_hadv_tmp_layout + cspace_raw_tmp;
+                caret_xadv_tmp += glyph_hadv_tmp_caret + cspace_raw_tmp;
+                n_chars += 1;
             }
-            let cspace = seg.cspace.unwrap_or(0.0) / TEXT_SCALE;
-            let n_chars = part_chars.len();
-            let cspace_total = cspace * n_chars as f32;
-            w_scaled += measured + cspace_total;
+            let cspace = cspace_raw_tmp / TEXT_SCALE;
+            w_scaled += measured + cspace * n_chars as f32;
             has_chars = true;
             prev_cspace = Some(cspace);
-            if seg_size > max_seg_size {
-                max_seg_size = seg_size;
-            }
-        }
-
-        if !remaining.is_empty() {
-            let mut measured = 0.0f32;
-            for ch in remaining.chars() {
-                let advance =
-                    freetype_advance_x(capture_atlases, resolved_name_ref, ch, ch, base_size)
-                        .unwrap_or(0.0);
-                measured += advance;
-                let glyph_hadv_tmp = advance * TEXT_SCALE;
-                update_cpv_width_for_char(&mut max_cpv_width_tmp, cpv_xadv_tmp, glyph_hadv_tmp, ch);
-                cpv_xadv_tmp += glyph_hadv_tmp;
-                caret_xadv_tmp += glyph_hadv_tmp;
-                // vertical bounds：无 voffset 的 fallback 字符。
-                let glyph_asc_tmp = base_size * (66.0 / 75.0) * TEXT_SCALE;
-                let glyph_des_tmp = base_size * (9.0 / 75.0) * TEXT_SCALE;
-                if glyph_asc_tmp > vbounds_max_top_tmp {
-                    vbounds_max_top_tmp = glyph_asc_tmp;
-                }
-                if -glyph_des_tmp < vbounds_min_bottom_tmp {
-                    vbounds_min_bottom_tmp = -glyph_des_tmp;
-                }
-            }
-            w_scaled += measured * global.scale;
-            has_chars = true;
-            if base_size > max_seg_size {
-                max_seg_size = base_size;
+            max_seg_size = max_seg_size.max(seg.font_size);
+            if debug_probe {
+                line_text.push_str(piece.text);
             }
         }
 
         if max_seg_size < 0.001 {
-            // TMP 在空行时用当前 active style 的 metrics（\n 字符继承 active size）。
-            // 优先取最后一个已消费 segment 的 size；若无（首行空），取首个 segment 的 size
-            // （即 \n 发生时的 active style）。
-            let active_size = segments
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(si, _)| seg_consumed[*si] > 0)
-                .or_else(|| segments.iter().enumerate().next())
-                .map(|(_, seg)| resolve_segment_font_size(seg.size, text.size))
-                .unwrap_or(base_size);
-            max_seg_size = active_size;
+            max_seg_size = line_feed_sizes
+                .get(line_idx)
+                .or_else(|| {
+                    line_idx
+                        .checked_sub(1)
+                        .and_then(|prev| line_feed_sizes.get(prev))
+                })
+                .copied()
+                .unwrap_or(first_size);
         }
 
         // TMP CENTER 对齐的 lineWidth = caret_xAdvance + trailing_cspace。
@@ -1240,7 +1095,7 @@ fn layout_text_ops(
         if debug_probe {
             tmp_line_probes.push(TmpDebugLineProbe {
                 line_index: line_idx,
-                text: (*line_str).to_string(),
+                text: line_text,
                 line_width_tmp_like: w_scaled * TEXT_SCALE,
                 preferred_width_tmp: max_cpv_width_tmp,
                 max_seg_size_tmp: max_seg_size,
@@ -1251,36 +1106,20 @@ fn layout_text_ops(
     }
 
     let base_line_h = text.size;
-    let lh_override: Option<f32> = segments.iter().find_map(|segment| {
-        segment.line_height.map(|spec| {
-            let size = resolve_segment_font_size(segment.size, text.size);
-            match spec {
-                LineHeight::Pixels(value) => value,
-                LineHeight::Em(value) => value * size,
-                LineHeight::Percent(value) => {
-                    FACE_LINE_HEIGHT * value / 100.0 * (size / TMP_POINT_SIZE * TEXT_SCALE)
-                }
-            }
-        })
-    });
+    let lh_override: Option<f32> = segments.iter().find_map(|segment| segment.line_height);
     let n_lines = line_max_sizes.len();
 
-    // TMP lineGap 实测为 75.625（= m_LineHeight - (ascentLine - descentLine) + 0.625）
-    // 0.625 是 TMP 内部的行间距修正项（通过 Frida 多数据点拟合确认）
-    const ASCENT_LINE: f32 = 66.0;
-    const DESCENT_LINE: f32 = -9.0;
-    /// Face line height of the profile fonts, in the same units as the sampling
-    /// point size. A percentage line height is a share of this value.
-    const FACE_LINE_HEIGHT: f32 = 150.0;
-    const LINE_GAP: f32 = FACE_LINE_HEIGHT - (-DESCENT_LINE + ASCENT_LINE) + 0.625;
+    // TMP lineGap = m_LineHeight - (ascentLine - descentLine) + 0.625；0.625 是
+    // 与游戏行距对齐的经验修正项。
+    let line_gap = face.line_height - (face.ascent_line - face.descent_line) + 0.625;
 
     let mut line_asc: Vec<f32> = Vec::with_capacity(n_lines);
     let mut line_des: Vec<f32> = Vec::with_capacity(n_lines);
     for i in 0..n_lines {
         let ms = line_max_sizes[i];
-        let es = (ms / TMP_POINT_SIZE) * TEXT_SCALE;
-        let asc = es * ASCENT_LINE;
-        let des = es * DESCENT_LINE;
+        let es = face.font_scale(ms);
+        let asc = es * face.ascent_line;
+        let des = es * face.descent_line;
         if i == 0 || ms > 0.001 {
             line_asc.push(asc);
             line_des.push(des);
@@ -1291,15 +1130,20 @@ fn layout_text_ops(
     }
 
     let mut line_offsets = vec![0.0f32; n_lines];
-    let ls_tmp = text.line_spacing * base_line_h * TEXT_SCALE / TMP_POINT_SIZE;
+    let ls_tmp = tmp_text::face::line_spacing_offset(
+        text.line_spacing,
+        base_line_h,
+        &face,
+        DEFAULT_LINE_SPACING_FACTOR,
+    );
     for i in 1..n_lines {
         let delta = if let Some(lh) = lh_override {
             lh + ls_tmp
         } else {
             let asc_new = line_asc[i];
             let des_prev = line_des[i - 1];
-            let base_scale = (base_line_h / TMP_POINT_SIZE) * TEXT_SCALE;
-            asc_new + des_prev.abs() + LINE_GAP * base_scale + ls_tmp
+            let base_scale = face.font_scale(base_line_h);
+            asc_new + des_prev.abs() + line_gap * base_scale + ls_tmp
         };
         line_offsets[i] = line_offsets[i - 1] + delta;
     }
@@ -1332,14 +1176,13 @@ fn layout_text_ops(
     };
 
     let total_h_tmp = effective_max_asc - effective_min_des;
-    let _total_h = total_h_tmp / TEXT_SCALE;
     let anchor_base = (effective_max_asc + effective_min_des) / (2.0 * TEXT_SCALE);
     let underlay = resolve_outline_params(outline_override, text, md);
     let max_rw = rect_widths.iter().cloned().fold(0.0f32, f32::max);
     const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
     let box_w = max_rw + PAD_ORIGINAL;
 
-    let any_italic = segments.iter().any(|seg| seg.italic);
+    let any_italic = segments.iter().any(|seg| seg.italic.is_some());
     let any_bold = segments.iter().any(|seg| seg.bold);
     let debug_align_hex = match align {
         2 => "0x1000202".to_string(),
@@ -1401,19 +1244,22 @@ fn layout_text_ops(
 
     capture_timings.measure_ns = capture_elapsed_ns(measure_started);
     let command_build_started = capture_timing_enabled.then(std::time::Instant::now);
-    let mut render_consumed: Vec<usize> = vec![0; segments.len()];
     let mut draw_ops = Vec::new();
-    let mut decorations = Vec::new();
+    let mut line_op_ranges = Vec::with_capacity(lines.len());
+    let default_align = segments.first().and_then(|segment| segment.align);
 
-    for (i, line_str) in line_texts.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let sw = line_widths[i];
-        let line_align = line_segs
-            .get(i)
-            .and_then(|ls| ls.first())
-            .and_then(|seg| seg.align)
-            .or(global.align);
+        let first_text = line
+            .iter()
+            .find(|piece| piece.segment.caret.is_none())
+            .map(|piece| piece.segment);
+        let line_align = first_text
+            .and_then(|segment| segment.align)
+            .or(default_align);
+        // Justified and flush lines are not stretched; they start at the left.
         let effective_align = match line_align {
-            Some(InlineAlign::Left) => 1,
+            Some(InlineAlign::Left | InlineAlign::Justified | InlineAlign::Flush) => 1,
             Some(InlineAlign::Center) => 2,
             Some(InlineAlign::Right) => 4,
             None => align,
@@ -1424,171 +1270,53 @@ fn layout_text_ops(
             _ => -box_w / 2.0,
         };
         let ly = anchor_base + line_offsets[i] / TEXT_SCALE;
-        let mut cursor_x = lx;
-        // 解析后的 position 是状态；同一个 <pos> 跨颜色/voffset 分段时只应跳转一次。
-        let mut current_position: Option<Indent> = None;
+        let mut cursor_x = tmp_layout::line_start(lx, sw, max_rw, effective_align, first_text);
 
-        if let Some(li_seg) = line_segs.get(i).and_then(|ls| ls.first()) {
-            if let Some(ref indent) = li_seg.indent {
-                match indent {
-                    Indent::Percent(p) => {
-                        let pct = *p / 100.0;
-                        if pct < 1.0 {
-                            const TMP_PAD: f32 = 64.0;
-                            let sw_canvas = sw * TEXT_SCALE;
-                            let rect = (sw_canvas + TMP_PAD) / (1.0 - pct);
-                            let indent_skia = rect * pct / TEXT_SCALE;
-                            cursor_x = match effective_align {
-                                2 => (indent_skia - sw) / 2.0,
-                                4 => rect / (2.0 * TEXT_SCALE) - sw,
-                                _ => rect * (pct - 0.5) / TEXT_SCALE,
-                            };
-                        }
-                    }
-                    Indent::Pixels(px) => {
-                        cursor_x += px / TEXT_SCALE;
-                    }
-                    Indent::Em(em) => {
-                        let em_px = em * resolve_segment_font_size(li_seg.size, text.size);
-                        cursor_x += em_px / TEXT_SCALE;
-                    }
+        let ops_start = draw_ops.len();
+        for piece in line {
+            let seg = piece.segment;
+            match seg.caret {
+                Some(CaretCommand::Advance(advance)) => {
+                    cursor_x += advance / TEXT_SCALE;
+                    continue;
                 }
-            }
-            if let Some(ref li) = li_seg.line_indent {
-                match li {
-                    LineIndent::Percent(p) => {
-                        let pct = *p / 100.0;
-                        if let Some(terminal_x) =
-                            static_line_indent_terminal_x(pct, sw, max_rw, effective_align)
-                        {
-                            cursor_x = terminal_x;
-                        }
-                    }
-                    LineIndent::Pixels(px) => {
-                        cursor_x = lx + px;
-                    }
+                Some(CaretCommand::MoveTo(offset)) => {
+                    cursor_x = lx + tmp_layout::offset_draw_units(offset, box_w);
+                    continue;
                 }
-            }
-        }
-
-        let mut remaining = *line_str;
-        for (si, seg) in segments.iter().enumerate() {
-            if remaining.is_empty() {
-                break;
-            }
-            let sc = &seg_cleans[si];
-            if sc.is_empty() || render_consumed[si] >= sc.len() {
-                continue;
-            }
-            let seg_rest = &sc[render_consumed[si]..];
-            let part = if remaining.starts_with(seg_rest) {
-                remaining = &remaining[seg_rest.len()..];
-                render_consumed[si] = sc.len();
-                seg_rest.to_string()
-            } else if seg_rest.starts_with(remaining) {
-                let p = remaining.to_string();
-                render_consumed[si] += remaining.len();
-                remaining = "";
-                p
-            } else {
-                continue;
-            };
-            if part.is_empty() {
-                continue;
+                None => {}
             }
 
-            let seg_size = resolve_segment_font_size(seg.size, text.size);
+            let render_size = seg.render_size();
             let seg_scale = seg.scale.unwrap_or(1.0);
-            if seg.position != current_position {
-                if let Some(pos_shift) = resolve_indent_value(seg.position, seg_size, box_w) {
-                    cursor_x = lx + pos_shift;
-                }
-                current_position = seg.position;
-            }
-            let face_info = resolve_tmp_face_info_constants(resolved_name_ref);
-            let point_size = face_info.point_size.max(1.0);
-            let (render_size, mut baseline_shift) = if seg.subscript {
-                (
-                    seg_size * face_info.subscript_size,
-                    (face_info.subscript_offset * seg_size / point_size) / TEXT_SCALE,
-                )
-            } else if seg.superscript {
-                (
-                    seg_size * face_info.superscript_size,
-                    (face_info.superscript_offset * seg_size / point_size) / TEXT_SCALE,
-                )
-            } else {
-                (seg_size, 0.0)
-            };
-            if let Some(vo) = seg.voffset {
-                baseline_shift = -vo / TEXT_SCALE;
-            }
-            let cspace_px = seg.cspace.unwrap_or(0.0) / TEXT_SCALE;
-            let (sr, sg, sb) = seg.color.unwrap_or((def_color.r, def_color.g, def_color.b));
+            // TMP 基线偏移 Y-up；绘制空间 Y-down。
+            let baseline_shift = -seg.baseline_offset / TEXT_SCALE;
+            let cspace_px = seg.character_spacing / TEXT_SCALE;
+            let [sr, sg, sb] = seg.color.unwrap_or([def_color.r, def_color.g, def_color.b]);
             let sa_u8 = effective_vertex_alpha_u8(seg.alpha, def_color.a);
-            let sa = sa_u8 as f32 / 255.0;
+            let italic_slope = seg.italic.map(|angle| angle as f32 * 0.01);
+            let mono_cell = seg.monospace.map_or(0.0, |cell| cell / TEXT_SCALE);
 
-            let part_chars: Vec<char> = part.chars().collect();
-            let mut measured = 0.0f32;
-            for ch in &part_chars {
-                let (display, char_scale) = transform_char_for_segment(*ch, seg);
-                // One glyph is drawn per character, so the mark background is
-                // measured over the same first codepoint the draw loop renders.
-                let display_char = display.chars().next().unwrap_or(*ch);
-                measured += freetype_advance_x(
-                    capture_atlases,
-                    resolved_name_ref,
-                    *ch,
-                    display_char,
-                    render_size,
-                )
-                .unwrap_or(0.0)
-                    * seg_scale
-                    * char_scale;
-            }
-
-            if let Some((mr, mg, mb, ma)) = seg.mark_color {
-                decorations.push(TextDecorationOp {
-                    rgba: [
-                        mr as f32 / 255.0,
-                        mg as f32 / 255.0,
-                        mb as f32 / 255.0,
-                        ma as f32 / 255.0,
-                    ],
-                    kind: TextDecorationKind::MarkRect {
-                        x: cursor_x,
-                        y: ly - render_size * 0.85,
-                        width: measured,
-                        height: render_size * 1.1,
-                    },
-                });
-            }
-
-            let seg_chars: Vec<char> = part_chars;
-            for ch in &seg_chars {
-                let (ch_str, char_scale) = transform_char_for_segment(*ch, seg);
-                let effective_scale = seg_scale * char_scale;
-                let mono_cell = resolve_indent_value(seg.monospace, seg_size, box_w)
-                    .map(|width| {
-                        if seg.duospace && matches!(*ch, '.' | ':' | ',') {
-                            width / 2.0
-                        } else {
-                            width
-                        }
-                    })
-                    .unwrap_or(0.0);
+            for ch in piece.text.chars() {
+                let (display, char_scale) = seg.transform_char(ch);
+                // <smallcaps> scales the whole glyph, not just its width.
+                let glyph_size = render_size * char_scale;
+                let Some(glyph_char) =
+                    resolve_draw_char(capture_atlases, resolved_name_ref, display)
+                else {
+                    continue;
+                };
                 // 查询 SDF glyph，获取 FreeType 度量（与 TMP FontEngine 同源，NO_HINTING）
                 let sdf_glyph = if capture_atlases.is_some() {
                     None
                 } else {
-                    lookup_or_generate(resolved_name_ref, *ch)
+                    lookup_or_generate(resolved_name_ref, glyph_char)
                 };
-                let metric_ch = ch_str.chars().next().unwrap_or(*ch);
                 let atlas_metrics =
-                    atlas_layout_glyph_metrics(capture_atlases, resolved_name_ref, metric_ch);
+                    atlas_layout_glyph_metrics(capture_atlases, resolved_name_ref, glyph_char);
                 let ft_scale = atlas_metrics.map_or_else(
-                    || render_size / sdf_outline::sampling_point_size(),
-                    |metrics| render_size / metrics.point_size,
+                    || glyph_size / sdf_outline::sampling_point_size(),
+                    |metrics| glyph_size / metrics.point_size,
                 );
                 let ft_advance_x = atlas_metrics
                     .map(|metrics| metrics.advance_x * ft_scale)
@@ -1596,7 +1324,7 @@ fn layout_text_ops(
                     .or_else(|| {
                         // Outline-free glyphs (the space) carry an hmtx advance
                         // but cannot produce an SDF.
-                        sdf_outline::glyph_advance_x(resolved_name_ref, *ch)
+                        sdf_outline::glyph_advance_x(resolved_name_ref, glyph_char)
                             .map(|advance| advance * ft_scale)
                     });
                 let ft_pivot_x = atlas_metrics
@@ -1606,7 +1334,6 @@ fn layout_text_ops(
                             .as_ref()
                             .map(|g| (g.plane_bearing_x() + g.plane_width() / 2.0) * ft_scale)
                     });
-                // 优先使用 FreeType 度量计算 pivot，回退到 Skia
                 // A glyph with no FreeType metrics has no outline, so it is not
                 // rasterized and its pivot is never consumed.
                 let pivot_x = ft_pivot_x.unwrap_or(0.0);
@@ -1639,23 +1366,21 @@ fn layout_text_ops(
                         })
                     });
                 let (half_w, half_h) = ft_half_extents.unwrap_or((0.0, 0.0));
-                // TMP italic shear 公式（从源码 + Frida 5 字符验证推导）：
-                // midPoint = height/2 + TMP_SPREAD; center_shift = 0.35 * (bY - h - spread) * base_eS
-                // 等价于：shear_cx = 0.35 * (bearingY - height - spread) * ft_scale
-                // base_eS 不含 scale 标签（center 在 scale 变换下不变，已验证）
-                let shear_cx = if seg.italic {
-                    if let Some(metrics) = atlas_metrics {
-                        0.35 * (metrics.bearing_y - metrics.height - metrics.spread) * ft_scale
-                    } else if let Some(g) = sdf_glyph.as_ref() {
-                        let bearing_y = g.plane_bearing_y();
-                        let height = g.plane_height();
-                        let spread = sdf_outline::sampling_spread();
-                        0.35 * (bearing_y - height - spread) * ft_scale
-                    } else {
-                        0.0
+                // TMP italic：顶点按 slope = angle / 100 剪切，零剪切线在
+                // midPoint = height/2 + spread 处。skew 绕墨迹中心施加，故中心需额外平移
+                // shear_cx = slope * (bearingY - height - spread) * ft_scale。
+                let shear_cx = match italic_slope {
+                    Some(slope) => {
+                        if let Some(metrics) = atlas_metrics {
+                            slope * (metrics.bearing_y - metrics.height - metrics.spread) * ft_scale
+                        } else if let Some(g) = sdf_glyph.as_ref() {
+                            let spread = sdf_outline::sampling_spread();
+                            slope * (g.plane_bearing_y() - g.plane_height() - spread) * ft_scale
+                        } else {
+                            0.0
+                        }
                     }
-                } else {
-                    0.0
+                    None => 0.0,
                 };
                 let draw_x = if mono_cell > 0.0 {
                     // pivot_x is the FreeType glyph-ink centre.
@@ -1665,7 +1390,7 @@ fn layout_text_ops(
                 };
 
                 draw_ops.push(DrawCharOp {
-                    ch: ch_str,
+                    ch: glyph_char.to_string(),
                     x: draw_x,
                     y: ly + baseline_shift,
                     pivot_x,
@@ -1673,16 +1398,14 @@ fn layout_text_ops(
                     half_w,
                     half_h,
                     shear_cx,
-                    scale_x: effective_scale,
-                    skew_x: if seg.italic { -0.21 } else { 0.0 },
+                    scale_x: seg_scale,
+                    skew_x: italic_slope.map_or(0.0, |slope| -slope),
                     rotate_deg: seg.rotate.unwrap_or(0.0),
-                    font_size: render_size,
+                    font_size: glyph_size,
                     face: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0, 1.0],
                     sdf_params: underlay,
                     mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
-                        render_size,
-                        seg.bold,
-                        sa_u8,
+                        glyph_size, seg.bold, sa_u8,
                     ),
                 });
 
@@ -1690,67 +1413,16 @@ fn layout_text_ops(
                     cursor_x += mono_cell + cspace_px;
                 } else {
                     // Cursor advance comes from FreeType, the same engine TMP uses.
-                    // A glyph with no metrics is not drawn, so it advances nothing.
-                    let adv = ft_advance_x.unwrap_or(0.0);
-                    cursor_x += adv * effective_scale + cspace_px;
+                    let adv = if glyph::advances_caret(ch) {
+                        ft_advance_x.unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    cursor_x += adv * seg_scale + cspace_px;
                 }
             }
-
-            if seg.underline && !seg_chars.is_empty() {
-                decorations.push(TextDecorationOp {
-                    rgba: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0, sa],
-                    kind: TextDecorationKind::Line {
-                        x0: cursor_x - measured,
-                        x1: cursor_x,
-                        y: ly + baseline_shift + render_size * 0.15,
-                        stroke_width: (render_size * 0.05).max(1.0),
-                    },
-                });
-            }
-
-            if seg.strikethrough && !seg_chars.is_empty() {
-                decorations.push(TextDecorationOp {
-                    rgba: [sr as f32 / 255.0, sg as f32 / 255.0, sb as f32 / 255.0, sa],
-                    kind: TextDecorationKind::Line {
-                        x0: cursor_x - measured,
-                        x1: cursor_x,
-                        y: ly + baseline_shift - render_size * 0.3,
-                        stroke_width: (render_size * 0.05).max(1.0),
-                    },
-                });
-            }
         }
-
-        if !remaining.is_empty() {
-            let (fr, fg, fb) = global
-                .color
-                .unwrap_or((def_color.r, def_color.g, def_color.b));
-            let fa_u8 = effective_vertex_alpha_u8(global.alpha, def_color.a);
-
-            draw_ops.push(DrawCharOp {
-                ch: remaining.to_string(),
-                x: cursor_x,
-                y: ly,
-                pivot_x: 0.0,
-                pivot_y: 0.0,
-                half_w: 0.0,
-                half_h: 0.0,
-                shear_cx: 0.0,
-                scale_x: global.scale,
-                skew_x: 0.0,
-                rotate_deg: 0.0,
-                font_size: base_size,
-                face: [fr as f32 / 255.0, fg as f32 / 255.0, fb as f32 / 255.0, 1.0],
-                sdf_params: underlay,
-                mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(
-                    base_size, false, fa_u8,
-                ),
-            });
-        }
-
-        if debug_probe {
-            // xAdvance 现在由测量循环的独立 caret 链提供，不再从渲染循环 cursor 计算。
-        }
+        line_op_ranges.push(ops_start..draw_ops.len());
     }
 
     if let Some(placement) = render_placement {
@@ -1768,8 +1440,6 @@ fn layout_text_ops(
     }
     capture_timings.command_build_ns = capture_elapsed_ns(command_build_started);
 
-    let _ = (SDF_DILATE_SCALE, TMP_POINT_SIZE_OUTLINE);
-
     if debug_probe {
         let final_metrics = TmpDebugFinalMetrics {
             current_font_size_tmp: debug_current_font_size_tmp,
@@ -1785,22 +1455,18 @@ fn layout_text_ops(
             padding_tmp: 64.0 / 8.0,
             outline_width_tmp: text.outline_size,
         };
-        // 输出每个字符的最终绘制中心坐标（TMP 等效坐标系：乘以 TEXT_SCALE）。
-        // 与 Frida 采集的 characterInfo vertex center 同语义，用于全量对比。
-        // Frida 报告所有字符（含 \n），\n 的 center=(0,0)。
-        // 我们按原始 clean 文本顺序输出，\n 插入占位符。
+        // 输出每个字符的最终绘制中心坐标（TMP 等效坐标系：乘以 TEXT_SCALE），
+        // 与 TMP characterInfo 顶点中心同语义；行与行之间插入 \n 占位，其 center=(0,0)。
         let char_positions: Vec<(String, f32, f32, f32, f32, f32)> = {
             let mut positions = Vec::new();
-            let mut op_idx = 0;
-            for ch in clean.chars() {
-                if ch == '\n' {
+            for (line_index, range) in line_op_ranges.iter().enumerate() {
+                if line_index > 0 {
                     positions.push(("\\n".to_string(), 0.0, 0.0, 1.0, 0.0, 0.0));
-                } else if op_idx < draw_ops.len() {
-                    let op = &draw_ops[op_idx];
+                }
+                for op in &draw_ops[range.clone()] {
                     let cx = (op.x + op.pivot_x + op.shear_cx) * TEXT_SCALE;
                     let cy = -(op.y + op.pivot_y) * TEXT_SCALE;
                     positions.push((op.ch.clone(), cx, cy, op.scale_x, op.skew_x, op.pivot_x));
-                    op_idx += 1;
                 }
             }
             positions
@@ -1819,7 +1485,7 @@ fn layout_text_ops(
                 )
             })
             .collect();
-        // 变换后字形 footprint 四角（[TL,TR,BR,BL]），用于 #4 剪切/尺寸的顶点级回归。
+        // 变换后字形 footprint 四角（[TL,TR,BR,BL]），用于剪切/尺寸的顶点级回归。
         // 刚性旋转下为矩形；S·R 复合剪切时为平行四边形。与 glyph_local_matrix 同源。
         let char_quads: Vec<(String, [(f32, f32); 4])> = draw_ops
             .iter()
@@ -1842,7 +1508,6 @@ fn layout_text_ops(
     Ok(TextLayoutRun {
         font_family: resolved_name,
         draw_ops,
-        decorations,
         timings: capture_timings,
     })
 }
@@ -1864,32 +1529,242 @@ fn text_render_translation(
     (dx, dy)
 }
 
-fn static_line_indent_terminal_x(
-    pct: f32,
-    caret_width: f32,
-    preferred_width: f32,
-    align: i32,
-) -> Option<f32> {
-    if pct >= 1.0 {
-        return None;
-    }
-    const TMP_PAD: f32 = 64.0;
-    // TextContentView feeds TMP preferredWidth + 64 back into the next frame's
-    // RectTransform.  Keep caret_width for alignment, but never use the
-    // scale-sensitive caret advance as the feedback container width.
-    let feedback_width_tmp = preferred_width * TEXT_SCALE;
-    let rect_tmp = (feedback_width_tmp + TMP_PAD) / (1.0 - pct);
-    let indent = rect_tmp * pct / TEXT_SCALE;
-    Some(match align {
-        2 => (indent - caret_width) / 2.0,
-        4 => rect_tmp / (2.0 * TEXT_SCALE) - caret_width,
-        _ => rect_tmp * (pct - 0.5) / TEXT_SCALE,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::effective_vertex_alpha;
+    use sekai_profile_renderer_core::tmp_text;
+
+    /// Metrics come from DejaVu Sans, the one face the build container ships;
+    /// these layout checks skip when it is not installed.
+    const LAYOUT_TEST_FAMILY: &str = "DejaVu Sans";
+
+    struct LayoutTestFont;
+    impl crate::masterdata::MasterDataProvider for LayoutTestFont {
+        fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _: i32) -> Option<crate::types::CardEntry> {
+            None
+        }
+        fn resolve_color(&self, _: i32) -> Option<crate::masterdata::ResolvedColor> {
+            Some(crate::masterdata::ResolvedColor {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            })
+        }
+        fn resolve_font(&self, _: i32) -> Option<String> {
+            Some(LAYOUT_TEST_FAMILY.into())
+        }
+        fn resolve_stamp(&self, _: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(&self, _: &str, _: i32) -> Option<crate::masterdata::ResourceInfo> {
+            None
+        }
+        fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, _: i32) -> Option<crate::types::BondsHonorEntry> {
+            None
+        }
+        fn get_bonds_honor_word(&self, _: i64) -> Option<crate::types::BondsHonorWordEntry> {
+            None
+        }
+        fn get_honor(&self, _: i32) -> Option<crate::types::HonorEntry> {
+            None
+        }
+        fn resolve_unit_vs_sd(&self, id: i32, _: i32) -> i32 {
+            id
+        }
+        fn font_count(&self) -> usize {
+            1
+        }
+        fn color_count(&self) -> usize {
+            1
+        }
+    }
+
+    fn layout_test_md() -> Option<crate::masterdata::MasterData> {
+        if crate::sdf::outline::load_font_bytes_for_family(LAYOUT_TEST_FAMILY).is_none() {
+            eprintln!("skipping: {LAYOUT_TEST_FAMILY} is not installed");
+            return None;
+        }
+        Some(crate::masterdata::MasterData::new(std::sync::Arc::new(
+            LayoutTestFont,
+        )))
+    }
+
+    fn layout_test_element(
+        text: &str,
+        size: f32,
+        line_spacing: f32,
+        text_type: i32,
+    ) -> crate::types::TextElement {
+        serde_json::from_value(serde_json::json!({
+            "objectData": {
+                "layer": 0, "lock": false, "visible": true,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            },
+            "colorId": 1, "fontId": 1, "lineSpacing": line_spacing,
+            "outlineColorId": 1, "outlineSize": 0.0, "size": size,
+            "text": text, "type": text_type
+        }))
+        .expect("layout test element")
+    }
+
+    fn layout_ops(
+        text: &str,
+        size: f32,
+        line_spacing: f32,
+        text_type: i32,
+    ) -> Option<Vec<super::DrawCharOp>> {
+        let md = layout_test_md()?;
+        let element = layout_test_element(text, size, line_spacing, text_type);
+        Some(
+            super::layout_text_ops(&element, &md, None, None, None, false)
+                .expect("text layout")
+                .draw_ops,
+        )
+    }
+
+    fn test_advance(ch: char, size: f32) -> f32 {
+        super::freetype_advance_x(None, Some(LAYOUT_TEST_FAMILY), ch, ch, size)
+            .expect("test font advance")
+    }
+
+    fn assert_close(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "{what}: {actual} != {expected}"
+        );
+    }
+
+    #[test]
+    fn superscript_rises_and_subscript_drops_by_the_face_offsets() {
+        let Some(ops) = layout_ops("A<sup>B</sup>", 30.0, 0.0, 1) else {
+            return;
+        };
+        // 66 design units at 30 / 75 * 2 per unit, half size, in draw space.
+        assert_close(
+            ops[0].y - ops[1].y,
+            66.0 * 0.8 * 0.5 / 2.0,
+            "superscript rise",
+        );
+        assert_close(ops[1].font_size, 15.0, "superscript size");
+        let ops = layout_ops("A<sub>B</sub>", 30.0, 0.0, 1).expect("test font");
+        assert_close(ops[1].y - ops[0].y, 9.0 * 0.8 * 0.5 / 2.0, "subscript drop");
+    }
+
+    #[test]
+    fn smallcaps_shrink_the_glyph_on_both_axes() {
+        let Some(ops) = layout_ops("<smallcaps>a</smallcaps>", 30.0, 0.0, 1) else {
+            return;
+        };
+        assert_eq!(ops[0].ch, "A");
+        assert_close(ops[0].font_size, 24.0, "small caps size");
+        assert_close(ops[0].scale_x, 1.0, "small caps horizontal scale");
+    }
+
+    #[test]
+    fn italic_slant_matches_its_shear_centre() {
+        let Some(ops) = layout_ops("<i>A</i><i angle=20>B</i>", 30.0, 0.0, 1) else {
+            return;
+        };
+        assert_close(ops[0].skew_x, -0.35, "default italic slant");
+        assert_close(ops[1].skew_x, -0.20, "italic angle attribute");
+    }
+
+    #[test]
+    fn closing_cspace_takes_the_spacing_back_from_the_last_character() {
+        let Some(ops) = layout_ops("<cspace=10>AB</cspace>C", 30.0, 0.0, 1) else {
+            return;
+        };
+        assert_close(
+            ops[1].x - ops[0].x,
+            test_advance('A', 30.0) + 5.0,
+            "spacing inside",
+        );
+        assert_close(
+            ops[2].x - ops[1].x,
+            test_advance('B', 30.0),
+            "spacing taken back",
+        );
+    }
+
+    #[test]
+    fn space_tags_move_the_caret_on_their_own_line_only() {
+        let Some(ops) = layout_ops("A<space=50>B", 30.0, 0.0, 1) else {
+            return;
+        };
+        assert_close(
+            ops[1].x - ops[0].x,
+            test_advance('A', 30.0) + 25.0,
+            "space advance",
+        );
+        // Centred: the second line holds no space and centres on its glyph.
+        let ops = layout_ops("<space=50>A\nA", 30.0, 0.0, 2).expect("test font");
+        assert_close(
+            ops[1].x,
+            -test_advance('A', 30.0) / 2.0,
+            "second line start",
+        );
+    }
+
+    #[test]
+    fn line_indent_pixels_are_layout_units() {
+        let Some(plain) = layout_ops("A", 30.0, 0.0, 1) else {
+            return;
+        };
+        let indented = layout_ops("<line-indent=20>A", 30.0, 0.0, 1).expect("test font");
+        assert_close(indented[0].x - plain[0].x, 10.0, "line indent");
+        let em = layout_ops("<indent=10><line-indent=1em>A", 30.0, 0.0, 1).expect("test font");
+        assert_close(em[0].x - plain[0].x, 20.0, "indent plus em line indent");
+    }
+
+    #[test]
+    fn line_spacing_uses_the_game_factor() {
+        let Some(tight) = layout_ops("A\nA", 300.0, 0.0, 1) else {
+            return;
+        };
+        let spaced = layout_ops("A\nA", 300.0, 1.0, 1).expect("test font");
+        let gap = |ops: &[super::DrawCharOp]| ops[1].y - ops[0].y;
+        // One unit of spacing is 2 * 1.325 * 300 / 100 layout units.
+        assert_close(
+            gap(&spaced) - gap(&tight),
+            2.0 * 1.325 * 3.0 / 2.0,
+            "line spacing",
+        );
+    }
+
+    #[test]
+    fn a_character_no_font_has_is_drawn_as_the_missing_glyph_square() {
+        let Some(ops) = layout_ops("A\u{6F22}B", 30.0, 0.0, 1) else {
+            return;
+        };
+        assert_eq!(ops[1].ch, "\u{25A1}");
+        assert_close(
+            ops[2].x - ops[0].x,
+            test_advance('A', 30.0) + test_advance('\u{25A1}', 30.0),
+            "square advance",
+        );
+        let md = layout_test_md().expect("test font");
+        let element = layout_test_element("A\u{6F22}B A\u{6F22}B", 30.0, 0.0, 1);
+        let wrapped = super::wrap_rich_text_to_width(&element, &md, 90.0).expect("wrapped text");
+        assert!(wrapped.contains('\n'), "{wrapped:?}");
+    }
+
+    #[test]
+    fn unrecognised_tags_are_laid_out_as_text() {
+        let Some(ops) = layout_ops("<love>", 30.0, 0.0, 1) else {
+            return;
+        };
+        let text: String = ops.iter().map(|op| op.ch.as_str()).collect();
+        assert_eq!(text, "<love>");
+    }
 
     #[test]
     fn sdf_capture_rejects_decoration_spans_without_emitting_partial_glyphs() {
@@ -1997,7 +1872,7 @@ mod tests {
             "<u></u><s></s><mark=#ff0000></mark>plain",
             "<u>\n</u><s>\n</s><mark=#ff0000>\n</mark>",
         ] {
-            let segments = super::parse_rich_segments(text);
+            let segments = tmp_text::parse_segments(text, 24.0);
             assert_eq!(
                 super::validate_sdf_text_segments(&segments),
                 Ok(()),
@@ -2008,14 +1883,14 @@ mod tests {
 
     #[test]
     fn rich_text_parsing_retains_decoration_semantics_for_non_capture_consumers() {
-        let segments = super::parse_rich_segments("<u>A</u><s>B</s><mark=#ff0000>C</mark>");
+        let segments = tmp_text::parse_segments("<u>A</u><s>B</s><mark=#ff000040>C</mark>", 24.0);
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].text, "A");
         assert!(segments[0].underline);
         assert_eq!(segments[1].text, "B");
         assert!(segments[1].strikethrough);
         assert_eq!(segments[2].text, "C");
-        assert_eq!(segments[2].mark_color, Some((255, 0, 0, 64)));
+        assert_eq!(segments[2].mark, Some([255, 0, 0, 64]));
     }
 
     /// A capture given the outline as resolved RGBA must produce exactly the
@@ -2205,60 +2080,20 @@ mod tests {
 
     #[test]
     fn effective_vertex_alpha_caps_override_by_base_alpha() {
-        let alpha = effective_vertex_alpha(Some(0.8), 128);
+        let alpha = effective_vertex_alpha(204, 128);
         assert!((alpha - (128.0 / 255.0)).abs() < 1e-6);
     }
 
     #[test]
     fn effective_vertex_alpha_uses_override_when_lower_than_base() {
-        let alpha = effective_vertex_alpha(Some(0.25), 255);
+        let alpha = effective_vertex_alpha(64, 255);
         assert!((alpha - (64.0 / 255.0)).abs() < 1e-6);
     }
 
     #[test]
     fn effective_vertex_alpha_falls_back_to_base_alpha() {
-        let alpha = effective_vertex_alpha(None, 64);
+        let alpha = effective_vertex_alpha(255, 64);
         assert!((alpha - (64.0 / 255.0)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn cpv_width_uses_pos_reset_instead_of_natural_sum() {
-        let mut width = 0.0;
-        let mut xadv = 0.0;
-        let glyph = 36.0;
-
-        super::update_cpv_width(&mut width, xadv, glyph);
-        xadv = 0.0;
-        super::update_cpv_width(&mut width, xadv, glyph);
-
-        assert!((width - glyph).abs() < 1e-6);
-    }
-
-    #[test]
-    fn cpv_width_keeps_negative_pos_extent() {
-        let mut width = 0.0;
-
-        super::update_cpv_width(&mut width, -221.0, 31.0);
-
-        assert!((width - 252.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn cpv_width_excludes_trailing_spaces_but_caret_keeps_advancing() {
-        let mut width = 0.0;
-        let mut xadv = 0.0;
-
-        super::update_cpv_width_for_char(&mut width, xadv, 24.0, ' ');
-        xadv += 24.0;
-        super::update_cpv_width_for_char(&mut width, xadv, 110.0, '●');
-        xadv += 110.0;
-        for _ in 0..5 {
-            super::update_cpv_width_for_char(&mut width, xadv, 24.0, ' ');
-            xadv += 24.0;
-        }
-
-        assert!((width - 134.0).abs() < 1e-6);
-        assert!((xadv - 254.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2271,24 +2106,6 @@ mod tests {
         assert_eq!(center, (0.0, 0.0));
         assert!((right.0 + 20.0).abs() < 1e-6);
         assert_eq!(right.1, 0.0);
-    }
-
-    #[test]
-    fn static_line_indent_terminal_position_uses_preferred_width_feedback() {
-        for (caret_width, preferred_width, pct) in [
-            (70.0, 100.0, 0.939),
-            (100.0, 100.0, 0.939),
-            (120.0, 100.0, 0.939),
-        ] {
-            let actual =
-                super::static_line_indent_terminal_x(pct, caret_width, preferred_width, 1).unwrap();
-            let rect_tmp = (preferred_width * super::TEXT_SCALE + 64.0) / (1.0 - pct);
-            let expected = rect_tmp * (pct - 0.5) / super::TEXT_SCALE;
-            assert!(
-                (actual - expected).abs() < 1e-4,
-                "caret={caret_width} preferred={preferred_width}: actual={actual} expected={expected}"
-            );
-        }
     }
 
     #[test]

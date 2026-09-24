@@ -2,12 +2,16 @@ use sekai_profile_renderer_core::sdf_material::{tmp_uv2_y, TmpGlyphMaterial};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-const TEXT_SCALE: f32 = 2.0;
-const TMP_POINT_SIZE: f32 = 75.0;
-const ASCENT_LINE: f32 = 66.0;
-const DESCENT_LINE: f32 = -9.0;
-const LINE_GAP: f32 = 150.0 - (66.0 + 9.0) + 0.625;
-const PAD_ORIGINAL: f32 = 64.0 / TEXT_SCALE;
+use sekai_profile_renderer_core::tmp_text::{
+    face::line_spacing_offset,
+    glyph,
+    layout::{self as tmp_layout, offset_draw_units},
+    markup::{CaretCommand, InlineAlign, TextSegment},
+    parse_segments, split_lines, DEFAULT_LINE_SPACING_FACTOR, PROFILE_FACE,
+};
+
+const TEXT_SCALE: f32 = PROFILE_FACE.scale;
+const PAD_ORIGINAL: f32 = tmp_layout::CONTAINER_PADDING / TEXT_SCALE;
 
 pub fn build_layout_json(input: &str) -> Result<String, String> {
     let request: LayoutRequest =
@@ -102,212 +106,123 @@ fn layout_layer(
     atlas: &AtlasInput,
     glyphs: &[GlyphInfo],
 ) -> (Vec<GlyphInstance>, Option<DynamicProgramDescriptor>) {
-    let segments = parse_rich_segments(&layer.text);
-    let dynamic_percent = line_indent_dynamic_percent(&layer.text, &segments);
-    let global = segments_to_global(&segments);
-    let mut clean = global.clean.clone();
-    if clean.ends_with('\n') {
-        clean.pop();
-    }
-    let line_texts = clean
-        .split('\n')
-        .map(|part| part.to_string())
-        .collect::<Vec<_>>();
-    let mut line_segs: Vec<Vec<TextSegment>> = vec![Vec::new()];
-    for seg in &segments {
-        for (idx, part) in seg.text.split('\n').enumerate() {
-            if idx > 0 {
-                line_segs.push(Vec::new());
-            }
-            if !part.is_empty() {
-                line_segs.last_mut().unwrap().push(seg.clone());
-            }
-        }
-    }
-
-    let seg_cleans = segments
+    let face = PROFILE_FACE;
+    let segments = parse_segments(&layer.text, layer.font_size);
+    let dynamic_percent = tmp_layout::uniform_line_indent_percent(&segments);
+    let lines = split_lines(&segments);
+    // Font size of each line feed: a line without characters takes its
+    // metrics from the line feed that ends it.
+    let line_feed_sizes: Vec<f32> = segments
         .iter()
-        .map(|seg| {
-            seg.text
+        .flat_map(|segment| {
+            segment
+                .text
                 .chars()
-                .filter(|ch| *ch != '\n')
-                .collect::<Vec<_>>()
+                .filter(|ch| *ch == '\n')
+                .map(|_| segment.font_size)
         })
-        .collect::<Vec<_>>();
-    let mut measure_consumed = vec![0usize; segments.len()];
-    let mut line_widths = Vec::new();
-    let mut rect_widths = Vec::new();
-    let mut line_max_sizes = Vec::new();
+        .collect();
+    let first_size = segments
+        .first()
+        .map_or(layer.font_size, |segment| segment.font_size);
+
+    let mut line_widths = Vec::with_capacity(lines.len());
+    let mut rect_widths = Vec::with_capacity(lines.len());
+    let mut line_max_sizes = Vec::with_capacity(lines.len());
     let mut vbounds_max_top = f32::NEG_INFINITY;
     let mut vbounds_min_bottom = f32::INFINITY;
-    let mut line_advances_tmp = Vec::new();
+    let mut line_advances_tmp = Vec::with_capacity(lines.len());
 
-    for line_text in &line_texts {
+    for (line_index, line) in lines.iter().enumerate() {
         let mut current_line_advances_tmp = Vec::new();
-        let mut remaining = line_text.chars().collect::<Vec<_>>();
+        let mut pending_advance_tmp = 0.0f32;
         let mut w_scaled = 0.0;
         let mut max_seg_size: f32 = 0.0;
         let mut prev_cspace = None;
         let mut cpv_xadv_tmp = 0.0;
         let mut max_cpv_width_tmp = 0.0;
         let mut has_chars = false;
-        let mut current_position: Option<Indent> = None;
-        let mut caret_position: Option<Indent> = None;
-        let mut caret_xadv_tmp = 0.0;
+        let mut has_visible = false;
 
-        for (si, seg) in segments.iter().enumerate() {
-            if remaining.is_empty() {
-                break;
-            }
-            if let Some(fixed) = seg.fixed_advance {
-                let seg_font_size = resolve_segment_font_size(&seg.size, layer.font_size);
-                if seg.position != current_position {
-                    if let Some(pos_shift) = resolve_indent_value(&seg.position, seg_font_size, 0.0)
-                    {
-                        cpv_xadv_tmp = pos_shift * TEXT_SCALE;
-                        caret_xadv_tmp = pos_shift * TEXT_SCALE;
+        for piece in line {
+            let seg = piece.segment;
+            match seg.caret {
+                Some(CaretCommand::Advance(advance)) => {
+                    w_scaled += advance / TEXT_SCALE;
+                    cpv_xadv_tmp += advance;
+                    pending_advance_tmp += advance;
+                    if advance >= 0.0 {
+                        max_cpv_width_tmp = tmp_layout::extend_preferred_width(
+                            max_cpv_width_tmp,
+                            cpv_xadv_tmp,
+                            0.0,
+                        );
+                        has_chars = true;
+                        max_seg_size = max_seg_size.max(seg.font_size);
+                    } else {
+                        // `</cspace>` already took the trailing spacing back.
+                        prev_cspace = None;
                     }
-                    current_position = seg.position.clone();
-                    caret_position = seg.position.clone();
+                    continue;
                 }
-                let adv = fixed / TEXT_SCALE;
-                w_scaled += adv;
-                cpv_xadv_tmp += fixed;
-                caret_xadv_tmp += fixed;
-                current_line_advances_tmp.push(fixed);
-                max_cpv_width_tmp = update_cpv_width(max_cpv_width_tmp, cpv_xadv_tmp, 0.0);
-                has_chars = true;
-                max_seg_size = max_seg_size.max(seg_font_size);
-                continue;
-            }
-
-            let sc = &seg_cleans[si];
-            if sc.is_empty() || measure_consumed[si] >= sc.len() {
-                continue;
-            }
-            let seg_rest = &sc[measure_consumed[si]..];
-            let part: Vec<char>;
-            if starts_with_chars(&remaining, seg_rest) {
-                part = seg_rest.to_vec();
-                remaining.drain(..seg_rest.len());
-                measure_consumed[si] = sc.len();
-            } else if starts_with_chars(seg_rest, &remaining) {
-                part = remaining.clone();
-                measure_consumed[si] += remaining.len();
-                remaining.clear();
-            } else {
-                continue;
-            }
-            if part.is_empty() {
-                continue;
-            }
-
-            let seg_size = resolve_segment_font_size(&seg.size, layer.font_size);
-            if seg.position != current_position {
-                if let Some(pos_shift) = resolve_indent_value(&seg.position, seg_size, 0.0) {
-                    cpv_xadv_tmp = pos_shift * TEXT_SCALE;
+                Some(CaretCommand::MoveTo(offset)) => {
+                    cpv_xadv_tmp = offset_draw_units(offset, 0.0) * TEXT_SCALE;
                     max_cpv_width_tmp = 0.0;
+                    continue;
                 }
-                current_position = seg.position.clone();
-            }
-            if seg.position != caret_position {
-                if let Some(pos_shift) = resolve_indent_value(&seg.position, seg_size, 0.0) {
-                    caret_xadv_tmp = pos_shift * TEXT_SCALE;
-                }
-                caret_position = seg.position.clone();
+                None => {}
             }
 
-            let measure_size = if seg.subscript || seg.superscript {
-                seg_size * 0.5
-            } else {
-                seg_size
-            };
+            let measure_size = seg.render_size();
             let seg_scale = seg.scale.unwrap_or(1.0);
-            let cspace_raw_tmp = seg.cspace.unwrap_or(0.0);
-            let voffset_tmp = seg.voffset.unwrap_or(0.0);
+            let cspace_raw_tmp = seg.character_spacing;
+            let voffset_tmp = seg.baseline_offset;
+            let glyph_asc_tmp = face.font_scale(measure_size) * face.ascent_line;
+            let glyph_des_tmp = -face.font_scale(measure_size) * face.descent_line;
             let mut measured = 0.0;
             let mut rendered_count = 0usize;
-            for raw_ch in part {
-                for (rendered_ch, char_scale) in transformed_glyphs(raw_ch, seg) {
-                    let text = rendered_ch.to_string();
-                    let glyph = if force_fallback_glyph(rendered_ch) {
-                        None
-                    } else {
-                        glyph_for(layer, glyphs, &text)
-                    };
-                    let glyph_advance_tmp = glyph_advance(
-                        glyph,
-                        rendered_ch,
-                        measure_size,
-                        atlas.base_size,
-                        &layer.font_family,
-                    ) * char_scale
-                        * TEXT_SCALE;
-                    measured += (glyph_advance_tmp * seg_scale) / TEXT_SCALE;
-                    rendered_count += 1;
-                    max_cpv_width_tmp = update_cpv_width_for_char(
-                        max_cpv_width_tmp,
-                        cpv_xadv_tmp,
-                        glyph_advance_tmp,
-                        raw_ch,
-                    );
-                    let glyph_advance_caret = glyph_advance_tmp * seg_scale;
-                    current_line_advances_tmp.push(glyph_advance_tmp + cspace_raw_tmp);
-                    let glyph_asc_tmp = measure_size * (66.0 / 75.0) * TEXT_SCALE;
-                    let glyph_des_tmp = measure_size * (9.0 / 75.0) * TEXT_SCALE;
-                    vbounds_max_top = vbounds_max_top.max(voffset_tmp + glyph_asc_tmp);
-                    vbounds_min_bottom = vbounds_min_bottom.min(voffset_tmp - glyph_des_tmp);
-                    cpv_xadv_tmp += glyph_advance_tmp + cspace_raw_tmp;
-                    caret_xadv_tmp += glyph_advance_caret + cspace_raw_tmp;
-                }
-            }
-            let cspace = seg.cspace.unwrap_or(0.0) / TEXT_SCALE;
-            w_scaled += measured + cspace * rendered_count as f32;
-            has_chars = true;
-            prev_cspace = Some(cspace);
-            max_seg_size = max_seg_size.max(seg_size);
-        }
-
-        if !remaining.is_empty() {
-            for raw_ch in remaining {
-                let glyph = if force_fallback_glyph(raw_ch) {
-                    None
-                } else {
-                    glyph_for(layer, glyphs, &raw_ch.to_string())
-                };
-                let glyph_advance_tmp = glyph_advance(
-                    glyph,
-                    raw_ch,
-                    layer.font_size,
+            for raw_ch in piece.text.chars() {
+                let (display, char_scale) = seg.transform_char(raw_ch);
+                let glyph_advance_tmp = layer_glyph(layer, glyphs, raw_ch, display).advance(
+                    measure_size * char_scale,
                     atlas.base_size,
                     &layer.font_family,
                 ) * TEXT_SCALE;
-                w_scaled += glyph_advance_tmp / TEXT_SCALE;
-                max_cpv_width_tmp = update_cpv_width_for_char(
+                measured += (glyph_advance_tmp * seg_scale) / TEXT_SCALE;
+                rendered_count += 1;
+                has_visible |= !raw_ch.is_whitespace();
+                max_cpv_width_tmp = tmp_layout::extend_preferred_width_for_char(
                     max_cpv_width_tmp,
                     cpv_xadv_tmp,
                     glyph_advance_tmp,
                     raw_ch,
                 );
-                cpv_xadv_tmp += glyph_advance_tmp;
-                caret_xadv_tmp += glyph_advance_tmp;
-                current_line_advances_tmp.push(glyph_advance_tmp);
-                vbounds_max_top = vbounds_max_top.max(layer.font_size * (66.0 / 75.0) * TEXT_SCALE);
-                vbounds_min_bottom =
-                    vbounds_min_bottom.min(-layer.font_size * (9.0 / 75.0) * TEXT_SCALE);
+                // TMP's preferred width ignores `<scale>`, so the line-indent
+                // program reads the unscaled advances.
+                current_line_advances_tmp
+                    .push(glyph_advance_tmp + cspace_raw_tmp + pending_advance_tmp);
+                pending_advance_tmp = 0.0;
+                vbounds_max_top = vbounds_max_top.max(voffset_tmp + glyph_asc_tmp);
+                vbounds_min_bottom = vbounds_min_bottom.min(voffset_tmp - glyph_des_tmp);
+                cpv_xadv_tmp += glyph_advance_tmp + cspace_raw_tmp;
             }
+            let cspace = cspace_raw_tmp / TEXT_SCALE;
+            w_scaled += measured + cspace * rendered_count as f32;
             has_chars = true;
-            max_seg_size = max_seg_size.max(layer.font_size);
+            prev_cspace = Some(cspace);
+            max_seg_size = max_seg_size.max(seg.font_size);
         }
 
         if max_seg_size < 0.001 {
-            let consumed_idx = measure_consumed.iter().rposition(|value| *value > 0);
-            let active = consumed_idx
-                .and_then(|idx| segments.get(idx))
-                .or_else(|| segments.first());
-            max_seg_size = active
-                .map(|seg| resolve_segment_font_size(&seg.size, layer.font_size))
-                .unwrap_or(layer.font_size);
+            max_seg_size = line_feed_sizes
+                .get(line_index)
+                .or_else(|| {
+                    line_index
+                        .checked_sub(1)
+                        .and_then(|prev| line_feed_sizes.get(prev))
+                })
+                .copied()
+                .unwrap_or(first_size);
         }
         if let Some(cspace) = prev_cspace {
             w_scaled += cspace;
@@ -319,20 +234,19 @@ fn layout_layer(
             0.0
         });
         line_max_sizes.push(max_seg_size);
-        line_advances_tmp.push(if line_text.chars().any(|ch| !ch.is_whitespace()) {
+        line_advances_tmp.push(if has_visible {
             current_line_advances_tmp
         } else {
             Vec::new()
         });
-        let _ = caret_xadv_tmp;
     }
 
     let mut line_asc = Vec::new();
     let mut line_des = Vec::new();
     for (i, max_size) in line_max_sizes.iter().copied().enumerate() {
-        let scale = (max_size / TMP_POINT_SIZE) * TEXT_SCALE;
-        let asc = scale * ASCENT_LINE;
-        let des = scale * DESCENT_LINE;
+        let scale = face.font_scale(max_size);
+        let asc = scale * face.ascent_line;
+        let des = scale * face.descent_line;
         if i == 0 || max_size > 0.001 {
             line_asc.push(asc);
             line_des.push(des);
@@ -342,16 +256,24 @@ fn layout_layer(
         }
     }
 
+    // lineGap = m_LineHeight - (ascentLine - descentLine) + 0.625; the 0.625
+    // is an empirical correction matching the game's line pitch.
+    let line_gap = face.line_height - (face.ascent_line - face.descent_line) + 0.625;
     let mut line_offsets = vec![0.0; line_max_sizes.len()];
     let lh_override = segments.iter().find_map(|seg| seg.line_height);
-    let ls_tmp = layer.line_spacing * layer.font_size * TEXT_SCALE / TMP_POINT_SIZE;
+    let ls_tmp = line_spacing_offset(
+        layer.line_spacing,
+        layer.font_size,
+        &face,
+        DEFAULT_LINE_SPACING_FACTOR,
+    );
     for i in 1..line_offsets.len() {
         let delta = if let Some(lh) = lh_override {
             lh + ls_tmp
         } else {
             line_asc[i]
                 + line_des[i - 1].abs()
-                + LINE_GAP * ((layer.font_size / TMP_POINT_SIZE) * TEXT_SCALE)
+                + line_gap * face.font_scale(layer.font_size)
                 + ls_tmp
         };
         line_offsets[i] = line_offsets[i - 1] + delta;
@@ -381,23 +303,24 @@ fn layout_layer(
         line_offsets,
     };
 
-    let mut render_consumed = vec![0usize; segments.len()];
+    let default_align = segments.first().and_then(|segment| segment.align);
     let mut instances = Vec::new();
     let mut plain_text_index = 0usize;
-    for (i, line_text) in line_texts.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             plain_text_index += 1;
         }
         let sw = *layout_metrics.line_widths.get(i).unwrap_or(&0.0);
-        let line_align = line_segs
-            .get(i)
-            .and_then(|list| list.first())
-            .and_then(|seg| seg.align.clone())
-            .or_else(|| global.align.clone());
-        let effective_align = match line_align.as_deref() {
-            Some("center") => 2,
-            Some("right") => 4,
-            _ => layer.text_type & 0x07,
+        let first_text = line
+            .iter()
+            .find(|piece| piece.segment.caret.is_none())
+            .map(|piece| piece.segment);
+        // Justified and flush lines are not stretched; they start at the left.
+        let effective_align = match first_text.and_then(|seg| seg.align).or(default_align) {
+            Some(InlineAlign::Left | InlineAlign::Justified | InlineAlign::Flush) => 1,
+            Some(InlineAlign::Center) => 2,
+            Some(InlineAlign::Right) => 4,
+            None => layer.text_type & 0x07,
         };
         let lx = if effective_align == 2 {
             -sw / 2.0
@@ -408,163 +331,94 @@ fn layout_layer(
         };
         let ly = layout_metrics.anchor_base
             + layout_metrics.line_offsets.get(i).copied().unwrap_or(0.0) / TEXT_SCALE;
-        let mut cursor_x = apply_line_indent(
-            lx,
-            sw,
-            layout_metrics.box_w,
-            effective_align,
-            line_segs.get(i).and_then(|list| list.first()),
-        );
-        let mut remaining = line_text.chars().collect::<Vec<_>>();
-        let mut current_position: Option<Indent> = None;
+        let mut cursor_x = tmp_layout::line_start(lx, sw, max_rw, effective_align, first_text);
 
-        for (si, seg) in segments.iter().enumerate() {
-            if remaining.is_empty() {
-                break;
-            }
-            let sc = &seg_cleans[si];
-            if sc.is_empty() || render_consumed[si] >= sc.len() {
-                continue;
-            }
-            let seg_rest = &sc[render_consumed[si]..];
-            let part: Vec<char>;
-            if starts_with_chars(&remaining, seg_rest) {
-                part = seg_rest.to_vec();
-                remaining.drain(..seg_rest.len());
-                render_consumed[si] = sc.len();
-            } else if starts_with_chars(seg_rest, &remaining) {
-                part = remaining.clone();
-                render_consumed[si] += remaining.len();
-                remaining.clear();
-            } else {
-                continue;
-            }
-            if part.is_empty() {
-                continue;
+        for piece in line {
+            let seg = piece.segment;
+            match seg.caret {
+                Some(CaretCommand::Advance(advance)) => {
+                    cursor_x += advance / TEXT_SCALE;
+                    continue;
+                }
+                Some(CaretCommand::MoveTo(offset)) => {
+                    cursor_x = lx + offset_draw_units(offset, layout_metrics.box_w);
+                    continue;
+                }
+                None => {}
             }
 
-            let seg_size = resolve_segment_font_size(&seg.size, layer.font_size);
+            let render_size = seg.render_size();
             let seg_scale = seg.scale.unwrap_or(1.0);
-            if seg.position != current_position {
-                if let Some(pos_shift) =
-                    resolve_indent_value(&seg.position, seg_size, layout_metrics.box_w)
-                {
-                    cursor_x = lx + pos_shift;
-                }
-                current_position = seg.position.clone();
-            }
-            let render_size = if seg.subscript || seg.superscript {
-                seg_size * 0.5
-            } else {
-                seg_size
-            };
-            let mut baseline_shift = if seg.subscript {
-                0.15 * seg_size / TEXT_SCALE
-            } else if seg.superscript {
-                -0.35 * seg_size / TEXT_SCALE
-            } else {
-                0.0
-            };
-            if let Some(voffset) = seg.voffset {
-                baseline_shift = -voffset / TEXT_SCALE;
-            }
-            let cspace_px = seg.cspace.unwrap_or(0.0) / TEXT_SCALE;
-            let fill = resolve_fill(layer, seg, &global);
+            // TMP's baseline offset points up; draw space points down.
+            let baseline_shift = -seg.baseline_offset / TEXT_SCALE;
+            let cspace_px = seg.character_spacing / TEXT_SCALE;
+            let fill = resolve_fill(layer, seg);
             let outline = layer.outline_color;
+            let italic_slope = seg.italic.map(|angle| angle as f32 * 0.01);
+            let mono_cell = seg.monospace.map(|cell| cell / TEXT_SCALE);
 
-            for raw_ch in part {
-                for (rendered_ch, char_scale) in transformed_glyphs(raw_ch, seg) {
-                    let text = rendered_ch.to_string();
-                    let glyph = if force_fallback_glyph(rendered_ch) {
-                        None
-                    } else {
-                        glyph_for(layer, glyphs, &text)
-                    };
-                    let effective_scale = seg_scale * char_scale;
-                    let ft_scale = render_size / atlas.base_size;
-                    let fallback_adv =
-                        fallback_advance(rendered_ch, render_size, &layer.font_family);
-                    let pivot_x = glyph
-                        .map(|glyph| {
-                            glyph.plane_bearing_x * ft_scale + glyph.plane_width * ft_scale / 2.0
-                        })
-                        .unwrap_or(fallback_adv / 2.0);
-                    let pivot_y = glyph
-                        .map(|glyph| {
-                            -(glyph.plane_bearing_y * ft_scale
-                                - glyph.plane_height * ft_scale / 2.0)
-                        })
-                        .unwrap_or(0.0);
-                    let shear_cx = if let (true, Some(glyph)) = (seg.italic, glyph) {
-                        0.35 * (glyph.plane_bearing_y - glyph.plane_height - atlas.spread)
+            for raw_ch in piece.text.chars() {
+                let (display, char_scale) = seg.transform_char(raw_ch);
+                // <smallcaps> scales the whole glyph, not just its width.
+                let glyph_size = render_size * char_scale;
+                let resolved = layer_glyph(layer, glyphs, raw_ch, display);
+                let glyph = resolved.atlas_glyph();
+                let advance = resolved.advance(glyph_size, atlas.base_size, &layer.font_family);
+                let ft_scale = glyph_size / atlas.base_size;
+                let pivot_x = glyph
+                    .map(|glyph| {
+                        glyph.plane_bearing_x * ft_scale + glyph.plane_width * ft_scale / 2.0
+                    })
+                    .unwrap_or(advance / 2.0);
+                let pivot_y = glyph
+                    .map(|glyph| {
+                        -(glyph.plane_bearing_y * ft_scale - glyph.plane_height * ft_scale / 2.0)
+                    })
+                    .unwrap_or(0.0);
+                let shear_cx = match (italic_slope, glyph) {
+                    (Some(slope), Some(glyph)) => {
+                        slope
+                            * (glyph.plane_bearing_y - glyph.plane_height - atlas.spread)
                             * ft_scale
-                    } else {
-                        0.0
-                    };
-                    let mono_cell =
-                        resolve_indent_value(&seg.monospace, seg_size, layout_metrics.box_w);
-                    let draw_x = if let Some(cell) = mono_cell {
-                        if cell > 0.0 {
-                            cursor_x
-                                + if seg.duospace && matches_duo(rendered_ch) {
-                                    cell / 4.0
-                                } else {
-                                    cell / 2.0
-                                }
-                                - pivot_x
-                        } else {
-                            cursor_x
-                        }
-                    } else {
-                        cursor_x
-                    };
-                    let op = GlyphOp {
-                        x: draw_x,
-                        y: ly + baseline_shift,
-                        pivot_x,
-                        pivot_y,
-                        shear_cx,
-                        scale_x: effective_scale,
-                        skew_x: if seg.italic { -0.21 } else { 0.0 },
-                        rotate_deg: seg.rotate.unwrap_or(0.0),
-                    };
-                    instances.push(make_instance(
-                        layer,
-                        plain_text_index,
-                        atlas,
-                        glyph,
-                        &text,
-                        op,
-                        fill,
-                        outline,
-                        layout_metrics.clone(),
-                        render_size,
-                        compute_sdf_shader_params(
-                            render_size,
-                            seg.bold,
-                            layer.outline_width,
-                            effective_vertex_alpha(seg.alpha.or(global.alpha), layer.color[3]),
-                        ),
-                    ));
-                    if let Some(cell) = mono_cell {
-                        if cell > 0.0 {
-                            cursor_x += if seg.duospace && matches_duo(rendered_ch) {
-                                cell / 2.0
-                            } else {
-                                cell
-                            } + cspace_px;
-                        } else {
-                            cursor_x +=
-                                (glyph.map(|g| g.advance * ft_scale).unwrap_or(fallback_adv))
-                                    * effective_scale
-                                    + cspace_px;
-                        }
-                    } else {
-                        cursor_x += (glyph.map(|g| g.advance * ft_scale).unwrap_or(fallback_adv))
-                            * effective_scale
-                            + cspace_px;
                     }
-                }
+                    _ => 0.0,
+                };
+                let draw_x = match mono_cell {
+                    Some(cell) => cursor_x + cell / 2.0 - pivot_x,
+                    None => cursor_x,
+                };
+                let op = GlyphOp {
+                    x: draw_x,
+                    y: ly + baseline_shift,
+                    pivot_x,
+                    pivot_y,
+                    shear_cx,
+                    scale_x: seg_scale,
+                    skew_x: italic_slope.map_or(0.0, |slope| -slope),
+                    rotate_deg: seg.rotate.unwrap_or(0.0),
+                };
+                instances.push(make_instance(
+                    layer,
+                    plain_text_index,
+                    atlas,
+                    glyph,
+                    &resolved.drawn_char().to_string(),
+                    op,
+                    fill,
+                    outline,
+                    layout_metrics.clone(),
+                    glyph_size,
+                    compute_sdf_shader_params(
+                        glyph_size,
+                        seg.bold,
+                        layer.outline_width,
+                        effective_vertex_alpha(seg.alpha, layer.color[3]),
+                    ),
+                ));
+                cursor_x += match mono_cell {
+                    Some(cell) => cell,
+                    None => advance * seg_scale,
+                } + cspace_px;
                 plain_text_index += 1;
             }
         }
@@ -790,13 +644,9 @@ mod material_tests {
     }
 }
 
-fn effective_vertex_alpha(alpha_override: Option<f32>, base_alpha: f32) -> f32 {
+fn effective_vertex_alpha(markup_alpha: u8, base_alpha: f32) -> f32 {
     let base_u8 = (base_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let alpha_u8 = alpha_override
-        .map(|alpha| (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
-        .map(|alpha| alpha.min(base_u8))
-        .unwrap_or(base_u8);
-    alpha_u8 as f32 / 255.0
+    markup_alpha.min(base_u8) as f32 / 255.0
 }
 
 fn glyph_for<'a>(layer: &TextLayer, glyphs: &'a [GlyphInfo], text: &str) -> Option<&'a GlyphInfo> {
@@ -807,22 +657,83 @@ fn glyph_for<'a>(layer: &TextLayer, glyphs: &'a [GlyphInfo], text: &str) -> Opti
     glyphs.iter().find(|glyph| glyph.key == key)
 }
 
-fn glyph_advance(
-    glyph: Option<&GlyphInfo>,
-    ch: char,
-    font_size: f32,
-    base_size: f32,
-    family: &str,
-) -> f32 {
-    glyph
-        .map(|glyph| glyph.advance * (font_size / base_size))
-        .unwrap_or_else(|| fallback_advance(ch, font_size, family))
+/// What one character takes from the layer's atlas.
+enum LayerGlyph<'a> {
+    /// A glyph the atlas carries, drawn in place of the character.
+    Atlas { glyph: &'a GlyphInfo, ch: char },
+    /// White space the atlas does not carry; its advance is estimated.
+    Blank { ch: char },
+    /// Nothing is drawn and the caret does not move.
+    Missing { ch: char },
 }
 
-fn fallback_advance(ch: char, font_size: f32, family: &str) -> f32 {
-    if ch == '\u{00a0}' {
-        return font_size;
+impl<'a> LayerGlyph<'a> {
+    fn atlas_glyph(&self) -> Option<&'a GlyphInfo> {
+        match self {
+            Self::Atlas { glyph, .. } => Some(glyph),
+            Self::Blank { .. } | Self::Missing { .. } => None,
+        }
     }
+
+    fn drawn_char(&self) -> char {
+        match *self {
+            Self::Atlas { ch, .. } | Self::Blank { ch } | Self::Missing { ch } => ch,
+        }
+    }
+
+    fn advance(&self, font_size: f32, base_size: f32, family: &str) -> f32 {
+        match self {
+            Self::Atlas { glyph, .. } => glyph.advance * (font_size / base_size),
+            Self::Blank { ch } => blank_advance(*ch, font_size, family),
+            Self::Missing { .. } => 0.0,
+        }
+    }
+}
+
+/// Resolves `display`, the case-mapped form of `source`, against the layer's
+/// atlas with TextMesh Pro's missing-glyph chain.
+fn layer_glyph<'a>(
+    layer: &TextLayer,
+    glyphs: &'a [GlyphInfo],
+    source: char,
+    display: char,
+) -> LayerGlyph<'a> {
+    let lookup = |ch: char| glyph_for(layer, glyphs, &ch.to_string());
+    if !glyph::advances_caret(source) {
+        return LayerGlyph::Missing { ch: display };
+    }
+    if let Some(found) = lookup(display) {
+        return LayerGlyph::Atlas {
+            glyph: found,
+            ch: display,
+        };
+    }
+    if display.is_control() {
+        return LayerGlyph::Missing { ch: display };
+    }
+    if display.is_whitespace() {
+        // Glyph demand leaves white space out, so an atlas rarely carries it.
+        let ch = glyph::same_face_alternate(display).unwrap_or(display);
+        return lookup(ch).map_or(LayerGlyph::Blank { ch }, |found| LayerGlyph::Atlas {
+            glyph: found,
+            ch,
+        });
+    }
+    match glyph::resolve_glyph(display, 1, |_, ch| ch == ' ' || lookup(ch).is_some()) {
+        Some(choice) => {
+            lookup(choice.glyph).map_or(LayerGlyph::Blank { ch: choice.glyph }, |found| {
+                LayerGlyph::Atlas {
+                    glyph: found,
+                    ch: choice.glyph,
+                }
+            })
+        }
+        None => LayerGlyph::Missing { ch: display },
+    }
+}
+
+/// Estimated advance of white space the atlas does not carry.
+fn blank_advance(ch: char, font_size: f32, family: &str) -> f32 {
     if ch == ' ' {
         return (font_size * space_advance_ratio(family)).round();
     }
@@ -831,10 +742,6 @@ fn fallback_advance(ch: char, font_size: f32, family: &str) -> f32 {
     } else {
         font_size * 0.5
     }
-}
-
-fn force_fallback_glyph(ch: char) -> bool {
-    ch == ' ' || ch == '\u{00a0}'
 }
 
 fn space_advance_ratio(family: &str) -> f32 {
@@ -850,463 +757,39 @@ fn space_advance_ratio(family: &str) -> f32 {
 
 fn is_fullwidth(ch: char) -> bool {
     let cp = ch as u32;
-    matches!(
-        cp,
-        0x2000..=0x206f
-            | 0x2190..=0x21ff
-            | 0x2200..=0x22ff
-            | 0x2300..=0x23ff
-            | 0x2460..=0x24ff
-            | 0x2500..=0x259f
-            | 0x25a0..=0x25ff
-            | 0x2600..=0x26ff
-            | 0x2700..=0x27bf
-            | 0x3000..=0x30ff
-            | 0x3400..=0x4dbf
-            | 0x4e00..=0x9fff
-            | 0xf900..=0xfaff
-            | 0xfe30..=0xfe4f
-            | 0xff01..=0xff60
-    )
+    matches!(cp, 0x2000..=0x206f | 0x3000..=0x30ff)
 }
 
-fn parse_rich_segments(raw: &str) -> Vec<TextSegment> {
-    let mut state = ParseState::default();
-    let chars = raw.chars().collect::<Vec<_>>();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if state.noparse_depth > 0 {
-            if chars[i] == '<' {
-                if let Some(end) = find_gt(&chars, i) {
-                    let tag = chars[i + 1..end].iter().collect::<String>().to_lowercase();
-                    if tag == "/noparse" && handle_tag(&mut state, &tag) {
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-            append_char(&mut state, chars[i]);
-            i += 1;
-            continue;
-        }
-        if chars[i] == '<' {
-            if let Some(end) = find_gt(&chars, i) {
-                let tag = chars[i + 1..end].iter().collect::<String>().to_lowercase();
-                if handle_tag(&mut state, &tag) {
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-        append_char(&mut state, chars[i]);
-        i += 1;
-    }
-    state.segs
-}
-
-fn find_gt(chars: &[char], start: usize) -> Option<usize> {
-    chars
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(idx, ch)| (*ch == '>').then_some(idx))
-}
-
-#[derive(Default)]
-struct ParseState {
-    segs: Vec<TextSegment>,
-    color_stack: Vec<ColorFrame>,
-    current_color: Option<[f32; 3]>,
-    size_stack: Vec<SizeSpec>,
-    scale_stack: Vec<f32>,
-    alpha_override: Option<f32>,
-    bold_depth: i32,
-    italic_depth: i32,
-    underline_depth: i32,
-    strikethrough_depth: i32,
-    subscript_depth: i32,
-    superscript_depth: i32,
-    mark_stack: Vec<[f32; 4]>,
-    case_stack: Vec<CaseTransform>,
-    smallcaps_depth: i32,
-    noparse_depth: i32,
-    voffset_stack: Vec<f32>,
-    rotate_stack: Vec<f32>,
-    cspace_override: Option<f32>,
-    line_height_override: Option<f32>,
-    line_indent_override: Option<LineIndent>,
-    indent_stack: Vec<Indent>,
-    position_stack: Vec<Indent>,
-    monospace_stack: Vec<Indent>,
-    duospace_stack: Vec<bool>,
-    align_stack: Vec<String>,
-}
-
-#[derive(Clone)]
-struct ColorFrame {
-    color: Option<[f32; 3]>,
-    alpha: Option<f32>,
-}
-
-fn build_segment(state: &ParseState, text: String, fixed_advance: Option<f32>) -> TextSegment {
-    TextSegment {
-        text,
-        fixed_advance,
-        color: state.current_color,
-        size: state.size_stack.last().cloned(),
-        scale: state.scale_stack.last().copied(),
-        alpha: state.alpha_override,
-        bold: state.bold_depth > 0,
-        italic: state.italic_depth > 0,
-        underline: state.underline_depth > 0,
-        strikethrough: state.strikethrough_depth > 0,
-        mark_color: state.mark_stack.last().copied(),
-        superscript: state.superscript_depth > 0,
-        subscript: state.subscript_depth > 0,
-        case_transform: state
-            .case_stack
-            .last()
-            .cloned()
-            .unwrap_or(CaseTransform::None),
-        smallcaps: state.smallcaps_depth > 0,
-        voffset: state.voffset_stack.last().copied(),
-        rotate: state.rotate_stack.last().copied(),
-        cspace: state.cspace_override,
-        line_height: state.line_height_override,
-        line_indent: state.line_indent_override.clone(),
-        indent: state.indent_stack.last().cloned(),
-        position: state.position_stack.last().cloned(),
-        monospace: state.monospace_stack.last().cloned(),
-        duospace: state.duospace_stack.last().copied().unwrap_or(false),
-        align: state.align_stack.last().cloned(),
-    }
-}
-
-fn append_char(state: &mut ParseState, ch: char) {
-    let seg = build_segment(state, ch.to_string(), None);
-    if let Some(last) = state.segs.last_mut() {
-        if can_merge(last, &seg) {
-            last.text.push(ch);
-            return;
-        }
-    }
-    state.segs.push(seg);
-}
-
-fn push_text(state: &mut ParseState, text: &str) {
-    state
-        .segs
-        .push(build_segment(state, text.to_string(), None));
-}
-
-fn handle_tag(state: &mut ParseState, tag: &str) -> bool {
-    if let Some(rest) = tag.strip_prefix("color=#") {
-        return push_color(state, rest);
-    }
-    if let Some(rest) = tag.strip_prefix('#') {
-        return push_color(state, rest);
-    }
-    if tag == "/color" {
-        if state.color_stack.len() > 1 {
-            state.color_stack.pop();
-        }
-        let prev = state.color_stack.last().cloned().unwrap_or(ColorFrame {
-            color: None,
-            alpha: None,
-        });
-        state.current_color = prev.color;
-        state.alpha_override = prev.alpha;
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("size=") {
-        if let Some(parsed) = parse_size(rest) {
-            state.size_stack.push(parsed);
-        }
-        return true;
-    }
-    if tag == "/size" {
-        state.size_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("scale=") {
-        if let Some(value) = parse_loose(&rest.replace('#', "")) {
-            state.scale_stack.push(value);
-        }
-        return true;
-    }
-    if tag == "/scale" {
-        state.scale_stack.pop();
-        return true;
-    }
-    if tag == "br" || tag == "cr" {
-        push_text(state, "\n");
-        return true;
-    }
-    if tag == "nbsp" {
-        append_char(state, '\u{00a0}');
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("space=") {
-        if let Some(value) = parse_loose(&rest.replace('#', "")) {
-            state
-                .segs
-                .push(build_segment(state, String::new(), Some(value)));
-        }
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("alpha=") {
-        let hex = rest.replace('#', "");
-        let slice = &hex[..hex.len().min(2)];
-        state.alpha_override = u8::from_str_radix(if slice.is_empty() { "ff" } else { slice }, 16)
-            .ok()
-            .map(|value| value as f32 / 255.0);
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("voffset=") {
-        return push_number(&mut state.voffset_stack, rest);
-    }
-    if tag == "/voffset" {
-        state.voffset_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("rotate=") {
-        return push_number(&mut state.rotate_stack, rest);
-    }
-    if tag == "/rotate" {
-        state.rotate_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("cspace=") {
-        state.cspace_override = parse_loose(&rest.replace('#', ""));
-        return true;
-    }
-    if tag == "/cspace" {
-        state.cspace_override = None;
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("line-height=") {
-        state.line_height_override = parse_loose(&rest.replace('#', ""));
-        return true;
-    }
-    if tag == "/line-height" {
-        state.line_height_override = None;
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("line-indent=") {
-        state.line_indent_override = parse_line_indent(rest);
-        return true;
-    }
-    if tag == "/line-indent" {
-        state.line_indent_override = None;
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("indent=") {
-        return push_indent(&mut state.indent_stack, rest);
-    }
-    if tag == "/indent" {
-        state.indent_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("pos=") {
-        return push_indent(&mut state.position_stack, rest);
-    }
-    if tag == "/pos" {
-        state.position_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("mspace=") {
-        let mut parts = rest.split_whitespace();
-        if let Some(first) = parts.next() {
-            if let Some(parsed) = parse_indent(first) {
-                state.monospace_stack.push(parsed);
-                state
-                    .duospace_stack
-                    .push(parts.any(|part| part.replace('#', "") == "duospace=1"));
-            }
-        }
-        return true;
-    }
-    if tag == "/mspace" {
-        state.monospace_stack.pop();
-        state.duospace_stack.pop();
-        return true;
-    }
-    if let Some(rest) = tag.strip_prefix("align=") {
-        if rest == "left" || rest == "center" || rest == "right" {
-            state.align_stack.push(rest.to_string());
-        }
-        return true;
-    }
-    if tag == "/align" {
-        state.align_stack.pop();
-        return true;
-    }
-    match tag {
-        "b" => state.bold_depth += 1,
-        "/b" => state.bold_depth = (state.bold_depth - 1).max(0),
-        "i" => state.italic_depth += 1,
-        "/i" => state.italic_depth = (state.italic_depth - 1).max(0),
-        "u" => state.underline_depth += 1,
-        "/u" => state.underline_depth = (state.underline_depth - 1).max(0),
-        "s" => state.strikethrough_depth += 1,
-        "/s" => state.strikethrough_depth = (state.strikethrough_depth - 1).max(0),
-        "sub" => state.subscript_depth += 1,
-        "/sub" => state.subscript_depth = (state.subscript_depth - 1).max(0),
-        "sup" => state.superscript_depth += 1,
-        "/sup" => state.superscript_depth = (state.superscript_depth - 1).max(0),
-        "uppercase" | "allcaps" => state.case_stack.push(CaseTransform::Upper),
-        "/uppercase" | "/allcaps" => {
-            state.case_stack.pop();
-        }
-        "lowercase" => state.case_stack.push(CaseTransform::Lower),
-        "/lowercase" => {
-            state.case_stack.pop();
-        }
-        "smallcaps" => state.smallcaps_depth += 1,
-        "/smallcaps" => state.smallcaps_depth = (state.smallcaps_depth - 1).max(0),
-        "noparse" => state.noparse_depth += 1,
-        "/noparse" => state.noparse_depth = (state.noparse_depth - 1).max(0),
-        _ => {}
-    }
-    true
-}
-
-fn can_merge(a: &TextSegment, b: &TextSegment) -> bool {
-    let mut aa = a.clone();
-    let mut bb = b.clone();
-    aa.text.clear();
-    bb.text.clear();
-    aa == bb
-}
-
-fn segments_to_global(segs: &[TextSegment]) -> GlobalStyle {
-    let first = segs.first();
-    GlobalStyle {
-        color: first.and_then(|seg| seg.color),
-        alpha: first.and_then(|seg| seg.alpha),
-        align: first.and_then(|seg| seg.align.clone()),
-        clean: segs.iter().map(|seg| seg.text.as_str()).collect::<String>(),
-    }
-}
-
-fn resolve_segment_font_size(size: &Option<SizeSpec>, base: f32) -> f32 {
-    match size {
-        None => base,
-        Some(SizeSpec::Absolute(value)) => *value,
-        Some(SizeSpec::Delta(value)) => base + *value,
-        Some(SizeSpec::Percent(value)) => base * *value / 100.0,
-        Some(SizeSpec::Em(value)) => base * *value,
-    }
-}
-
-fn resolve_indent_value(spec: &Option<Indent>, base_font_size: f32, box_w: f32) -> Option<f32> {
-    match spec {
-        None => None,
-        Some(Indent::Pixels(value)) => Some(*value / TEXT_SCALE),
-        Some(Indent::Em(value)) => Some(*value * base_font_size / TEXT_SCALE),
-        Some(Indent::Percent(value)) => Some(box_w * *value / 100.0),
-    }
-}
-
-fn update_cpv_width(current: f32, before: f32, glyph_advance: f32) -> f32 {
-    current.max(before.abs() + glyph_advance)
-}
-
-fn update_cpv_width_for_char(current: f32, before: f32, glyph_advance: f32, ch: char) -> f32 {
-    if ch.is_whitespace() {
-        current
-    } else {
-        update_cpv_width(current, before, glyph_advance)
-    }
-}
-
-fn transform_char(ch: char, seg: &TextSegment) -> (String, f32) {
-    if seg.smallcaps
-        && ch.to_lowercase().to_string() == ch.to_string()
-        && ch.to_uppercase().to_string() != ch.to_string()
-    {
-        return (ch.to_uppercase().collect::<String>(), 0.8);
-    }
-    match seg.case_transform {
-        CaseTransform::Upper => (ch.to_uppercase().collect::<String>(), 1.0),
-        CaseTransform::Lower => (ch.to_lowercase().collect::<String>(), 1.0),
-        CaseTransform::None => (ch.to_string(), 1.0),
-    }
-}
-
-fn transformed_glyphs(ch: char, seg: &TextSegment) -> Vec<(char, f32)> {
-    let (text, scale) = transform_char(ch, seg);
-    text.chars().map(|value| (value, scale)).collect()
-}
-
+/// Characters the layout may draw: the visible, case-mapped characters that
+/// are not white space, their same-face stand-ins, and the missing-glyph
+/// square that replaces any the font lacks.
 fn glyph_demand_chars(raw: &str) -> Vec<char> {
-    parse_rich_segments(raw)
-        .iter()
-        .flat_map(|segment| {
-            segment.text.chars().flat_map(|source| {
-                if source == '\n' || source == '\r' || force_fallback_glyph(source) {
-                    Vec::new()
-                } else {
-                    transformed_glyphs(source, segment)
-                        .into_iter()
-                        .map(|(value, _)| value)
-                        .collect()
-                }
-            })
-        })
-        .collect()
+    let mut chars = Vec::new();
+    for segment in parse_segments(raw, 0.0) {
+        for source in segment.text.chars() {
+            if source.is_whitespace() || source.is_control() {
+                continue;
+            }
+            let (display, _) = segment.transform_char(source);
+            chars.push(display);
+            if let Some(alternate) =
+                glyph::same_face_alternate(display).filter(|ch| !ch.is_whitespace())
+            {
+                chars.push(alternate);
+            }
+        }
+    }
+    if !chars.is_empty() {
+        chars.push(glyph::MISSING_GLYPH_CHARACTER);
+    }
+    chars
 }
 
-fn resolve_fill(layer: &TextLayer, seg: &TextSegment, global: &GlobalStyle) -> [f32; 4] {
-    let color = seg.color.or(global.color).unwrap_or(layer.color_rgb);
+fn resolve_fill(layer: &TextLayer, seg: &TextSegment) -> [f32; 4] {
+    let color = seg.color.map_or(layer.color_rgb, |[r, g, b]| {
+        [f32::from(r), f32::from(g), f32::from(b)]
+    });
     [color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1.0]
-}
-
-fn apply_line_indent(
-    lx: f32,
-    sw: f32,
-    _box_w: f32,
-    effective_align: i32,
-    seg: Option<&TextSegment>,
-) -> f32 {
-    let mut cursor_x = lx;
-    if let Some(seg) = seg {
-        if let Some(indent) = &seg.indent {
-            match indent {
-                Indent::Percent(value) if *value < 100.0 => {
-                    cursor_x = percent_indent_cursor(sw, effective_align, *value);
-                }
-                Indent::Pixels(value) => cursor_x += *value / TEXT_SCALE,
-                Indent::Em(value) => {
-                    cursor_x += *value * resolve_segment_font_size(&seg.size, 0.0) / TEXT_SCALE;
-                }
-                _ => {}
-            }
-        }
-        if let Some(line_indent) = &seg.line_indent {
-            match line_indent {
-                LineIndent::Percent(value) if *value < 100.0 => {
-                    cursor_x = percent_indent_cursor(sw, effective_align, *value);
-                }
-                LineIndent::Pixels(value) => cursor_x = lx + *value,
-                _ => {}
-            }
-        }
-    }
-    cursor_x
-}
-
-fn percent_indent_cursor(sw: f32, effective_align: i32, percent: f32) -> f32 {
-    let pct = percent / 100.0;
-    let rect = (sw * TEXT_SCALE + 64.0) / (1.0 - pct);
-    let resolved_indent = rect * pct / TEXT_SCALE;
-    if effective_align == 2 {
-        (resolved_indent - sw) / 2.0
-    } else if effective_align == 4 {
-        rect / (2.0 * TEXT_SCALE) - sw
-    } else {
-        rect * (pct - 0.5) / TEXT_SCALE
-    }
 }
 
 fn layer_base_matrix(layer: &TextLayer) -> Mat {
@@ -1319,26 +802,6 @@ fn layer_base_matrix(layer: &TextLayer) -> Mat {
             ),
         )
     })
-}
-
-fn line_indent_dynamic_percent(raw: &str, segments: &[TextSegment]) -> Option<f32> {
-    let _ = raw;
-    let mut dynamic_percent = None;
-    for segment in segments
-        .iter()
-        .filter(|segment| segment.text.chars().any(|ch| !ch.is_whitespace()))
-    {
-        let LineIndent::Percent(value) = segment.line_indent.as_ref()? else {
-            return None;
-        };
-        if !value.is_finite()
-            || dynamic_percent.is_some_and(|current: f32| (current - *value).abs() > f32::EPSILON)
-        {
-            return None;
-        }
-        dynamic_percent = Some(*value);
-    }
-    dynamic_percent
 }
 
 type Mat = [f32; 6];
@@ -1375,134 +838,6 @@ fn multiply(a: Mat, b: Mat) -> Mat {
 
 fn apply(m: Mat, x: f32, y: f32) -> [f32; 2] {
     [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]
-}
-
-fn parse_size(raw: &str) -> Option<SizeSpec> {
-    let value = raw.replace('#', "");
-    if let Some(rest) = value.strip_suffix("em") {
-        parse_as(rest, SizeSpec::Em)
-    } else if let Some(rest) = value.strip_suffix('%') {
-        parse_as(rest, SizeSpec::Percent)
-    } else if let Some(rest) = value.strip_prefix('+') {
-        parse_as(rest, SizeSpec::Delta)
-    } else if let Some(rest) = value.strip_prefix('-') {
-        parse_as(rest, |n| SizeSpec::Delta(-n))
-    } else {
-        parse_as(&value, SizeSpec::Absolute)
-    }
-}
-
-fn parse_indent(raw: &str) -> Option<Indent> {
-    let value = raw.replace('#', "");
-    if let Some(rest) = value.strip_suffix('%') {
-        parse_as(rest, Indent::Percent)
-    } else if let Some(rest) = value.strip_suffix("em") {
-        parse_as(rest, Indent::Em)
-    } else if let Some(rest) = value.strip_suffix("px") {
-        parse_as(rest, Indent::Pixels)
-    } else {
-        parse_as(&value, Indent::Pixels)
-    }
-}
-
-fn parse_line_indent(raw: &str) -> Option<LineIndent> {
-    if let Some(rest) = raw.strip_suffix('%') {
-        parse_as(rest, LineIndent::Percent)
-    } else {
-        parse_as(raw, LineIndent::Pixels)
-    }
-}
-
-fn parse_as<T>(raw: &str, map: impl FnOnce(f32) -> T) -> Option<T> {
-    parse_loose(raw).map(map)
-}
-
-fn parse_loose(raw: &str) -> Option<f32> {
-    let trimmed = raw.trim();
-    let mut end = 0usize;
-    for (idx, ch) in trimmed.char_indices() {
-        let ok =
-            ch.is_ascii_digit() || ch == '+' || ch == '-' || ch == '.' || ch == 'e' || ch == 'E';
-        if ok {
-            end = idx + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if end == 0 {
-        return None;
-    }
-    trimmed[..end]
-        .parse::<f32>()
-        .ok()
-        .filter(|value| value.is_finite())
-}
-
-fn push_color(state: &mut ParseState, hex: &str) -> bool {
-    if let Some(parsed) = parse_hex_color(hex) {
-        state.current_color = Some([parsed[0], parsed[1], parsed[2]]);
-        state.alpha_override = if parsed[3].is_nan() {
-            None
-        } else {
-            Some(parsed[3] / 255.0)
-        };
-        state.color_stack.push(ColorFrame {
-            color: state.current_color,
-            alpha: state.alpha_override,
-        });
-    }
-    true
-}
-
-fn parse_hex_color(hex: &str) -> Option<[f32; 4]> {
-    let value = hex.replace('#', "");
-    if value.len() == 3 || value.len() == 4 {
-        let mut nums = value
-            .chars()
-            .filter_map(|ch| ch.to_digit(16).map(|value| value as f32 * 17.0))
-            .collect::<Vec<_>>();
-        if nums.len() < 3 {
-            return None;
-        }
-        while nums.len() < 4 {
-            nums.push(f32::NAN);
-        }
-        return nums.try_into().ok();
-    }
-    if value.len() == 6 || value.len() == 8 {
-        let r = u8::from_str_radix(&value[0..2], 16).ok()? as f32;
-        let g = u8::from_str_radix(&value[2..4], 16).ok()? as f32;
-        let b = u8::from_str_radix(&value[4..6], 16).ok()? as f32;
-        let a = if value.len() == 8 {
-            u8::from_str_radix(&value[6..8], 16).ok()? as f32
-        } else {
-            f32::NAN
-        };
-        return Some([r, g, b, a]);
-    }
-    None
-}
-
-fn push_number(stack: &mut Vec<f32>, raw: &str) -> bool {
-    if let Some(value) = parse_loose(&raw.replace('#', "")) {
-        stack.push(value);
-    }
-    true
-}
-
-fn push_indent(stack: &mut Vec<Indent>, raw: &str) -> bool {
-    if let Some(value) = parse_indent(raw) {
-        stack.push(value);
-    }
-    true
-}
-
-fn matches_duo(ch: char) -> bool {
-    ch == '.' || ch == ':' || ch == ','
-}
-
-fn starts_with_chars(left: &[char], prefix: &[char]) -> bool {
-    left.len() >= prefix.len() && left.iter().zip(prefix.iter()).all(|(a, b)| a == b)
 }
 
 #[derive(Deserialize)]
@@ -1576,54 +911,277 @@ fn one() -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_glyph_demand_json, build_layout_json, glyph_demand_chars, parse_rich_segments,
-        transformed_glyphs, update_cpv_width_for_char,
-    };
+    use super::{build_glyph_demand_json, build_layout_json, glyph_demand_chars};
+    use serde_json::{json, Value};
 
-    #[test]
-    fn cpv_width_excludes_trailing_spaces_but_caret_keeps_advancing() {
-        let mut width = 0.0;
-        let mut xadv = 0.0;
+    const FAMILY: &str = "SyntheticSans";
 
-        width = update_cpv_width_for_char(width, xadv, 24.0, ' ');
-        xadv += 24.0;
-        width = update_cpv_width_for_char(width, xadv, 110.0, '●');
-        xadv += 110.0;
-        for _ in 0..5 {
-            width = update_cpv_width_for_char(width, xadv, 24.0, ' ');
-            xadv += 24.0;
-        }
+    fn source_hash() -> String {
+        "a".repeat(64)
+    }
 
-        assert!((width - 134.0).abs() < 1e-6);
-        assert!((xadv - 254.0).abs() < 1e-6);
+    fn atlas_glyph(ch: char, advance: f32) -> Value {
+        json!({
+            "key": format!("en\u{0}{}\u{0}{FAMILY}\u{0}{ch}", source_hash()),
+            "page": 0, "u0": 0.0, "v0": 0.0, "u1": 0.1, "v1": 0.1,
+            "advance": advance,
+            "planeBearingX": 2.0, "planeBearingY": 50.0,
+            "planeWidth": 30.0, "planeHeight": 50.0,
+            "drawable": true
+        })
+    }
+
+    fn layout(
+        text: &str,
+        font_size: f32,
+        text_type: i32,
+        line_spacing: f32,
+        glyphs: &[(char, f32)],
+    ) -> Value {
+        let input = json!({
+            "layers": [{
+                "id": "text-layer", "z": 0, "text": text,
+                "region": "en", "fontFamily": FAMILY, "fontSourceHash": source_hash(),
+                "x": 0.0, "y": 0.0, "rotationDeg": 0.0, "scaleX": 1.0, "scaleY": 1.0,
+                "fontSize": font_size, "color": [1.0, 1.0, 1.0, 1.0],
+                "outlineColor": [0.0, 0.0, 0.0, 0.0], "colorRgb": [10.0, 20.0, 30.0],
+                "outlineWidth": 0.0, "lineSpacing": line_spacing, "textType": text_type
+            }],
+            "atlas": {
+                "baseSize": 75.0, "spread": 6.0,
+                "glyphs": glyphs.iter().map(|(ch, advance)| atlas_glyph(*ch, *advance)).collect::<Vec<_>>()
+            },
+            "tick": 0, "frameMode": "animate"
+        });
+        serde_json::from_str(&build_layout_json(&input.to_string()).unwrap()).unwrap()
+    }
+
+    /// Latin capitals 60 units wide at the 75-unit atlas size: 19.2 at size 24.
+    const LETTERS: &[(char, f32)] = &[('A', 60.0), ('B', 60.0), ('C', 60.0), ('\u{25A1}', 75.0)];
+    const LETTER_ADVANCE: f64 = 19.2;
+
+    fn instances(output: &Value) -> &Vec<Value> {
+        output["instances"].as_array().unwrap()
+    }
+
+    fn op(instance: &Value, index: usize) -> f64 {
+        instance["charOp"][index].as_f64().unwrap()
+    }
+
+    fn assert_close(actual: f64, expected: f64, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "{what}: {actual} != {expected}"
+        );
     }
 
     #[test]
     fn glyph_demand_uses_tmp_visible_transformed_scalars() {
         assert_eq!(
             glyph_demand_chars("<uppercase>aß</uppercase> <noparse><b></noparse>"),
-            vec!['A', 'S', 'S', '<', 'b', '>'],
+            vec!['A', 'ß', '<', 'b', '>', '\u{25A1}'],
         );
     }
 
     #[test]
     fn glyph_demand_json_is_deduplicated_and_font_scoped() {
-        let output: serde_json::Value = serde_json::from_str(
+        let output: Value = serde_json::from_str(
             &build_glyph_demand_json(r#"{"layers":[{"text":"<b>12</b>","region":"en","fontFamily":"Inter","fontSourceHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"text":"2A","region":"en","fontFamily":"Inter","fontSourceHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#).unwrap(),
         ).unwrap();
         assert_eq!(output["source"], "wasm-tmp-glyph-demand");
-        assert_eq!(output["requests"].as_array().unwrap().len(), 3);
-        assert_eq!(output["requests"][0]["char"], "1");
-        assert_eq!(output["requests"][1]["char"], "2");
-        assert_eq!(output["requests"][2]["char"], "A");
+        let chars: Vec<&str> = output["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|request| request["char"].as_str().unwrap())
+            .collect();
+        assert_eq!(chars, ["1", "2", "\u{25A1}", "A"]);
     }
 
     #[test]
-    fn case_expansion_is_laid_out_as_scalar_glyphs() {
-        let segments = parse_rich_segments("<uppercase>ß</uppercase>");
-        let glyphs = transformed_glyphs('ß', &segments[0]);
-        assert_eq!(glyphs, vec![('S', 1.0), ('S', 1.0)]);
+    fn case_changes_map_one_character_to_one() {
+        let output = layout("<uppercase>ß</uppercase>", 24.0, 1, 0.0, &[('ß', 50.0)]);
+        let chars: Vec<&str> = instances(&output)
+            .iter()
+            .map(|instance| instance["char"].as_str().unwrap())
+            .collect();
+        assert_eq!(chars, ["ß"]);
+    }
+
+    #[test]
+    fn multi_byte_colour_values_stay_literal_instead_of_panicking() {
+        for text in ["<alpha=#日>A", "<color=#日日>A", "<#日日>A"] {
+            let output = layout(text, 24.0, 1, 0.0, LETTERS);
+            let count = instances(&output).len();
+            assert_eq!(count, text.chars().count(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn named_colours_and_closing_tags_follow_tmp() {
+        let output = layout("<color=red>A", 24.0, 1, 0.0, LETTERS);
+        assert_eq!(instances(&output)[0]["fill"], json!([1.0, 0.0, 0.0, 1.0]));
+
+        let output = layout("<color=#ff0000>A</color>B", 24.0, 1, 0.0, LETTERS);
+        let fill = instances(&output)[1]["fill"].as_array().unwrap().clone();
+        assert_close(fill[0].as_f64().unwrap(), 10.0 / 255.0, "element red");
+        assert_close(fill[2].as_f64().unwrap(), 30.0 / 255.0, "element blue");
+
+        // A colour tag replaces the alpha an earlier <alpha> set.
+        let output = layout("<alpha=#40>AB<color=#ff0000>C", 24.0, 1, 0.0, LETTERS);
+        let alphas: Vec<f64> = instances(&output)
+            .iter()
+            .map(|instance| instance["shaderVertexAlpha"].as_f64().unwrap())
+            .collect();
+        assert_close(alphas[0], 64.0 / 255.0, "alpha tag");
+        assert_close(alphas[2], 1.0, "colour tag alpha");
+    }
+
+    #[test]
+    fn unrecognised_tags_are_laid_out_as_text() {
+        let glyphs: Vec<(char, f32)> = "<love>".chars().map(|ch| (ch, 40.0)).collect();
+        let output = layout("<love>", 24.0, 1, 0.0, &glyphs);
+        let text: String = instances(&output)
+            .iter()
+            .map(|instance| instance["char"].as_str().unwrap())
+            .collect();
+        assert_eq!(text, "<love>");
+    }
+
+    #[test]
+    fn spacing_tags_resolve_units_and_move_the_caret() {
+        let plain = layout("A", 24.0, 1, 0.0, LETTERS);
+        let start = op(&instances(&plain)[0], 1);
+
+        let spaced = layout("A<space=50>B", 24.0, 1, 0.0, LETTERS);
+        let [a, b] = [0, 1].map(|index| op(&instances(&spaced)[index], 1));
+        assert_close(b - a, LETTER_ADVANCE + 25.0, "space advance");
+
+        // The second line holds no space and centres on its own glyph.
+        let centred = layout("<space=50>A\nA", 24.0, 2, 0.0, LETTERS);
+        assert_close(
+            op(&instances(&centred)[1], 1),
+            -LETTER_ADVANCE / 2.0,
+            "second line start",
+        );
+
+        let cspace = layout("<cspace=0.1em>AB", 24.0, 1, 0.0, LETTERS);
+        let [a, b] = [0, 1].map(|index| op(&instances(&cspace)[index], 1));
+        assert_close(
+            b - a,
+            LETTER_ADVANCE + 0.1 * 24.0 / 2.0,
+            "em character spacing",
+        );
+
+        let indent = layout("<indent=1em>A", 24.0, 1, 0.0, LETTERS);
+        assert_close(op(&instances(&indent)[0], 1) - start, 12.0, "em indent");
+
+        let line_indent = layout("<line-indent=20>A", 24.0, 1, 0.0, LETTERS);
+        assert_close(
+            op(&instances(&line_indent)[0], 1) - start,
+            10.0,
+            "pixel line indent",
+        );
+    }
+
+    #[test]
+    fn static_percent_line_indent_follows_the_unscaled_preferred_width() {
+        let at = |scale: f32| {
+            let output = layout(
+                &format!("<line-indent=96%><size=1250><scale={scale}>A"),
+                24.0,
+                1,
+                0.0,
+                LETTERS,
+            );
+            op(&instances(&output)[0], 1)
+        };
+        assert_close(at(60.0), at(1.0), "static start under <scale>");
+    }
+
+    #[test]
+    fn superscript_rises_by_the_face_offset() {
+        let output = layout("A<sup>B</sup>", 24.0, 1, 0.0, LETTERS);
+        let [a, b] = [0, 1].map(|index| op(&instances(&output)[index], 2));
+        assert_close(a - b, 66.0 * 0.64 * 0.5 / 2.0, "superscript rise");
+        assert_close(
+            instances(&output)[1]["shaderFontSize"].as_f64().unwrap(),
+            12.0,
+            "superscript size",
+        );
+    }
+
+    #[test]
+    fn line_height_percent_and_line_spacing_use_tmp_units() {
+        let output = layout("A\n<line-height=50%>A", 24.0, 1, 0.0, LETTERS);
+        // 50% of the 150-unit face line height at 24 / 75 * 2 per unit.
+        assert_close(
+            output["instances"][0]["layoutMetrics"]["lineOffsets"][1]
+                .as_f64()
+                .unwrap(),
+            48.0,
+            "line height",
+        );
+        let gap = |line_spacing: f32| {
+            let output = layout("A\nA", 300.0, 1, line_spacing, LETTERS);
+            output["instances"][0]["layoutMetrics"]["lineOffsets"][1]
+                .as_f64()
+                .unwrap()
+        };
+        assert_close(gap(1.0) - gap(0.0), 2.0 * 1.325 * 3.0, "line spacing");
+    }
+
+    #[test]
+    fn italic_and_small_caps_follow_tmp_geometry() {
+        let output = layout("<i>A</i>", 24.0, 1, 0.0, LETTERS);
+        assert_close(
+            instances(&output)[0]["charPosition"][4].as_f64().unwrap(),
+            -0.35,
+            "italic slant",
+        );
+        let output = layout("<smallcaps>a</smallcaps>", 24.0, 1, 0.0, LETTERS);
+        let instance = &instances(&output)[0];
+        assert_eq!(instance["char"], "A");
+        assert_close(
+            instance["shaderFontSize"].as_f64().unwrap(),
+            19.2,
+            "small caps size",
+        );
+        assert_close(op(instance, 3), 1.0, "small caps horizontal scale");
+    }
+
+    #[test]
+    fn a_character_the_atlas_lacks_is_drawn_as_the_missing_glyph_square() {
+        let output = layout("A\u{6F22}B", 24.0, 1, 0.0, LETTERS);
+        let square = &instances(&output)[1];
+        assert_eq!(square["char"], "\u{25A1}");
+        assert_eq!(square["drawable"], true);
+        let [a, b] = [0, 2].map(|index| op(&instances(&output)[index], 1));
+        assert_close(b - a, LETTER_ADVANCE + 24.0, "square advance");
+    }
+
+    #[test]
+    fn plain_text_indices_match_the_numeric_runs() {
+        let glyphs: Vec<(char, f32)> = "HP10".chars().map(|ch| (ch, 40.0)).collect();
+        let text = "HP<br>100";
+        let output = layout(text, 24.0, 1, 0.0, &glyphs);
+        let digit_indices: Vec<u64> = instances(&output)
+            .iter()
+            .filter(|instance| {
+                instance["char"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit())
+            })
+            .map(|instance| instance["plainTextIndex"].as_u64().unwrap())
+            .collect();
+        let runs = sekai_profile_renderer_core::tmp_text::numeric_text_runs(text);
+        assert_eq!(runs.len(), 1);
+        let run_indices: Vec<u64> = (runs[0].plain_start..runs[0].plain_end)
+            .map(u64::from)
+            .collect();
+        assert_eq!(digit_indices, run_indices);
     }
 
     #[test]
@@ -1782,70 +1340,6 @@ mod tests {
             "reflection must preserve negative winding: {quad:?}"
         );
     }
-}
-
-#[derive(Clone, PartialEq)]
-enum SizeSpec {
-    Absolute(f32),
-    Delta(f32),
-    Percent(f32),
-    Em(f32),
-}
-
-#[derive(Clone, PartialEq)]
-enum Indent {
-    Percent(f32),
-    Pixels(f32),
-    Em(f32),
-}
-
-#[derive(Clone, PartialEq)]
-enum LineIndent {
-    Percent(f32),
-    Pixels(f32),
-}
-
-#[derive(Clone, PartialEq)]
-enum CaseTransform {
-    None,
-    Upper,
-    Lower,
-}
-
-#[derive(Clone, PartialEq)]
-struct TextSegment {
-    text: String,
-    fixed_advance: Option<f32>,
-    color: Option<[f32; 3]>,
-    size: Option<SizeSpec>,
-    scale: Option<f32>,
-    alpha: Option<f32>,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikethrough: bool,
-    mark_color: Option<[f32; 4]>,
-    superscript: bool,
-    subscript: bool,
-    case_transform: CaseTransform,
-    smallcaps: bool,
-    voffset: Option<f32>,
-    rotate: Option<f32>,
-    cspace: Option<f32>,
-    line_height: Option<f32>,
-    line_indent: Option<LineIndent>,
-    indent: Option<Indent>,
-    position: Option<Indent>,
-    monospace: Option<Indent>,
-    duospace: bool,
-    align: Option<String>,
-}
-
-struct GlobalStyle {
-    color: Option<[f32; 3]>,
-    alpha: Option<f32>,
-    align: Option<String>,
-    clean: String,
 }
 
 #[derive(Clone, Serialize)]

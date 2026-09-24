@@ -26,7 +26,7 @@
 //! | [`profile_transform`] | Transform and matrix helpers shared by backends |
 //! | [`masterdata`] | Masterdata lookups the resolve step needs |
 //! | [`locale`] | Region-specific strings for fixed panel labels |
-//! | [`tmp_text`] | TextMesh Pro markup handling |
+//! | [`tmp_text`] | TextMesh Pro markup, line breaking and glyph choice |
 //! | [`sdf_geometry`] | Path segments and their analytic distance field |
 //! | [`sdf_glyph`] | Glyph SDF rasterization shared by the native and browser backends |
 //! | [`sdf_material`] | Text and shape SDF material parameters |
@@ -48,6 +48,8 @@ pub mod sdf_geometry;
 pub mod sdf_glyph;
 pub mod sdf_material;
 pub mod tmp_text;
+
+pub use tmp_text::{wrap_tmp_markup, MeasuredTextUnit};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -818,68 +820,6 @@ pub struct LineIndentMaterialization {
     pub fps: u32,
     pub looped: bool,
     pub frames: Vec<LineIndentFrameLocal>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MeasuredTextUnit {
-    pub advance: f32,
-    pub hard_break: bool,
-}
-
-/// Inserts soft line breaks into TMP markup without splitting tags. `units` must contain one
-/// entry per visible Unicode scalar (including existing newlines as `hard_break=true`).
-pub fn wrap_tmp_markup(
-    raw: &str,
-    units: &[MeasuredTextUnit],
-    max_width: f32,
-) -> Result<String, &'static str> {
-    if !max_width.is_finite() || max_width <= 0.0 {
-        return Err("max_width must be finite and positive");
-    }
-    let mut breaks = BTreeSet::new();
-    let mut width = 0.0f32;
-    let mut line_units = 0usize;
-    for (index, unit) in units.iter().enumerate() {
-        if unit.hard_break {
-            width = 0.0;
-            line_units = 0;
-            continue;
-        }
-        let advance = unit.advance.max(0.0);
-        if line_units > 0 && width + advance > max_width {
-            breaks.insert(index);
-            width = 0.0;
-            line_units = 0;
-        }
-        width += advance;
-        line_units += 1;
-    }
-
-    let mut output = String::with_capacity(raw.len() + breaks.len());
-    let mut visible_index = 0usize;
-    let mut cursor = 0usize;
-    while cursor < raw.len() {
-        let rest = &raw[cursor..];
-        if rest.starts_with('<') {
-            if let Some(end) = rest.find('>') {
-                let end = cursor + end + 1;
-                output.push_str(&raw[cursor..end]);
-                cursor = end;
-                continue;
-            }
-        }
-        let ch = rest.chars().next().ok_or("invalid utf-8 cursor")?;
-        if breaks.contains(&visible_index) && ch != '\n' {
-            output.push('\n');
-        }
-        output.push(ch);
-        cursor += ch.len_utf8();
-        visible_index += 1;
-    }
-    if visible_index != units.len() {
-        return Err("measured unit count does not match visible markup text");
-    }
-    Ok(output)
 }
 
 /// Compatibility-only bounded materialization for native encoders/debuggers.
@@ -5018,41 +4958,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(multiline, widest_line);
-    }
-
-    #[test]
-    fn rich_text_wrapping_inserts_breaks_without_splitting_markup() {
-        let units = "ABCD"
-            .chars()
-            .map(|_| MeasuredTextUnit {
-                advance: 60.0,
-                hard_break: false,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            wrap_tmp_markup("<color=#ff0000>ABCD</color>", &units, 130.0).unwrap(),
-            "<color=#ff0000>AB\nCD</color>"
-        );
-    }
-
-    #[test]
-    fn rich_text_wrapping_preserves_authored_newlines_and_fails_on_unit_drift() {
-        let units = vec![
-            MeasuredTextUnit {
-                advance: 40.0,
-                hard_break: false,
-            },
-            MeasuredTextUnit {
-                advance: 0.0,
-                hard_break: true,
-            },
-            MeasuredTextUnit {
-                advance: 40.0,
-                hard_break: false,
-            },
-        ];
-        assert_eq!(wrap_tmp_markup("A\nB", &units, 50.0).unwrap(), "A\nB");
-        assert!(wrap_tmp_markup("AB", &units, 50.0).is_err());
     }
 
     fn legacy_materialize(source: &LineIndentSource, max_frames: usize) -> (bool, Vec<f32>) {
