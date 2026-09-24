@@ -26,6 +26,7 @@ use crate::render_object::{
 
 #[cfg(target_arch = "x86_64")]
 mod simd_x86;
+mod ugui_text;
 
 pub const PROFILE_COMPOSITOR_SCHEMA: &str = "allium.profile-compositor.v1";
 pub const GENERAL_BASE_CONTRACT: &str =
@@ -135,6 +136,10 @@ pub enum ProfileCompositorError {
     SkiaReference(String),
     #[error("profile compositor semantic SDF command {role} failed: {reason}")]
     SemanticSdf { role: String, reason: String },
+    #[error("profile compositor command {role} needs font {family}, which is not installed")]
+    MissingFont { role: String, family: String },
+    #[error("profile compositor command {role} could not render its glyphs: {reason}")]
+    GlyphRaster { role: String, reason: String },
 }
 
 struct CompositionTarget {
@@ -791,7 +796,9 @@ fn general_base_plan(
                     .push(command);
                 static_commands.push(command);
             }
-            SemanticCommandPayload::Composite { .. } => return Ok(None),
+            SemanticCommandPayload::UguiText(_) | SemanticCommandPayload::Composite { .. } => {
+                return Ok(None)
+            }
         }
     }
     if static_commands.is_empty() || overlay_commands.is_empty() || grouped_static.len() != 1 {
@@ -954,7 +961,9 @@ fn general_base_tile_plan(
                 }
             }
             SemanticCommandPayload::Shape { .. } => {}
-            SemanticCommandPayload::Composite { .. } => unreachable!(),
+            SemanticCommandPayload::UguiText(_) | SemanticCommandPayload::Composite { .. } => {
+                unreachable!()
+            }
         }
     }
     for (family, identity) in atlas_identities {
@@ -1333,6 +1342,31 @@ fn render_image_commands_into(
                 stats.simd_packet_count = stats
                     .simd_packet_count
                     .saturating_add(execution.simd_packet_count);
+            }
+            SemanticCommandPayload::UguiText(source) => {
+                let target = targets
+                    .last_mut()
+                    .map(|target| target.pixels.as_mut_slice())
+                    .unwrap_or(destination);
+                let raster = ugui_text::raster_ugui_text_command(
+                    target,
+                    width,
+                    height,
+                    command,
+                    layer,
+                    source,
+                    control_state.translate_y,
+                    executor,
+                )?;
+                stats.text_command_count = stats.text_command_count.saturating_add(1);
+                stats.blended_fragment_count = stats
+                    .blended_fragment_count
+                    .saturating_add(raster.fragments);
+                stats.simd_packet_count =
+                    stats.simd_packet_count.saturating_add(raster.simd_packets);
+                stats.scalar_fragment_count = stats
+                    .scalar_fragment_count
+                    .saturating_add(raster.scalar_fragments);
             }
             SemanticCommandPayload::Shape {
                 primitive,
@@ -1793,7 +1827,7 @@ pub fn render_image_scene_skia_reference(
             continue;
         }
         match &command.payload {
-            SemanticCommandPayload::Text { .. } => {
+            SemanticCommandPayload::Text { .. } | SemanticCommandPayload::UguiText(_) => {
                 stats.skipped_text_command_count =
                     stats.skipped_text_command_count.saturating_add(1);
             }

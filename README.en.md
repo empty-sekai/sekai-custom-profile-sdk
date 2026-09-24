@@ -163,16 +163,24 @@ cargo run --release --bin render-card -- \
 ```
 
 `customProfileCharacterIconResources`, `customProfileMaterialResources`, and
-`customProfileUserInterfaceIconResources` (`OPTIONAL_TABLES` in the host crate) are shipped by
-some regions only. `--masterdata` and `--masterdata-url` load them when present; without them
-the `characterIcons`, `materials`, and `userInterfaceIcons` elements are not drawn and no
-missing-table warning is reported.
+`customProfileUserInterfaceIconResources` are shipped by some regions only, and `omikujis` is
+read only by omikuji collections; the four tables are `OPTIONAL_TABLES` in the host crate.
+`--masterdata` and `--masterdata-url` load them when present; without them the
+`characterIcons`, `materials`, and `userInterfaceIcons` elements and omikuji collections are
+not drawn and no missing-table warning is reported.
 
 Collections follow the `customProfileResourceCollectionType` of their
 `customProfileCollectionResources` row: `can_badge` rows draw their image through a lit badge
 material that also needs the static asset `ui/sekai_badge_normal` (a normal map, listed in the
-CLI's static manifest); `omikuji` rows name a prefab rather than an image and are neither drawn
-nor requested; every other type, and a missing one, draws as a plain image.
+CLI's static manifest); `omikuji` rows name a fortune-slip prefab, and the element's
+`targetId` picks the `omikujis` row it shows. The native renderer draws the slip's cover and
+fortune images and its vertical title, summary and description texts, which are rendered from
+FreeType coverage rather than SDF glyphs. The two images are requested as ordinary assets. The
+texts use the font assets `FOT-Omikuji` (2022 slips) and `FOT-UDMinchoPro-B` (2023–2025 slips),
+found as `FOT-Omikuji.otf` and `FOT-UDMinchoPro-B.otf` in the font directory; without the font
+the page fails to render. A missing `targetId`, one naming no row, and a slip prefab that is
+not laid out draw nothing and request nothing. The browser renderer does not draw omikuji
+collections yet. Every other type, and a missing one, draws as a plain image.
 
 `--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
 `--asset-url-layout game-assets` only when the source follows the extracted game asset

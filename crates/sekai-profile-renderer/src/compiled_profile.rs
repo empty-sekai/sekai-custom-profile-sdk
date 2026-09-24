@@ -374,6 +374,7 @@ fn collect_scene_resource_requests(scene: &ResolvedCardCommands) -> Vec<Compiled
                 ..
             } => insert_resource(&mut resources, resource, CompiledResourceUseKind::ShapeMask),
             SemanticCommandPayload::Text { .. }
+            | SemanticCommandPayload::UguiText(_)
             | SemanticCommandPayload::Shape { .. }
             | SemanticCommandPayload::Composite { .. } => {}
         }
@@ -406,7 +407,7 @@ fn accumulate_scene_work(scene: &ResolvedCardCommands, work: &mut CompiledProfil
     }
     for command in &scene.commands {
         match &command.payload {
-            SemanticCommandPayload::Text { .. } => {
+            SemanticCommandPayload::Text { .. } | SemanticCommandPayload::UguiText(_) => {
                 work.text_command_count = work.text_command_count.saturating_add(1)
             }
             SemanticCommandPayload::Image { .. } => {

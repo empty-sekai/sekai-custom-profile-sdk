@@ -31,6 +31,8 @@
 //! | [`sdf_glyph`] | Glyph SDF rasterization shared by the native and browser backends |
 //! | [`sdf_material`] | Text and shape SDF material parameters |
 //! | [`badge_material`] | Lit material of can-badge collection images |
+//! | [`ugui_text`] | uGUI text layout drawn from FreeType bitmaps |
+//! | [`omikuji`] | The fortune slip of omikuji collections |
 //! | [`authoring_document`] | Editable document model |
 //! | [`authoring_session`] | Editing session state and command handling |
 
@@ -40,6 +42,7 @@ pub mod badge_material;
 pub mod general_recipe;
 pub mod locale;
 pub mod masterdata;
+pub mod omikuji;
 pub mod profile_data;
 pub mod profile_layout;
 pub mod profile_resolve;
@@ -50,6 +53,7 @@ pub mod sdf_geometry;
 pub mod sdf_glyph;
 pub mod sdf_material;
 pub mod tmp_text;
+pub mod ugui_text;
 
 pub use tmp_text::{wrap_tmp_markup, MeasuredTextUnit};
 
@@ -61,7 +65,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const SCHEMA_MAJOR: u16 = 1;
-pub const SCHEMA_MINOR: u16 = 16;
+pub const SCHEMA_MINOR: u16 = 17;
 pub const TICKS_PER_SECOND: u32 = 60;
 pub const TMP_PAD: f32 = 64.0;
 pub const TMP_SEED_WIDTH: f32 = 8.46;
@@ -344,6 +348,9 @@ pub enum SemanticCommandPayload {
         opacity: f32,
         clip: Option<Quad>,
     },
+    /// A uGUI text node drawn from FreeType bitmaps; see [`ugui_text`]. Its
+    /// geometry is laid out by the renderer, which owns the font file.
+    UguiText(ugui_text::UguiTextSource),
 }
 
 /// Backend-neutral post-layout placement. The TMP layout output remains
@@ -506,6 +513,31 @@ impl SemanticCommandSource {
                 opacity: 1.0,
                 clip: None,
             },
+        }
+    }
+
+    /// A uGUI text node whose node rect covers `bounds` in the layer.
+    pub fn ugui_text(
+        id: CommandId,
+        layer_id: LayerId,
+        role: impl Into<String>,
+        bounds: Rect,
+        source: ugui_text::UguiTextSource,
+    ) -> Self {
+        Self {
+            id,
+            layer_id,
+            role: role.into(),
+            bounds,
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            hit_geometry: [[0.0; 2]; 4],
+            blend_mode: BlendMode::SrcOver,
+            clip: None,
+            control_bindings: Vec::new(),
+            metadata: BTreeMap::new(),
+            numeric_text_runs: Vec::new(),
+            render_placement: None,
+            payload: SemanticCommandPayload::UguiText(source),
         }
     }
 

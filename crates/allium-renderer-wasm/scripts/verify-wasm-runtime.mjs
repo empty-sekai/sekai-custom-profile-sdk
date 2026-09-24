@@ -68,6 +68,7 @@ assert.deepEqual(iconMasterData.optional_tables, [
   "customProfileCharacterIconResources",
   "customProfileMaterialResources",
   "customProfileUserInterfaceIconResources",
+  "omikujis",
 ]);
 for (const [name, table] of [
   ["customProfileTextColors", [{ id: 1, colorCode: "#ff8000" }]],
@@ -113,18 +114,27 @@ callJsonInput("sdf_renderer_core_masterdata_put_table_json", {
     { id: 2, customProfileResourceType: "collection", customProfileResourceCollectionType: "omikuji", resourceLoadVal: "lottery_game/new_year_2022", fileName: "Prefabs/Omikuji" },
   ],
 }, [collectionMasterData.handle]);
+callJsonInput("sdf_renderer_core_masterdata_put_table_json", {
+  name: "omikujis",
+  table: [{
+    id: 7, unit: "idol", summary: "s",
+    title1: "t1", description1: "d1", title2: "t2", description2: "d2", title3: "t3", description3: "d3",
+    fortuneAssetbundleName: "lottery_game/new_year_2022_material", fortuneFilePath: "unsei_daikichi",
+    omikujiCoverAssetbundleName: "lottery_game/new_year_2022_material", omikujiCoverFilePath: "omikuji_idol",
+  }],
+}, [collectionMasterData.handle]);
 callJson("sdf_renderer_core_masterdata_seal_json", ["number"], [collectionMasterData.handle]);
 const collectionPreparation = callJsonInput("sdf_renderer_core_profile_prepare_json", {
   documentKey: "collections",
   card: {
     collections: [
       { objectData: iconObject, id: 1, targetId: null },
-      { objectData: { ...iconObject, layer: 2 }, id: 2, targetId: null },
+      { objectData: { ...iconObject, layer: 2 }, id: 2, targetId: 7 },
     ],
   },
 }, [collectionMasterData.handle]);
-// A can badge requests its image and the static normal map; the omikuji
-// prefab requests nothing.
+// A can badge requests its image and the static normal map; the browser leaves
+// the omikuji out and requests nothing for it, even with its `omikujis` row.
 assert.deepEqual(
   collectionPreparation.resources.map((request) => `${request.resource.namespace}/${request.resource.key}`).sort(),
   ["assets/custom_profile/collection/crash/crash_fixture_canbadge", "static/ui/sekai_badge_normal"],

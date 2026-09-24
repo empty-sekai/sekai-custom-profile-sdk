@@ -742,6 +742,23 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        super::put_table(
+            handle,
+            &serde_json::json!({
+                "name": "omikujis",
+                "table": [{
+                    "id": 7, "unit": "idol", "summary": "s",
+                    "title1": "t1", "description1": "d1", "title2": "t2",
+                    "description2": "d2", "title3": "t3", "description3": "d3",
+                    "fortuneAssetbundleName": "lottery_game/new_year_2022_material",
+                    "fortuneFilePath": "unsei_daikichi",
+                    "omikujiCoverAssetbundleName": "lottery_game/new_year_2022_material",
+                    "omikujiCoverFilePath": "omikuji_idol"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
         super::seal(handle).unwrap();
         let object = |layer: i32| {
             serde_json::json!({
@@ -755,7 +772,7 @@ mod tests {
             "documentKey": "collections",
             "card": { "collections": [
                 { "objectData": object(1), "id": 1, "targetId": null },
-                { "objectData": object(2), "id": 2, "targetId": null },
+                { "objectData": object(2), "id": 2, "targetId": 7 },
                 { "objectData": object(3), "id": 3, "targetId": null }
             ] }
         })
@@ -816,6 +833,14 @@ mod tests {
                 ),
             ]
         );
+        // The browser does not draw omikuji slips yet: even with its
+        // `omikujis` row the collection requests nothing and draws nothing.
+        assert!(response["snapshot"]["semantic_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["payload"]["kind"] != "ugui_text"
+                && !command["role"].as_str().unwrap().starts_with("omikuji-")));
         assert!(super::super::scene::destroy(
             response["handle"].as_u64().unwrap() as u32
         ));

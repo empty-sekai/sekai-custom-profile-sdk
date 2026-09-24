@@ -5090,7 +5090,8 @@ mod expansion_tests {
 mod tests {
     use super::*;
     use crate::masterdata::{
-        CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+        CollectionResourceType, MasterDataProvider, OmikujiRow, ResolvedColor, ResolvedHonor,
+        ResourceInfo,
     };
     use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
     #[cfg(feature = "skia-oracle")]
@@ -5655,13 +5656,15 @@ mod tests {
 
     const BADGE_KEY: &str = "custom_profile/collection/crash/crash_fixture_canbadge";
     const OMIKUJI_KEY: &str = "lottery_game/new_year_2022/Prefabs/Omikuji";
+    const OMIKUJI_COVER_KEY: &str = "lottery_game/new_year_2022_material/bg_omikuji_street";
+    const OMIKUJI_FORTUNE_KEY: &str = "lottery_game/new_year_2022_material/unsei_kichi";
     const STAND_KEY: &str = "custom_profile/collection/acrylic/acrylic_fixture";
     const BADGE_NORMAL_MAP_KEY: &str = "ui/sekai_badge_normal";
 
     /// Colours, `customProfileEtcResources` 1, collections 1 (can badge),
-    /// 2 (omikuji prefab) and 3 (acrylic stand), and, when `icon_tables` is
-    /// set, character icon 1, material 3 and user-interface icon 2. A region
-    /// without the icon tables has only the others.
+    /// 2 (omikuji prefab) and 3 (acrylic stand), `omikujis` row 7, and, when
+    /// `icon_tables` is set, character icon 1, material 3 and user-interface
+    /// icon 2. A region without the icon tables has only the others.
     struct IconRowsProvider {
         icon_tables: bool,
     }
@@ -5701,7 +5704,13 @@ mod tests {
                 ("user_interface_icon", 2) if self.icon_tables => (USER_INTERFACE_ICON_KEY, plain),
                 _ => return None,
             };
-            let (load_val, file_name) = key.rsplit_once('/')?;
+            // The slip prefab sits in a folder of its bundle.
+            let (load_val, file_name) = match key.split_once("/Prefabs/") {
+                Some((load_val, _)) => {
+                    (load_val, sekai_profile_renderer_core::omikuji::PREFAB_FILE)
+                }
+                None => key.rsplit_once('/')?,
+            };
             Some(ResourceInfo {
                 file_name: file_name.into(),
                 load_val: load_val.into(),
@@ -5729,6 +5738,23 @@ mod tests {
         }
         fn color_count(&self) -> usize {
             2
+        }
+        fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+            (id == 7).then(|| OmikujiRow {
+                id,
+                unit: "street".into(),
+                summary: "夢の実現に\n近づく年".into(),
+                title1: "願望".into(),
+                description1: "必ず叶う".into(),
+                title2: "健康".into(),
+                description2: "大変良好".into(),
+                title3: "待人".into(),
+                description3: "必ず来る".into(),
+                fortune_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                fortune_file_path: "unsei_kichi".into(),
+                omikuji_cover_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                omikuji_cover_file_path: "omikuji_street".into(),
+            })
         }
     }
 
@@ -5890,7 +5916,7 @@ mod tests {
         let md = renderer.snapshot();
         let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
         keys.sort();
-        // The omikuji row names a prefab: it requests nothing.
+        // The omikuji has no `omikujis` row to show: it requests nothing.
         assert_eq!(keys, [STAND_KEY, BADGE_KEY, BADGE_NORMAL_MAP_KEY]);
         let output = renderer
             .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
@@ -5901,6 +5927,60 @@ mod tests {
         assert_eq!(pixel_at(&output, 0.0, 0.0), [0; 4]);
         assert_eq!(pixel_at(&output, 600.0, 0.0), [0, 255, 0, 255]);
         assert_eq!(pixel_at(&output, 0.0, 200.0), [0; 4]);
+    }
+
+    /// An omikuji collection showing `omikujis` row 7, and one whose row does
+    /// not exist below it.
+    fn omikuji_page() -> CustomProfileCard {
+        let object = |layer: i32, y: f32| {
+            serde_json::json!({
+                "layer": layer, "lock": false, "visible": true,
+                "position": { "x": 0.0, "y": y, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "collections": [
+                { "objectData": object(1, 0.0), "id": 2, "targetId": 7 },
+                { "objectData": object(2, -300.0), "id": 2, "targetId": 8 }
+            ]
+        }))
+        .expect("omikuji page")
+    }
+
+    #[test]
+    fn an_omikuji_collection_requests_its_slip_images_and_draws_with_its_font() {
+        let card = omikuji_page();
+        let cover = [30, 60, 90, 255];
+        let fortune = [200, 0, 0, 255];
+        let (_temp, renderer) = page_renderer(
+            false,
+            &[(OMIKUJI_COVER_KEY, cover), (OMIKUJI_FORTUNE_KEY, fortune)],
+        );
+        let md = renderer.snapshot();
+        let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
+        keys.sort();
+        assert_eq!(keys, [OMIKUJI_COVER_KEY, OMIKUJI_FORTUNE_KEY]);
+        let rendered = renderer.render_full_card_sdf_scalar_f32_transparent_candidate(&card, None);
+        match (
+            crate::sdf::outline::resolve_font_path("FOT-Omikuji"),
+            rendered,
+        ) {
+            // The slip's texts need the font asset's file; without it the page
+            // fails rather than drawing the slip without them.
+            (None, Err(error)) => assert!(
+                error.contains("omikuji-title needs font FOT-Omikuji"),
+                "{error}"
+            ),
+            (Some(_), Ok(output)) => {
+                assert_eq!(pixel_at(&output, -600.0, 0.0), cover);
+                assert_eq!(pixel_at(&output, 624.0, 1.0), fortune);
+                // The collection without a row draws nothing.
+                assert_eq!(pixel_at(&output, -600.0, -300.0 - 200.0), [0; 4]);
+            }
+            (font, rendered) => panic!("font {font:?}: {:?}", rendered.map(|output| output.width)),
+        }
     }
 
     #[test]

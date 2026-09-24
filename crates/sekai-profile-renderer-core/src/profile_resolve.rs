@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::masterdata::{CollectionResourceType, ProfileMasterData, ResourceInfo};
+use crate::omikuji::OmikujiPlan;
 use crate::profile_data::{MusicDifficultyStats as ProfileMusicStats, ProfileData};
 use crate::profile_scene::{
     card_member_lookup_key, collection_normal_map_lookup_key, ordered_profile_elements,
@@ -538,7 +539,8 @@ fn prepare_profile_inner(
                 fallback,
             ),
             crate::SemanticCommandPayload::Composite { .. }
-            | crate::SemanticCommandPayload::Shape { .. } => {}
+            | crate::SemanticCommandPayload::Shape { .. }
+            | crate::SemanticCommandPayload::UguiText(_) => {}
         }
     }
     output.resources = resources.into_values().collect();
@@ -705,7 +707,11 @@ fn populate_authored_resources(
         }
         match authored_resource(element.value, masterdata) {
             AuthoredResource::None => {}
-            AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
+            // Only the native renderer draws the text of an omikuji slip, so
+            // this resolver leaves omikuji collections out.
+            AuthoredResource::MissingRow
+            | AuthoredResource::NotDrawn
+            | AuthoredResource::Omikuji(_) => {
                 snapshot.omitted_elements.insert(element.source_key);
             }
             AuthoredResource::Request(request) => {
@@ -729,8 +735,9 @@ pub enum AuthoredResource {
     /// The master-data row the element references does not exist. The game
     /// does not build such an element.
     MissingRow,
-    /// The row names content that is not an image: an omikuji collection
-    /// points at a prefab. The element is not drawn and requests nothing.
+    /// The row names a prefab whose content is not laid out: an omikuji
+    /// collection of an unknown slip prefab. The element is not drawn and
+    /// requests nothing.
     NotDrawn,
     /// The resource to load, keyed by [`resource_lookup_key`].
     Request(ProfileResourceRequest),
@@ -741,15 +748,20 @@ pub enum AuthoredResource {
         image: ProfileResourceRequest,
         normal_map: ProfileResourceRequest,
     },
+    /// An omikuji collection: the fortune slip of its `targetId` row, drawn
+    /// with the images [`OmikujiPlan::cover`] and [`OmikujiPlan::fortune`].
+    Omikuji(OmikujiPlan),
 }
 
 /// Resolves the resource an authored image-like element draws: shapes, card
 /// members, stamps and the `customProfile*Resources` image kinds. Keys follow
 /// the master-data rows (`resourceLoadVal/fileName`, card and stamp asset
 /// bundles); a missing row yields [`AuthoredResource::MissingRow`] rather than
-/// an invented key. Collections follow their row's collection type: omikuji
-/// rows are [`AuthoredResource::NotDrawn`] and can badges
-/// [`AuthoredResource::LitBadge`].
+/// an invented key. Collections follow their row's collection type: can
+/// badges are [`AuthoredResource::LitBadge`], and omikuji collections
+/// [`AuthoredResource::Omikuji`] when their `targetId` names an `omikujis` row
+/// ([`AuthoredResource::MissingRow`] otherwise) and their prefab is one
+/// [`crate::omikuji`] lays out ([`AuthoredResource::NotDrawn`] otherwise).
 pub fn authored_resource(
     element: ProfileElementRef<'_>,
     masterdata: &(impl ProfileMasterData + ?Sized),
@@ -810,7 +822,9 @@ pub fn authored_resource(
         ProfileElementRef::Other(value) => {
             master_resource_request(masterdata, "other", "etc", value.id, SMALL_RESOURCE)
         }
-        ProfileElementRef::Collection(value) => return collection_resource(masterdata, value.id),
+        ProfileElementRef::Collection(value) => {
+            return collection_resource(masterdata, value.id, value.target_id)
+        }
         ProfileElementRef::StandMember(value) => master_resource_request(
             masterdata,
             "stand-member",
@@ -872,13 +886,25 @@ fn normal_map_metric() -> ResourceMetric {
 fn collection_resource(
     masterdata: &(impl ProfileMasterData + ?Sized),
     id: i32,
+    target_id: Option<i32>,
 ) -> AuthoredResource {
     let Some(row) = masterdata.resolve_resource("collection", id) else {
         return AuthoredResource::MissingRow;
     };
     let image = row_resource_request(&row, "collection", id, SMALL_RESOURCE);
     match row.collection_type {
-        CollectionResourceType::Omikuji => AuthoredResource::NotDrawn,
+        CollectionResourceType::Omikuji => {
+            let Some(omikuji) = target_id.and_then(|id| masterdata.resolve_omikuji(id)) else {
+                return AuthoredResource::MissingRow;
+            };
+            match crate::omikuji::prefab(&row.load_value, &row.file_name) {
+                Some(prefab) => AuthoredResource::Omikuji(OmikujiPlan {
+                    prefab,
+                    row: omikuji,
+                }),
+                None => AuthoredResource::NotDrawn,
+            }
+        }
         CollectionResourceType::CanBadge => AuthoredResource::LitBadge {
             image,
             normal_map: ProfileResourceRequest {
@@ -2992,11 +3018,16 @@ mod tests {
     const SECOND_BADGE_KEY: &str = "custom_profile/collection/crash/second_canbadge";
 
     /// Collection rows 1 (can badge), 2 (omikuji prefab), 3 (acrylic stand),
-    /// 4 (no collection type) and 5 (a second can badge).
+    /// 4 (no collection type), 5 (a second can badge) and 6 (an omikuji slip
+    /// prefab that is not laid out).
     fn collection_tables() -> JsonMasterData {
         let mut data = text_and_shape_tables();
         let row = |id: i32, kind: serde_json::Value, key: &str| {
-            let (load, file) = key.rsplit_once('/').unwrap();
+            // Slip prefabs sit in a folder of their bundle.
+            let (load, file) = key
+                .split_once("/Prefabs/")
+                .map(|(load, _)| (load, crate::omikuji::PREFAB_FILE))
+                .unwrap_or_else(|| key.rsplit_once('/').unwrap());
             serde_json::json!({
                 "id": id, "customProfileResourceType": "collection",
                 "customProfileResourceCollectionType": kind,
@@ -3015,6 +3046,11 @@ mod tests {
                 row(3, "acrylic_stand".into(), STAND_KEY),
                 row(4, serde_json::Value::Null, PLAIN_KEY),
                 row(5, "can_badge".into(), SECOND_BADGE_KEY),
+                row(
+                    6,
+                    "omikuji".into(),
+                    "lottery_game/new_year_2030/Prefabs/Omikuji"
+                ),
             ]),
         )
         .unwrap();
@@ -3131,28 +3167,90 @@ mod tests {
         }
     }
 
+    /// Omikuji collections as `(layer, collection id, targetId)`.
+    fn omikuji_card(elements: &[(i32, i32, Option<i32>)]) -> CustomProfileCard {
+        serde_json::from_value(serde_json::json!({
+            "collections": elements
+                .iter()
+                .map(|(layer, id, target)| serde_json::json!({
+                    "objectData": visible_object(*layer, true), "id": id, "targetId": target
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap()
+    }
+
+    /// [`collection_tables`] with `omikujis` rows 7 and 8.
+    fn omikuji_tables() -> JsonMasterData {
+        let mut data = collection_tables();
+        data.insert_value(
+            "omikujis",
+            serde_json::json!([
+                crate::masterdata::tests::omikuji_row_value(7, "idol"),
+                crate::masterdata::tests::omikuji_row_value(8, "street"),
+            ]),
+        )
+        .unwrap();
+        data
+    }
+
     #[test]
-    fn omikuji_collections_request_nothing_and_draw_nothing() {
-        let card = collection_card(&[(1, 2, true), (2, 3, true)]);
-        let data = collection_tables();
-        assert_eq!(
+    fn omikuji_collections_resolve_to_the_slip_of_their_target_row() {
+        let resolve = |data: &JsonMasterData, id: i32, target: Option<i32>| {
+            let card = omikuji_card(&[(1, id, target)]);
             authored_resource(
                 crate::profile_scene::ProfileElementRef::Collection(&card.collections[0]),
-                &data,
-            ),
-            AuthoredResource::NotDrawn
+                data,
+            )
+        };
+        let data = omikuji_tables();
+        let AuthoredResource::Omikuji(plan) = resolve(&data, 2, Some(8)) else {
+            panic!("{:?}", resolve(&data, 2, Some(8)));
+        };
+        assert_eq!(plan.prefab, crate::omikuji::PREFABS[0]);
+        assert_eq!(plan.row, data.resolve_omikuji(8).unwrap());
+        assert_eq!(plan.row.unit, "street");
+        // The game does not build an omikuji whose row is missing, nor one
+        // without a target.
+        assert_eq!(resolve(&data, 2, Some(9)), AuthoredResource::MissingRow);
+        assert_eq!(resolve(&data, 2, None), AuthoredResource::MissingRow);
+        assert_eq!(
+            resolve(&collection_tables(), 2, Some(7)),
+            AuthoredResource::MissingRow
         );
+        // A slip prefab that is not laid out draws nothing.
+        assert_eq!(resolve(&data, 6, Some(7)), AuthoredResource::NotDrawn);
+    }
+
+    #[test]
+    fn the_shared_resolver_leaves_omikuji_collections_out_and_requests_nothing_for_them() {
+        let data = omikuji_tables();
+        let card = omikuji_card(&[(1, 2, Some(7)), (2, 3, None), (3, 6, Some(7)), (4, 2, None)]);
         assert_eq!(
             prepared_keys(&card, &data),
             [("assets".to_string(), STAND_KEY.to_string())]
         );
-        let scene = collection_scene(&card);
-        let commands = game_layer_commands(&scene, 1);
-        assert_eq!(commands.len(), 1);
-        assert!(matches!(
-            commands[0].payload,
-            crate::SemanticCommandPayload::Composite { .. }
-        ));
+        let scene = compile_profile_scene(
+            &card,
+            None,
+            &data,
+            "collections",
+            "jp",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        for game_layer in [1, 3, 4] {
+            let commands = game_layer_commands(&scene, game_layer);
+            assert_eq!(commands.len(), 1, "layer {game_layer}");
+            assert!(
+                matches!(
+                    commands[0].payload,
+                    crate::SemanticCommandPayload::Composite { .. }
+                ),
+                "layer {game_layer}"
+            );
+        }
         assert_eq!(image_material(&scene, 2).0, STAND_KEY);
     }
 

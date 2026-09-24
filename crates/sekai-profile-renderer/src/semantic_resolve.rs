@@ -1,5 +1,6 @@
 //! Native resolve-snapshot adapter for the shared renderer v0.2 profile resolver.
 
+use sekai_profile_renderer_core::omikuji::OmikujiClient;
 use sekai_profile_renderer_core::profile_resolve::{authored_resource, AuthoredResource};
 use sekai_profile_renderer_core::profile_scene::{
     card_member_lookup_key, ordered_profile_elements, resolve_profile_scene, CardVisualSnapshot,
@@ -151,6 +152,7 @@ pub fn resolve_card_commands_with_base_timed(
     debug_assert!(base.snapshot.line_indent.is_empty());
     debug_assert!(base.snapshot.honor_visuals.is_empty());
     debug_assert!(base.snapshot.card_member_visuals.is_empty());
+    debug_assert!(base.snapshot.omikuji_visuals.is_empty());
     populate_resolve_snapshot_parts(
         &mut base.snapshot,
         card,
@@ -172,6 +174,7 @@ pub fn resolve_card_commands_with_base_timed(
     base.snapshot.line_indent.clear();
     base.snapshot.honor_visuals.clear();
     base.snapshot.card_member_visuals.clear();
+    base.snapshot.omikuji_visuals.clear();
     result.map(|scene| {
         (
             scene,
@@ -267,6 +270,12 @@ fn populate_resolve_snapshot_parts(
                         id,
                         assets,
                     );
+                }
+                AuthoredResource::Omikuji(plan) => {
+                    let client = OmikujiClient::for_region(md.region().as_str());
+                    snapshot
+                        .omikuji_visuals
+                        .insert(element.source_key, plan.visual(client));
                 }
                 AuthoredResource::LitBadge { image, normal_map } => {
                     let (table, id) = resource_provenance(element.value);

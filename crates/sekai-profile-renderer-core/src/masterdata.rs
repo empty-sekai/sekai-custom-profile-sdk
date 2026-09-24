@@ -26,12 +26,15 @@ pub const PROFILE_MASTERDATA_TABLES: &[&str] = &[
     "unitStoryEpisodeGroups",
 ];
 
-/// Tables only some regions ship. Without one, the elements that draw from it
-/// have no master-data row and are left out; nothing else changes.
+/// Tables a table set may lack: the icon resource tables, which only some
+/// regions ship, and `omikujis`, which only omikuji collections read. Without
+/// one, the elements that draw from it have no master-data row and are left
+/// out; nothing else changes.
 pub const PROFILE_OPTIONAL_MASTERDATA_TABLES: &[&str] = &[
     "customProfileCharacterIconResources",
     "customProfileMaterialResources",
     "customProfileUserInterfaceIconResources",
+    "omikujis",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,8 +84,8 @@ pub struct ResourceInfo {
 /// `customProfileResourceCollectionType` column.
 ///
 /// Only [`Self::Omikuji`] and [`Self::CanBadge`] draw differently from a plain
-/// image: an omikuji row names a prefab rather than an image and is not drawn,
-/// and a can badge draws its image with the lit material of
+/// image: an omikuji row names a fortune-slip prefab ([`crate::omikuji`]), and
+/// a can badge draws its image with the lit material of
 /// [`crate::badge_material`]. Every other kind draws the row's image as is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +121,28 @@ impl CollectionResourceType {
             _ => Self::None,
         }
     }
+}
+
+/// One `omikujis` row: the fortune an omikuji collection shows, picked by the
+/// element's `targetId`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OmikujiRow {
+    pub id: i32,
+    /// Unit whose colour the title backgrounds take (`piapro`, `light_sound`,
+    /// ...).
+    pub unit: String,
+    pub summary: String,
+    pub title1: String,
+    pub description1: String,
+    pub title2: String,
+    pub description2: String,
+    pub title3: String,
+    pub description3: String,
+    pub fortune_assetbundle_name: String,
+    pub fortune_file_path: String,
+    pub omikuji_cover_assetbundle_name: String,
+    pub omikuji_cover_file_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -544,6 +569,11 @@ pub trait ProfileMasterData {
     fn resolve_localized_text(&self, _key: &str) -> Option<String> {
         None
     }
+    /// The `omikujis` row `id`, or `None` when the table or the row is
+    /// missing (the table is optional) or the row lacks a field.
+    fn resolve_omikuji(&self, _id: i32) -> Option<OmikujiRow> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -728,6 +758,9 @@ impl ProfileMasterData for JsonMasterData {
     fn get_bonds_honor_word(&self, id: i64) -> Option<BondsHonorWordEntry> {
         self.table("bondsHonorWords")?.typed(id)
     }
+    fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        self.table("omikujis")?.typed(id.into())
+    }
     fn resolve_unit_virtual_singer(&self, self_id: i32, partner_id: i32) -> i32 {
         let Some(table) = self.table("gameCharacterUnits") else {
             return self_id;
@@ -763,7 +796,7 @@ impl ProfileMasterData for JsonMasterData {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn planned_honor() -> ResolvedHonor {
@@ -1142,6 +1175,58 @@ mod tests {
             CollectionResourceType::parse(None),
             CollectionResourceType::None
         );
+    }
+
+    /// An `omikujis` row with every column the table ships.
+    pub(crate) fn omikuji_row_value(id: i32, unit: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "omikujiGroupId": 1, "unit": unit, "fortuneType": "grate_fortune",
+            "summary": "夢の実現に\n近づく年", "title1": "願望", "description1": "必ず叶う",
+            "title2": "健康", "description2": "大変良好", "title3": "待人", "description3": "必ず来る",
+            "unitAssetbundleName": "lottery_game/new_year_2022_material",
+            "fortuneAssetbundleName": "lottery_game/new_year_2022_material",
+            "omikujiCoverAssetbundleName": "lottery_game/new_year_2022_material",
+            "unitFilePath": "bird_VIRTUAL SINGER", "fortuneFilePath": "unsei_daikichi",
+            "omikujiCoverFilePath": "omikuji_VIRTUAL SINGER"
+        })
+    }
+
+    #[test]
+    fn omikuji_rows_resolve_by_id_and_missing_tables_rows_or_fields_resolve_to_none() {
+        let mut data = JsonMasterData::new("cn");
+        assert_eq!(data.resolve_omikuji(1), None);
+        let mut incomplete = omikuji_row_value(3, "idol");
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("fortuneFilePath");
+        data.insert_value(
+            "omikujis",
+            serde_json::json!([omikuji_row_value(1, "piapro"), incomplete]),
+        )
+        .unwrap();
+        assert_eq!(
+            data.resolve_omikuji(1),
+            Some(OmikujiRow {
+                id: 1,
+                unit: "piapro".into(),
+                summary: "夢の実現に\n近づく年".into(),
+                title1: "願望".into(),
+                description1: "必ず叶う".into(),
+                title2: "健康".into(),
+                description2: "大変良好".into(),
+                title3: "待人".into(),
+                description3: "必ず来る".into(),
+                fortune_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                fortune_file_path: "unsei_daikichi".into(),
+                omikuji_cover_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                omikuji_cover_file_path: "omikuji_VIRTUAL SINGER".into(),
+            })
+        );
+        assert_eq!(data.resolve_omikuji(2), None);
+        assert_eq!(data.resolve_omikuji(3), None);
+        assert!(PROFILE_OPTIONAL_MASTERDATA_TABLES.contains(&"omikujis"));
+        assert!(!PROFILE_MASTERDATA_TABLES.contains(&"omikujis"));
     }
 
     #[test]

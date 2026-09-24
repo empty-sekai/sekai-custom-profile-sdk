@@ -3,6 +3,7 @@
 //! 富文本规则、断行与缺字替换都来自 core 的 `tmp_text`；这里只做度量与字形排布。
 
 pub(crate) mod simple_raster;
+pub(crate) mod ugui_glyphs;
 
 use crate::masterdata::{MasterData, ResolvedColor};
 use crate::sdf::outline::{self as sdf_outline, lookup_or_generate};

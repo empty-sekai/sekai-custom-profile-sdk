@@ -94,7 +94,8 @@ fn card_asset_requirements(
 
     // 图片类元素（形状 / 卡面 / 贴纸 / customProfile*Resources）按 core 的
     // 资源规则取 key；隐藏元素与 masterdata 缺行的元素游戏不会构建，不计入；
-    // 御神签收藏品是预制体而非图片，不绘制也不计入；罐徽章另需静态法线贴图。
+    // 罐徽章另需静态法线贴图；御神签收藏品计入签面与运势两张图，未排版的
+    // 签预制体不绘制也不计入。
     for element in ordered_profile_elements(card, "asset-keys") {
         if !element.object().visible {
             continue;
@@ -104,6 +105,10 @@ fn card_asset_requirements(
             AuthoredResource::LitBadge { image, normal_map } => {
                 keys.push(image.resource.key);
                 keys.resource(normal_map.resource);
+            }
+            AuthoredResource::Omikuji(plan) => {
+                keys.resource(plan.cover());
+                keys.resource(plan.fortune());
             }
             AuthoredResource::None | AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {}
         }

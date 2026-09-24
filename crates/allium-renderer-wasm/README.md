@@ -155,7 +155,7 @@ export interface ResourceProvider {
 
 `namespace`、`key` 和 `role` 表达 renderer 语义；调用方可将其映射到任意资源命名和存储规则。
 
-罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`；`omikuji` 收藏品不绘制，也不请求资源。
+罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`；`omikuji` 收藏品目前只由 native renderer 绘制，浏览器渲染器不绘制，也不请求资源。
 
 ### 任意异步来源
 
@@ -237,7 +237,7 @@ const masterData = await renderer.loadMasterData(
 );
 ```
 
-`masterData.optionalTables` 列出只有部分区服提供的表（`customProfileCharacterIconResources`、`customProfileMaterialResources`、`customProfileUserInterfaceIconResources`）。loader 以 `optional: true` 被调用；返回 `null` 或 `undefined` 表示该区服没有这张表，可选表加载失败同样跳过。引用缺失表的元素不绘制，名片其余部分照常渲染。
+`masterData.optionalTables` 列出表集合可以没有的表（只有部分区服提供的 `customProfileCharacterIconResources`、`customProfileMaterialResources`、`customProfileUserInterfaceIconResources`，以及御神签收藏品读取的 `omikujis`）。loader 以 `optional: true` 被调用；返回 `null` 或 `undefined` 表示该区服没有这张表，可选表加载失败同样跳过。引用缺失表的元素不绘制，名片其余部分照常渲染。
 
 需要逐表控制生命周期时，可直接驱动 session：
 

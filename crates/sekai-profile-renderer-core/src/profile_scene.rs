@@ -266,9 +266,13 @@ pub struct ProfileResolveSnapshot {
     pub card_member_visuals: BTreeMap<String, CardVisualSnapshot>,
     /// Source keys of elements that are not drawn: the game does not build an
     /// element whose master-data row does not exist, and an omikuji collection
-    /// row names a prefab rather than an image. Their layers stay empty.
+    /// is left out when its slip is not laid out ([`crate::omikuji`]) or the
+    /// resolver does not draw slips. Their layers stay empty.
     #[serde(default)]
     pub omitted_elements: BTreeSet<String>,
+    /// Omikuji collections to draw, by source key.
+    #[serde(default)]
+    pub omikuji_visuals: BTreeMap<String, crate::omikuji::OmikujiVisualSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1292,7 +1296,26 @@ pub fn resolve_profile_scene(
         // layers keep an empty composite.
         let built =
             element.object().visible && !snapshot.omitted_elements.contains(&element.source_key);
-        let (layer_kind, source_content, primary) = if built {
+        let omikuji = match (built, element.value) {
+            (true, ProfileElementRef::Collection(collection)) => snapshot
+                .omikuji_visuals
+                .get(&element.source_key)
+                .map(|visual| (collection, visual)),
+            _ => None,
+        };
+        let (layer_kind, source_content, primary) = if let Some((collection, visual)) = omikuji {
+            parameters.insert(
+                "omikuji_id".into(),
+                ParameterValue::I64(visual.omikuji_id.into()),
+            );
+            composite_primary(
+                element.layer_id,
+                command_id,
+                "collection",
+                collection.id,
+                &mut parameters,
+            )
+        } else if built {
             lower_primary_command(
                 element.value,
                 element.layer_id,
@@ -1312,7 +1335,12 @@ pub fn resolve_profile_scene(
                 ),
             )
         };
-        let mut layer_commands = vec![primary];
+        let mut layer_commands = match omikuji {
+            Some((_, visual)) => {
+                crate::omikuji::lower_omikuji(&element.source_key, element.layer_id, visual)
+            }
+            None => vec![primary],
+        };
         let mut layer_regions = Vec::new();
         let mut layer_controls = Vec::new();
         if built

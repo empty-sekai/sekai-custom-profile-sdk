@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
 
-pub use sekai_profile_renderer_core::masterdata::CollectionResourceType;
+pub use sekai_profile_renderer_core::masterdata::{CollectionResourceType, OmikujiRow};
 
 /// 解析后的颜色值（RGBA）。
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +213,12 @@ pub trait MasterDataProvider: Send + Sync {
         None
     }
 
+    /// 查 `omikujis[id]`：御神签收藏品显示的签文。表或行缺失时返回
+    /// `None`（默认实现），该收藏品不绘制。
+    fn resolve_omikuji(&self, _id: i32) -> Option<OmikujiRow> {
+        None
+    }
+
     fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         match element_type {
             "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
@@ -333,6 +339,11 @@ impl MasterData {
     pub fn resolve_localized_text(&self, key: &str) -> Option<String> {
         self.provider.resolve_localized_text(key)
     }
+
+    /// 签文行。见 [`MasterDataProvider::resolve_omikuji`]。
+    pub fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        self.provider.resolve_omikuji(id)
+    }
 }
 
 impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
@@ -440,5 +451,9 @@ impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
 
     fn resolve_localized_text(&self, key: &str) -> Option<String> {
         MasterData::resolve_localized_text(self, key)
+    }
+
+    fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        MasterData::resolve_omikuji(self, id)
     }
 }

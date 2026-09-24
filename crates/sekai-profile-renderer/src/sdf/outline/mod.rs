@@ -20,7 +20,7 @@ const TMP_POINT_SIZE: f32 = 75.0;
 /// TextMesh Pro 的 gradient scale：atlas padding（5）加一个 texel。
 const TMP_SPREAD: f32 = 6.0;
 
-const FONT_FILE_MAP: [(&str, &[&str]); 12] = [
+const FONT_FILE_MAP: [(&str, &[&str]); 14] = [
     (
         "FZLanTingHei-DB-GBK",
         &["FOT-RodinNTLGPro-DB.ttf", "FOT-RodinNTLGPro-DB.otf"],
@@ -35,6 +35,10 @@ const FONT_FILE_MAP: [(&str, &[&str]); 12] = [
     ("FOT-PopHappinessStd-EB", &["FOT-PopHappinessStd-EB.otf"]),
     ("FOT-Yuruka Std UB", &["FOT-YurukaStd-UB.otf"]),
     ("FOT-YurukaStd-UB", &["FOT-YurukaStd-UB.otf"]),
+    // Font assets of the omikuji slips, which draw with FreeType coverage
+    // rather than an SDF atlas.
+    ("FOT-Omikuji", &["FOT-Omikuji.otf"]),
+    ("FOT-UDMinchoPro-B", &["FOT-UDMinchoPro-B.otf"]),
     // Source Han Sans is the open-licensed CJK sans shipped alongside the game
     // faces. It carries the same outlines as Noto Sans CJK, which is what the
     // Live Master progress recipe used to reach through fontconfig.
@@ -745,6 +749,22 @@ mod tests {
             expected.plane_advance_x.to_bits()
         );
         assert_eq!(actual.pixels, expected.pixels);
+    }
+
+    #[test]
+    fn every_omikuji_font_asset_names_its_font_file() {
+        for prefab in sekai_profile_renderer_core::omikuji::PREFABS {
+            let family = prefab.font_family;
+            let files = FONT_FILE_MAP
+                .iter()
+                .find_map(|(key, files)| (*key == family).then_some(*files));
+            assert_eq!(
+                files,
+                Some(&[format!("{family}.otf").as_str()][..]),
+                "{}",
+                prefab.bundle
+            );
+        }
     }
 
     #[test]

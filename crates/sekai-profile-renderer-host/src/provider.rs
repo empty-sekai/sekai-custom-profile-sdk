@@ -2,15 +2,17 @@
 //!
 //! 表映射与生产网关适配层一致：cards / stamps / honors / honorGroups /
 //! bondsHonors / bondsHonorWords / gameCharacterUnits / 7 张 customProfile*
-//! 资源表 / eventStories / unitStoryEpisodeGroups，以及只有部分 region 提供的
-//! 3 张图标资源表（[`OPTIONAL_TABLES`]）。
+//! 资源表 / eventStories / unitStoryEpisodeGroups，以及可缺的表
+//! （[`OPTIONAL_TABLES`]）：只有部分 region 提供的 3 张图标资源表与御神签
+//! 收藏品读取的 `omikujis`。
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use sekai_profile_renderer::masterdata::{
-    CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
+    CollectionResourceType, MasterDataProvider, OmikujiRow, ResolvedColor, ResolvedHonor,
+    ResourceInfo,
 };
 use sekai_profile_renderer::region::Region;
 use sekai_profile_renderer::types::{
@@ -41,13 +43,10 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "unitStoryEpisodeGroups",
 ];
 
-/// 只有部分 region 提供的表。缺表是常态：引用它的元素按缺行处理、不绘制，
-/// 也不计入 [`JsonMasterDataProvider::missing_tables`]。
-pub const OPTIONAL_TABLES: &[&str] = &[
-    "customProfileCharacterIconResources",
-    "customProfileMaterialResources",
-    "customProfileUserInterfaceIconResources",
-];
+/// 表集合可以没有的表，与 core 的可选表同一份。缺表时引用它的元素按缺行
+/// 处理、不绘制，也不计入 [`JsonMasterDataProvider::missing_tables`]。
+pub const OPTIONAL_TABLES: &[&str] =
+    sekai_profile_renderer::core::masterdata::PROFILE_OPTIONAL_MASTERDATA_TABLES;
 
 /// 从 JSON 表集合构建的 MasterDataProvider。
 pub struct JsonMasterDataProvider {
@@ -235,6 +234,10 @@ impl MasterDataProvider for JsonMasterDataProvider {
         v["name"].as_str().map(|s| s.to_string())
     }
 
+    fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        self.typed("omikujis", i64::from(id))
+    }
+
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
         let honor = self.table("honors")?.by_id(honor_id as i64)?;
         let group = honor
@@ -374,6 +377,30 @@ mod tests {
         assert_eq!(kind(2), CollectionResourceType::Omikuji);
         assert_eq!(kind(3), CollectionResourceType::None);
         assert_eq!(kind(4), CollectionResourceType::None);
+    }
+
+    #[test]
+    fn omikuji_rows_resolve_from_the_optional_omikujis_table() {
+        let p = JsonMasterDataProvider::empty();
+        assert!(p.resolve_omikuji(1).is_none());
+        assert!(OPTIONAL_TABLES.contains(&"omikujis"));
+        assert!(!p.missing_tables().contains(&"omikujis"));
+        let p = provider_with(
+            "omikujis",
+            r#"[{"id": 1, "omikujiGroupId": 1, "unit": "idol", "fortuneType": "grate_fortune",
+                 "summary": "s", "title1": "t1", "description1": "d1", "title2": "t2",
+                 "description2": "d2", "title3": "t3", "description3": "d3",
+                 "unitAssetbundleName": "u", "unitFilePath": "uf",
+                 "fortuneAssetbundleName": "lottery_game/new_year_2022_material",
+                 "fortuneFilePath": "unsei_daikichi",
+                 "omikujiCoverAssetbundleName": "lottery_game/new_year_2022_material",
+                 "omikujiCoverFilePath": "omikuji_idol"}]"#,
+        );
+        let row = p.resolve_omikuji(1).expect("row");
+        assert_eq!((row.unit.as_str(), row.title3.as_str()), ("idol", "t3"));
+        assert_eq!(row.fortune_file_path, "unsei_daikichi");
+        assert_eq!(row.omikuji_cover_file_path, "omikuji_idol");
+        assert!(p.resolve_omikuji(2).is_none());
     }
 
     #[test]
