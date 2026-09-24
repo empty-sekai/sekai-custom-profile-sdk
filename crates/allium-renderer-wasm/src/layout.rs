@@ -661,7 +661,8 @@ fn glyph_for<'a>(layer: &TextLayer, glyphs: &'a [GlyphInfo], text: &str) -> Opti
 enum LayerGlyph<'a> {
     /// A glyph the atlas carries, drawn in place of the character.
     Atlas { glyph: &'a GlyphInfo, ch: char },
-    /// White space the atlas does not carry; its advance is estimated.
+    /// White space the atlas does not carry, where its font lacks the
+    /// character or a prebuilt atlas left it out; its advance is estimated.
     Blank { ch: char },
     /// Nothing is drawn and the caret does not move.
     Missing { ch: char },
@@ -712,7 +713,6 @@ fn layer_glyph<'a>(
         return LayerGlyph::Missing { ch: display };
     }
     if display.is_whitespace() {
-        // Glyph demand leaves white space out, so an atlas rarely carries it.
         let ch = glyph::same_face_alternate(display).unwrap_or(display);
         return lookup(ch).map_or(LayerGlyph::Blank { ch }, |found| LayerGlyph::Atlas {
             glyph: found,
@@ -760,26 +760,28 @@ fn is_fullwidth(ch: char) -> bool {
     matches!(cp, 0x2000..=0x206f | 0x3000..=0x30ff)
 }
 
-/// Characters the layout may draw: the visible, case-mapped characters that
-/// are not white space, their same-face stand-ins, and the missing-glyph
-/// square that replaces any the font lacks.
+/// Characters the layout takes from the atlas: the case-mapped characters of
+/// the text, their same-face stand-ins, and the missing-glyph square that
+/// replaces any visible character the font lacks. White space is included so
+/// that its advance is the font's, as the native layout measures it; an
+/// outline-free glyph carries its advance and draws nothing.
 fn glyph_demand_chars(raw: &str) -> Vec<char> {
     let mut chars = Vec::new();
+    let mut visible = false;
     for segment in parse_segments(raw, 0.0) {
         for source in segment.text.chars() {
-            if source.is_whitespace() || source.is_control() {
+            if source.is_control() {
                 continue;
             }
+            visible |= !source.is_whitespace();
             let (display, _) = segment.transform_char(source);
             chars.push(display);
-            if let Some(alternate) =
-                glyph::same_face_alternate(display).filter(|ch| !ch.is_whitespace())
-            {
+            if let Some(alternate) = glyph::same_face_alternate(display) {
                 chars.push(alternate);
             }
         }
     }
-    if !chars.is_empty() {
+    if visible {
         chars.push(glyph::MISSING_GLYPH_CHARACTER);
     }
     chars
@@ -979,8 +981,31 @@ mod tests {
     fn glyph_demand_uses_tmp_visible_transformed_scalars() {
         assert_eq!(
             glyph_demand_chars("<uppercase>aß</uppercase> <noparse><b></noparse>"),
-            vec!['A', 'ß', '<', 'b', '>', '\u{25A1}'],
+            vec!['A', 'ß', ' ', '<', 'b', '>', '\u{25A1}'],
         );
+    }
+
+    #[test]
+    fn glyph_demand_carries_white_space_and_its_stand_in() {
+        assert_eq!(
+            glyph_demand_chars("a\u{00A0}b\u{3000}\n"),
+            vec!['a', '\u{00A0}', ' ', 'b', '\u{3000}', '\u{25A1}'],
+        );
+        // White space alone needs no missing-glyph square.
+        assert_eq!(glyph_demand_chars("  "), vec![' ', ' ']);
+    }
+
+    #[test]
+    fn white_space_the_atlas_carries_advances_by_its_own_advance() {
+        let mut glyphs = LETTERS.to_vec();
+        glyphs.push((' ', 16.5));
+        let carried = layout("A B", 24.0, 1, 0.0, &glyphs);
+        let [a, b] = [0, 2].map(|index| op(&instances(&carried)[index], 1));
+        assert_close(b - a, LETTER_ADVANCE + 16.5 * 24.0 / 75.0, "carried space");
+        // Without it the advance is estimated.
+        let estimated = layout("A B", 24.0, 1, 0.0, LETTERS);
+        let [a, b] = [0, 2].map(|index| op(&instances(&estimated)[index], 1));
+        assert_close(b - a, LETTER_ADVANCE + 5.0, "estimated space");
     }
 
     #[test]

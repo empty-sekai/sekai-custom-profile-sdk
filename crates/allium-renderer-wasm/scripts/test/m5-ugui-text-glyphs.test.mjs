@@ -5,7 +5,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { SemanticCommandPlan } from "../../src/gpu/semanticCommandPlanner.ts";
-import { compileSemanticDrawBatches, SEMANTIC_FLOATS_PER_VERTEX } from "../../src/gpu/semanticCommandGeometry.ts";
+import { compileSemanticDrawBatches, SEMANTIC_FLOATS_PER_VERTEX, SEMANTIC_VERTEX_ATTRIBUTES as LAYOUT, transformPoint } from "../../src/gpu/semanticCommandGeometry.ts";
 import { WebglSemanticCommandExecutor } from "../../dist/gpu/webglSemanticCommandExecutor.js";
 
 const IDENTITY = [1, 0, 0, 1, 0, 0];
@@ -79,8 +79,16 @@ function layout() {
   };
 }
 
-function vertex(batch, index) {
-  return Array.from(batch.vertices.slice(index * SEMANTIC_FLOATS_PER_VERTEX, (index + 1) * SEMANTIC_FLOATS_PER_VERTEX));
+/** One attribute of a batch vertex, with negative zeros as zeros. */
+function attribute(batch, index, name) {
+  const { offset, size } = LAYOUT[name];
+  const base = index * SEMANTIC_FLOATS_PER_VERTEX + offset;
+  return Array.from(batch.vertices.slice(base, base + size), (value) => value + 0);
+}
+
+/** The canvas-to-local matrix a vertex carries. */
+function inverseOf(batch, index) {
+  return [...attribute(batch, index, "inverse"), ...attribute(batch, index, "inverseOffset")];
 }
 
 test("a uGUI text draws its backdrop as a shape, then its glyph runs page by page", () => {
@@ -98,14 +106,14 @@ test("a uGUI text draws its backdrop as a shape, then its glyph runs page by pag
   ]);
   assert.deepEqual(batches.map((batch) => batch.vertices.length / SEMANTIC_FLOATS_PER_VERTEX), [6, 6, 18, 6, 12]);
   // The backdrop is the fitted rectangle in layer space, filled solid.
-  const backdrop = vertex(batches[1], 0);
-  assert.deepEqual(backdrop.slice(0, 2), [915 - 6, Math.fround(406 - 210.2)]);
-  assert.deepEqual(backdrop.slice(6, 10), [0, Math.fround(0.8), Math.fround(0.73333335), 1]);
-  assert.deepEqual(backdrop.slice(14, 18), [0, 0, 0, 0]);
-  assert.deepEqual(backdrop.slice(26, 28), [50, 74]);
+  assert.deepEqual(attribute(batches[1], 0, "bounds"), [-6, -210.2, 50, 74].map(Math.fround));
+  assert.deepEqual(inverseOf(batches[1], 0), [1, 0, 0, 1, -915, -406]);
+  assert.deepEqual(attribute(batches[1], 0, "fill"), [0, Math.fround(0.8), Math.fround(0.73333335), 1]);
+  assert.deepEqual(attribute(batches[1], 0, "params"), [0, 0, 0, 0]);
+  assert.deepEqual(attribute(batches[1], 0, "gradient"), [0, 0, 0, 0]);
 });
 
-test("glyph vertices map the padded cell onto the turned quad through the node matrix", () => {
+test("glyph vertices map the canvas onto the padded cell through the node matrix", () => {
   const batches = compileSemanticDrawBatches(
     plan([uguiCommand("title")]).operations(),
     { ...layout(), texts: [{ ...layout().texts[0], backdrop: null }] },
@@ -114,28 +122,39 @@ test("glyph vertices map the padded cell onto the turned quad through the node m
   assert.equal(batches.length, 1);
   const [glyphs] = batches;
   assert.equal(glyphs.kind, "ugui_glyph");
-  // Unit corners (0,0) (1,0) (1,1) (0,0) (1,1) (0,1) are quad corners
-  // 0 1 2 0 2 3; the node matrix sends node (x, y) to layer (y + 10, x + 30).
-  const expected = [[0, 0, 0], [1, 1, 0], [2, 1, 1], [0, 0, 0], [2, 1, 1], [3, 0, 1]];
-  for (const [index, [corner, unitX, unitY]] of expected.entries()) {
-    const [nodeX, nodeY] = CELL[corner];
-    const values = vertex(glyphs, index);
-    assert.deepEqual(values.slice(0, 2), [915 + nodeY + 10, 406 + nodeX + 30], `vertex ${index}`);
+  // The node matrix sends node (x, y) to layer (y + 10, x + 30): the cell's
+  // top-left corner lands at canvas (946, 435), its columns run down the
+  // canvas and its rows to the left, so canvas (x, y) is cell texel
+  // (y - 435, 946 - x).
+  const units = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+  for (const [index, unit] of units.entries()) {
+    assert.deepEqual(inverseOf(glyphs, index), [0, -1, 1, 0, -435, 946], `vertex ${index}`);
     // Cell texels: 22 + 2 x 21 + 2.
-    assert.deepEqual(values.slice(2, 4), [unitX * 24, unitY * 23], `vertex ${index}`);
-    assert.deepEqual(values.slice(4, 6), [unitX, unitY]);
+    assert.deepEqual(attribute(glyphs, index, "bounds"), [0, 0, 24, 23]);
+    assert.deepEqual(attribute(glyphs, index, "corner"), unit);
     // Vertex colour, the bitmap's page rectangle and the padding.
-    assert.deepEqual(values.slice(6, 10), WHITE);
-    assert.deepEqual(values.slice(10, 14), [0, 3, 22, 21]);
-    assert.deepEqual(values.slice(14, 18), [1, 0, 0, 0]);
-    assert.deepEqual(values.slice(26, 28), [24, 23]);
+    assert.deepEqual(attribute(glyphs, index, "fill"), WHITE);
+    assert.deepEqual(attribute(glyphs, index, "uvRect"), [0, 3, 22, 21]);
+    assert.deepEqual(attribute(glyphs, index, "params"), [1, 0, 0, 0]);
     // No clip: the clip quad covers everything.
-    assert.deepEqual(values.slice(18, 20), [-1e9, -1e9]);
+    assert.deepEqual(attribute(glyphs, index, "clip01").slice(0, 2), [-1e9, -1e9]);
+  }
+  // Each quad corner, placed on the canvas, maps back onto its cell corner.
+  for (const [corner, cell] of [[0, [0, 0]], [1, [24, 0]], [2, [24, 23]], [3, [0, 23]]]) {
+    const [nodeX, nodeY] = CELL[corner];
+    assert.deepEqual(transformPoint(inverseOf(glyphs, 0), 915 + nodeY + 10, 406 + nodeX + 30).map((value) => value + 0), cell);
   }
   assert.deepEqual(Array.from(glyphs.layerSlots), new Array(12).fill(0));
   assert.deepEqual(Array.from(glyphs.commandSlots), new Array(12).fill(0));
   // The second glyph's rectangle.
-  assert.deepEqual(vertex(glyphs, 6).slice(10, 14), [22, 3, 20, 19]);
+  assert.deepEqual(attribute(glyphs, 6, "uvRect"), [22, 3, 20, 19]);
+});
+
+test("a glyph cell whose corners span no area draws nothing", () => {
+  const flat = { ...layout(), texts: [{ ...layout().texts[0], backdrop: null, quads: [{ corners: [[0, 0], [0, 0], [0, 0], [0, 0]], glyph: 0 }, quad(1)] }] };
+  const [glyphs] = compileSemanticDrawBatches(plan([uguiCommand("title")]).operations(), flat);
+  assert.equal(glyphs.vertices.length, 6 * SEMANTIC_FLOATS_PER_VERTEX);
+  assert.deepEqual(attribute(glyphs, 0, "uvRect"), [22, 3, 20, 19]);
 });
 
 test("a uGUI text needs its layout, and glyph batches never merge across blend modes", () => {

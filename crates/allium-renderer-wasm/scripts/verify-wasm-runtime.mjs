@@ -51,7 +51,8 @@ const demand = callJsonInput("sdf_layout_freetype_glyph_demand_json", {
     fontSourceHash: "a".repeat(64),
   }],
 });
-assert.deepEqual(demand.requests.map((request) => request.char), ["A", "ß", "1", "2", "□"]);
+// White space is demanded too: an atlas that carries it supplies its advance.
+assert.deepEqual(demand.requests.map((request) => request.char), ["A", "ß", " ", "1", "2", "□"]);
 
 const masterData = callJsonInput("sdf_renderer_core_masterdata_create_json", {
   region: "en",

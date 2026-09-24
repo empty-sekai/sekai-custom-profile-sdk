@@ -44,7 +44,10 @@ function harness({ prepare, create, upload, failRelease } = {}) {
       semanticCommandPlanFromCoreSnapshot: () => ({ resourceRequests: () => [] }),
     },
     "./gpu/semanticWebglSceneRenderer.js": { SemanticWebglSceneRenderer: Gpu },
-    "./fontSdfAtlas.js": { disposeWorkerAtlasSessions() {} },
+    "./fontSdfAtlas.js": {
+      disposeWorkerAtlasSessions() {},
+      isWhiteSpaceRequest: (request) => /^\p{White_Space}$/u.test(request.char),
+    },
     "./prebuiltSdfAtlas.js": {},
     "./worker-client.js": {},
     "./telemetry/rendererTelemetry.js": { RendererRuntimeTelemetry: Telemetry },

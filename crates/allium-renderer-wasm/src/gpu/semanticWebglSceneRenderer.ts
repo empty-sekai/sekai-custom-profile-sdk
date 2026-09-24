@@ -65,7 +65,9 @@ export class SemanticWebglSceneRenderer {
       placedInstances,
       operation.visible && operation.commandVisible,
     ));
-    const glyphsByCommand = compileSemanticTextGlyphBatches(placedInstances, textOperations);
+    // Without an atlas no glyph is drawable, so the page size is never read.
+    const pageSize = { width: input.atlas?.width ?? 1, height: input.atlas?.height ?? 1 };
+    const glyphsByCommand = compileSemanticTextGlyphBatches(placedInstances, textOperations, pageSize);
     const textGlyphBatches = new Map<string, Float32Array>();
     for (const batch of batches.filter((batch) => batch.kind === "text")) {
       const vertices = concatenateFloat32(batch.commandIds.map((commandId) => glyphsByCommand.get(commandId) ?? new Float32Array()));

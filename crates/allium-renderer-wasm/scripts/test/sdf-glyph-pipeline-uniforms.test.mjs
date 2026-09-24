@@ -3,7 +3,7 @@ import test from "node:test";
 
 import "./register-typescript.mjs";
 
-const { WebglSdfGlyphPipeline } = await import("../../src/gpu/webglSdfGlyphPipeline.ts");
+const { SDF_GLYPH_FLOATS_PER_INSTANCE, WebglSdfGlyphPipeline } = await import("../../src/gpu/webglSdfGlyphPipeline.ts");
 
 function recordingContext() {
   const log = { lookups: 0, uniforms: [] };
@@ -30,7 +30,7 @@ function recordingContext() {
 test("glyph pipeline resolves its uniform locations once, not per draw", () => {
   const { gl, log } = recordingContext();
   const pipeline = new WebglSdfGlyphPipeline(gl);
-  pipeline.upload("batch", new Float32Array(36));
+  pipeline.upload("batch", new Float32Array(SDF_GLYPH_FLOATS_PER_INSTANCE));
   const lookupsBeforeDraw = log.lookups;
   const state = {};
   const mask = {};

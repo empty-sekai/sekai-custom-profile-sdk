@@ -31,6 +31,7 @@
 //! | [`sdf_glyph`] | Glyph SDF rasterization shared by the native and browser backends |
 //! | [`sdf_material`] | Text and shape SDF material parameters |
 //! | [`badge_material`] | Lit material of can-badge collection images |
+//! | [`pixel_sampling`] | Where a device pixel is sampled, and what a shape or image covers there |
 //! | [`ugui_text`] | uGUI text layout drawn from FreeType bitmaps |
 //! | `ugui_freetype` | FreeType glyphs for [`ugui_text`] (feature `freetype`) |
 //! | [`omikuji`] | The fortune slip of omikuji collections |
@@ -44,6 +45,7 @@ pub mod general_recipe;
 pub mod locale;
 pub mod masterdata;
 pub mod omikuji;
+pub mod pixel_sampling;
 pub mod profile_data;
 pub mod profile_layout;
 pub mod profile_resolve;

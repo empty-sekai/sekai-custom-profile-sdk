@@ -26,8 +26,9 @@ const TMP_SHARPNESS: f32 = 0.0;
 const TMP_UV2_PER_POINT: f32 = 1.0 / 20250.0;
 /// Smallest `uv2.y` magnitude; keeps the bold sign meaningful at size zero.
 const TMP_MIN_UV2: f32 = 1e-8;
-/// Floor of the shader scale, as in the TextMesh Pro vertex program.
-const TMP_MIN_SHADER_SCALE: f32 = 0.0001;
+/// Floor of the shader scale, as in the TextMesh Pro vertex program; the
+/// fragment stages apply it again to the face and underlay scales.
+pub const TMP_MIN_SHADER_SCALE: f32 = 0.0001;
 
 /// Screen-space pixel scale of the reference 1920x1080 canvas: the vertex
 /// program's `_ScreenParams`-derived term, `1 / length(pixelSize)` with a

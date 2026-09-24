@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
+use sekai_profile_renderer_core::pixel_sampling;
 use sekai_profile_renderer_core::profile_scene::{ComponentControlState, ResolvedProfileScene};
 use sekai_profile_renderer_core::{
     AuthoredElementKind, BlendMode, CompositeOperation, FontRole, ImageMaterial, LayerSource,
@@ -2150,54 +2151,17 @@ fn axis_aligned_command_clip(
     clip: &sekai_profile_renderer_core::Quad,
     matrix: Matrix2d,
 ) -> Result<AxisAlignedClip, ()> {
-    const EPSILON: f32 = 1.0e-4;
-
-    let clip = clip.map(|point| {
+    let corners = clip.map(|point| {
         let (x, y) = transform_point(matrix, point[0], point[1]);
         [x, y]
     });
-    if !clip.iter().flatten().all(|value| value.is_finite()) {
-        return Err(());
-    }
-    let horizontal = |left: [f32; 2], right: [f32; 2]| {
-        (left[1] - right[1]).abs() <= EPSILON && (left[0] - right[0]).abs() > EPSILON
-    };
-    let vertical = |top: [f32; 2], bottom: [f32; 2]| {
-        (top[0] - bottom[0]).abs() <= EPSILON && (top[1] - bottom[1]).abs() > EPSILON
-    };
-    let axis_aligned_rectangle = (horizontal(clip[0], clip[1])
-        && vertical(clip[1], clip[2])
-        && horizontal(clip[2], clip[3])
-        && vertical(clip[3], clip[0]))
-        || (vertical(clip[0], clip[1])
-            && horizontal(clip[1], clip[2])
-            && vertical(clip[2], clip[3])
-            && horizontal(clip[3], clip[0]));
-    if !axis_aligned_rectangle {
-        return Err(());
-    }
-
-    let clip_min_x = clip
-        .iter()
-        .map(|point| point[0])
-        .fold(f32::INFINITY, f32::min);
-    let clip_min_y = clip
-        .iter()
-        .map(|point| point[1])
-        .fold(f32::INFINITY, f32::min);
-    let clip_max_x = clip
-        .iter()
-        .map(|point| point[0])
-        .fold(f32::NEG_INFINITY, f32::max);
-    let clip_max_y = clip
-        .iter()
-        .map(|point| point[1])
-        .fold(f32::NEG_INFINITY, f32::max);
+    let [min_x, min_y, max_x, max_y] =
+        pixel_sampling::axis_aligned_clip_bounds(corners).ok_or(())?;
     Ok(AxisAlignedClip {
-        min_x: clip_min_x,
-        min_y: clip_min_y,
-        max_x: clip_max_x,
-        max_y: clip_max_y,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
     })
 }
 
@@ -2227,10 +2191,8 @@ fn mask_alpha_at(
     v: f32,
     role: &str,
 ) -> Result<u8, ProfileCompositorError> {
-    let mx = (u * mask.entry.width as f32).floor();
-    let my = (v * mask.entry.height as f32).floor();
-    let mx = mx.max(0.0).min(mask.entry.width.saturating_sub(1) as f32) as u32;
-    let my = my.max(0.0).min(mask.entry.height.saturating_sub(1) as f32) as u32;
+    let mx = pixel_sampling::nearest_texel(u, mask.entry.width);
+    let my = pixel_sampling::nearest_texel(v, mask.entry.height);
     let pixel = object_pixel(mask, mx, my)
         .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))?;
     Ok(pixel[3])
@@ -2261,36 +2223,13 @@ fn image_clip_contains(
     local_x: f32,
     local_y: f32,
 ) -> bool {
-    let Some(clip) = clip else {
-        return true;
-    };
-    let half_width = bounds.width * 0.5;
-    let half_height = bounds.height * 0.5;
-    if half_width <= 0.0 || half_height <= 0.0 {
-        return false;
-    }
-    let center_x = bounds.x + half_width;
-    let center_y = bounds.y + half_height;
     match clip {
-        ImageClipGeometry::Ellipse => {
-            let normalized_x = (local_x - center_x) / half_width;
-            let normalized_y = (local_y - center_y) / half_height;
-            normalized_x.mul_add(normalized_x, normalized_y * normalized_y) <= 1.0
+        None => true,
+        Some(ImageClipGeometry::Ellipse) => {
+            pixel_sampling::ellipse_clip_contains(bounds, local_x, local_y)
         }
-        ImageClipGeometry::RoundedRect { radius } => {
-            let radius_x = radius[0].abs().min(half_width);
-            let radius_y = radius[1].abs().min(half_height);
-            if radius_x == 0.0 || radius_y == 0.0 {
-                return true;
-            }
-            let distance_x = (local_x - center_x).abs() - (half_width - radius_x);
-            let distance_y = (local_y - center_y).abs() - (half_height - radius_y);
-            if distance_x <= 0.0 || distance_y <= 0.0 {
-                return true;
-            }
-            let normalized_x = distance_x / radius_x;
-            let normalized_y = distance_y / radius_y;
-            normalized_x.mul_add(normalized_x, normalized_y * normalized_y) <= 1.0
+        Some(ImageClipGeometry::RoundedRect { radius }) => {
+            pixel_sampling::rounded_rect_clip_contains(radius, bounds, local_x, local_y)
         }
     }
 }
@@ -2619,15 +2558,16 @@ fn raster_semantic_shape_command(
         .iter()
         .map(|value| value.1)
         .fold(f32::NEG_INFINITY, f32::max);
-    let clip_x0 = command_clip.map_or(0.0, |clip| (clip.min_x - 0.5).ceil());
-    let clip_y0 = command_clip.map_or(0.0, |clip| (clip.min_y - 0.5).ceil());
-    let clip_x1 = command_clip.map_or(canvas_width as f32, |clip| (clip.max_x - 0.5).ceil());
-    let clip_y1 = command_clip.map_or(canvas_height as f32, |clip| (clip.max_y - 0.5).ceil());
+    let (clip_x0, clip_x1) = command_clip.map_or((0.0, canvas_width as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_x, clip.max_x)
+    });
+    let (clip_y0, clip_y1) = command_clip.map_or((0.0, canvas_height as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_y, clip.max_y)
+    });
     let x0 = min_x.floor().max(clip_x0).clamp(0.0, canvas_width as f32) as u32;
     let y0 = min_y.floor().max(clip_y0).clamp(0.0, canvas_height as f32) as u32;
     let x1 = max_x.ceil().min(clip_x1).clamp(0.0, canvas_width as f32) as u32;
     let y1 = max_y.ceil().min(clip_y1).clamp(0.0, canvas_height as f32) as u32;
-    let samples = [(0.25f32, 0.25f32), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
     let mut stats = RasterImageStats::default();
     for y in y0..y1 {
         #[cfg(target_arch = "x86_64")]
@@ -2665,25 +2605,32 @@ fn raster_semantic_shape_command(
         for x in x0..x1 {
             let mut accumulated = [0.0f32; 4];
             let mut covered = false;
-            for (offset_x, offset_y) in samples {
+            for [offset_x, offset_y] in pixel_sampling::SHAPE_SAMPLES {
                 let (local_x, local_y) =
                     transform_point(inverse, x as f32 + offset_x, y as f32 + offset_y);
-                if !semantic_shape_contains(primitive, bounds, local_x, local_y, 0.0) {
+                if !pixel_sampling::shape_contains(primitive, bounds, local_x, local_y, 0.0) {
                     continue;
                 }
                 covered = true;
                 let use_stroke = stroke_width > 0.0
-                    && !semantic_shape_contains(primitive, bounds, local_x, local_y, stroke_width);
+                    && !pixel_sampling::shape_contains(
+                        primitive,
+                        bounds,
+                        local_x,
+                        local_y,
+                        stroke_width,
+                    );
                 let color = if use_stroke {
                     stroke
                 } else {
-                    semantic_shape_fill(fill, gradient, bounds, local_x, local_y)
+                    pixel_sampling::shape_fill(fill, gradient, bounds, local_x, local_y)
                 };
                 let alpha = color[3].clamp(0.0, 1.0);
-                accumulated[0] += color[0].clamp(0.0, 1.0) * alpha * 0.25;
-                accumulated[1] += color[1].clamp(0.0, 1.0) * alpha * 0.25;
-                accumulated[2] += color[2].clamp(0.0, 1.0) * alpha * 0.25;
-                accumulated[3] += alpha * 0.25;
+                let weight = pixel_sampling::SHAPE_SAMPLE_WEIGHT;
+                accumulated[0] += color[0].clamp(0.0, 1.0) * alpha * weight;
+                accumulated[1] += color[1].clamp(0.0, 1.0) * alpha * weight;
+                accumulated[2] += color[2].clamp(0.0, 1.0) * alpha * weight;
+                accumulated[3] += alpha * weight;
             }
             if !covered {
                 continue;
@@ -2702,72 +2649,6 @@ fn raster_semantic_shape_command(
         }
     }
     Ok(stats)
-}
-
-fn semantic_shape_contains(
-    primitive: &ShapePrimitive,
-    bounds: Rect,
-    x: f32,
-    y: f32,
-    inset: f32,
-) -> bool {
-    let left = bounds.x + inset;
-    let top = bounds.y + inset;
-    let right = bounds.x + bounds.width - inset;
-    let bottom = bounds.y + bounds.height - inset;
-    if left >= right || top >= bottom || x < left || x >= right || y < top || y >= bottom {
-        return false;
-    }
-    match primitive {
-        ShapePrimitive::Rect => true,
-        ShapePrimitive::Ellipse => {
-            let rx = (right - left) * 0.5;
-            let ry = (bottom - top) * 0.5;
-            let nx = (x - (left + right) * 0.5) / rx;
-            let ny = (y - (top + bottom) * 0.5) / ry;
-            nx.mul_add(nx, ny * ny) <= 1.0
-        }
-        ShapePrimitive::RoundedRect { radius } => {
-            let rx = (radius[0] - inset).max(0.0).min((right - left) * 0.5);
-            let ry = (radius[1] - inset).max(0.0).min((bottom - top) * 0.5);
-            if rx == 0.0 || ry == 0.0 {
-                return true;
-            }
-            let cx = x.clamp(left + rx, right - rx);
-            let cy = y.clamp(top + ry, bottom - ry);
-            let nx = (x - cx) / rx;
-            let ny = (y - cy) / ry;
-            nx.mul_add(nx, ny * ny) <= 1.0
-        }
-        ShapePrimitive::AssetMask { .. } => false,
-    }
-}
-
-fn semantic_shape_fill(
-    fill: [f32; 4],
-    gradient: Option<&sekai_profile_renderer_core::LinearGradient>,
-    bounds: Rect,
-    x: f32,
-    y: f32,
-) -> [f32; 4] {
-    let Some(gradient) = gradient else {
-        return fill;
-    };
-    let u = (x - bounds.x) / bounds.width;
-    let v = (y - bounds.y) / bounds.height;
-    let dx = gradient.end[0] - gradient.start[0];
-    let dy = gradient.end[1] - gradient.start[1];
-    let denominator = dx.mul_add(dx, dy * dy);
-    let t = if denominator <= f32::EPSILON {
-        0.0
-    } else {
-        ((u - gradient.start[0]).mul_add(dx, (v - gradient.start[1]) * dy) / denominator)
-            .clamp(0.0, 1.0)
-    };
-    std::array::from_fn(|channel| {
-        (gradient.end_color[channel] - gradient.start_color[channel])
-            .mul_add(t, gradient.start_color[channel])
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2826,10 +2707,12 @@ fn raster_image_command(
         .iter()
         .map(|value| value.1)
         .fold(f32::NEG_INFINITY, f32::max);
-    let clip_x0 = command_clip.map_or(0.0, |clip| (clip.min_x - 0.5).ceil());
-    let clip_y0 = command_clip.map_or(0.0, |clip| (clip.min_y - 0.5).ceil());
-    let clip_x1 = command_clip.map_or(canvas_width as f32, |clip| (clip.max_x - 0.5).ceil());
-    let clip_y1 = command_clip.map_or(canvas_height as f32, |clip| (clip.max_y - 0.5).ceil());
+    let (clip_x0, clip_x1) = command_clip.map_or((0.0, canvas_width as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_x, clip.max_x)
+    });
+    let (clip_y0, clip_y1) = command_clip.map_or((0.0, canvas_height as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_y, clip.max_y)
+    });
     let x0 = min_x.floor().max(clip_x0).max(0.0).min(canvas_width as f32) as u32;
     let y0 = min_y
         .floor()
@@ -2885,7 +2768,7 @@ fn raster_image_command(
     }
 
     for y in y0..y1 {
-        let py = y as f32 + 0.5;
+        let py = y as f32 + pixel_sampling::PIXEL_CENTRE;
         let mut x = x0;
         while x < x1 {
             let packet_end = x.saturating_add(16).min(x1);
@@ -2927,7 +2810,7 @@ fn raster_image_command(
             let mut source_pixels = [0u32; 16];
             let mut active_mask = 0u16;
             for packet_x in x..packet_end {
-                let px = packet_x as f32 + 0.5;
+                let px = packet_x as f32 + pixel_sampling::PIXEL_CENTRE;
                 let (local_x, local_y) = transform_point(inverse, px, py);
                 let u = (local_x - bounds.x) / bounds.width;
                 let v = (local_y - bounds.y) / bounds.height;
@@ -2939,16 +2822,8 @@ fn raster_image_command(
                 }
                 let image_u = uv.x + u * uv.width;
                 let image_v = uv.y + v * uv.height;
-                let source_x = (image_u * source.entry.width as f32).floor();
-                let source_y = (image_v * source.entry.height as f32).floor();
-                let sx = source_x
-                    .max(0.0)
-                    .min(source.entry.width.saturating_sub(1) as f32)
-                    as u32;
-                let sy = source_y
-                    .max(0.0)
-                    .min(source.entry.height.saturating_sub(1) as f32)
-                    as u32;
+                let sx = pixel_sampling::nearest_texel(image_u, source.entry.width);
+                let sy = pixel_sampling::nearest_texel(image_v, source.entry.height);
                 let mut source_pixel = object_pixel(source, sx, sy)
                     .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))?;
                 if let Some(badge) = badge {
@@ -3040,16 +2915,12 @@ unsafe fn raster_axis_aligned_image_command(
 ) -> RasterImageStats {
     const INACTIVE_SOURCE_COLUMN: u32 = u32::MAX;
 
-    let source_width = source.entry.width as f32;
-    let source_height = source.entry.height as f32;
-    let maximum_source_x = source.entry.width - 1;
-    let maximum_source_y = source.entry.height - 1;
     let source_row_bytes = source.entry.row_bytes as usize;
     let canvas_row_bytes = canvas_width as usize * 4;
     let mut source_columns = Vec::with_capacity((x1 - x0) as usize);
     let mut local_columns = Vec::with_capacity((x1 - x0) as usize);
     for x in x0..x1 {
-        let px = x as f32 + 0.5;
+        let px = x as f32 + pixel_sampling::PIXEL_CENTRE;
         let local_x = inverse[0].mul_add(px, inverse[4]);
         local_columns.push(local_x);
         let u = (local_x - bounds.x) / bounds.width;
@@ -3057,8 +2928,10 @@ unsafe fn raster_axis_aligned_image_command(
             source_columns.push(INACTIVE_SOURCE_COLUMN);
             continue;
         }
-        let source_x = ((uv.x + u * uv.width) * source_width).floor();
-        source_columns.push(source_x.max(0.0).min(maximum_source_x as f32) as u32);
+        source_columns.push(pixel_sampling::nearest_texel(
+            uv.x + u * uv.width,
+            source.entry.width,
+        ));
     }
 
     struct AxisPacket {
@@ -3112,14 +2985,14 @@ unsafe fn raster_axis_aligned_image_command(
     let source_base = source.pixels.as_ptr();
     let mut stats = RasterImageStats::default();
     for y in y0..y1 {
-        let py = y as f32 + 0.5;
-        let (_, local_y) = transform_point(inverse, 0.5, py);
+        let py = y as f32 + pixel_sampling::PIXEL_CENTRE;
+        let (_, local_y) = transform_point(inverse, pixel_sampling::PIXEL_CENTRE, py);
         let v = (local_y - bounds.y) / bounds.height;
         if !(0.0..1.0).contains(&v) {
             continue;
         }
-        let source_y = ((uv.y + v * uv.height) * source_height).floor();
-        let source_y = source_y.max(0.0).min(maximum_source_y as f32) as usize;
+        let source_y =
+            pixel_sampling::nearest_texel(uv.y + v * uv.height, source.entry.height) as usize;
         let source_row = source_base.add(source_y * source_row_bytes);
         let destination_row = destination_base.add(y as usize * canvas_row_bytes);
 
@@ -3305,15 +3178,10 @@ fn sample_straight_bilinear(
     v: f32,
     role: &str,
 ) -> Result<[f32; 4], ProfileCompositorError> {
-    let max_x = object.entry.width.saturating_sub(1) as f32;
-    let max_y = object.entry.height.saturating_sub(1) as f32;
-    let x = (u * object.entry.width as f32 - 0.5).clamp(0.0, max_x);
-    let y = (v * object.entry.height as f32 - 0.5).clamp(0.0, max_y);
-    let (x0, y0) = (x.floor(), y.floor());
-    let (x1, y1) = ((x0 + 1.0).min(max_x), (y0 + 1.0).min(max_y));
-    let (fx, fy) = (x - x0, y - y0);
-    let texel = |x: f32, y: f32| {
-        object_pixel(object, x as u32, y as u32)
+    let (x0, x1, fx) = pixel_sampling::bilinear_taps(u, object.entry.width);
+    let (y0, y1, fy) = pixel_sampling::bilinear_taps(v, object.entry.height);
+    let texel = |x: u32, y: u32| {
+        object_pixel(object, x, y)
             .map(straight_texel)
             .ok_or_else(|| ProfileCompositorError::InvalidObject(role.into()))
     };

@@ -1,4 +1,4 @@
-import { glyphKey, type GlyphRequest, type SdfAtlas } from "./fontSdfAtlas.js";
+import { glyphKey, isWhiteSpaceRequest, type GlyphRequest, type SdfAtlas } from "./fontSdfAtlas.js";
 import { RENDERER_WORKER_PROTOCOL } from "./protocol.js";
 import type { AtlasPageUpdate } from "./types/atlas.js";
 
@@ -136,10 +136,13 @@ export async function buildPrebuiltSdfAtlas(
     family,
     new Map(manifest.glyphs.map((glyph) => [glyph.codepoint, glyph] as const)),
   ] as const));
-  const resolved = requests.map((request) => {
+  const resolved = requests.flatMap((request) => {
     const codepoint = singleCodepoint(request.char);
     const glyph = codepoint == null ? undefined : glyphByFamily.get(request.family)?.get(codepoint);
-    return glyph ? { request, glyph } : null;
+    if (glyph) return [{ request, glyph }];
+    // A package may leave white space out; the layout then estimates its
+    // advance instead of generating the whole atlas at runtime.
+    return isWhiteSpaceRequest(request) ? [] : [null];
   });
   if (resolved.some((entry) => entry == null)) return null;
 

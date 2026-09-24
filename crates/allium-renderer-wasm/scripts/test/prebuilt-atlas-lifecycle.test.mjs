@@ -275,3 +275,27 @@ test("install progress reports the whole package size up front", async () => {
     uninstall();
   }
 });
+
+test("a prebuilt package serves the white space it carries and may leave it out", async () => {
+  const request = (char) => ({ region: "cn", family: "Face", fontSourceHash: FONT_SHA256, char });
+  const requests = [request("A"), request(" ")];
+  const signal = new AbortController().signal;
+  const withSpace = await atlasPackage("Face");
+  withSpace.manifest.glyphs.push({
+    codepoint: 0x20, page: 0, rect: [8, 1, 12, 12], plane_bearing: [0, 0], plane_size: [0.015625, 0.015625], plane_advance_x: 16.5,
+  });
+  const served = await buildPrebuiltSdfAtlas(staticProvider(new Map([["Face", withSpace]])), requests, signal);
+  assert.deepEqual([...served.glyphs.values()].map((glyph) => [glyph.char, glyph.advance]), [["A", 45], [" ", 16.5]]);
+  await served.release();
+  // Without it the layout estimates the advance; the package still serves.
+  const withoutSpace = await atlasPackage("Face");
+  const partial = await buildPrebuiltSdfAtlas(staticProvider(new Map([["Face", withoutSpace]])), requests, signal);
+  assert.deepEqual([...partial.glyphs.values()].map((glyph) => glyph.char), ["A"]);
+  await partial.release();
+  // A visible character the package lacks sends the scene to runtime
+  // generation.
+  assert.equal(
+    await buildPrebuiltSdfAtlas(staticProvider(new Map([["Face", withoutSpace]])), [request("B"), request(" ")], signal),
+    null,
+  );
+});

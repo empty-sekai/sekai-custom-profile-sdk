@@ -10,6 +10,7 @@
 //! ([`ugui_text::cell_coverage`]), and it blends the vertex colour times that
 //! coverage.
 
+use sekai_profile_renderer_core::pixel_sampling::{pixel_span, PIXEL_CENTRE};
 use sekai_profile_renderer_core::ugui_text::{self, UguiGlyph, UguiTextSource};
 use sekai_profile_renderer_core::{
     BlendMode, LayerSource, Matrix2d, SemanticCommandSource, ShapePrimitive,
@@ -163,14 +164,12 @@ impl GlyphTarget<'_> {
                 .map(|c| c[axis])
                 .fold(f32::NEG_INFINITY, f32::max)
         };
-        let clip_x0 = self.clip.map_or(0.0, |clip| (clip.min_x - 0.5).ceil());
-        let clip_y0 = self.clip.map_or(0.0, |clip| (clip.min_y - 0.5).ceil());
-        let clip_x1 = self
-            .clip
-            .map_or(self.width as f32, |clip| (clip.max_x - 0.5).ceil());
-        let clip_y1 = self
-            .clip
-            .map_or(self.height as f32, |clip| (clip.max_y - 0.5).ceil());
+        let (clip_x0, clip_x1) = self.clip.map_or((0.0, self.width as f32), |clip| {
+            pixel_span(clip.min_x, clip.max_x)
+        });
+        let (clip_y0, clip_y1) = self.clip.map_or((0.0, self.height as f32), |clip| {
+            pixel_span(clip.min_y, clip.max_y)
+        });
         let x0 = min(0).floor().max(clip_x0).clamp(0.0, self.width as f32) as u32;
         let y0 = min(1).floor().max(clip_y0).clamp(0.0, self.height as f32) as u32;
         let x1 = max(0).ceil().min(clip_x1).clamp(0.0, self.width as f32) as u32;
@@ -178,7 +177,8 @@ impl GlyphTarget<'_> {
         let mut fragments = 0u64;
         for y in y0..y1 {
             for x in x0..x1 {
-                let (u, v) = transform_point(to_cell, x as f32 + 0.5, y as f32 + 0.5);
+                let (u, v) =
+                    transform_point(to_cell, x as f32 + PIXEL_CENTRE, y as f32 + PIXEL_CENTRE);
                 if !(0.0..cell_width).contains(&u) || !(0.0..cell_height).contains(&v) {
                     continue;
                 }

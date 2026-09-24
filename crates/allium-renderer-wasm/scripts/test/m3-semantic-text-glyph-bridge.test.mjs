@@ -4,6 +4,7 @@ import test from "node:test";
 import "./register-typescript.mjs";
 
 const { compileSemanticTextGlyphBatches } = await import("../../src/gpu/semanticTextGlyphBridge.ts");
+const { SDF_GLYPH_INSTANCE_ATTRIBUTES } = await import("../../src/gpu/webglSdfGlyphPipeline.ts");
 
 test("semantic text glyphs retain command identity but consume authored layer slots", () => {
   const operation = (commandId, slot) => ({
@@ -27,9 +28,11 @@ test("semantic text glyphs retain command identity but consume authored layer sl
   });
   const batches = compileSemanticTextGlyphBatches(
     [glyph("command-a", 0), glyph("command-b", 20)],
-    [operation("command-a", 3), operation("command-b", 7)]
+    [operation("command-a", 3), operation("command-b", 7)],
+    { width: 16, height: 16 },
   );
   assert.deepEqual([...batches.keys()], ["command-a", "command-b"]);
-  assert.equal(batches.get("command-a")[25], 3);
-  assert.equal(batches.get("command-b")[25], 7);
+  const layerSlot = SDF_GLYPH_INSTANCE_ATTRIBUTES.instanceMeta.offset + 1;
+  assert.equal(batches.get("command-a")[layerSlot], 3);
+  assert.equal(batches.get("command-b")[layerSlot], 7);
 });

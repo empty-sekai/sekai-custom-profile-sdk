@@ -23,14 +23,55 @@ export type SemanticDrawBatch = {
   glyphPage: number | null;
 };
 
-/** Per vertex: position, UV, shape UV, fill, stroke, params, clip quad,
- * shape size, and the canvas direction of the command's local +x axis.
+/** One float attribute of a semantic vertex: its shader location, its
+ * component count and its offset in floats. */
+export type SemanticVertexAttribute = { location: number; size: number; offset: number };
+
+/** Float attributes of a semantic vertex. Every value is shared by the six
+ * vertices of a quad except `corner`: the fragment stage maps each device
+ * pixel into the draw's local space itself and decides there what it shows.
  *
- * A `ugui_glyph` vertex carries the texel position in its glyph cell as UV,
- * the vertex colour as fill, the bitmap's page rectangle (x, y, width, rows)
- * as stroke, the cell padding as the first param, and the cell size as shape
- * size. */
-export const SEMANTIC_FLOATS_PER_VERTEX = 30;
+ * - `inverse`, `inverseOffset`: the canvas-to-local matrix of the draw, `[a,
+ *   b, c, d]` and `[e, f]` (`x' = a x + c y + e`), before the dynamic offsets
+ *   and the preview transform the vertex stage applies.
+ * - `bounds`: the drawn rectangle in local space (x, y, width, height), and
+ *   `corner` the unit corner of the vertex.
+ * - `uvRect`: the image region an image or mask samples (x, y, width,
+ *   height in `0..=1`).
+ * - `fill`, `stroke`: the fill (a shape's gradient start colour, an image's
+ *   tint, an asset mask's face colour) and the stroke colour, straight RGBA.
+ * - `params`: the primitive (0 rectangle, 1 rounded rectangle, 2 ellipse),
+ *   its corner radii and the stroke width.
+ * - `gradient`, `gradientEndColor`: a shape's gradient line (start x, y, end
+ *   x, y in normalised bounds coordinates) and end colour; a zero line keeps
+ *   the fill.
+ * - `clip01`, `clip23`: the clip quad on the canvas before the dynamic offset
+ *   and the preview transform (see `commandClipQuad`).
+ *
+ * A `ugui_glyph` vertex maps the canvas onto its glyph cell, in texels: its
+ * bounds are the cell, its `uvRect` the bitmap's rectangle on the coverage
+ * page (x, y, width, rows), its fill the vertex colour and its first param
+ * the cell padding. */
+export const SEMANTIC_VERTEX_ATTRIBUTES = {
+  inverse: { location: 0, size: 4, offset: 0 },
+  inverseOffset: { location: 1, size: 2, offset: 4 },
+  bounds: { location: 2, size: 4, offset: 6 },
+  corner: { location: 3, size: 2, offset: 10 },
+  uvRect: { location: 4, size: 4, offset: 12 },
+  fill: { location: 5, size: 4, offset: 16 },
+  stroke: { location: 6, size: 4, offset: 20 },
+  params: { location: 7, size: 4, offset: 24 },
+  gradient: { location: 8, size: 4, offset: 28 },
+  gradientEndColor: { location: 9, size: 4, offset: 32 },
+  clip01: { location: 10, size: 4, offset: 36 },
+  clip23: { location: 11, size: 4, offset: 40 },
+} as const satisfies Record<string, SemanticVertexAttribute>;
+export const SEMANTIC_FLOATS_PER_VERTEX = 44;
+/** Locations of the integer attributes, each in a buffer of its own: the
+ * layer's and the command's state slot. */
+export const SEMANTIC_LAYER_SLOT_LOCATION = 12;
+export const SEMANTIC_COMMAND_SLOT_LOCATION = 13;
+
 export function semanticTextBatchKey(commandIds: readonly string[]): string {
   return `semantic-text-batch\0${commandIds.join("\0")}`;
 }
@@ -38,8 +79,6 @@ const UNIT_TRIANGLES = [
   [0, 0], [1, 0], [1, 1],
   [0, 0], [1, 1], [0, 1],
 ] as const;
-/** Quad corner at a unit position: `UNIT_CORNER[y][x]`. */
-const UNIT_CORNER = [[0, 1], [3, 2]] as const;
 
 /** Glyph quads of one uGUI text command that sit on one coverage page. */
 type GlyphRun = {
@@ -128,53 +167,54 @@ function glyphBatchDescriptor(operation: SemanticDrawOperation, page: number) {
   };
 }
 
-/** Maps each glyph cell onto its quad: corner k of the quad is corner k of
- * the cell (top-left, top-right, bottom-right, bottom-left), placed on the
- * canvas by the layer, command and text-node matrices. */
+/** Maps the canvas onto each glyph cell the way the native compositor does:
+ * the cell's corners (top-left, top-right, bottom-right, bottom-left) are
+ * placed on the canvas by the layer, command and text-node matrices, and the
+ * inverse of the matrix spanned by the first, second and fourth corner sends
+ * a pixel to its cell texel position. A cell whose corners span no area
+ * draws nothing. */
 function compileGlyphGroup(
   blendMode: SemanticBlendMode,
   page: number,
   runs: GlyphRun[],
   uguiText: UguiTextLayout,
 ): SemanticDrawBatch {
-  const quadCount = runs.reduce((sum, run) => sum + run.quads.length, 0);
-  const vertices = new Float32Array(quadCount * 6 * SEMANTIC_FLOATS_PER_VERTEX);
-  const layerSlots = new Uint32Array(quadCount * 6);
-  const commandSlots = new Uint32Array(quadCount * 6);
-  let vertexOffset = 0;
-  for (const { operation, mesh, quads } of runs) {
+  const quads: QuadValues[] = [];
+  for (const { operation, mesh, quads: glyphQuads } of runs) {
     const commandId = operation.command.id;
     const payload = operation.command.payload;
     const commandMatrix = requireMatrix(operation.command.matrix, commandId);
     const nodeMatrix = requireMatrix(payload.node_matrix, commandId);
-    const clip = commandClip(operation.command.clip, operation.baseMatrix, commandId);
+    const clip = commandClipQuad(operation.command.clip, operation.baseMatrix, commandId);
     const color = requireColor(payload.color, commandId);
-    const axis = linearAxis(operation.baseMatrix, commandMatrix);
+    const device = composeMatrix(composeMatrix(operation.baseMatrix, commandMatrix), nodeMatrix);
     const padding = mesh.cellPadding;
-    for (const quad of quads) {
+    for (const quad of glyphQuads) {
       const glyph = uguiText.glyphs[quad.glyph];
       const cellWidth = glyph.width + 2 * padding;
       const cellHeight = glyph.rows + 2 * padding;
-      for (const [unitX, unitY] of UNIT_TRIANGLES) {
-        const [nodeX, nodeY] = quad.corners[UNIT_CORNER[unitY][unitX]];
-        const commandPoint = transformPoint(nodeMatrix, nodeX, nodeY);
-        const layerPoint = transformPoint(commandMatrix, commandPoint[0], commandPoint[1]);
-        const [x, y] = transformPoint(operation.baseMatrix, layerPoint[0], layerPoint[1]);
-        vertices.set([
-          x, y,
-          unitX * cellWidth, unitY * cellHeight,
-          unitX, unitY,
-          ...color,
-          glyph.x, glyph.y, glyph.width, glyph.rows,
-          padding, 0, 0, 0,
-          ...clip[0], ...clip[1], ...clip[2], ...clip[3],
-          cellWidth, cellHeight,
-          ...axis,
-        ], vertexOffset * SEMANTIC_FLOATS_PER_VERTEX);
-        layerSlots[vertexOffset] = operation.layerSlot;
-        commandSlots[vertexOffset] = operation.commandSlot;
-        vertexOffset += 1;
-      }
+      const [origin, right, , down] = quad.corners.map(([x, y]) => transformPoint(device, x, y));
+      const toCell = invertMatrix([
+        f32(f32(right[0] - origin[0]) / cellWidth),
+        f32(f32(right[1] - origin[1]) / cellWidth),
+        f32(f32(down[0] - origin[0]) / cellHeight),
+        f32(f32(down[1] - origin[1]) / cellHeight),
+        origin[0],
+        origin[1],
+      ]);
+      if (!toCell) continue;
+      quads.push({
+        operation,
+        inverse: toCell,
+        bounds: [0, 0, cellWidth, cellHeight],
+        uvRect: [glyph.x, glyph.y, glyph.width, glyph.rows],
+        fill: color,
+        stroke: [0, 0, 0, 0],
+        params: [padding, 0, 0, 0],
+        gradient: [0, 0, 0, 0],
+        gradientEndColor: color,
+        clip,
+      });
     }
   }
   const batchOperations = runs.map((run) => run.operation);
@@ -188,9 +228,7 @@ function compileGlyphGroup(
     glyphPage: page,
     operations: batchOperations,
     commandIds: [...new Set(batchOperations.map((operation) => operation.command.id))],
-    vertices,
-    layerSlots,
-    commandSlots,
+    ...packQuads(quads),
   };
 }
 
@@ -241,47 +279,50 @@ function compileGroup(
   if (kind === "text" || kind === "composite") {
     return { kind, resource, maskResource, normalMapResource, blendMode, compositeOperation, glyphPage: null, operations: [...operations], commandIds: operations.map((op) => op.command.id), vertices: new Float32Array(), layerSlots: new Uint32Array(), commandSlots: new Uint32Array() };
   }
-  const vertices = new Float32Array(operations.length * 6 * SEMANTIC_FLOATS_PER_VERTEX);
-  const layerSlots = new Uint32Array(operations.length * 6);
-  const commandSlots = new Uint32Array(operations.length * 6);
-  let vertexOffset = 0;
+  const quads: QuadValues[] = [];
   for (const operation of operations) {
     const bounds = requireRect(operation.command.bounds, operation.command.id);
     const commandMatrix = requireMatrix(operation.command.matrix, operation.command.id);
-    const clip = commandClip(operation.command.clip, operation.baseMatrix, operation.command.id);
+    const clip = commandClipQuad(operation.command.clip, operation.baseMatrix, operation.command.id);
+    const inverse = invertMatrix(composeMatrix(operation.baseMatrix, commandMatrix));
+    // Empty bounds cover no pixel, and a matrix without an inverse maps no
+    // pixel back into the command.
+    if (!inverse || bounds.width <= 0 || bounds.height <= 0) continue;
     const payload = operation.command.payload;
-    const uv = payload.kind === "image" ? optionalRect(payload.uv) : { x: 0, y: 0, width: 1, height: 1 };
-    const fill = payload.kind === "image" ? optionalColor(payload.tint, [1, 1, 1, 1]) : optionalColor(payload.fill, [1, 1, 1, 1]);
-    const stroke = payload.kind === "shape" ? optionalColor(payload.stroke, [0, 0, 0, 0]) : [0, 0, 0, 0];
-    const [primitive, radiusX, radiusY] = payload.kind === "shape"
-      ? shapeParams(payload.primitive, bounds)
-      : payload.kind === "image" ? imageClipParams(payload.clip, bounds) : [0, 0, 0];
-    const strokeWidth = payload.kind === "shape" && typeof payload.stroke_width === "number"
-      ? payload.stroke_width
-      : 0;
-    const axis = linearAxis(operation.baseMatrix, commandMatrix);
-    for (const [unitX, unitY] of UNIT_TRIANGLES) {
-      const vertexFill = payload.kind === "shape" ? gradientColor(payload.gradient, unitX, unitY, fill) : fill;
-      const localX = bounds.x + bounds.width * unitX;
-      const localY = bounds.y + bounds.height * unitY;
-      const commandPoint = transformPoint(commandMatrix, localX, localY);
-      const [x, y] = transformPoint(operation.baseMatrix, commandPoint[0], commandPoint[1]);
-      const base = vertexOffset * SEMANTIC_FLOATS_PER_VERTEX;
-      vertices.set([
-        x, y,
-        uv.x + uv.width * unitX, uv.y + uv.height * unitY,
-        unitX, unitY,
-        ...vertexFill,
-        ...stroke,
-        primitive, radiusX, radiusY, strokeWidth,
-        ...clip[0], ...clip[1], ...clip[2], ...clip[3],
-        bounds.width, bounds.height,
-        ...axis,
-      ], base);
-      layerSlots[vertexOffset] = operation.layerSlot;
-      commandSlots[vertexOffset] = operation.commandSlot;
-      vertexOffset += 1;
+    if (payload.kind === "image") {
+      const uv = optionalRect(payload.uv);
+      const tint = optionalColor(payload.tint, [1, 1, 1, 1]);
+      quads.push({
+        operation,
+        inverse,
+        bounds: [bounds.x, bounds.y, bounds.width, bounds.height],
+        uvRect: [uv.x, uv.y, uv.width, uv.height],
+        fill: tint,
+        stroke: [0, 0, 0, 0],
+        params: [...imageClipParams(payload.clip), 0],
+        gradient: [0, 0, 0, 0],
+        gradientEndColor: tint,
+        clip,
+      });
+      continue;
     }
+    const fill = optionalColor(payload.fill, [1, 1, 1, 1]);
+    // An asset mask's face is its fill: the native compositor draws it with
+    // the shape distance-field material, whose face colour is solid, so a
+    // gradient on the command does not reach it.
+    const gradient = shapeGradient(kind === "mask" ? null : payload.gradient, fill);
+    quads.push({
+      operation,
+      inverse,
+      bounds: [bounds.x, bounds.y, bounds.width, bounds.height],
+      uvRect: [0, 0, 1, 1],
+      fill: gradient.startColor,
+      stroke: optionalColor(payload.stroke, [0, 0, 0, 0]),
+      params: [...shapeParams(payload.primitive), typeof payload.stroke_width === "number" ? payload.stroke_width : 0],
+      gradient: gradient.line,
+      gradientEndColor: gradient.endColor,
+      clip,
+    });
   }
   return {
     kind,
@@ -293,10 +334,54 @@ function compileGroup(
     glyphPage: null,
     operations: [...operations],
     commandIds: operations.map((operation) => operation.command.id),
-    vertices,
-    layerSlots,
-    commandSlots,
+    ...packQuads(quads),
   };
+}
+
+type Quad4 = [number, number, number, number];
+
+/** The values one quad's six vertices share. */
+type QuadValues = {
+  operation: SemanticDrawOperation;
+  inverse: Matrix2d;
+  bounds: Quad4;
+  uvRect: Quad4;
+  fill: number[];
+  stroke: number[];
+  params: number[];
+  gradient: Quad4;
+  gradientEndColor: number[];
+  clip: [[number, number], [number, number], [number, number], [number, number]];
+};
+
+/** Writes two triangles per quad in `SEMANTIC_VERTEX_ATTRIBUTES` order. */
+function packQuads(quads: readonly QuadValues[]): Pick<SemanticDrawBatch, "vertices" | "layerSlots" | "commandSlots"> {
+  const vertices = new Float32Array(quads.length * 6 * SEMANTIC_FLOATS_PER_VERTEX);
+  const layerSlots = new Uint32Array(quads.length * 6);
+  const commandSlots = new Uint32Array(quads.length * 6);
+  const layout = SEMANTIC_VERTEX_ATTRIBUTES;
+  let vertex = 0;
+  for (const quad of quads) {
+    for (const corner of UNIT_TRIANGLES) {
+      const base = vertex * SEMANTIC_FLOATS_PER_VERTEX;
+      vertices.set(quad.inverse.slice(0, 4), base + layout.inverse.offset);
+      vertices.set(quad.inverse.slice(4, 6), base + layout.inverseOffset.offset);
+      vertices.set(quad.bounds, base + layout.bounds.offset);
+      vertices.set(corner, base + layout.corner.offset);
+      vertices.set(quad.uvRect, base + layout.uvRect.offset);
+      vertices.set(quad.fill, base + layout.fill.offset);
+      vertices.set(quad.stroke, base + layout.stroke.offset);
+      vertices.set(quad.params, base + layout.params.offset);
+      vertices.set(quad.gradient, base + layout.gradient.offset);
+      vertices.set(quad.gradientEndColor, base + layout.gradientEndColor.offset);
+      vertices.set([...quad.clip[0], ...quad.clip[1]], base + layout.clip01.offset);
+      vertices.set([...quad.clip[2], ...quad.clip[3]], base + layout.clip23.offset);
+      layerSlots[vertex] = quad.operation.layerSlot;
+      commandSlots[vertex] = quad.operation.commandSlot;
+      vertex += 1;
+    }
+  }
+  return { vertices, layerSlots, commandSlots };
 }
 
 function commandBlendMode(value: unknown): SemanticBlendMode {
@@ -311,30 +396,63 @@ function requireCompositeOperation(value: unknown, commandId: string): SemanticC
   throw new Error(`unsupported composite operation ${commandId}: ${String(value)}`);
 }
 
-function commandClip(
-  value: unknown,
-  baseMatrix: [number, number, number, number, number, number],
-  commandId: string
-): [[number, number], [number, number], [number, number], [number, number]] {
-  if (value == null) return [[-1e9, -1e9], [1e9, -1e9], [1e9, 1e9], [-1e9, 1e9]];
+export type ClipQuad = [[number, number], [number, number], [number, number], [number, number]];
+
+/** The clip of a command that has none: it holds the whole canvas. */
+export const NO_CLIP: ClipQuad = [[-1e9, -1e9], [1e9, -1e9], [1e9, 1e9], [-1e9, 1e9]];
+
+/** `pixel_sampling::CLIP_AXIS_TOLERANCE` of the shared core. */
+export const CLIP_AXIS_TOLERANCE = Math.fround(0.0001);
+
+/** A command's clip quad on the canvas, before the dynamic offset and the
+ * preview transform: its corners through the layer's matrix. Corners that
+ * form an axis-aligned rectangle become the corners of their bounds, as the
+ * native compositor reduces such a clip to its bounds (see
+ * `axisAlignedClipBounds`); the fragment stages keep `[min, max)` of those
+ * on both axes. Any other quad, which the native compositor does not draw,
+ * is kept as it is. */
+export function commandClipQuad(value: unknown, baseMatrix: readonly number[], commandId: string): ClipQuad {
+  if (value == null) return NO_CLIP;
   if (!Array.isArray(value) || value.length !== 4 || value.some((point) => !Array.isArray(point) || point.length !== 2 || point.some((entry) => typeof entry !== "number" || !Number.isFinite(entry)))) {
     throw new Error(`invalid command clip ${commandId}`);
   }
-  return value.map((point) => transformPoint(baseMatrix, point[0], point[1])) as [[number, number], [number, number], [number, number], [number, number]];
+  const corners = value.map((point) => transformPoint(baseMatrix, point[0], point[1])) as ClipQuad;
+  const bounds = axisAlignedClipBounds(corners);
+  if (!bounds) return corners;
+  const [minX, minY, maxX, maxY] = bounds;
+  return [[minX, minY], [maxX, minY], [maxX, maxY], [minX, maxY]];
 }
 
-function gradientColor(value: unknown, x: number, y: number, fallback: number[]): number[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+/** `pixel_sampling::axis_aligned_clip_bounds` of the shared core: the bounds
+ * `[minX, minY, maxX, maxY]` of corners that, in order around the clip, form
+ * an axis-aligned rectangle within `CLIP_AXIS_TOLERANCE`, or null. */
+export function axisAlignedClipBounds(corners: ClipQuad): [number, number, number, number] | null {
+  if (!corners.flat().every(Number.isFinite)) return null;
+  const horizontal = (left: [number, number], right: [number, number]) =>
+    Math.abs(f32(left[1] - right[1])) <= CLIP_AXIS_TOLERANCE && Math.abs(f32(left[0] - right[0])) > CLIP_AXIS_TOLERANCE;
+  const vertical = (top: [number, number], bottom: [number, number]) =>
+    Math.abs(f32(top[0] - bottom[0])) <= CLIP_AXIS_TOLERANCE && Math.abs(f32(top[1] - bottom[1])) > CLIP_AXIS_TOLERANCE;
+  const [c0, c1, c2, c3] = corners;
+  const rectangle = (horizontal(c0, c1) && vertical(c1, c2) && horizontal(c2, c3) && vertical(c3, c0))
+    || (vertical(c0, c1) && horizontal(c1, c2) && vertical(c2, c3) && horizontal(c3, c0));
+  if (!rectangle) return null;
+  const xs = corners.map((corner) => corner[0]);
+  const ys = corners.map((corner) => corner[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+/** A shape's gradient line and end colours; without a gradient the line is
+ * empty and both colours are the fill. */
+function shapeGradient(value: unknown, fill: number[]): { line: Quad4; startColor: number[]; endColor: number[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { line: [0, 0, 0, 0], startColor: fill, endColor: fill };
   const gradient = value as Record<string, unknown>;
   const start = optionalPoint(gradient.start, [0, 0.5]);
   const end = optionalPoint(gradient.end, [1, 0.5]);
-  const startColor = optionalColor(gradient.start_color, fallback);
-  const endColor = optionalColor(gradient.end_color, fallback);
-  const dx = end[0] - start[0];
-  const dy = end[1] - start[1];
-  const lengthSq = dx * dx + dy * dy;
-  const t = lengthSq > 1e-9 ? Math.max(0, Math.min(1, ((x - start[0]) * dx + (y - start[1]) * dy) / lengthSq)) : 0;
-  return startColor.map((component, index) => component + (endColor[index] - component) * t);
+  return {
+    line: [start[0], start[1], end[0], end[1]],
+    startColor: optionalColor(gradient.start_color, fill),
+    endColor: optionalColor(gradient.end_color, fill),
+  };
 }
 
 function optionalPoint(value: unknown, fallback: [number, number]): [number, number] {
@@ -343,23 +461,65 @@ function optionalPoint(value: unknown, fallback: [number, number]): [number, num
     : fallback;
 }
 
-/** Canvas direction of the local +x axis under `base` after `command`. */
-function linearAxis(
-  base: [number, number, number, number, number, number],
-  command: [number, number, number, number, number, number],
-): [number, number] {
-  return [base[0] * command[0] + base[2] * command[1], base[1] * command[0] + base[3] * command[1]];
+type Matrix2d = [number, number, number, number, number, number];
+
+const f32 = Math.fround;
+/** `f32::EPSILON`. */
+const F32_EPSILON = 2 ** -23;
+
+// The three functions below evaluate in single precision in the native
+// compositor's order of operations, so a device pixel maps to the same local
+// position on both backends. A single-precision sum, difference, product or
+// quotient computed in double precision and then rounded is the correctly
+// rounded single-precision result.
+
+/** `parent` after `child`, as the native compositor composes matrices. */
+export function composeMatrix(parent: readonly number[], child: readonly number[]): Matrix2d {
+  const p = parent.map(f32);
+  const c = child.map(f32);
+  return [
+    f32(f32(p[0] * c[0]) + f32(p[2] * c[1])),
+    f32(f32(p[1] * c[0]) + f32(p[3] * c[1])),
+    f32(f32(p[0] * c[2]) + f32(p[2] * c[3])),
+    f32(f32(p[1] * c[2]) + f32(p[3] * c[3])),
+    f32(f32(f32(p[0] * c[4]) + f32(p[2] * c[5])) + p[4]),
+    f32(f32(f32(p[1] * c[4]) + f32(p[3] * c[5])) + p[5]),
+  ];
 }
 
-function transformPoint(matrix: [number, number, number, number, number, number], x: number, y: number): [number, number] {
-  return [matrix[0] * x + matrix[2] * y + matrix[4], matrix[1] * x + matrix[3] * y + matrix[5]];
+/** The inverse, or null for a matrix the native compositor does not invert. */
+export function invertMatrix(matrix: readonly number[]): Matrix2d | null {
+  const [a, b, c, d, e, f] = matrix.map(f32);
+  const determinant = f32(f32(a * d) - f32(b * c));
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= F32_EPSILON) return null;
+  return [
+    f32(d / determinant),
+    f32(-b / determinant),
+    f32(-c / determinant),
+    f32(a / determinant),
+    f32(f32(f32(c * f) - f32(d * e)) / determinant),
+    f32(f32(f32(b * e) - f32(a * f)) / determinant),
+  ];
 }
 
-function requireMatrix(value: unknown, commandId: string): [number, number, number, number, number, number] {
+/** A point through the matrix with fused multiply-adds. Each fused result
+ * is rounded to double and then to single precision, which differs from a
+ * single rounding only when the double lies exactly halfway between two
+ * single-precision values. */
+export function transformPoint(matrix: readonly number[], x: number, y: number): [number, number] {
+  const m = matrix.map(f32);
+  const [px, py] = [f32(x), f32(y)];
+  return [
+    f32(m[0] * px + f32(m[2] * py + m[4])),
+    f32(m[1] * px + f32(m[3] * py + m[5])),
+  ];
+}
+
+function requireMatrix(value: unknown, commandId: string): Matrix2d {
   if (!Array.isArray(value) || value.length !== 6 || value.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))) {
     throw new Error(`invalid command matrix ${commandId}`);
   }
-  return value as [number, number, number, number, number, number];
+  return value as Matrix2d;
 }
 
 function requireRect(value: unknown, commandId: string): { x: number; y: number; width: number; height: number } {
@@ -394,7 +554,7 @@ function optionalColor(value: unknown, fallback: number[]): number[] {
     : fallback;
 }
 
-function shapeParams(value: unknown, _bounds: { width: number; height: number }): [number, number, number] {
+function shapeParams(value: unknown): [number, number, number] {
   if (value === "ellipse") return [2, 0, 0];
   if (value === "rect") return [0, 0, 0];
   if (!value || typeof value !== "object" || Array.isArray(value)) return [0, 0, 0];
@@ -408,7 +568,7 @@ function shapeParams(value: unknown, _bounds: { width: number; height: number })
   return [0, 0, 0];
 }
 
-function imageClipParams(value: unknown, _bounds: { width: number; height: number }): [number, number, number] {
+function imageClipParams(value: unknown): [number, number, number] {
   if (value === "ellipse") return [2, 0, 0];
   if (!value || typeof value !== "object" || Array.isArray(value)) return [0, 0, 0];
   const rounded = (value as Record<string, unknown>).rounded_rect;

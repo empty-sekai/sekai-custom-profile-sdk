@@ -25,6 +25,7 @@ import type { NumericTextRegion } from "./interaction/numericTextRegions.js";
 import {
   buildSdfAtlas,
   disposeWorkerAtlasSessions,
+  isWhiteSpaceRequest,
   type FontSource,
   type GlyphRequest,
   type PersistentCacheSelection,
@@ -307,7 +308,9 @@ export class BrowserRenderer {
         localizedText,
       });
       const glyphRequests = preparedGlyphRequests(preparation);
-      if (glyphRequests.length === 0) {
+      // Text of white space alone draws nothing; without an atlas the layout
+      // estimates its advance.
+      if (glyphRequests.every(isWhiteSpaceRequest)) {
         atlas = null;
       } else {
         atlas = this.prebuiltSdfAtlasProvider

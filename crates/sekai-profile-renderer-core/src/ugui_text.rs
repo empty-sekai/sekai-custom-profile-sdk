@@ -39,7 +39,7 @@ pub const MAX_PIXEL_SIZE: u32 = 500;
 pub const CARD_PIXELS_PER_UNIT: f32 = 1.0;
 /// Offset from a texel's corner to its centre, in texels. [`cell_coverage`]
 /// subtracts it before interpolating between texel centres.
-pub const TEXEL_CENTRE: f32 = 0.5;
+pub use crate::pixel_sampling::TEXEL_CENTRE;
 /// Added to both rect extents before the text is placed in the rect.
 const EXTENT_EPSILON: f32 = 0.0001;
 /// `cos(90°)` as `f32`: the residue of the quarter turn that sets glyphs

@@ -1,5 +1,14 @@
-import { SEMANTIC_FLOATS_PER_VERTEX, semanticTextBatchKey, type SemanticBlendMode, type SemanticDrawBatch } from "./semanticCommandGeometry.js";
+import {
+  SEMANTIC_COMMAND_SLOT_LOCATION,
+  SEMANTIC_FLOATS_PER_VERTEX,
+  SEMANTIC_LAYER_SLOT_LOCATION,
+  SEMANTIC_VERTEX_ATTRIBUTES,
+  semanticTextBatchKey,
+  type SemanticBlendMode,
+  type SemanticDrawBatch,
+} from "./semanticCommandGeometry.js";
 import type { SemanticCommandPlan, SemanticCommandStatePatch, SemanticLayerPatch } from "./semanticCommandPlanner.js";
+import { COMMAND_CLIP_GLSL } from "./commandClipShader.js";
 import { WebglSdfGlyphPipeline } from "./webglSdfGlyphPipeline.js";
 import { WebglSdfAtlasTexture } from "./webglSdfAtlasTexture.js";
 import { packPreviewTransformsForTexture } from "./previewTransformTextureLayout.js";
@@ -333,10 +342,11 @@ export class WebglSemanticCommandExecutor {
         gl.useProgram(program);
         this.bindCommon(program);
         if (batch.source.kind !== "shape") {
-          this.bindTexture(program, "u_image", 2, batch.source.resource, gl.NEAREST, batch.source.kind);
+          // The fragment stages read texels with texelFetch and filter them
+          // themselves, so no sampler state depends on the batch.
+          this.bindTexture(program, "u_image", 2, batch.source.resource, batch.source.kind);
           if (batch.source.kind === "badge") {
-            // The normal map is filtered bilinearly at the image's UV.
-            this.bindTexture(program, "u_normalMap", NORMAL_MAP_TEXTURE_UNIT, batch.source.normalMapResource, gl.LINEAR, batch.source.kind);
+            this.bindTexture(program, "u_normalMap", NORMAL_MAP_TEXTURE_UNIT, batch.source.normalMapResource, batch.source.kind);
           } else {
             gl.uniform1i(gl.getUniformLocation(program, "u_maskMode"), batch.source.kind === "mask" ? 1 : 0);
           }
@@ -429,7 +439,6 @@ export class WebglSemanticCommandExecutor {
     uniform: string,
     unit: number,
     resource: { namespace: string; key: string } | null,
-    filter: number,
     kind: string,
   ): void {
     const gl = this.gl;
@@ -439,8 +448,6 @@ export class WebglSemanticCommandExecutor {
     if (!texture) throw new Error(`semantic GPU resource not loaded ${key}`);
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.uniform1i(gl.getUniformLocation(program, uniform), unit);
   }
 
@@ -531,24 +538,17 @@ export class WebglSemanticCommandExecutor {
     gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, source.vertices, gl.STATIC_DRAW);
     const stride = SEMANTIC_FLOATS_PER_VERTEX * 4;
-    floatAttribute(gl, 0, 2, stride, 0);
-    floatAttribute(gl, 1, 2, stride, 2 * 4);
-    floatAttribute(gl, 2, 2, stride, 4 * 4);
-    floatAttribute(gl, 3, 4, stride, 6 * 4);
-    floatAttribute(gl, 4, 4, stride, 10 * 4);
-    floatAttribute(gl, 5, 4, stride, 14 * 4);
-    floatAttribute(gl, 7, 4, stride, 18 * 4);
-    floatAttribute(gl, 8, 4, stride, 22 * 4);
-    floatAttribute(gl, 10, 2, stride, 26 * 4);
-    floatAttribute(gl, 11, 2, stride, 28 * 4);
+    for (const { location, size, offset } of Object.values(SEMANTIC_VERTEX_ATTRIBUTES)) {
+      floatAttribute(gl, location, size, stride, offset * 4);
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, slotBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, source.layerSlots, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(6);
-    gl.vertexAttribIPointer(6, 1, gl.UNSIGNED_INT, 4, 0);
+    gl.enableVertexAttribArray(SEMANTIC_LAYER_SLOT_LOCATION);
+    gl.vertexAttribIPointer(SEMANTIC_LAYER_SLOT_LOCATION, 1, gl.UNSIGNED_INT, 4, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, commandSlotBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, source.commandSlots, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(9);
-    gl.vertexAttribIPointer(9, 1, gl.UNSIGNED_INT, 4, 0);
+    gl.enableVertexAttribArray(SEMANTIC_COMMAND_SLOT_LOCATION);
+    gl.vertexAttribIPointer(SEMANTIC_COMMAND_SLOT_LOCATION, 1, gl.UNSIGNED_INT, 4, 0);
     gl.bindVertexArray(null);
     return { source, vao, vertexBuffer, slotBuffer, commandSlotBuffer, vertices: source.layerSlots.length };
   }
@@ -640,18 +640,20 @@ function createProgram(gl: WebGL2RenderingContext, vertexSource: string, fragmen
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
 precision highp usampler2D;
-layout(location=0) in vec2 a_position;
-layout(location=1) in vec2 a_uv;
-layout(location=2) in vec2 a_shapeUv;
-layout(location=3) in vec4 a_fill;
-layout(location=4) in vec4 a_stroke;
-layout(location=5) in vec4 a_params;
-layout(location=6) in uint a_layerSlot;
-layout(location=7) in vec4 a_clip01;
-layout(location=8) in vec4 a_clip23;
-layout(location=9) in uint a_commandSlot;
-layout(location=10) in vec2 a_shapeSize;
-layout(location=11) in vec2 a_axis;
+layout(location=0) in vec4 a_inverse;
+layout(location=1) in vec2 a_inverseOffset;
+layout(location=2) in vec4 a_bounds;
+layout(location=3) in vec2 a_corner;
+layout(location=4) in vec4 a_uvRect;
+layout(location=5) in vec4 a_fill;
+layout(location=6) in vec4 a_stroke;
+layout(location=7) in vec4 a_params;
+layout(location=8) in vec4 a_gradient;
+layout(location=9) in vec4 a_gradientEndColor;
+layout(location=10) in vec4 a_clip01;
+layout(location=11) in vec4 a_clip23;
+layout(location=12) in uint a_layerSlot;
+layout(location=13) in uint a_commandSlot;
 uniform vec2 u_canvas;
 uniform sampler2D u_state;
 uniform highp usampler2D u_mask;
@@ -660,17 +662,25 @@ uniform highp usampler2D u_commandMask;
 uniform sampler2D u_commandState;
 uniform float u_commandWidth;
 uniform sampler2D u_previewTransform;
-out vec2 v_uv;
-out vec2 v_shapeUv;
-out vec4 v_fill;
-out vec4 v_stroke;
-out vec4 v_params;
-out vec2 v_point;
-out vec4 v_clip01;
-out vec4 v_clip23;
-out vec2 v_shapeSize;
-out vec2 v_tangent;
+flat out vec4 v_inverse;
+flat out vec2 v_inverseOffset;
+flat out vec4 v_bounds;
+flat out vec4 v_uvRect;
+flat out vec4 v_fill;
+flat out vec4 v_stroke;
+flat out vec4 v_params;
+flat out vec4 v_gradient;
+flat out vec4 v_gradientEndColor;
+flat out vec4 v_clip01;
+flat out vec4 v_clip23;
+flat out vec2 v_tangent;
 flat out uint v_visible;
+// Device pixels the quad is grown by on every side. The fragment stage
+// decides what each pixel shows; the quad only has to reach every pixel with
+// a sample inside the draw. No sample lies more than a quarter pixel from its
+// pixel's centre along either axis, which leaves room for the rasteriser's
+// snapping of the grown corners.
+const float QUAD_OUTSET = 0.5;
 void main() {
   float stateU = (float(a_layerSlot) + 0.5) / u_stateWidth;
   vec2 dynamicOffset = texture(u_state, vec2(stateU, 0.5)).rg;
@@ -679,139 +689,220 @@ void main() {
   vec2 totalOffset = dynamicOffset + commandOffset;
   vec4 preview0 = texelFetch(u_previewTransform, ivec2(int(a_layerSlot), 0), 0);
   vec4 preview1 = texelFetch(u_previewTransform, ivec2(int(a_layerSlot), 1), 0);
-  vec2 basePoint = a_position + totalOffset;
+  // The canvas-to-local matrix after the dynamic offset and the preview: the
+  // preview is undone, then the offset, then the draw's own mapping.
+  float previewDeterminant = preview0.x * preview1.y - preview1.x * preview0.y;
+  vec4 previewInverse = vec4(preview1.y, -preview1.x, -preview0.y, preview0.x) / previewDeterminant;
+  vec2 previewInverseOffset = vec2(
+    preview0.y * preview1.z - preview1.y * preview0.z,
+    preview1.x * preview0.z - preview0.x * preview1.z
+  ) / previewDeterminant;
+  vec2 undone = previewInverseOffset - totalOffset;
+  vec4 inverse = vec4(
+    a_inverse.x * previewInverse.x + a_inverse.z * previewInverse.y,
+    a_inverse.y * previewInverse.x + a_inverse.w * previewInverse.y,
+    a_inverse.x * previewInverse.z + a_inverse.z * previewInverse.w,
+    a_inverse.y * previewInverse.z + a_inverse.w * previewInverse.w
+  );
+  vec2 inverseOffset = vec2(
+    a_inverse.x * undone.x + a_inverse.z * undone.y + a_inverseOffset.x,
+    a_inverse.y * undone.x + a_inverse.w * undone.y + a_inverseOffset.y
+  );
+  // Local to canvas, for the quad's corners.
+  float determinant = inverse.x * inverse.w - inverse.y * inverse.z;
+  vec4 forward = vec4(inverse.w, -inverse.y, -inverse.z, inverse.x) / determinant;
+  vec2 forwardOffset = vec2(
+    inverse.z * inverseOffset.y - inverse.w * inverseOffset.x,
+    inverse.y * inverseOffset.x - inverse.x * inverseOffset.y
+  ) / determinant;
+  // A canvas step of QUAD_OUTSET pixels moves a local coordinate by at most
+  // QUAD_OUTSET times the length of that coordinate's row of the inverse, so
+  // the bounds grown by that much reach every pixel within QUAD_OUTSET.
+  vec2 outset = QUAD_OUTSET * vec2(length(inverse.xz), length(inverse.yw));
+  vec2 local = a_bounds.xy + a_corner * a_bounds.zw + (a_corner * 2.0 - 1.0) * outset;
   vec2 point = vec2(
-    dot(preview0.xy, basePoint) + preview0.z,
-    dot(preview1.xy, basePoint) + preview1.z
+    forward.x * local.x + forward.z * local.y + forwardOffset.x,
+    forward.y * local.x + forward.w * local.y + forwardOffset.y
   );
   gl_Position = vec4(point.x / u_canvas.x * 2.0 - 1.0, 1.0 - point.y / u_canvas.y * 2.0, 0.0, 1.0);
-  v_uv = a_uv;
-  v_shapeUv = a_shapeUv;
+  v_inverse = inverse;
+  v_inverseOffset = inverseOffset;
+  v_bounds = a_bounds;
+  v_uvRect = a_uvRect;
   v_fill = a_fill;
   v_stroke = a_stroke;
   v_params = a_params;
-  v_point = point;
+  v_gradient = a_gradient;
+  v_gradientEndColor = a_gradientEndColor;
   vec2 clip0 = vec2(dot(preview0.xy, a_clip01.xy + dynamicOffset), dot(preview1.xy, a_clip01.xy + dynamicOffset)) + vec2(preview0.z, preview1.z);
   vec2 clip1 = vec2(dot(preview0.xy, a_clip01.zw + dynamicOffset), dot(preview1.xy, a_clip01.zw + dynamicOffset)) + vec2(preview0.z, preview1.z);
   vec2 clip2 = vec2(dot(preview0.xy, a_clip23.xy + dynamicOffset), dot(preview1.xy, a_clip23.xy + dynamicOffset)) + vec2(preview0.z, preview1.z);
   vec2 clip3 = vec2(dot(preview0.xy, a_clip23.zw + dynamicOffset), dot(preview1.xy, a_clip23.zw + dynamicOffset)) + vec2(preview0.z, preview1.z);
   v_clip01 = vec4(clip0, clip1);
   v_clip23 = vec4(clip2, clip3);
-  v_shapeSize = a_shapeSize;
   // The local +x axis on the canvas, turned to the lighting frame where +y is up.
-  vec2 axis = vec2(dot(preview0.xy, a_axis), dot(preview1.xy, a_axis));
+  vec2 axis = forward.xy;
   v_tangent = vec2(axis.x, -axis.y);
   v_visible = texture(u_mask, vec2(stateU, 0.5)).r * texture(u_commandMask, vec2(commandU, 0.5)).r;
 }`;
 
-const SHAPE_FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-in vec2 v_uv;
-in vec2 v_shapeUv;
-in vec4 v_fill;
-in vec4 v_stroke;
-in vec4 v_params;
-in vec2 v_point;
-in vec4 v_clip01;
-in vec4 v_clip23;
-in vec2 v_shapeSize;
+// Declarations and helpers of every semantic fragment stage. Each stage maps
+// the pixel under the fragment into the draw's local space itself; sampling
+// positions are derived from the fragment position so they do not depend on
+// the rasteriser's vertex precision.
+const FRAGMENT_COMMON = `uniform vec2 u_canvas;
+flat in vec4 v_inverse;
+flat in vec2 v_inverseOffset;
+flat in vec4 v_bounds;
+flat in vec4 v_uvRect;
+flat in vec4 v_fill;
+flat in vec4 v_stroke;
+flat in vec4 v_params;
+flat in vec4 v_gradient;
+flat in vec4 v_gradientEndColor;
+flat in vec4 v_clip01;
+flat in vec4 v_clip23;
+flat in vec2 v_tangent;
 flat in uint v_visible;
 out vec4 outColor;
-// Signed distance to the shape after insetting its bounds (and corner radii)
-// by the inset in local pixels; an inset that empties the shape is far outside.
-float shapeDistance(float inset) {
-  vec2 point = (v_shapeUv - 0.5) * v_shapeSize;
-  vec2 halfSize = v_shapeSize * 0.5 - vec2(inset);
-  if (min(halfSize.x, halfSize.y) <= 0.0) return 1.0e6;
+// Top-left corner of the canvas pixel under the fragment, +y down.
+vec2 canvasPixel() {
+  vec2 window = floor(gl_FragCoord.xy);
+  return vec2(window.x, u_canvas.y - 1.0 - window.y);
+}
+// A canvas point in the draw's local space.
+vec2 toLocal(vec2 point) {
+  return vec2(
+    v_inverse.x * point.x + (v_inverse.z * point.y + v_inverseOffset.x),
+    v_inverse.y * point.x + (v_inverse.w * point.y + v_inverseOffset.y)
+  );
+}
+${COMMAND_CLIP_GLSL}`;
+
+// Image sampling shared by the image, mask and badge stages: the image clip
+// and the texel under a sample, as the shared core decides them (a contract
+// test pins both).
+const IMAGE_SAMPLING = `bool imageClipContains(vec2 point) {
+  if (v_params.x < 0.5) return true;
+  float halfWidth = v_bounds.z * 0.5;
+  float halfHeight = v_bounds.w * 0.5;
+  if (halfWidth <= 0.0 || halfHeight <= 0.0) return false;
   if (v_params.x > 1.5) {
-    return (length(point / halfSize) - 1.0) * min(halfSize.x, halfSize.y);
+    float ellipseX = (point.x - (v_bounds.x + halfWidth)) / halfWidth;
+    float ellipseY = (point.y - (v_bounds.y + halfHeight)) / halfHeight;
+    return ellipseX * ellipseX + ellipseY * ellipseY <= 1.0;
   }
-  if (v_params.x > 0.5) {
-    vec2 radius = min(max(v_params.yz - vec2(inset), vec2(0.00001)), halfSize);
-    vec2 q = abs(point) - halfSize + radius;
-    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - min(radius.x, radius.y);
-  }
-  vec2 q = abs(point) - halfSize;
-  return max(q.x, q.y);
+  float radiusX = min(abs(v_params.y), halfWidth);
+  float radiusY = min(abs(v_params.z), halfHeight);
+  if (radiusX == 0.0 || radiusY == 0.0) return true;
+  float distanceX = abs(point.x - (v_bounds.x + halfWidth)) - (halfWidth - radiusX);
+  float distanceY = abs(point.y - (v_bounds.y + halfHeight)) - (halfHeight - radiusY);
+  if (distanceX <= 0.0 || distanceY <= 0.0) return true;
+  float cornerX = distanceX / radiusX;
+  float cornerY = distanceY / radiusY;
+  return cornerX * cornerX + cornerY * cornerY <= 1.0;
 }
-// Area of the pixel inside the outline, as a one-pixel box filter: a pixel
-// centre half a pixel inside a straight edge is fully covered.
-float coverage(float distance) {
-  return clamp(0.5 - distance / max(length(vec2(dFdx(distance), dFdy(distance))), 0.0005), 0.0, 1.0);
-}
-float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
-bool insideClip() {
-  highp vec2 p[4];
-  p[0] = v_clip01.xy;
-  p[1] = v_clip01.zw;
-  p[2] = v_clip23.xy;
-  p[3] = v_clip23.zw;
-  float c0 = cross2(p[1] - p[0], v_point - p[0]);
-  float c1 = cross2(p[2] - p[1], v_point - p[1]);
-  float c2 = cross2(p[3] - p[2], v_point - p[2]);
-  float c3 = cross2(p[0] - p[3], v_point - p[3]);
-  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
-}
-void main() {
-  // Derivatives stay in uniform control flow, ahead of the per-fragment clip.
-  float outerDistance = shapeDistance(0.0);
-  float innerDistance = shapeDistance(v_params.w);
-  float outerCoverage = coverage(outerDistance);
-  float innerCoverage = v_params.w > 0.0 ? coverage(innerDistance) : outerCoverage;
-  if (v_visible == uint(0)) discard;
-  if (!insideClip()) discard;
-  // The stroke is the band between the outline and the outline inset by the
-  // stroke width, so it stays inside the shape bounds.
-  float strokeCoverage = max(outerCoverage - innerCoverage, 0.0);
-  vec4 fill = clamp(v_fill, 0.0, 1.0);
-  vec4 stroke = clamp(v_stroke, 0.0, 1.0);
-  outColor = vec4(fill.rgb * fill.a, fill.a) * innerCoverage + vec4(stroke.rgb * stroke.a, stroke.a) * strokeCoverage;
+ivec2 nearestTexel(vec2 coordinate, ivec2 size) {
+  vec2 texel = floor(coordinate * vec2(size));
+  return ivec2(clamp(texel, vec2(0.0), vec2(size - 1)));
 }`;
 
-const TEXTURE_FRAGMENT_SHADER = `#version 300 es
+// Shape coverage: the share of the pixel's samples inside the shape, each
+// sample taking the stroke colour where the shape inset by the stroke width
+// does not contain it and the fill elsewhere. A contract test pins it to the
+// shared core rule.
+const SHAPE_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
-in vec2 v_uv;
-in vec2 v_shapeUv;
-in vec4 v_fill;
-in vec4 v_stroke;
-in vec4 v_params;
-in vec2 v_point;
-in vec4 v_clip01;
-in vec4 v_clip23;
-in vec2 v_shapeSize;
-flat in uint v_visible;
-uniform sampler2D u_image;
-uniform sampler2D u_alphaMask;
-uniform int u_hasAlphaMask;
-uniform int u_maskMode;
-out vec4 outColor;
-float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
-bool insideClip() {
-  highp vec2 p[4];
-  p[0] = v_clip01.xy;
-  p[1] = v_clip01.zw;
-  p[2] = v_clip23.xy;
-  p[3] = v_clip23.zw;
-  float c0 = cross2(p[1] - p[0], v_point - p[0]);
-  float c1 = cross2(p[2] - p[1], v_point - p[1]);
-  float c2 = cross2(p[3] - p[2], v_point - p[2]);
-  float c3 = cross2(p[0] - p[3], v_point - p[3]);
-  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
+${FRAGMENT_COMMON}
+// The straight fill colour at a local point: the gradient's colour at the
+// point's projection onto its line, clamped to the line's ends. A shape
+// without a gradient has an empty line and keeps its fill.
+vec4 shapeFill(vec2 point) {
+  float u = (point.x - v_bounds.x) / v_bounds.z;
+  float v = (point.y - v_bounds.y) / v_bounds.w;
+  float dx = v_gradient.z - v_gradient.x;
+  float dy = v_gradient.w - v_gradient.y;
+  float denominator = dx * dx + dy * dy;
+  float t = denominator <= 1.1920929e-7 ? 0.0 : clamp(((u - v_gradient.x) * dx + (v - v_gradient.y) * dy) / denominator, 0.0, 1.0);
+  return (v_gradientEndColor - v_fill) * t + v_fill;
+}
+bool shapeContains(vec2 point, float inset) {
+  float left = v_bounds.x + inset;
+  float top = v_bounds.y + inset;
+  float right = v_bounds.x + v_bounds.z - inset;
+  float bottom = v_bounds.y + v_bounds.w - inset;
+  if (left >= right || top >= bottom || point.x < left || point.x >= right || point.y < top || point.y >= bottom) return false;
+  if (v_params.x > 1.5) {
+    float rx = (right - left) * 0.5;
+    float ry = (bottom - top) * 0.5;
+    float nx = (point.x - (left + right) * 0.5) / rx;
+    float ny = (point.y - (top + bottom) * 0.5) / ry;
+    return nx * nx + ny * ny <= 1.0;
+  }
+  if (v_params.x > 0.5) {
+    float rx = min(max(v_params.y - inset, 0.0), (right - left) * 0.5);
+    float ry = min(max(v_params.z - inset, 0.0), (bottom - top) * 0.5);
+    if (rx == 0.0 || ry == 0.0) return true;
+    float cx = clamp(point.x, left + rx, right - rx);
+    float cy = clamp(point.y, top + ry, bottom - ry);
+    float nx = (point.x - cx) / rx;
+    float ny = (point.y - cy) / ry;
+    return nx * nx + ny * ny <= 1.0;
+  }
+  return true;
 }
 void main() {
   if (v_visible == uint(0)) discard;
-  if (!insideClip()) discard;
-  if (v_params.x > 1.5 && length((v_shapeUv - 0.5) * 2.0) > 1.0) discard;
-  if (v_params.x > 0.5 && v_params.x < 1.5) {
-    vec2 point = (v_shapeUv - 0.5) * v_shapeSize;
-    vec2 halfSize = v_shapeSize * 0.5;
-    vec2 radius = min(max(v_params.yz, vec2(0.00001)), halfSize);
-    vec2 q = abs(point) - halfSize + radius;
-    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - min(radius.x, radius.y);
-    if (distance > 0.0) discard;
+  vec2 pixel = canvasPixel();
+  if (!insideClip(pixel + vec2(0.5))) discard;
+  highp vec2 samples[4];
+  samples[0] = vec2(0.25, 0.25);
+  samples[1] = vec2(0.75, 0.25);
+  samples[2] = vec2(0.25, 0.75);
+  samples[3] = vec2(0.75, 0.75);
+  vec4 accumulated = vec4(0.0);
+  bool covered = false;
+  for (int index = 0; index < 4; index += 1) {
+    vec2 point = toLocal(pixel + samples[index]);
+    if (!shapeContains(point, 0.0)) continue;
+    covered = true;
+    bool useStroke = v_params.w > 0.0 && !shapeContains(point, v_params.w);
+    vec4 color = useStroke ? v_stroke : shapeFill(point);
+    float alpha = clamp(color.a, 0.0, 1.0);
+    accumulated += vec4(clamp(color.rgb, 0.0, 1.0) * alpha, alpha) * 0.25;
   }
-  vec4 sampleColor = texture(u_image, v_uv);
-  if (u_hasAlphaMask == 1) sampleColor *= texture(u_alphaMask, v_shapeUv).a;
+  if (!covered) discard;
+  outColor = accumulated;
+}`;
+
+// Images and shape masks: the texel under the pixel centre, drawn when the
+// centre lies in the bounds and the image clip.
+const TEXTURE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+${FRAGMENT_COMMON}
+${IMAGE_SAMPLING}
+uniform highp sampler2D u_image;
+uniform highp sampler2D u_alphaMask;
+uniform int u_hasAlphaMask;
+uniform int u_maskMode;
+void main() {
+  if (v_visible == uint(0)) discard;
+  vec2 centre = canvasPixel() + vec2(0.5);
+  if (!insideClip(centre)) discard;
+  vec2 local = toLocal(centre);
+  float u = (local.x - v_bounds.x) / v_bounds.z;
+  float v = (local.y - v_bounds.y) / v_bounds.w;
+  if (u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) discard;
+  if (!imageClipContains(local)) discard;
+  vec2 imageUv = v_uvRect.xy + vec2(u, v) * v_uvRect.zw;
+  vec4 sampleColor = texelFetch(u_image, nearestTexel(imageUv, textureSize(u_image, 0)), 0);
+  // The mask spans the bounds and scales the premultiplied colour.
+  float maskCoverage = 1.0;
+  if (u_hasAlphaMask == 1) {
+    maskCoverage = texelFetch(u_alphaMask, nearestTexel(vec2(u, v), textureSize(u_alphaMask, 0)), 0).a;
+    if (maskCoverage == 0.0) discard;
+  }
   vec4 color;
   if (u_maskMode == 1) {
     float outlineSize = clamp(v_params.w, 0.0, 1.0);
@@ -833,43 +924,36 @@ void main() {
       faceAlpha + outlineAlpha * (1.0 - faceAlpha)
     );
   } else {
-    color = sampleColor * v_fill;
+    vec4 tint = clamp(v_fill, 0.0, 1.0);
+    color = sampleColor * tint;
     color.rgb *= color.a;
   }
-  outColor = color;
+  outColor = color * maskCoverage;
 }`;
 
 // The lit badge material; every constant matches the shared core material,
-// which a contract test pins statement by statement.
+// which a contract test pins statement by statement. The albedo is the texel
+// under the pixel centre and the normal map is filtered bilinearly at the
+// same image position.
 const BADGE_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
-in vec2 v_uv;
-in vec2 v_shapeUv;
-in vec4 v_fill;
-in vec4 v_params;
-in vec2 v_point;
-in vec4 v_clip01;
-in vec4 v_clip23;
-in vec2 v_shapeSize;
-in vec2 v_tangent;
-flat in uint v_visible;
-uniform sampler2D u_image;
-uniform sampler2D u_normalMap;
-uniform sampler2D u_alphaMask;
+precision highp int;
+${FRAGMENT_COMMON}
+${IMAGE_SAMPLING}
+uniform highp sampler2D u_image;
+uniform highp sampler2D u_normalMap;
+uniform highp sampler2D u_alphaMask;
 uniform int u_hasAlphaMask;
-out vec4 outColor;
-float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
-bool insideClip() {
-  highp vec2 p[4];
-  p[0] = v_clip01.xy;
-  p[1] = v_clip01.zw;
-  p[2] = v_clip23.xy;
-  p[3] = v_clip23.zw;
-  float c0 = cross2(p[1] - p[0], v_point - p[0]);
-  float c1 = cross2(p[2] - p[1], v_point - p[1]);
-  float c2 = cross2(p[3] - p[2], v_point - p[2]);
-  float c3 = cross2(p[0] - p[3], v_point - p[3]);
-  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
+vec4 normalTexel(vec2 coordinate) {
+  ivec2 size = textureSize(u_normalMap, 0);
+  vec2 last = vec2(size - 1);
+  vec2 position = clamp(coordinate * vec2(size) - 0.5, vec2(0.0), last);
+  vec2 low = floor(position);
+  vec2 high = min(low + 1.0, last);
+  vec2 weight = position - low;
+  vec4 top = texelFetch(u_normalMap, ivec2(low.x, low.y), 0) * (1.0 - weight.x) + texelFetch(u_normalMap, ivec2(high.x, low.y), 0) * weight.x;
+  vec4 bottom = texelFetch(u_normalMap, ivec2(low.x, high.y), 0) * (1.0 - weight.x) + texelFetch(u_normalMap, ivec2(high.x, high.y), 0) * weight.x;
+  return top * (1.0 - weight.y) + bottom * weight.y;
 }
 // Specular term of one light: the unit direction towards it in xyz, its
 // intensity in w.
@@ -884,19 +968,17 @@ float badgeSpecular(vec3 surface, vec4 light, float roughness2, float normalizat
 }
 void main() {
   if (v_visible == uint(0)) discard;
-  if (!insideClip()) discard;
-  if (v_params.x > 1.5 && length((v_shapeUv - 0.5) * 2.0) > 1.0) discard;
-  if (v_params.x > 0.5 && v_params.x < 1.5) {
-    vec2 point = (v_shapeUv - 0.5) * v_shapeSize;
-    vec2 halfSize = v_shapeSize * 0.5;
-    vec2 radius = min(max(v_params.yz, vec2(0.00001)), halfSize);
-    vec2 q = abs(point) - halfSize + radius;
-    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - min(radius.x, radius.y);
-    if (distance > 0.0) discard;
-  }
+  vec2 centre = canvasPixel() + vec2(0.5);
+  if (!insideClip(centre)) discard;
+  vec2 local = toLocal(centre);
+  float u = (local.x - v_bounds.x) / v_bounds.z;
+  float v = (local.y - v_bounds.y) / v_bounds.w;
+  if (u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) discard;
+  if (!imageClipContains(local)) discard;
+  vec2 imageUv = v_uvRect.xy + vec2(u, v) * v_uvRect.zw;
   // Both textures hold straight 8-bit values, lit in gamma space.
-  vec4 albedo = texture(u_image, v_uv);
-  vec4 packedNormal = texture(u_normalMap, v_uv);
+  vec4 albedo = texelFetch(u_image, nearestTexel(imageUv, textureSize(u_image, 0)), 0);
+  vec4 packedNormal = normalTexel(imageUv);
   vec3 tangent = vec3(normalize(v_tangent), 0.0);
   vec3 normal = vec3(0.0, 0.0, -1.0);
   vec3 bitangent = cross(normal, tangent) * -1.0;
@@ -916,46 +998,27 @@ void main() {
   float alpha = (albedo.a >= 0.5 ? 1.0 : 0.0) * clamp(v_fill.a, 0.0, 1.0);
   vec3 color = clamp((albedo.rgb * diffuse + vec3(specular)) * v_fill.rgb * alpha, 0.0, 1.0);
   outColor = vec4(color, alpha);
-  if (u_hasAlphaMask == 1) outColor *= texture(u_alphaMask, v_shapeUv).a;
+  if (u_hasAlphaMask == 1) {
+    float maskCoverage = texelFetch(u_alphaMask, nearestTexel(vec2(u, v), textureSize(u_alphaMask, 0)), 0).a;
+    if (maskCoverage == 0.0) discard;
+    outColor *= maskCoverage;
+  }
 }`;
 
-// uGUI text glyphs: the coverage of the glyph cell at the fragment centre,
-// interpolated between texel centres as the shared core samples a cell
-// (a contract test pins it), times the vertex colour. Texels outside the
-// bitmap are empty.
+// uGUI text glyphs: the coverage of the glyph cell at the pixel centre,
+// interpolated between texel centres as the shared core samples a cell (a
+// contract test pins it), times the vertex colour. The pixel is drawn when
+// its centre lies in the cell; texels outside the bitmap are empty.
 const UGUI_GLYPH_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 precision highp int;
-in vec2 v_uv;
-in vec4 v_fill;
-in vec4 v_stroke;
-in vec4 v_params;
-in vec2 v_point;
-in vec4 v_clip01;
-in vec4 v_clip23;
-flat in uint v_visible;
-uniform sampler2D u_glyphs;
-out vec4 outColor;
-float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
-bool insideClip() {
-  highp vec2 p[4];
-  p[0] = v_clip01.xy;
-  p[1] = v_clip01.zw;
-  p[2] = v_clip23.xy;
-  p[3] = v_clip23.zw;
-  float c0 = cross2(p[1] - p[0], v_point - p[0]);
-  float c1 = cross2(p[2] - p[1], v_point - p[1]);
-  float c2 = cross2(p[3] - p[2], v_point - p[2]);
-  float c3 = cross2(p[0] - p[3], v_point - p[3]);
-  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
-}
+${FRAGMENT_COMMON}
+uniform highp sampler2D u_glyphs;
 // Coverage of cell texel (column, row); the bitmap starts after the padding.
 float glyphTexel(int column, int row) {
-  // The per-glyph values are equal at every vertex; rounding undoes the
-  // interpolation error.
-  ivec2 origin = ivec2(floor(v_stroke.xy + 0.5));
-  ivec2 size = ivec2(floor(v_stroke.zw + 0.5));
-  int padding = int(floor(v_params.x + 0.5));
+  ivec2 origin = ivec2(v_uvRect.xy);
+  ivec2 size = ivec2(v_uvRect.zw);
+  int padding = int(v_params.x);
   int x = column - padding;
   int y = row - padding;
   if (x < 0 || y < 0 || x >= size.x || y >= size.y) return 0.0;
@@ -963,9 +1026,12 @@ float glyphTexel(int column, int row) {
 }
 void main() {
   if (v_visible == uint(0)) discard;
-  if (!insideClip()) discard;
-  float x = v_uv.x - 0.5;
-  float y = v_uv.y - 0.5;
+  vec2 centre = canvasPixel() + vec2(0.5);
+  if (!insideClip(centre)) discard;
+  vec2 cell = toLocal(centre);
+  if (cell.x < 0.0 || cell.x >= v_bounds.z || cell.y < 0.0 || cell.y >= v_bounds.w) discard;
+  float x = cell.x - 0.5;
+  float y = cell.y - 0.5;
   float left = floor(x);
   float top = floor(y);
   float fx = x - left;
@@ -982,7 +1048,6 @@ void main() {
 
 const COMPOSITE_VERTEX_SHADER = `#version 300 es
 precision highp float;
-out vec2 v_uv;
 void main() {
   highp vec2 positions[6];
   positions[0] = vec2(-1.0, -1.0);
@@ -991,16 +1056,15 @@ void main() {
   positions[3] = vec2(-1.0, -1.0);
   positions[4] = vec2(1.0, 1.0);
   positions[5] = vec2(-1.0, 1.0);
-  vec2 position = positions[gl_VertexID];
-  v_uv = position * 0.5 + 0.5;
-  gl_Position = vec4(position, 0.0, 1.0);
+  gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);
 }`;
 
+// A group target has the canvas's size and orientation: each fragment copies
+// the texel under it.
 const COMPOSITE_FRAGMENT_SHADER = `#version 300 es
 precision highp float;
-in vec2 v_uv;
-uniform sampler2D u_image;
+uniform highp sampler2D u_image;
 out vec4 outColor;
 void main() {
-  outColor = texture(u_image, v_uv);
+  outColor = texelFetch(u_image, ivec2(gl_FragCoord.xy), 0);
 }`;

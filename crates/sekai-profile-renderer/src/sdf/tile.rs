@@ -15,6 +15,9 @@ use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use sekai_profile_renderer_core::pixel_sampling::{self, PIXEL_CENTRE, TEXEL_CENTRE};
+use sekai_profile_renderer_core::sdf_material::TMP_MIN_SHADER_SCALE;
+
 use super::atlas::{MappedSdfAtlas, MappedSdfAtlasSet, SdfAtlasGlyphManifest};
 use super::shape::{
     coverage_terms, shade_shape, shade_shape_coverages, texel_coverage, ShapeSdfMaterial,
@@ -1191,10 +1194,10 @@ impl SdfTilePlan {
                         continue;
                     }
                 }
-                let py = y as f32 + 0.5;
+                let py = y as f32 + PIXEL_CENTRE;
                 for local_x in span.x0..span.x1 {
                     let x = origin_x + u32::from(local_x);
-                    let px = x as f32 + 0.5;
+                    let px = x as f32 + PIXEL_CENTRE;
                     let tx = command
                         .tx_dx
                         .mul_add(px, command.tx_dy.mul_add(py, command.tx_c));
@@ -2221,10 +2224,10 @@ fn plan_command(
         source,
         tx_dx: atlas_width * a_dx,
         tx_dy: atlas_width * a_dy,
-        tx_c: atlas_width.mul_add(a_c, atlas_x - 0.5),
+        tx_c: atlas_width.mul_add(a_c, atlas_x - TEXEL_CENTRE),
         ty_dx: atlas_height * b_dx,
         ty_dy: atlas_height * b_dy,
-        ty_c: atlas_height.mul_add(b_c, atlas_y - 0.5),
+        ty_c: atlas_height.mul_add(b_c, atlas_y - TEXEL_CENTRE),
         shape_face_offset,
         shape_outline_offset,
         shape_coverage_scale,
@@ -2240,28 +2243,26 @@ fn scan_command(
     per_tile: &mut [Vec<TileSpan>],
     stats: &mut SdfPlanStats,
 ) -> Result<(), SdfTileError> {
-    let clip_x0 = device_clip
-        .map_or(0.0, |clip| (clip.min_x - 0.5).ceil())
-        .clamp(0.0, grid.canvas_width as f32) as u32;
-    let clip_y0 = device_clip
-        .map_or(0.0, |clip| (clip.min_y - 0.5).ceil())
-        .clamp(0.0, grid.canvas_height as f32) as u32;
-    let clip_x1 = device_clip
-        .map_or(grid.canvas_width as f32, |clip| (clip.max_x - 0.5).ceil())
-        .clamp(0.0, grid.canvas_width as f32) as u32;
-    let clip_y1 = device_clip
-        .map_or(grid.canvas_height as f32, |clip| (clip.max_y - 0.5).ceil())
-        .clamp(0.0, grid.canvas_height as f32) as u32;
+    let (clip_x0, clip_x1) = device_clip.map_or((0.0, grid.canvas_width as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_x, clip.max_x)
+    });
+    let (clip_y0, clip_y1) = device_clip.map_or((0.0, grid.canvas_height as f32), |clip| {
+        pixel_sampling::pixel_span(clip.min_y, clip.max_y)
+    });
+    let clip_x0 = clip_x0.clamp(0.0, grid.canvas_width as f32) as u32;
+    let clip_y0 = clip_y0.clamp(0.0, grid.canvas_height as f32) as u32;
+    let clip_x1 = clip_x1.clamp(0.0, grid.canvas_width as f32) as u32;
+    let clip_y1 = clip_y1.clamp(0.0, grid.canvas_height as f32) as u32;
     if clip_x0 >= clip_x1 || clip_y0 >= clip_y1 {
         return Ok(());
     }
     if let Some((min_x, min_y, max_x, max_y)) = axis_aligned_quad_bounds(quad) {
-        let first_y =
-            ((min_y - 0.5).ceil().clamp(0.0, grid.canvas_height as f32) as u32).max(clip_y0);
-        let end_y =
-            ((max_y - 0.5).ceil().clamp(0.0, grid.canvas_height as f32) as u32).min(clip_y1);
-        let x0 = ((min_x - 0.5).ceil().clamp(0.0, grid.canvas_width as f32) as u32).max(clip_x0);
-        let x1 = ((max_x - 0.5).ceil().clamp(0.0, grid.canvas_width as f32) as u32).min(clip_x1);
+        let (first_y, end_y) = pixel_sampling::pixel_span(min_y, max_y);
+        let first_y = (first_y.clamp(0.0, grid.canvas_height as f32) as u32).max(clip_y0);
+        let end_y = (end_y.clamp(0.0, grid.canvas_height as f32) as u32).min(clip_y1);
+        let (x0, x1) = pixel_sampling::pixel_span(min_x, max_x);
+        let x0 = (x0.clamp(0.0, grid.canvas_width as f32) as u32).max(clip_x0);
+        let x1 = (x1.clamp(0.0, grid.canvas_width as f32) as u32).min(clip_x1);
         if x0 < x1 {
             for y in first_y..end_y {
                 push_scanline_spans(grid, command_index, kind, y, x0, x1, per_tile, stats)?;
@@ -2278,10 +2279,11 @@ fn scan_command(
         .iter()
         .map(|point| point.y)
         .fold(f32::NEG_INFINITY, f32::max);
-    let first_y = ((min_y - 0.5).ceil().clamp(0.0, grid.canvas_height as f32) as u32).max(clip_y0);
-    let end_y = ((max_y - 0.5).ceil().clamp(0.0, grid.canvas_height as f32) as u32).min(clip_y1);
+    let (first_y, end_y) = pixel_sampling::pixel_span(min_y, max_y);
+    let first_y = (first_y.clamp(0.0, grid.canvas_height as f32) as u32).max(clip_y0);
+    let end_y = (end_y.clamp(0.0, grid.canvas_height as f32) as u32).min(clip_y1);
     for y in first_y..end_y {
-        let py = y as f32 + 0.5;
+        let py = y as f32 + PIXEL_CENTRE;
         let mut intersections = [0.0f32; 4];
         let mut count = 0usize;
         for edge in 0..4 {
@@ -2303,8 +2305,9 @@ fn scan_command(
             (f32::INFINITY, f32::NEG_INFINITY),
             |(min_x, max_x), value| (min_x.min(*value), max_x.max(*value)),
         );
-        let x0 = ((min_x - 0.5).ceil().clamp(0.0, grid.canvas_width as f32) as u32).max(clip_x0);
-        let x1 = ((max_x - 0.5).ceil().clamp(0.0, grid.canvas_width as f32) as u32).min(clip_x1);
+        let (x0, x1) = pixel_sampling::pixel_span(min_x, max_x);
+        let x0 = (x0.clamp(0.0, grid.canvas_width as f32) as u32).max(clip_x0);
+        let x1 = (x1.clamp(0.0, grid.canvas_width as f32) as u32).min(clip_x1);
         if x0 >= x1 {
             continue;
         }
@@ -2476,12 +2479,12 @@ fn shade_sample(command: SdfDrawCommand, sample: BilinearSample) -> Result<[f32;
 fn shade_text(material: SdfMaterial, sdf: f32) -> [f32; 4] {
     let face_t = material
         .face_scale
-        .max(0.0001)
+        .max(TMP_MIN_SHADER_SCALE)
         .mul_add(sdf, -material.face_bias)
         .clamp(0.0, 1.0);
     let outline_t = material
         .outline_scale
-        .max(0.0001)
+        .max(TMP_MIN_SHADER_SCALE)
         .mul_add(sdf, -material.outline_bias)
         .clamp(0.0, 1.0);
     let outline_weight = outline_t * (1.0 - material.face[3] * face_t);

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { SemanticCommandPlan } from "../../src/gpu/semanticCommandPlanner.ts";
-import { compileSemanticDrawBatches, SEMANTIC_FLOATS_PER_VERTEX } from "../../src/gpu/semanticCommandGeometry.ts";
+import { compileSemanticDrawBatches, SEMANTIC_FLOATS_PER_VERTEX, SEMANTIC_VERTEX_ATTRIBUTES as LAYOUT } from "../../src/gpu/semanticCommandGeometry.ts";
 
 const NORMAL_MAP = { namespace: "static", key: "ui/sekai_badge_normal" };
 const LIT_BADGE = { kind: "lit_badge", normal_map: NORMAL_MAP };
@@ -43,7 +43,7 @@ test("lit badge images batch apart from plain images and request their normal ma
   ]);
 });
 
-test("every vertex carries the canvas direction of its command's local x axis", () => {
+test("every vertex carries the canvas-to-local matrix its tangent comes from", () => {
   const radians = Math.PI / 6;
   const [cos, sin] = [Math.cos(radians), Math.sin(radians)];
   // Turned 30 degrees counter-clockwise on screen, then drawn at twice its size.
@@ -51,9 +51,16 @@ test("every vertex carries the canvas direction of its command's local x axis", 
   const [batch] = compileSemanticDrawBatches(semantic.operations());
   assert.equal(batch.vertices.length, 6 * SEMANTIC_FLOATS_PER_VERTEX);
   for (let vertex = 0; vertex < 6; vertex += 1) {
-    const base = vertex * SEMANTIC_FLOATS_PER_VERTEX;
-    const axis = Array.from(batch.vertices.slice(base + 28, base + 30));
-    assert.ok(Math.abs(axis[0] - 2 * cos) < 1e-6 && Math.abs(axis[1] + 2 * sin) < 1e-6, `vertex ${vertex}: ${axis}`);
+    const base = vertex * SEMANTIC_FLOATS_PER_VERTEX + LAYOUT.inverse.offset;
+    const [a, b, c, d] = batch.vertices.slice(base, base + 4);
+    // The inverse of [2cos, -2sin, 2sin, 2cos]: half the opposite turn.
+    const expected = [cos / 2, sin / 2, -sin / 2, cos / 2];
+    assert.ok([a, b, c, d].every((value, index) => Math.abs(value - expected[index]) < 1e-6), `vertex ${vertex}: ${[a, b, c, d]}`);
+    // Its inverse is the canvas matrix, whose first column is the local x
+    // axis on the canvas.
+    const determinant = a * d - b * c;
+    const axis = [d / determinant, -b / determinant];
+    assert.ok(Math.abs(axis[0] - 2 * cos) < 1e-5 && Math.abs(axis[1] + 2 * sin) < 1e-5, `vertex ${vertex}: ${axis}`);
   }
 });
 
@@ -73,24 +80,30 @@ test("the badge program lights the image through a bilinear normal map in the sh
   const badgeShader = source.slice(source.indexOf("const BADGE_FRAGMENT_SHADER"), source.indexOf("const COMPOSITE_VERTEX_SHADER"));
   assert.match(source, /programs\.push\(createProgram\(gl, VERTEX_SHADER, BADGE_FRAGMENT_SHADER\)\);/);
   assert.match(source, /batch\.source\.kind === "badge" \? this\.badgeProgram : this\.textureProgram/);
-  // The image keeps the nearest sampling of every image; the normal map is
-  // filtered bilinearly on its own unit.
-  assert.match(source, /this\.bindTexture\(program, "u_image", 2, batch\.source\.resource, gl\.NEAREST, batch\.source\.kind\);/);
-  assert.match(source, /this\.bindTexture\(program, "u_normalMap", NORMAL_MAP_TEXTURE_UNIT, batch\.source\.normalMapResource, gl\.LINEAR, batch\.source\.kind\);/);
+  // The image and the normal map are bound on units of their own; the
+  // fragment stage reads their texels itself.
+  assert.match(source, /this\.bindTexture\(program, "u_image", 2, batch\.source\.resource, batch\.source\.kind\);/);
+  assert.match(source, /this\.bindTexture\(program, "u_normalMap", NORMAL_MAP_TEXTURE_UNIT, batch\.source\.normalMapResource, batch\.source\.kind\);/);
   const units = [...source.matchAll(/^const [A-Z_]+_TEXTURE_UNIT = (\d+);$/gm)].map((match) => Number(match[1]));
   assert.deepEqual(units, [5, 6, 7]);
   // Straight texels: no premultiplication on upload.
   assert.match(source, /gl\.pixelStorei\(gl\.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0\);/);
-  // The per-vertex axis reaches the fragment stage turned to +y up.
-  assert.match(source, /floatAttribute\(gl, 11, 2, stride, 28 \* 4\);/);
-  assert.match(source, /layout\(location=11\) in vec2 a_axis;/);
-  assert.match(source, /vec2 axis = vec2\(dot\(preview0\.xy, a_axis\), dot\(preview1\.xy, a_axis\)\);/);
-  assert.match(badgeShader, /in vec2 v_tangent;/);
-  assert.match(badgeShader, /uniform sampler2D u_normalMap;/);
-  assert.match(badgeShader, /vec4 packedNormal = texture\(u_normalMap, v_uv\);/);
+  // The local x axis on the canvas, after the preview, reaches the fragment
+  // stage turned to +y up.
+  assert.match(source, /vec2 axis = forward\.xy;/);
+  assert.match(source, /flat in vec2 v_tangent;/);
+  assert.match(badgeShader, /\$\{FRAGMENT_COMMON\}/);
+  assert.match(badgeShader, /uniform highp sampler2D u_normalMap;/);
+  // The albedo is the texel under the pixel centre, the normal map is
+  // filtered bilinearly between texel centres at the same image position.
+  assert.match(badgeShader, /vec4 albedo = texelFetch\(u_image, nearestTexel\(imageUv, textureSize\(u_image, 0\)\), 0\);/);
+  assert.match(badgeShader, /vec4 packedNormal = normalTexel\(imageUv\);/);
+  assert.match(badgeShader, /vec2 position = clamp\(coordinate \* vec2\(size\) - 0\.5, vec2\(0\.0\), last\);/);
+  assert.doesNotMatch(badgeShader, /texture\(/);
   // Premultiplied output with the element alpha, masked like any image.
   assert.match(badgeShader, /clamp\(v_fill\.a, 0\.0, 1\.0\)/);
   assert.match(badgeShader, /outColor = vec4\(color, alpha\);/);
-  assert.match(badgeShader, /if \(u_hasAlphaMask == 1\) outColor \*= texture\(u_alphaMask, v_shapeUv\)\.a;/);
+  assert.match(badgeShader, /float maskCoverage = texelFetch\(u_alphaMask, nearestTexel\(vec2\(u, v\), textureSize\(u_alphaMask, 0\)\), 0\)\.a;/);
+  assert.match(badgeShader, /outColor \*= maskCoverage;/);
   assert.doesNotMatch(badgeShader, /u_maskMode/);
 });

@@ -5,6 +5,9 @@
 
 use std::arch::x86_64::*;
 
+use sekai_profile_renderer_core::pixel_sampling::PIXEL_CENTRE;
+use sekai_profile_renderer_core::sdf_material::TMP_MIN_SHADER_SCALE;
+
 use super::{
     PlannedCommand, SdfAccumulationMode, SdfAtlasSource, SdfCommandMaterial, SdfDestination,
     SdfExecutionStats, SdfPrimitiveKind, SdfSwizzledFormat, SdfSwizzledPage, SdfTileError,
@@ -169,13 +172,13 @@ pub(super) unsafe fn execute(
                 continue;
             }
             let page = cached_page.ok_or(SdfTileError::CorruptPlan)?;
-            let py = y as f32 + 0.5;
+            let py = y as f32 + PIXEL_CENTRE;
             let mut local_x = usize::from(span.x0);
             let end_x = usize::from(span.x1);
             while local_x < end_x {
                 let remaining = (end_x - local_x).min(LANES);
                 let mask = first_n_mask(remaining);
-                let first_x = (origin_x as usize + local_x) as f32 + 0.5;
+                let first_x = (origin_x as usize + local_x) as f32 + PIXEL_CENTRE;
                 let lanes = _mm512_loadu_ps(LANE_OFFSETS.as_ptr());
                 let px = _mm512_add_ps(_mm512_set1_ps(first_x), lanes);
                 let tx = _mm512_fmadd_ps(
@@ -536,12 +539,12 @@ unsafe fn shade_text_packet(
     let one = _mm512_set1_ps(1.0);
     let face_t = clamp01(_mm512_fmadd_ps(
         sdf,
-        _mm512_set1_ps(material.face_scale.max(0.0001)),
+        _mm512_set1_ps(material.face_scale.max(TMP_MIN_SHADER_SCALE)),
         _mm512_set1_ps(-material.face_bias),
     ));
     let outline_t = clamp01(_mm512_fmadd_ps(
         sdf,
-        _mm512_set1_ps(material.outline_scale.max(0.0001)),
+        _mm512_set1_ps(material.outline_scale.max(TMP_MIN_SHADER_SCALE)),
         _mm512_set1_ps(-material.outline_bias),
     ));
     let outline_weight = _mm512_mul_ps(

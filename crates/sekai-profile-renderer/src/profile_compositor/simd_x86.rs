@@ -5,6 +5,9 @@
 
 use std::arch::x86_64::*;
 
+use sekai_profile_renderer_core::pixel_sampling::{
+    PIXEL_CENTRE, SHAPE_SAMPLES, SHAPE_SAMPLE_WEIGHT,
+};
 use sekai_profile_renderer_core::{BlendMode, LinearGradient, Matrix2d, Rect, ShapePrimitive};
 
 use super::ImageClipGeometry;
@@ -77,12 +80,16 @@ pub(super) unsafe fn sample_affine_and_blend_rgba8_packet(
         (1u16 << lane_count) - 1
     } as __mmask16;
     let px = _mm512_add_ps(
-        _mm512_set1_ps(x as f32),
-        _mm512_setr_ps(
-            0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5,
+        _mm512_add_ps(
+            _mm512_set1_ps(x as f32),
+            _mm512_setr_ps(
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
+                15.0,
+            ),
         ),
+        _mm512_set1_ps(PIXEL_CENTRE),
     );
-    let py = _mm512_set1_ps(y as f32 + 0.5);
+    let py = _mm512_set1_ps(y as f32 + PIXEL_CENTRE);
     let local_x = _mm512_fmadd_ps(
         _mm512_set1_ps(inverse[0]),
         px,
@@ -181,11 +188,11 @@ pub(super) unsafe fn raster_semantic_shape_packet(
     );
     let zero = _mm512_setzero_ps();
     let one = _mm512_set1_ps(1.0);
-    let quarter = _mm512_set1_ps(0.25);
+    let weight = _mm512_set1_ps(SHAPE_SAMPLE_WEIGHT);
     let mut accumulated = [zero; 4];
     let mut covered = 0u16;
 
-    for (offset_x, offset_y) in [(0.25f32, 0.25f32), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+    for [offset_x, offset_y] in SHAPE_SAMPLES {
         let px = _mm512_add_ps(
             _mm512_add_ps(_mm512_set1_ps(x as f32), lanes),
             _mm512_set1_ps(offset_x),
@@ -260,7 +267,7 @@ pub(super) unsafe fn raster_semantic_shape_packet(
         }
         let alpha = color[3];
         for channel in 0..3 {
-            let contribution = _mm512_mul_ps(_mm512_mul_ps(color[channel], alpha), quarter);
+            let contribution = _mm512_mul_ps(_mm512_mul_ps(color[channel], alpha), weight);
             accumulated[channel] = _mm512_add_ps(
                 accumulated[channel],
                 _mm512_maskz_mov_ps(outer, contribution),
@@ -268,7 +275,7 @@ pub(super) unsafe fn raster_semantic_shape_packet(
         }
         accumulated[3] = _mm512_add_ps(
             accumulated[3],
-            _mm512_maskz_mov_ps(outer, _mm512_mul_ps(alpha, quarter)),
+            _mm512_maskz_mov_ps(outer, _mm512_mul_ps(alpha, weight)),
         );
     }
 

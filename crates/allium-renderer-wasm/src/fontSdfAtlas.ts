@@ -22,6 +22,14 @@ export type GlyphRequest = {
   char: string;
 };
 
+const WHITE_SPACE = /^\p{White_Space}$/u;
+
+/** Whether a request is for white space, which the layout asks for to learn
+ * its advance and which draws nothing. */
+export function isWhiteSpaceRequest(request: Pick<GlyphRequest, "char">): boolean {
+  return WHITE_SPACE.test(request.char);
+}
+
 export type FontSource = {
   region: string;
   family: string;

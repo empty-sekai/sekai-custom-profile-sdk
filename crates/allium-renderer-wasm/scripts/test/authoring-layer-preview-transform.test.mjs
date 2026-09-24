@@ -10,9 +10,14 @@ test("authored gesture previews update a retained GPU matrix instead of rebuildi
   assert.match(renderer, /setLayerPreviewTransform\(/);
   assert.match(executor, /texSubImage2D\([\s\S]*previewTransforms\.subarray/);
   assert.match(executor, /uniform sampler2D u_previewTransform/);
-  assert.match(executor, /dot\(preview0\.xy, basePoint\)/);
+  // The vertex stage undoes the retained preview matrix when it maps canvas
+  // pixels back into each draw.
+  assert.match(executor, /float previewDeterminant = preview0\.x \* preview1\.y - preview1\.x \* preview0\.y;/);
+  assert.match(executor, /vec4 previewInverse = vec4\(preview1\.y, -preview1\.x, -preview0\.y, preview0\.x\) \/ previewDeterminant;/);
+  assert.match(executor, /vec2 undone = previewInverseOffset - totalOffset;/);
   assert.match(glyphs, /uniform sampler2D u_previewTransform/);
-  assert.match(glyphs, /dot\(preview0\.xy, pixelPosition\)/);
+  assert.match(glyphs, /vec2 undone = previewInverseOffset - totalState;/);
+  assert.match(glyphs, /return vec2\(dot\(preview0\.xy, point\) \+ preview0\.z, dot\(preview1\.xy, point\) \+ preview1\.z\);/);
   assert.doesNotMatch(executor.match(/setLayerPreviewTransform\([\s\S]*?\n  }/)?.[0] ?? "", /bufferData|setScene|compileSemanticDrawBatches/);
 });
 
