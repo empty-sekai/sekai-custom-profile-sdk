@@ -61,7 +61,7 @@ function harness({ prepare, create, upload, failRelease } = {}) {
   vm.runInContext(compiled, context);
   const { BrowserRenderer, BrowserScene } = module.exports;
   const core = { initial: { snapshot: {} }, destroy: async () => dispose("core") };
-  const renderer = new BrowserRenderer({}, { terminate() {} }, "en", {}, {});
+  const renderer = new BrowserRenderer({}, { terminate() {} }, "en", new EventTarget(), {});
   const masterData = {
     async prepareProfile() {
       calls.push("prepare");

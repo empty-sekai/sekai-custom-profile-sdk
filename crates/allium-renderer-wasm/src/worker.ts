@@ -917,7 +917,10 @@ function assertSchema(major: number): void {
 }
 
 function tick(value: number): number {
-  if (!Number.isFinite(value) || value < 0) throw new WorkerError("INVALID_TICK", "Tick must be a non-negative finite number");
+  // The scene export takes an unsigned 32-bit tick; larger values would wrap.
+  if (!Number.isFinite(value) || value < 0 || value > 0xFFFF_FFFF) {
+    throw new WorkerError("INVALID_TICK", "Tick must be a finite number between 0 and 4294967295");
+  }
   return Math.floor(value);
 }
 

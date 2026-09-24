@@ -53,7 +53,7 @@ export class SemanticWebglSceneRenderer {
       : { bytes: 0, rects: 0 };
     const textOperations = operations.filter((operation) => operation.command.payload.kind === "text");
     const placedInstances = placeGeneralTextInstances(input.layout.instances, textOperations);
-    this.textHitGeometry = buildAuthoredTextHitGeometry(textOperations, placedInstances);
+    this.textHitGeometry = buildAuthoredTextHitGeometry(operations, placedInstances);
     this.numericRegions = textOperations.flatMap((operation) => buildNumericTextRegions(
       operation.command as Parameters<typeof buildNumericTextRegions>[0],
       placedInstances,
@@ -190,12 +190,20 @@ export class SemanticWebglSceneRenderer {
   }
 }
 
+/** Glyph-accurate hit geometry for authored text layers: layers whose only
+ * command is one text run. Layers that also draw shapes, images, or further
+ * text runs keep the core's layer hit geometry. */
 export function buildAuthoredTextHitGeometry(
   operations: SemanticDrawOperation[],
   instances: GlyphInstance[],
 ): Map<string, AuthoredTextHitGeometry> {
   const output = new Map<string, AuthoredTextHitGeometry>();
+  const commandsByLayer = new Map<string, number>();
   for (const operation of operations) {
+    commandsByLayer.set(operation.layerId, (commandsByLayer.get(operation.layerId) ?? 0) + 1);
+  }
+  for (const operation of operations) {
+    if (operation.command.payload.kind !== "text" || commandsByLayer.get(operation.layerId) !== 1) continue;
     const quads = instances
       .filter((instance) => instance.layerId === operation.command.id)
       .map((instance) => instance.deviceCharQuad[1])

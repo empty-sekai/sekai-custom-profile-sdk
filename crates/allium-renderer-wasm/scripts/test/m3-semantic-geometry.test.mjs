@@ -81,15 +81,17 @@ test("rounded rectangles retain local pixel radii and full two-axis bounds", () 
 
 test("ellipse strokes compare pixel widths against pixel-space distance", async () => {
   const executor = await readFile(new URL("../../src/gpu/webglSemanticCommandExecutor.ts", import.meta.url), "utf8");
-  assert.match(executor, /float localRadius = min\(v_shapeSize\.x, v_shapeSize\.y\) \* 0\.5;/);
-  assert.match(executor, /\(length\(\(v_shapeUv - 0\.5\) \* 2\.0\) - 1\.0\) \* localRadius/);
+  assert.match(executor, /vec2 point = \(v_shapeUv - 0\.5\) \* v_shapeSize;/);
+  assert.match(executor, /vec2 halfSize = v_shapeSize \* 0\.5 - vec2\(inset\);/);
+  assert.match(executor, /return \(length\(point \/ halfSize\) - 1\.0\) \* min\(halfSize\.x, halfSize\.y\);/);
 
-  const radius = 88;
-  const strokeHalfWidth = 2;
-  const distanceAtCenter = (0 - 1) * radius;
-  const distanceAtBoundary = (1 - 1) * radius;
-  assert.ok(Math.abs(distanceAtCenter) > strokeHalfWidth);
-  assert.ok(Math.abs(distanceAtBoundary) < strokeHalfWidth);
+  // A 176px circle with a 4px stroke: the stroke band runs from the inset
+  // outline (radius 84) to the outline (radius 88), both in local pixels.
+  const distance = (radius, inset) => (radius / (88 - inset) - 1) * (88 - inset);
+  assert.equal(distance(88, 0), 0);
+  assert.equal(distance(84, 4), 0);
+  assert.equal(distance(0, 0), -88);
+  assert.ok(distance(86, 0) < 0 && distance(86, 4) > 0);
 });
 
 test("authored component scaling transforms geometry and viewport clips with one layer matrix", () => {

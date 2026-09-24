@@ -71,23 +71,34 @@ export class WebglSemanticCommandExecutor {
   private isolationTargetAllocations = 0;
 
   constructor(private readonly gl: WebGL2RenderingContext, private readonly canvasWidth = CARD_W, private readonly canvasHeight = CARD_H) {
-    this.shapeProgram = createProgram(gl, VERTEX_SHADER, SHAPE_FRAGMENT_SHADER);
-    this.textureProgram = createProgram(gl, VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER);
-    this.compositeProgram = createProgram(gl, COMPOSITE_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER);
-    const compositeVao = gl.createVertexArray();
-    const stateTexture = gl.createTexture();
-    const maskTexture = gl.createTexture();
-    const commandMaskTexture = gl.createTexture();
-    const commandStateTexture = gl.createTexture();
-    const previewTransformTexture = gl.createTexture();
-    if (!stateTexture || !maskTexture || !commandMaskTexture || !commandStateTexture || !previewTransformTexture || !compositeVao) throw new Error("semantic WebGL state texture creation failed");
-    this.stateTexture = stateTexture;
-    this.maskTexture = maskTexture;
-    this.commandMaskTexture = commandMaskTexture;
-    this.commandStateTexture = commandStateTexture;
-    this.previewTransformTexture = previewTransformTexture;
+    // A lost context fails every compile; report the loss rather than a shader error.
+    if (gl.isContextLost()) throw new Error("WebGL context is lost");
+    const programs: WebGLProgram[] = [];
+    const textures: WebGLTexture[] = [];
+    let compositeVao: WebGLVertexArrayObject | null = null;
+    let glyphPipeline: WebglSdfGlyphPipeline;
+    try {
+      programs.push(createProgram(gl, VERTEX_SHADER, SHAPE_FRAGMENT_SHADER));
+      programs.push(createProgram(gl, VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER));
+      programs.push(createProgram(gl, COMPOSITE_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER));
+      compositeVao = gl.createVertexArray();
+      for (let index = 0; index < 5; index += 1) {
+        const texture = gl.createTexture();
+        if (texture) textures.push(texture);
+      }
+      if (textures.length !== 5 || !compositeVao) throw new Error("semantic WebGL state texture creation failed");
+      glyphPipeline = new WebglSdfGlyphPipeline(gl);
+    } catch (error) {
+      // A failed construction leaves nothing behind in the shared context.
+      for (const program of programs) gl.deleteProgram(program);
+      for (const texture of textures) gl.deleteTexture(texture);
+      gl.deleteVertexArray(compositeVao);
+      throw error;
+    }
+    [this.shapeProgram, this.textureProgram, this.compositeProgram] = programs;
+    [this.stateTexture, this.maskTexture, this.commandMaskTexture, this.commandStateTexture, this.previewTransformTexture] = textures;
     this.compositeVao = compositeVao;
-    this.glyphPipeline = new WebglSdfGlyphPipeline(gl);
+    this.glyphPipeline = glyphPipeline;
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   }
@@ -213,6 +224,9 @@ export class WebglSemanticCommandExecutor {
 
   draw(): SemanticGpuMetrics {
     const gl = this.gl;
+    // The loss event arrives asynchronously; until then a lost context answers
+    // every query with null.
+    if (gl.isContextLost()) throw new Error("WebGL context is lost");
     const rootFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
     const rootViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
     gl.viewport(0, 0, this.canvasWidth, this.canvasHeight);
@@ -516,26 +530,38 @@ function setStateTextureParameters(gl: WebGL2RenderingContext): void {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 }
 
+/** Compiles and links one program; every shader and a failed program are
+ * deleted before returning or throwing. */
 function createProgram(gl: WebGL2RenderingContext, vertexSource: string, fragmentSource: string): WebGLProgram {
-  const compile = (type: number, source: string) => {
+  const shaders: WebGLShader[] = [];
+  const compile = (type: number, stage: string, source: string) => {
     const shader = gl.createShader(type);
-    if (!shader) throw new Error("semantic shader allocation failed");
+    if (!shader) throw new Error(`semantic ${stage} shader allocation failed`);
+    shaders.push(shader);
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) ?? "semantic shader compile failed");
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader) || `semantic ${stage} shader compile failed`);
+    }
     return shader;
   };
-  const vertex = compile(gl.VERTEX_SHADER, vertexSource);
-  const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
-  const program = gl.createProgram();
-  if (!program) throw new Error("semantic program allocation failed");
-  gl.attachShader(program, vertex);
-  gl.attachShader(program, fragment);
-  gl.linkProgram(program);
-  gl.deleteShader(vertex);
-  gl.deleteShader(fragment);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) ?? "semantic program link failed");
-  return program;
+  try {
+    const vertex = compile(gl.VERTEX_SHADER, "vertex", vertexSource);
+    const fragment = compile(gl.FRAGMENT_SHADER, "fragment", fragmentSource);
+    const program = gl.createProgram();
+    if (!program) throw new Error("semantic program allocation failed");
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(program);
+      gl.deleteProgram(program);
+      throw new Error(log || "semantic program link failed");
+    }
+    return program;
+  } finally {
+    for (const shader of shaders) gl.deleteShader(shader);
+  }
 }
 
 const VERTEX_SHADER = `#version 300 es
@@ -613,20 +639,27 @@ in vec4 v_clip23;
 in vec2 v_shapeSize;
 flat in uint v_visible;
 out vec4 outColor;
-float shapeDistance() {
-  if (v_params.x > 1.5) {
-    float localRadius = min(v_shapeSize.x, v_shapeSize.y) * 0.5;
-    return (length((v_shapeUv - 0.5) * 2.0) - 1.0) * localRadius;
-  }
+// Signed distance to the shape after insetting its bounds (and corner radii)
+// by the inset in local pixels; an inset that empties the shape is far outside.
+float shapeDistance(float inset) {
   vec2 point = (v_shapeUv - 0.5) * v_shapeSize;
-  vec2 halfSize = v_shapeSize * 0.5;
+  vec2 halfSize = v_shapeSize * 0.5 - vec2(inset);
+  if (min(halfSize.x, halfSize.y) <= 0.0) return 1.0e6;
+  if (v_params.x > 1.5) {
+    return (length(point / halfSize) - 1.0) * min(halfSize.x, halfSize.y);
+  }
   if (v_params.x > 0.5) {
-    vec2 radius = min(max(v_params.yz, vec2(0.00001)), halfSize);
+    vec2 radius = min(max(v_params.yz - vec2(inset), vec2(0.00001)), halfSize);
     vec2 q = abs(point) - halfSize + radius;
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - min(radius.x, radius.y);
   }
   vec2 q = abs(point) - halfSize;
   return max(q.x, q.y);
+}
+// Area of the pixel inside the outline, as a one-pixel box filter: a pixel
+// centre half a pixel inside a straight edge is fully covered.
+float coverage(float distance) {
+  return clamp(0.5 - distance / max(length(vec2(dFdx(distance), dFdy(distance))), 0.0005), 0.0, 1.0);
 }
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 bool insideClip() {
@@ -642,17 +675,19 @@ bool insideClip() {
   return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
 }
 void main() {
+  // Derivatives stay in uniform control flow, ahead of the per-fragment clip.
+  float outerDistance = shapeDistance(0.0);
+  float innerDistance = shapeDistance(v_params.w);
+  float outerCoverage = coverage(outerDistance);
+  float innerCoverage = v_params.w > 0.0 ? coverage(innerDistance) : outerCoverage;
   if (v_visible == uint(0)) discard;
   if (!insideClip()) discard;
-  float distance = shapeDistance();
-  float aa = max(fwidth(distance), 0.0005);
-  float fillCoverage = 1.0 - smoothstep(-aa, aa, distance);
-  float strokeHalfWidth = v_params.w * 0.5;
-  float strokeCoverage = v_params.w > 0.0 ? 1.0 - smoothstep(strokeHalfWidth - aa, strokeHalfWidth + aa, abs(distance)) : 0.0;
-  vec4 color = mix(v_fill, v_stroke, strokeCoverage);
-  color.a *= max(fillCoverage, strokeCoverage);
-  color.rgb *= color.a;
-  outColor = color;
+  // The stroke is the band between the outline and the outline inset by the
+  // stroke width, so it stays inside the shape bounds.
+  float strokeCoverage = max(outerCoverage - innerCoverage, 0.0);
+  vec4 fill = clamp(v_fill, 0.0, 1.0);
+  vec4 stroke = clamp(v_stroke, 0.0, 1.0);
+  outColor = vec4(fill.rgb * fill.a, fill.a) * innerCoverage + vec4(stroke.rgb * stroke.a, stroke.a) * strokeCoverage;
 }`;
 
 const TEXTURE_FRAGMENT_SHADER = `#version 300 es

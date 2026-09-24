@@ -203,10 +203,9 @@ export class BrowserRenderer {
         concurrency: fontConcurrency,
       })
       : null;
-    if (isHtmlCanvas(canvas)) {
-      canvas.addEventListener("webglcontextlost", this.handleContextLost);
-      canvas.addEventListener("webglcontextrestored", this.handleContextRestored);
-    }
+    // HTMLCanvasElement and OffscreenCanvas both receive WebGL context events.
+    canvas.addEventListener("webglcontextlost", this.handleContextLost);
+    canvas.addEventListener("webglcontextrestored", this.handleContextRestored);
   }
 
   static async create(options: BrowserRendererOptions): Promise<BrowserRenderer> {
@@ -484,10 +483,8 @@ export class BrowserRenderer {
     if (this.destroyed) return;
     this.destroyed = true;
     this.lifetime.abort(new BrowserRendererError("RENDERER_DESTROYED", "Browser renderer is destroyed"));
-    if (isHtmlCanvas(this.canvas)) {
-      this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
-      this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
-    }
+    this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored);
     disposeWorkerAtlasSessions(this.worker);
     this.worker.terminate();
   }
@@ -880,8 +877,4 @@ function monotonicNow(): number {
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-function isHtmlCanvas(canvas: HTMLCanvasElement | OffscreenCanvas): canvas is HTMLCanvasElement {
-  return typeof HTMLCanvasElement !== "undefined" && canvas instanceof HTMLCanvasElement;
 }
