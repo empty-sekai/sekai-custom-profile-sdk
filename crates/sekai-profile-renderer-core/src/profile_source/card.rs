@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    BondsHonorElement, CardMemberElement, CollectionElement, GeneralBackgroundElement,
-    GeneralElement, HonorElement, OtherElement, ShapeElement, StampElement, StandMemberElement,
-    StoryBackgroundElement, TextElement,
+    BondsHonorElement, CardMemberElement, CharacterIconElement, CollectionElement,
+    GeneralBackgroundElement, GeneralElement, HonorElement, MaterialElement, OtherElement,
+    ShapeElement, StampElement, StandMemberElement, StoryBackgroundElement, TextElement,
+    UserInterfaceIconElement,
 };
 
 /// Complete source data for one custom profile-card page.
@@ -36,6 +37,12 @@ pub struct CustomProfileCard {
     pub stand_members: Vec<StandMemberElement>,
     #[serde(default)]
     pub story_backgrounds: Vec<StoryBackgroundElement>,
+    #[serde(default)]
+    pub character_icons: Vec<CharacterIconElement>,
+    #[serde(default)]
+    pub materials: Vec<MaterialElement>,
+    #[serde(default)]
+    pub user_interface_icons: Vec<UserInterfaceIconElement>,
 }
 
 /// Wrapper returned by the Profile API.

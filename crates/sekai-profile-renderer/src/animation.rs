@@ -2310,6 +2310,9 @@ fn grouped_layer_card(
         general_backgrounds: Vec::new(),
         stand_members: Vec::new(),
         story_backgrounds: Vec::new(),
+        character_icons: Vec::new(),
+        materials: Vec::new(),
+        user_interface_icons: Vec::new(),
     };
     use sekai_profile_renderer_core::AuthoredElementKind::*;
     for (kind, index) in members {
@@ -2330,6 +2333,13 @@ fn grouped_layer_card(
             StoryBackground => card
                 .story_backgrounds
                 .push(base.story_backgrounds[*index].clone()),
+            CharacterIcon => card
+                .character_icons
+                .push(base.character_icons[*index].clone()),
+            Material => card.materials.push(base.materials[*index].clone()),
+            UserInterfaceIcon => card
+                .user_interface_icons
+                .push(base.user_interface_icons[*index].clone()),
         }
     }
     card

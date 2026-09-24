@@ -74,8 +74,14 @@ export type MasterDataTableRequest = {
   table: string;
   region: string;
   revision: string;
+  /** Set for a table only some regions ship; see `RendererMasterData.optionalTables`. */
+  optional: boolean;
 };
 
+/**
+ * Loads one master-data table. For an optional table, `null` or `undefined`
+ * means the region does not ship it.
+ */
 export type MasterDataTableLoader = (
   request: MasterDataTableRequest,
   context: { signal: AbortSignal },
@@ -389,12 +395,30 @@ export class BrowserRenderer {
       throw new BrowserRendererError("INVALID_MASTERDATA_CONCURRENCY", "Master-data concurrency must be a positive integer");
     }
     try {
+      const tables = [
+        ...session.requiredTables.map((table) => ({ table, optional: false })),
+        ...session.optionalTables.map((table) => ({ table, optional: true })),
+      ];
       let cursor = 0;
-      const workers = Array.from({ length: Math.min(concurrency, session.requiredTables.length) }, async () => {
-        while (cursor < session.requiredTables.length) {
+      const workers = Array.from({ length: Math.min(concurrency, tables.length) }, async () => {
+        while (cursor < tables.length) {
           if (signal.aborted) throw abortReason(signal);
-          const table = session.requiredTables[cursor++];
-          const value = await loadTable({ table, region: this.region, revision }, { signal });
+          const { table, optional } = tables[cursor++];
+          const request = { table, region: this.region, revision, optional };
+          let value: unknown;
+          if (optional) {
+            // A region without the table leaves its elements out, so a table
+            // the loader cannot supply is skipped rather than failing the load.
+            try {
+              value = await loadTable(request, { signal });
+            } catch {
+              if (signal.aborted) throw abortReason(signal);
+              continue;
+            }
+            if (value == null) continue;
+          } else {
+            value = await loadTable(request, { signal });
+          }
           await session.putTable(table, value);
         }
       });

@@ -7,6 +7,6 @@
 mod provider;
 mod table;
 
-pub use provider::{JsonMasterDataProvider, REQUIRED_TABLES};
+pub use provider::{JsonMasterDataProvider, OPTIONAL_TABLES, REQUIRED_TABLES};
 pub use sekai_profile_renderer::region::Region;
 pub use table::Table;

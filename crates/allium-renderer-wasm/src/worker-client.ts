@@ -150,10 +150,17 @@ export class RendererWorkerClient {
   async createMasterData(region: string, revision: string): Promise<RendererMasterData> {
     const result = await this.request("createMasterData", { region, revision });
     if (result.kind !== "createMasterData") throw new RendererWorkerError("PROTOCOL_MISMATCH", "Renderer worker returned an invalid master-data response");
-    const requiredTables = Array.isArray(result.report.required_tables)
-      ? result.report.required_tables.filter((value): value is string => typeof value === "string")
+    const tableNames = (value: unknown) => Array.isArray(value)
+      ? value.filter((name): name is string => typeof name === "string")
       : [];
-    return new RendererMasterData(this, result.masterDataId, region, revision, requiredTables);
+    return new RendererMasterData(
+      this,
+      result.masterDataId,
+      region,
+      revision,
+      tableNames(result.report.required_tables),
+      tableNames(result.report.optional_tables),
+    );
   }
 
   async stats(): Promise<RendererWorkerStats> {
@@ -396,6 +403,11 @@ export class RendererMasterData {
     readonly region: string,
     readonly revision: string,
     readonly requiredTables: readonly string[],
+    /**
+     * Tables only some regions ship. Elements that draw from a table the
+     * session does not hold are left out; nothing else changes.
+     */
+    readonly optionalTables: readonly string[] = [],
   ) {}
 
   async putTable(name: string, table: unknown): Promise<Record<string, unknown>> {

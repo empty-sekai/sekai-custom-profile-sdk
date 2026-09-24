@@ -246,6 +246,9 @@ fn populate_resolve_snapshot_parts(
                     insert_color(snapshot, md, shape.color_id);
                     insert_color(snapshot, md, shape.outline_color_id);
                 }
+                ProfileElementRef::UserInterfaceIcon(icon) => {
+                    insert_color(snapshot, md, icon.color_id);
+                }
                 _ => {}
             }
             match authored_resource(element.value, md) {
@@ -927,6 +930,9 @@ fn resource_provenance(element: ProfileElementRef<'_>) -> (&'static str, i32) {
         ProfileElementRef::StandMember(value) => ("standing", value.id),
         ProfileElementRef::GeneralBackground(value) => ("general_bg", value.id),
         ProfileElementRef::StoryBackground(value) => ("story_bg", value.id),
+        ProfileElementRef::CharacterIcon(value) => ("character_icon", value.id),
+        ProfileElementRef::Material(value) => ("material", value.id),
+        ProfileElementRef::UserInterfaceIcon(value) => ("user_interface_icon", value.id),
         ProfileElementRef::Text(_)
         | ProfileElementRef::Honor(_)
         | ProfileElementRef::BondsHonor(_)

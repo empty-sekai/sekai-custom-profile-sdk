@@ -23,5 +23,8 @@ impl CustomProfileCard {
             + self.stand_members.len()
             + self.general_backgrounds.len()
             + self.story_backgrounds.len()
+            + self.character_icons.len()
+            + self.materials.len()
+            + self.user_interface_icons.len()
     }
 }

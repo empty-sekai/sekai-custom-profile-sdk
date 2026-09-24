@@ -26,6 +26,14 @@ pub const PROFILE_MASTERDATA_TABLES: &[&str] = &[
     "unitStoryEpisodeGroups",
 ];
 
+/// Tables only some regions ship. Without one, the elements that draw from it
+/// have no master-data row and are left out; nothing else changes.
+pub const PROFILE_OPTIONAL_MASTERDATA_TABLES: &[&str] = &[
+    "customProfileCharacterIconResources",
+    "customProfileMaterialResources",
+    "customProfileUserInterfaceIconResources",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedColor {
     pub r: u8,
@@ -643,6 +651,9 @@ impl ProfileMasterData for JsonMasterData {
             "general_bg" => "customProfileGeneralBackgroundResources",
             "standing" => "customProfileMemberStandingPictureResources",
             "story_bg" => "customProfileStoryBackgroundResources",
+            "character_icon" => "customProfileCharacterIconResources",
+            "material" => "customProfileMaterialResources",
+            "user_interface_icon" => "customProfileUserInterfaceIconResources",
             _ => return None,
         };
         let row = self.table(table)?.get(id.into())?;

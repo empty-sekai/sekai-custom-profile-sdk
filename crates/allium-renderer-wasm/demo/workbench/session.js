@@ -121,9 +121,10 @@ export class WorkbenchSession extends EventTarget {
       this.setBusy(true, "Loading masterdata", this.config.masterdataBase);
       this.masterData = await this.renderer.loadMasterData(
         this.config.revision,
-        async ({ table }, { signal }) => {
+        async ({ table, optional }, { signal }) => {
           const url = `${this.config.masterdataBase}/${encodeURIComponent(table)}.json`;
           const response = await fetch(url, { signal, cache: "default" });
+          if (optional && !response.ok) return null;
           if (!response.ok) throw new Error(`Master-data fetch failed ${response.status}: ${url}`);
           return response.json();
         },

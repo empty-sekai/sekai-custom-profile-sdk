@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use sekai_profile_renderer::assets::AssetStore;
 use sekai_profile_renderer::codec::png::is_png;
-use sekai_profile_renderer_host::REQUIRED_TABLES;
+use sekai_profile_renderer_host::{OPTIONAL_TABLES, REQUIRED_TABLES};
 
 use crate::static_manifest::is_static_key;
 
@@ -110,8 +110,8 @@ fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
 /// 从 `masterdata_url` 逐表拉取，注入 provider，返回成功注入的表数。
 ///
 /// 与 `from_dir` 同一口径：服务端对某表答复 4xx 视为该表不存在，记 warning
-/// 跳过；表存在却拉不下来（重试用尽）、不是 UTF-8 或解析失败时整体报错，
-/// 不带着残缺的 masterdata 继续渲染。
+/// 跳过（[`OPTIONAL_TABLES`] 不记 warning）；表存在却拉不下来（重试用尽）、
+/// 不是 UTF-8 或解析失败时整体报错，不带着残缺的 masterdata 继续渲染。
 pub fn load_masterdata_url(
     provider: &mut sekai_profile_renderer_host::JsonMasterDataProvider,
     masterdata_url: &str,
@@ -121,10 +121,14 @@ pub fn load_masterdata_url(
         .timeout(std::time::Duration::from_secs(30))
         .build();
     let mut loaded = 0;
-    for name in REQUIRED_TABLES {
+    for name in REQUIRED_TABLES.iter().chain(OPTIONAL_TABLES) {
         let url = format!("{base}/{name}.json");
         let bytes = match get_bytes(&agent, &url) {
             Ok(bytes) => bytes,
+            Err(FetchError::Status(code)) if OPTIONAL_TABLES.contains(name) => {
+                tracing::debug!(table = name, %url, "可选 masterdata 表不存在（HTTP {code}），跳过");
+                continue;
+            }
             Err(FetchError::Status(code)) => {
                 tracing::warn!(table = name, %url, "masterdata 表缺失（HTTP {code}），跳过");
                 continue;
@@ -290,6 +294,34 @@ mod tests {
         let mut provider = JsonMasterDataProvider::empty();
         assert_eq!(load_masterdata_url(&mut provider, &base), Ok(1));
         assert!(provider.missing_tables().contains(&"cards"));
+    }
+
+    #[test]
+    fn icon_tables_load_when_the_server_has_them() {
+        use sekai_profile_renderer::masterdata::MasterDataProvider as _;
+
+        let base = serve(vec![
+            ("/stamps.json", vec![response(200, b"[]")]),
+            (
+                "/customProfileUserInterfaceIconResources.json",
+                vec![response(
+                    200,
+                    br#"[{"id": 1, "customProfileResourceType": "user_interface_icon", "resourceLoadVal": "custom_profile/user_interface_icon", "fileName": "profile_icon_0001"}]"#,
+                )],
+            ),
+        ]);
+        let mut provider = JsonMasterDataProvider::empty();
+        assert_eq!(load_masterdata_url(&mut provider, &base), Ok(2));
+        assert_eq!(
+            provider
+                .resolve_resource("user_interface_icon", 1)
+                .map(|info| info.asset_key())
+                .as_deref(),
+            Some("custom_profile/user_interface_icon/profile_icon_0001")
+        );
+        assert!(!provider
+            .missing_tables()
+            .contains(&"customProfileMaterialResources"));
     }
 
     #[test]

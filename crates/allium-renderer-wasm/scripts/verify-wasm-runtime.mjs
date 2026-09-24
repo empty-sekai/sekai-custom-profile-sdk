@@ -60,6 +60,48 @@ const stats = callJson("sdf_renderer_core_masterdata_stats_json", ["number"], [m
 assert.equal(stats.region, "en");
 assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [masterData.handle]), 1);
 
+const iconMasterData = callJsonInput("sdf_renderer_core_masterdata_create_json", {
+  region: "jp",
+  revision: "icons",
+});
+assert.deepEqual(iconMasterData.optional_tables, [
+  "customProfileCharacterIconResources",
+  "customProfileMaterialResources",
+  "customProfileUserInterfaceIconResources",
+]);
+for (const [name, table] of [
+  ["customProfileTextColors", [{ id: 1, colorCode: "#ff8000" }]],
+  ["customProfileUserInterfaceIconResources", [{
+    id: 1,
+    customProfileResourceType: "user_interface_icon",
+    resourceLoadVal: "custom_profile/user_interface_icon",
+    fileName: "profile_icon_0001",
+  }]],
+]) {
+  callJsonInput("sdf_renderer_core_masterdata_put_table_json", { name, table }, [iconMasterData.handle]);
+}
+callJson("sdf_renderer_core_masterdata_seal_json", ["number"], [iconMasterData.handle]);
+const iconObject = {
+  position: { x: 0, y: 0, z: 0 },
+  scale: { x: 1, y: 1, z: 1 },
+  rotation: { x: 0, y: 0, z: 0, w: 1 },
+  layer: 1,
+  lock: false,
+  visible: true,
+};
+const iconPreparation = callJsonInput("sdf_renderer_core_profile_prepare_json", {
+  documentKey: "icons",
+  card: {
+    userInterfaceIcons: [{ objectData: iconObject, id: 1, colorId: 1, alpha: 0.5 }],
+    materials: [{ objectData: { ...iconObject, layer: 2 }, id: 1 }],
+  },
+}, [iconMasterData.handle]);
+assert.deepEqual(
+  iconPreparation.resources.map((request) => request.resource.key),
+  ["custom_profile/user_interface_icon/profile_icon_0001"],
+);
+assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [iconMasterData.handle]), 1);
+
 const authoring = callJson("sdf_renderer_authoring_create_blank_json", [], []);
 assert.ok(Number.isInteger(authoring.handle) && authoring.handle > 0);
 assert.equal(authoring.document.userCustomProfileCards.length, 1);

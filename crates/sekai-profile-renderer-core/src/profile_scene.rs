@@ -32,6 +32,9 @@ pub enum ProfileElementRef<'a> {
     StandMember(&'a StandMemberElement),
     GeneralBackground(&'a GeneralBackgroundElement),
     StoryBackground(&'a StoryBackgroundElement),
+    CharacterIcon(&'a CharacterIconElement),
+    Material(&'a MaterialElement),
+    UserInterfaceIcon(&'a UserInterfaceIconElement),
 }
 
 impl ProfileElementRef<'_> {
@@ -49,6 +52,9 @@ impl ProfileElementRef<'_> {
             Self::StandMember(value) => &value.object_data,
             Self::GeneralBackground(value) => &value.object_data,
             Self::StoryBackground(value) => &value.object_data,
+            Self::CharacterIcon(value) => &value.object_data,
+            Self::Material(value) => &value.object_data,
+            Self::UserInterfaceIcon(value) => &value.object_data,
         }
     }
 }
@@ -319,6 +325,9 @@ pub fn ordered_profile_elements<'a>(
     append!(stand_members, StandMember, StandMember);
     append!(general_backgrounds, GeneralBackground, GeneralBackground);
     append!(story_backgrounds, StoryBackground, StoryBackground);
+    append!(character_icons, CharacterIcon, CharacterIcon);
+    append!(materials, Material, Material);
+    append!(user_interface_icons, UserInterfaceIcon, UserInterfaceIcon);
     values.sort_by_key(|element| {
         (
             element.object().layer,
@@ -343,6 +352,9 @@ pub fn authored_kind_name(kind: AuthoredElementKind) -> &'static str {
         AuthoredElementKind::StandMember => "stand-member",
         AuthoredElementKind::GeneralBackground => "general-background",
         AuthoredElementKind::StoryBackground => "story-background",
+        AuthoredElementKind::CharacterIcon => "character-icon",
+        AuthoredElementKind::Material => "material",
+        AuthoredElementKind::UserInterfaceIcon => "user-interface-icon",
     }
 }
 
@@ -1606,6 +1618,45 @@ fn lower_primary_command(
             "story-background",
             parameters,
         )?,
+        ProfileElementRef::CharacterIcon(value) => resolved_image_with_parameter(
+            snapshot,
+            "character-icon",
+            value.id,
+            "",
+            layer_id,
+            command_id,
+            "character-icon",
+            parameters,
+        )?,
+        ProfileElementRef::Material(value) => resolved_image_with_parameter(
+            snapshot, "material", value.id, "", layer_id, command_id, "material", parameters,
+        )?,
+        ProfileElementRef::UserInterfaceIcon(value) => {
+            let mut resolved = resolved_image_with_parameter(
+                snapshot,
+                "user-interface-icon",
+                value.id,
+                "",
+                layer_id,
+                command_id,
+                "user-interface-icon",
+                parameters,
+            )?;
+            if let SemanticCommandPayload::Image { tint, .. } = &mut resolved.2.payload {
+                // The icon is tinted like a shape face: the colour row with the
+                // element alpha, reaching the image as an 8-bit vertex colour.
+                *tint = with_alpha(
+                    snapshot
+                        .colors
+                        .get(&value.color_id)
+                        .copied()
+                        .unwrap_or([1.0; 4]),
+                    value.alpha,
+                )
+                .map(crate::sdf_material::color32_unit);
+            }
+            resolved
+        }
         ProfileElementRef::BondsHonor(value) => {
             composite_primary(layer_id, command_id, "bonds-honor", value.id, parameters)
         }

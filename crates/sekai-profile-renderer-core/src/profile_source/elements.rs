@@ -158,3 +158,29 @@ pub struct StoryBackgroundElement {
     pub object_data: ObjectData,
     pub id: i32,
 }
+
+/// Character icon element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterIconElement {
+    pub object_data: ObjectData,
+    pub id: i32,
+}
+
+/// Material icon element.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaterialElement {
+    pub object_data: ObjectData,
+    pub id: i32,
+}
+
+/// User-interface icon element, tinted with a `customProfileTextColors` colour and alpha.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInterfaceIconElement {
+    pub object_data: ObjectData,
+    pub id: i32,
+    pub color_id: i32,
+    pub alpha: f32,
+}

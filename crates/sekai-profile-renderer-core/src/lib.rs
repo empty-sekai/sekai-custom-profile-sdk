@@ -183,6 +183,9 @@ pub enum AuthoredElementKind {
     StandMember,
     GeneralBackground,
     StoryBackground,
+    CharacterIcon,
+    Material,
+    UserInterfaceIcon,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]

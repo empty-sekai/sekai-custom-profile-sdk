@@ -11,6 +11,9 @@ const KIND_LABELS = {
   stand_member: "Standing member",
   general_background: "General background",
   story_background: "Story background",
+  character_icon: "Character icon",
+  material: "Material",
+  user_interface_icon: "Interface icon",
 };
 
 const MAX_GROUP_ROWS = 40;

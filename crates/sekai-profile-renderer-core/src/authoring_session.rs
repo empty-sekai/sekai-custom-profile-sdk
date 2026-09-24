@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use crate::authoring_document::{
     check_element_shape, ElementShapeError, GameProfileDocument, GameProfileDocumentError,
+    OPTIONAL_CARD_ARRAYS,
 };
 
 pub const AUTHORING_HISTORY_LIMIT: usize = 150;
@@ -24,51 +25,68 @@ pub struct AuthoringElementId(pub u32);
 pub enum AuthoringCategory {
     BondsHonors,
     CardMembers,
+    CharacterIcons,
     Collections,
     GeneralBackgrounds,
     Generals,
     Honors,
+    Materials,
     Others,
     Shapes,
     Stamps,
     StandMembers,
     StoryBackgrounds,
     Texts,
+    UserInterfaceIcons,
 }
 
 impl AuthoringCategory {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::BondsHonors,
         Self::CardMembers,
+        Self::CharacterIcons,
         Self::Collections,
         Self::GeneralBackgrounds,
         Self::Generals,
         Self::Honors,
+        Self::Materials,
         Self::Others,
         Self::Shapes,
         Self::Stamps,
         Self::StandMembers,
         Self::StoryBackgrounds,
         Self::Texts,
+        Self::UserInterfaceIcons,
     ];
 
     pub fn key(self) -> &'static str {
         match self {
             Self::BondsHonors => "bondsHonors",
             Self::CardMembers => "cardMembers",
+            Self::CharacterIcons => "characterIcons",
             Self::Collections => "collections",
             Self::GeneralBackgrounds => "generalBackgrounds",
             Self::Generals => "generals",
             Self::Honors => "honors",
+            Self::Materials => "materials",
             Self::Others => "others",
             Self::Shapes => "shapes",
             Self::Stamps => "stamps",
             Self::StandMembers => "standMembers",
             Self::StoryBackgrounds => "storyBackgrounds",
             Self::Texts => "texts",
+            Self::UserInterfaceIcons => "userInterfaceIcons",
         }
     }
+
+    /// Whether a page may leave this category's array out.
+    fn optional(self) -> bool {
+        OPTIONAL_CARD_ARRAYS.contains(&self.key())
+    }
 }
+
+/// The elements of an optional category a page leaves out.
+static NO_ELEMENTS: Vec<Value> = Vec::new();
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -297,8 +315,7 @@ impl AuthoringSession {
                     .map(|category| {
                         let count = page["customProfileCard"][category.key()]
                             .as_array()
-                            .expect("validated document")
-                            .len();
+                            .map_or(0, Vec::len);
                         let values = (0..count)
                             .map(|_| {
                                 let id = AuthoringElementId(next_id);
@@ -324,7 +341,7 @@ impl AuthoringSession {
     }
 
     pub fn from_checkpoint_value(value: Value) -> Result<Self, AuthoringError> {
-        let checkpoint: AuthoringCheckpoint = serde_json::from_value(value)
+        let mut checkpoint: AuthoringCheckpoint = serde_json::from_value(value)
             .map_err(|error| AuthoringError::InvalidCheckpoint(error.to_string()))?;
         if checkpoint.schema != AUTHORING_CHECKPOINT_SCHEMA {
             return Err(AuthoringError::InvalidCheckpoint(format!(
@@ -344,6 +361,22 @@ impl AuthoringSession {
                 checkpoint.undo.len() + checkpoint.redo.len(),
                 AUTHORING_HISTORY_LIMIT
             )));
+        }
+        // A checkpoint written before a category existed has no IDs for it;
+        // its pages hold no elements of that category.
+        let history_ids = checkpoint
+            .undo
+            .iter_mut()
+            .chain(checkpoint.redo.iter_mut())
+            .flat_map(|entry| [&mut entry.before, &mut entry.after])
+            .flat_map(|snapshot| match snapshot {
+                HistorySnapshot::Page(page) => std::slice::from_mut(&mut page.ids),
+                HistorySnapshot::Document(document) => document.ids.as_mut_slice(),
+            });
+        for page_ids in checkpoint.ids.iter_mut().chain(history_ids) {
+            for category in AuthoringCategory::ALL {
+                page_ids.entry(category).or_default();
+            }
         }
         let document = GameProfileDocument::from_snapshot_value(checkpoint.document)?;
         let session = Self {
@@ -931,6 +964,9 @@ impl AuthoringSession {
                     .as_u64()
                     .unwrap_or_default() as usize;
                 for category in AuthoringCategory::ALL {
+                    if self.elements(location.page, category)?.is_empty() {
+                        continue;
+                    }
                     for element in self.elements_mut(location.page, category)? {
                         let current =
                             element["objectData"]["layer"].as_u64().unwrap_or_default() as usize;
@@ -1063,25 +1099,40 @@ impl AuthoringSession {
         page: usize,
         category: AuthoringCategory,
     ) -> Result<&Vec<Value>, AuthoringError> {
-        self.document
+        let card = &self
+            .document
             .pages()
             .get(page)
-            .ok_or(AuthoringError::PageNotFound(page))?["customProfileCard"][category.key()]
-        .as_array()
-        .ok_or(AuthoringError::ElementMustBeObject)
+            .ok_or(AuthoringError::PageNotFound(page))?["customProfileCard"];
+        match card.get(category.key()) {
+            None if category.optional() => Ok(&NO_ELEMENTS),
+            value => value
+                .and_then(Value::as_array)
+                .ok_or(AuthoringError::ElementMustBeObject),
+        }
     }
 
+    /// The category's array, added to the page when an optional category is
+    /// absent.
     fn elements_mut(
         &mut self,
         page: usize,
         category: AuthoringCategory,
     ) -> Result<&mut Vec<Value>, AuthoringError> {
-        self.document
+        let card = self
+            .document
             .pages_mut()
             .get_mut(page)
-            .ok_or(AuthoringError::PageNotFound(page))?["customProfileCard"][category.key()]
-        .as_array_mut()
-        .ok_or(AuthoringError::ElementMustBeObject)
+            .ok_or(AuthoringError::PageNotFound(page))?["customProfileCard"]
+            .as_object_mut()
+            .ok_or(AuthoringError::ElementMustBeObject)?;
+        if category.optional() {
+            card.entry(category.key())
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+        card.get_mut(category.key())
+            .and_then(Value::as_array_mut)
+            .ok_or(AuthoringError::ElementMustBeObject)
     }
 
     fn locate(&self, id: AuthoringElementId) -> Result<ElementLocation, AuthoringError> {
@@ -1308,8 +1359,7 @@ fn validate_ids_for_document(
             })?;
             let element_count = document.pages()[page_index]["customProfileCard"][category.key()]
                 .as_array()
-                .expect("validated document")
-                .len();
+                .map_or(0, Vec::len);
             if category_ids.len() != element_count {
                 return Err(AuthoringError::InvalidCheckpoint(format!(
                     "page {page_index} {} has {} IDs for {element_count} elements",
@@ -2049,5 +2099,120 @@ mod tests {
         // Once the gesture is gone the pre-gesture history is reachable again.
         session.cancel_gesture().unwrap();
         assert!(session.undo().unwrap().is_some());
+    }
+
+    fn at_layer(mut element: Value, layer: u64) -> Value {
+        element["objectData"]["layer"] = Value::from(layer);
+        element
+    }
+
+    fn user_interface_icon() -> Value {
+        json!({ "objectData": text()["objectData"], "id": 1, "colorId": 1, "alpha": 1.0 })
+    }
+
+    /// A page holding texts at layers 0 and 2 and a character icon at layer 1.
+    fn session_with_a_character_icon() -> AuthoringSession {
+        let mut profile = GameProfileDocument::blank().export_value();
+        let card = &mut profile["userCustomProfileCards"][0]["customProfileCard"];
+        card["texts"] = json!([at_layer(text(), 0), at_layer(text(), 2)]);
+        card["characterIcons"] = json!([at_layer(
+            json!({ "objectData": text()["objectData"], "id": 1 }),
+            1
+        )]);
+        AuthoringSession::new(GameProfileDocument::from_profile_value(profile).unwrap())
+    }
+
+    fn text_ids(session: &AuthoringSession) -> Vec<AuthoringElementId> {
+        session
+            .list_elements()
+            .into_iter()
+            .filter(|element| element.category == AuthoringCategory::Texts)
+            .map(|element| element.id)
+            .collect()
+    }
+
+    #[test]
+    fn icon_categories_share_the_page_layers_and_stay_absent_until_used() {
+        let mut session = session_with_a_character_icon();
+        let listed = session.list_elements();
+        assert_eq!(listed.len(), 3);
+        let icon = listed
+            .iter()
+            .find(|element| element.category == AuthoringCategory::CharacterIcons)
+            .expect("imported character icon")
+            .id;
+
+        let created = session
+            .apply(AuthoringCommand::Create {
+                page: 0,
+                category: AuthoringCategory::UserInterfaceIcons,
+                element: user_interface_icon(),
+            })
+            .unwrap();
+        let created_element = created.changes[0].element.as_ref().unwrap();
+        assert_eq!(created_element["objectData"]["layer"], 3);
+
+        session
+            .apply(AuthoringCommand::Delete { id: icon })
+            .unwrap();
+        let exported = session.export_value();
+        let card = &exported["userCustomProfileCards"][0]["customProfileCard"];
+        assert_eq!(card["characterIcons"], json!([]));
+        assert_eq!(card["texts"][0]["objectData"]["layer"], 0);
+        assert_eq!(card["texts"][1]["objectData"]["layer"], 1);
+        assert_eq!(card["userInterfaceIcons"][0]["objectData"]["layer"], 2);
+        assert!(card.get("materials").is_none());
+
+        let blank = AuthoringSession::new(GameProfileDocument::blank()).export_value();
+        for key in OPTIONAL_CARD_ARRAYS {
+            assert!(blank["userCustomProfileCards"][0]["customProfileCard"]
+                .get(key)
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn layer_moves_include_icons_without_adding_absent_categories() {
+        let mut session = session_with_a_character_icon();
+        let top_text = text_ids(&session)[1];
+        session
+            .apply(AuthoringCommand::ChangeLayer {
+                id: top_text,
+                layer: 0,
+            })
+            .unwrap();
+        let exported = session.export_value();
+        let card = &exported["userCustomProfileCards"][0]["customProfileCard"];
+        assert_eq!(card["characterIcons"][0]["objectData"]["layer"], 2);
+        assert_eq!(card["texts"][0]["objectData"]["layer"], 1);
+        assert_eq!(card["texts"][1]["objectData"]["layer"], 0);
+        assert!(card.get("materials").is_none());
+        assert!(card.get("userInterfaceIcons").is_none());
+    }
+
+    #[test]
+    fn checkpoints_without_icon_category_ids_still_restore() {
+        let mut session = session_with_a_character_icon();
+        let texts = text_ids(&session);
+        session
+            .apply(AuthoringCommand::SetVisible {
+                id: texts[0],
+                visible: false,
+            })
+            .unwrap();
+        let mut checkpoint = session.export_checkpoint_value().unwrap();
+        let strip = |ids: &mut Value| {
+            let ids = ids.as_object_mut().unwrap();
+            ids.remove("materials");
+            ids.remove("userInterfaceIcons");
+        };
+        strip(&mut checkpoint["ids"][0]);
+        for entry in checkpoint["undo"].as_array_mut().unwrap() {
+            for side in ["before", "after"] {
+                strip(&mut entry[side]["snapshot"]["ids"]);
+            }
+        }
+        let restored = AuthoringSession::from_checkpoint_value(checkpoint).unwrap();
+        assert_eq!(restored.list_elements().len(), 3);
     }
 }

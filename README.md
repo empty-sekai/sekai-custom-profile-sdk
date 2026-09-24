@@ -164,6 +164,11 @@ cargo run --release --bin render-card -- \
 ```
 
 
+`customProfileCharacterIconResources`、`customProfileMaterialResources`、
+`customProfileUserInterfaceIconResources`（host crate 的 `OPTIONAL_TABLES`）只有部分区服提供。
+`--masterdata` 与 `--masterdata-url` 存在时加载；缺失时 `characterIcons`、`materials`、
+`userInterfaceIcons` 元素不绘制，也不计入缺表告警。
+
 `--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical
 映射解析 `bonds_honor/character` 与 `bonds_honor/word`，不改变 renderer asset key。

@@ -545,6 +545,23 @@ impl CustomProfileRenderer {
                 warnings.push(format!("shapes[{i}]: shapeId={} 不在映射表中", shape.id));
             }
         }
+        for (i, icon) in card.user_interface_icons.iter().enumerate() {
+            if md.resolve_color(icon.color_id).is_none() {
+                warnings.push(format!(
+                    "userInterfaceIcons[{i}]: colorId={} 不在映射表中",
+                    icon.color_id
+                ));
+            }
+            if md
+                .resolve_resource("user_interface_icon", icon.id)
+                .is_none()
+            {
+                warnings.push(format!(
+                    "userInterfaceIcons[{i}]: id={} 不在映射表中",
+                    icon.id
+                ));
+            }
+        }
         if !warnings.is_empty() {
             tracing::warn!(count = warnings.len(), "名片数据校验发现缺失映射");
         }
@@ -3918,6 +3935,17 @@ fn render_element_authored_identity(
             index_of(&card.story_backgrounds, value)
                 .map(|index| (AuthoredElementKind::StoryBackground, index))
         }
+        crate::elements::RenderElement::CharacterIcon(value) => {
+            index_of(&card.character_icons, value)
+                .map(|index| (AuthoredElementKind::CharacterIcon, index))
+        }
+        crate::elements::RenderElement::Material(value) => {
+            index_of(&card.materials, value).map(|index| (AuthoredElementKind::Material, index))
+        }
+        crate::elements::RenderElement::UserInterfaceIcon(value) => {
+            index_of(&card.user_interface_icons, value)
+                .map(|index| (AuthoredElementKind::UserInterfaceIcon, index))
+        }
     }
 }
 
@@ -5618,6 +5646,207 @@ mod tests {
         }
     }
 
+    const CHARACTER_ICON_KEY: &str = "custom_profile/character_icon/profile_chr_icon_ichika";
+    const MATERIAL_KEY: &str = "custom_profile/material/profile_icon_item_0003";
+    const USER_INTERFACE_ICON_KEY: &str = "custom_profile/user_interface_icon/profile_icon_0002";
+    const ETC_KEY: &str = "custom_profile/etc/etc_001";
+
+    /// Colours plus `customProfileEtcResources` 1 and, when `icon_tables` is
+    /// set, character icon 1, material 3 and user-interface icon 2. A region
+    /// without the icon tables has only the first two.
+    struct IconRowsProvider {
+        icon_tables: bool,
+    }
+
+    impl MasterDataProvider for IconRowsProvider {
+        fn resolve_story_banner(&self, _story_type: &str, _story_id: i32) -> Option<String> {
+            None
+        }
+        fn get_card(&self, _card_id: i32) -> Option<CardEntry> {
+            None
+        }
+        fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor> {
+            match color_id {
+                7 => ResolvedColor::from_hex("#444466"),
+                2 => ResolvedColor::from_hex("#ff8000"),
+                _ => None,
+            }
+        }
+        fn default_color(&self) -> Option<ResolvedColor> {
+            self.resolve_color(7)
+        }
+        fn resolve_font(&self, _font_id: i32) -> Option<String> {
+            None
+        }
+        fn resolve_stamp(&self, _stamp_id: i32) -> Option<String> {
+            None
+        }
+        fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
+            let key = match (res_type, id) {
+                ("etc", 1) => ETC_KEY,
+                ("character_icon", 1) if self.icon_tables => CHARACTER_ICON_KEY,
+                ("material", 3) if self.icon_tables => MATERIAL_KEY,
+                ("user_interface_icon", 2) if self.icon_tables => USER_INTERFACE_ICON_KEY,
+                _ => return None,
+            };
+            let (load_val, file_name) = key.rsplit_once('/')?;
+            Some(ResourceInfo {
+                file_name: file_name.into(),
+                load_val: load_val.into(),
+                resource_type: res_type.into(),
+            })
+        }
+        fn resolve_honor(&self, _honor_id: i32, _honor_level: i32) -> Option<ResolvedHonor> {
+            None
+        }
+        fn get_bonds_honor(&self, _id: i32) -> Option<BondsHonorEntry> {
+            None
+        }
+        fn get_bonds_honor_word(&self, _word_id: i64) -> Option<BondsHonorWordEntry> {
+            None
+        }
+        fn get_honor(&self, _honor_id: i32) -> Option<HonorEntry> {
+            None
+        }
+        fn resolve_unit_vs_sd(&self, self_id: i32, _partner_id: i32) -> i32 {
+            self_id
+        }
+        fn font_count(&self) -> usize {
+            0
+        }
+        fn color_count(&self) -> usize {
+            2
+        }
+    }
+
+    /// A version-4 page with one visible element of each icon kind in a row,
+    /// a decoration above the material, a hidden character icon and a
+    /// material whose row does not exist.
+    fn icon_page() -> CustomProfileCard {
+        let object = |layer: i32, x: f32, y: f32, visible: bool| {
+            serde_json::json!({
+                "layer": layer, "lock": false, "visible": visible,
+                "position": { "x": x, "y": y, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "characterIcons": [
+                { "objectData": object(1, -600.0, 0.0, true), "id": 1 },
+                { "objectData": object(5, -600.0, 200.0, false), "id": 1 }
+            ],
+            "materials": [
+                { "objectData": object(2, 0.0, 0.0, true), "id": 3 },
+                { "objectData": object(6, 600.0, 200.0, true), "id": 99 }
+            ],
+            "userInterfaceIcons": [
+                { "objectData": object(3, 600.0, 0.0, true), "id": 2, "colorId": 2, "alpha": 0.5 }
+            ],
+            "others": [{ "objectData": object(4, 0.0, 200.0, true), "id": 1 }]
+        }))
+        .expect("version-4 page")
+    }
+
+    fn icon_page_renderer(icon_tables: bool) -> (tempfile::TempDir, CustomProfileRenderer) {
+        let assets = Arc::new(AssetStore::new(8));
+        for (key, pixel) in [
+            (CHARACTER_ICON_KEY, [255, 0, 0, 255]),
+            (MATERIAL_KEY, [0, 255, 0, 255]),
+            (USER_INTERFACE_ICON_KEY, [255, 255, 255, 255]),
+            (ETC_KEY, [0, 0, 255, 255]),
+        ] {
+            assets.put(
+                key.into(),
+                crate::codec::png::encode_rgba(8, 8, &pixel.repeat(64)).expect("png"),
+            );
+        }
+        // The store holds an unrelated object only, so every image draws from
+        // the asset store's source bytes.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut writer = crate::render_object::RenderObjectStoreWriter::create(
+            temp.path().join("store"),
+            "icon-fixture",
+            4096,
+        )
+        .expect("store writer");
+        writer
+            .add(crate::render_object::RenderObjectWrite {
+                key: "unrelated",
+                kind: crate::render_object::RenderObjectKind::Texture,
+                source_sha256: &"0".repeat(64),
+                width: 1,
+                height: 1,
+                row_bytes: 4,
+                pixels: &[0; 4],
+            })
+            .expect("store object");
+        let store = crate::render_object::MappedRenderObjectStore::open(
+            writer.finish().expect("store manifest"),
+        )
+        .expect("store");
+        let renderer = CustomProfileRenderer::new(Arc::new(IconRowsProvider { icon_tables }))
+            .with_assets(assets)
+            .with_render_object_store(Arc::new(store));
+        (temp, renderer)
+    }
+
+    /// Premultiplied pixel at a Unity position of a full-card surface.
+    fn pixel_at(output: &FullCardSdfExecutionOutput, x: f32, y: f32) -> [u8; 4] {
+        let (x, y) = sekai_profile_renderer_core::profile_transform::unity_to_skia(x, y);
+        let offset = (y as usize * output.width as usize + x as usize) * 4;
+        output.rgba[offset..offset + 4]
+            .try_into()
+            .expect("pixel inside the surface")
+    }
+
+    #[test]
+    fn icon_elements_request_their_assets_and_draw_on_the_native_surface() {
+        let card = icon_page();
+        let (_temp, renderer) = icon_page_renderer(true);
+        let md = renderer.snapshot();
+        let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                CHARACTER_ICON_KEY,
+                ETC_KEY,
+                MATERIAL_KEY,
+                USER_INTERFACE_ICON_KEY
+            ]
+        );
+        let output = renderer
+            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
+            .expect("rendered page");
+        assert_eq!(pixel_at(&output, -600.0, 0.0), [255, 0, 0, 255]);
+        assert_eq!(pixel_at(&output, 0.0, 0.0), [0, 255, 0, 255]);
+        // A white icon tinted #ff8000 at alpha 128/255, premultiplied.
+        assert_eq!(pixel_at(&output, 600.0, 0.0), [128, 64, 0, 128]);
+        assert_eq!(pixel_at(&output, 0.0, 200.0), [0, 0, 255, 255]);
+        // Hidden elements and elements without a row are not drawn.
+        assert_eq!(pixel_at(&output, -600.0, 200.0), [0; 4]);
+        assert_eq!(pixel_at(&output, 600.0, 200.0), [0; 4]);
+    }
+
+    #[test]
+    fn a_region_without_the_icon_tables_still_renders_the_rest_of_the_page() {
+        let card = icon_page();
+        let (_temp, renderer) = icon_page_renderer(false);
+        let md = renderer.snapshot();
+        assert_eq!(
+            crate::asset_keys::collect_card_asset_keys(&card, &md),
+            [ETC_KEY]
+        );
+        let output = renderer
+            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
+            .expect("rendered page");
+        assert_eq!(pixel_at(&output, 0.0, 200.0), [0, 0, 255, 255]);
+        for (x, y) in [(-600.0, 0.0), (0.0, 0.0), (600.0, 0.0)] {
+            assert_eq!(pixel_at(&output, x, y), [0; 4], "({x}, {y})");
+        }
+    }
+
     #[cfg(feature = "skia-oracle")]
     fn default_object_data(layer: i32, visible: bool) -> ObjectData {
         ObjectData {
@@ -5759,6 +5988,9 @@ mod tests {
             stand_members: vec![],
             general_backgrounds: vec![],
             story_backgrounds: vec![],
+            character_icons: vec![],
+            materials: vec![],
+            user_interface_icons: vec![],
         }
     }
 }

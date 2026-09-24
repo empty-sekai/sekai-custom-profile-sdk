@@ -18,6 +18,10 @@ const CARD_ARRAYS: [&str; 12] = [
     "storyBackgrounds",
     "texts",
 ];
+/// Arrays only newer cards carry. A page without one holds none of its
+/// elements and keeps it absent.
+pub(crate) const OPTIONAL_CARD_ARRAYS: [&str; 3] =
+    ["characterIcons", "materials", "userInterfaceIcons"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GameProfileDocument {
@@ -224,6 +228,19 @@ impl GameProfileDocument {
                         page: page_index,
                         category,
                     })?;
+                categories.push((category, values));
+            }
+            for category in OPTIONAL_CARD_ARRAYS {
+                let Some(values) = card.get(category) else {
+                    continue;
+                };
+                let values =
+                    values
+                        .as_array()
+                        .ok_or(GameProfileDocumentError::CardCategoryMustBeArray {
+                            page: page_index,
+                            category,
+                        })?;
                 categories.push((category, values));
             }
             let count = categories.iter().map(|(_, values)| values.len()).sum();
@@ -443,6 +460,44 @@ mod tests {
         let mut value = GameProfileDocument::blank().export_value();
         value["userCustomProfileCards"][0]["customProfileCard"]["shapes"] = json!([element()]);
         assert!(GameProfileDocument::from_export_value(value).is_ok());
+    }
+
+    #[test]
+    fn icon_arrays_may_be_absent_but_are_checked_when_present() {
+        let with = |key: &str, values: Value| {
+            let mut value = GameProfileDocument::blank().export_value();
+            value["userCustomProfileCards"][0]["customProfileCard"][key] = values;
+            GameProfileDocument::from_export_value(value)
+        };
+        assert!(with("characterIcons", json!([element()])).is_ok());
+        assert_eq!(
+            with("materials", json!({})),
+            Err(GameProfileDocumentError::CardCategoryMustBeArray {
+                page: 0,
+                category: "materials"
+            })
+        );
+        assert_eq!(
+            with("userInterfaceIcons", json!([element(), {}])),
+            Err(GameProfileDocumentError::InvalidElement {
+                page: 0,
+                category: "userInterfaceIcons",
+                index: 1
+            })
+        );
+
+        let mut value = GameProfileDocument::blank().export_value();
+        let card = &mut value["userCustomProfileCards"][0]["customProfileCard"];
+        card["texts"] = Value::Array((0..100).map(|_| element()).collect());
+        card["materials"] = Value::Array((0..51).map(|_| element()).collect());
+        assert_eq!(
+            GameProfileDocument::from_export_value(value),
+            Err(GameProfileDocumentError::ElementLimitExceeded {
+                page: 0,
+                count: 151,
+                max: 150
+            })
+        );
     }
 
     #[test]

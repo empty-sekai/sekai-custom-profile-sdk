@@ -68,6 +68,9 @@ pub enum RenderElement<'a> {
     StandMember(&'a StandMemberElement),
     GeneralBackground(&'a GeneralBackgroundElement),
     StoryBackground(&'a StoryBackgroundElement),
+    CharacterIcon(&'a CharacterIconElement),
+    Material(&'a MaterialElement),
+    UserInterfaceIcon(&'a UserInterfaceIconElement),
 }
 
 impl<'a> RenderElement<'a> {
@@ -85,6 +88,9 @@ impl<'a> RenderElement<'a> {
             Self::StandMember(e) => &e.object_data,
             Self::GeneralBackground(e) => &e.object_data,
             Self::StoryBackground(e) => &e.object_data,
+            Self::CharacterIcon(e) => &e.object_data,
+            Self::Material(e) => &e.object_data,
+            Self::UserInterfaceIcon(e) => &e.object_data,
         }
     }
 
@@ -99,19 +105,7 @@ impl<'a> RenderElement<'a> {
 
 /// 从 CustomProfileCard 提取所有元素，按 layer 升序排序。
 pub fn flatten_and_sort(card: &CustomProfileCard) -> Vec<RenderElement<'_>> {
-    let total = card.texts.len()
-        + card.shapes.len()
-        + card.card_members.len()
-        + card.stamps.len()
-        + card.others.len()
-        + card.bonds_honors.len()
-        + card.honors.len()
-        + card.collections.len()
-        + card.generals.len()
-        + card.stand_members.len()
-        + card.general_backgrounds.len()
-        + card.story_backgrounds.len();
-    let mut elements: Vec<RenderElement<'_>> = Vec::with_capacity(total);
+    let mut elements: Vec<RenderElement<'_>> = Vec::with_capacity(card.element_count());
 
     for e in &card.texts {
         elements.push(RenderElement::Text(e));
@@ -148,6 +142,15 @@ pub fn flatten_and_sort(card: &CustomProfileCard) -> Vec<RenderElement<'_>> {
     }
     for e in &card.story_backgrounds {
         elements.push(RenderElement::StoryBackground(e));
+    }
+    for e in &card.character_icons {
+        elements.push(RenderElement::CharacterIcon(e));
+    }
+    for e in &card.materials {
+        elements.push(RenderElement::Material(e));
+    }
+    for e in &card.user_interface_icons {
+        elements.push(RenderElement::UserInterfaceIcon(e));
     }
 
     elements.sort_by_key(|e| e.layer());

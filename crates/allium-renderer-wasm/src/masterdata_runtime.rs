@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use sekai_profile_renderer_core::masterdata::{JsonMasterData, PROFILE_MASTERDATA_TABLES};
+use sekai_profile_renderer_core::masterdata::{
+    JsonMasterData, PROFILE_MASTERDATA_TABLES, PROFILE_OPTIONAL_MASTERDATA_TABLES,
+};
 use sekai_profile_renderer_core::profile_data::ProfileData;
 use sekai_profile_renderer_core::profile_resolve::{
     compile_profile_scene, compile_profile_scene_with_localizations, prepare_profile,
@@ -42,6 +44,7 @@ struct CreateResponse {
     region: String,
     revision: String,
     required_tables: &'static [&'static str],
+    optional_tables: &'static [&'static str],
 }
 
 #[derive(Deserialize)]
@@ -197,6 +200,7 @@ pub fn create(input: &str) -> Result<String, String> {
             region: request.region.clone(),
             revision: request.revision.clone(),
             required_tables: PROFILE_MASTERDATA_TABLES,
+            optional_tables: PROFILE_OPTIONAL_MASTERDATA_TABLES,
         };
         table.sessions.insert(
             handle,
@@ -579,5 +583,135 @@ mod tests {
         let stats = super::stats(handle).unwrap();
         assert!(stats.contains("synthetic-v1"));
         assert!(super::destroy(handle));
+    }
+
+    /// Resource keys a page requests and the tint of its user-interface
+    /// icon, from a session holding `tables`.
+    fn icon_page(region: &str, tables: &[(&str, serde_json::Value)]) -> (Vec<String>, Vec<f64>) {
+        let created: serde_json::Value = serde_json::from_str(
+            &super::create(
+                &serde_json::json!({ "region": region, "revision": "icons" }).to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            created["optional_tables"],
+            serde_json::json!(
+                sekai_profile_renderer_core::masterdata::PROFILE_OPTIONAL_MASTERDATA_TABLES
+            )
+        );
+        let handle = created["handle"].as_u64().unwrap() as u32;
+        super::put_table(
+            handle,
+            &serde_json::json!({
+                "name": "customProfileTextColors",
+                "table": [{ "id": 1, "colorCode": "#ff8000" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for (name, table) in tables {
+            super::put_table(
+                handle,
+                &serde_json::json!({ "name": name, "table": table }).to_string(),
+            )
+            .unwrap();
+        }
+        super::seal(handle).unwrap();
+        let object = serde_json::json!({
+            "layer": 1, "lock": false, "visible": true,
+            "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+            "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+            "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+        });
+        let profile = serde_json::json!({
+            "userCustomProfileCards": [{
+                "seq": 1,
+                "customProfileCard": {
+                    "version": 4,
+                    "characterIcons": [{ "objectData": object, "id": 1 }],
+                    "materials": [{ "objectData": object, "id": 1 }],
+                    "userInterfaceIcons": [{ "objectData": object, "id": 1, "colorId": 1, "alpha": 0.5 }]
+                }
+            }]
+        });
+        let request = serde_json::json!({ "documentKey": "icons", "profile": profile }).to_string();
+        let prepared: serde_json::Value =
+            serde_json::from_str(&super::prepare(handle, &request).unwrap()).unwrap();
+        let mut keys = prepared["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|request| request["resource"]["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        keys.sort();
+        let response: serde_json::Value =
+            serde_json::from_str(&super::create_scene(handle, &request).unwrap()).unwrap();
+        let tint = response["snapshot"]["semantic_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| {
+                command["role"] == "user-interface-icon" && command["payload"]["kind"] == "image"
+            })
+            .map(|command| {
+                command["payload"]["tint"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_f64().unwrap())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(super::super::scene::destroy(
+            response["handle"].as_u64().unwrap() as u32
+        ));
+        assert!(super::destroy(handle));
+        (keys, tint)
+    }
+
+    #[test]
+    fn icon_elements_resolve_from_optional_tables_and_are_left_out_without_them() {
+        let row = |resource_type: &str, file_name: &str| {
+            serde_json::json!([{
+                "id": 1, "customProfileResourceType": resource_type,
+                "resourceLoadVal": format!("custom_profile/{resource_type}"), "fileName": file_name
+            }])
+        };
+        let (keys, tint) = icon_page(
+            "jp",
+            &[
+                (
+                    "customProfileCharacterIconResources",
+                    row("character_icon", "profile_chr_icon_ichika"),
+                ),
+                (
+                    "customProfileMaterialResources",
+                    row("material", "profile_icon_item_0001"),
+                ),
+                (
+                    "customProfileUserInterfaceIconResources",
+                    row("user_interface_icon", "profile_icon_0001"),
+                ),
+            ],
+        );
+        assert_eq!(
+            keys,
+            [
+                "custom_profile/character_icon/profile_chr_icon_ichika",
+                "custom_profile/material/profile_icon_item_0001",
+                "custom_profile/user_interface_icon/profile_icon_0001",
+            ]
+        );
+        let expected = [1.0f32, 128.0 / 255.0, 0.0, 128.0 / 255.0];
+        assert_eq!(tint.len(), expected.len());
+        for (actual, expected) in tint.iter().zip(expected) {
+            assert_eq!(*actual as f32, expected);
+        }
+
+        let (keys, tint) = icon_page("cn", &[]);
+        assert!(keys.is_empty(), "{keys:?}");
+        assert!(tint.is_empty());
     }
 }

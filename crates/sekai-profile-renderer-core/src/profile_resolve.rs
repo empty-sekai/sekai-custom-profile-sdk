@@ -688,6 +688,9 @@ fn populate_authored_resources(
                 insert_color(snapshot, masterdata, shape.color_id);
                 insert_color(snapshot, masterdata, shape.outline_color_id);
             }
+            ProfileElementRef::UserInterfaceIcon(icon) => {
+                insert_color(snapshot, masterdata, icon.color_id);
+            }
             _ => {}
         }
         match authored_resource(element.value, masterdata) {
@@ -806,6 +809,23 @@ pub fn authored_resource(
             masterdata,
             "story-background",
             "story_bg",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::CharacterIcon(value) => master_resource_request(
+            masterdata,
+            "character-icon",
+            "character_icon",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::Material(value) => {
+            master_resource_request(masterdata, "material", "material", value.id, SMALL_RESOURCE)
+        }
+        ProfileElementRef::UserInterfaceIcon(value) => master_resource_request(
+            masterdata,
+            "user-interface-icon",
+            "user_interface_icon",
             value.id,
             SMALL_RESOURCE,
         ),
@@ -2651,6 +2671,257 @@ mod tests {
                 keys.iter()
                     .any(|key| key == &format!("honor/{asset_bundle_name}/rank_sub")),
                 "{honor_type} {asset_bundle_name} did not request rank_sub: {keys:?}"
+            );
+        }
+    }
+
+    /// Colours plus one row in each icon table: character icon 1, material 3
+    /// and user-interface icon 2. Colour 7 is the first row.
+    fn icon_tables() -> JsonMasterData {
+        let mut data = text_and_shape_tables();
+        data.insert_value(
+            "customProfileTextColors",
+            serde_json::json!([{ "id": 7, "colorCode": "#444466" }, { "id": 2, "colorCode": "#ff8000" }]),
+        )
+        .unwrap();
+        for (table, resource_type, id, file_name) in [
+            (
+                "customProfileCharacterIconResources",
+                "character_icon",
+                1,
+                "profile_chr_icon_ichika",
+            ),
+            (
+                "customProfileMaterialResources",
+                "material",
+                3,
+                "profile_icon_item_0003",
+            ),
+            (
+                "customProfileUserInterfaceIconResources",
+                "user_interface_icon",
+                2,
+                "profile_icon_0002",
+            ),
+        ] {
+            data.insert_value(
+                table,
+                serde_json::json!([{
+                    "id": id, "seq": id, "customProfileResourceType": resource_type,
+                    "resourceLoadType": "assetbundle",
+                    "resourceLoadVal": format!("custom_profile/{resource_type}"),
+                    "fileName": file_name
+                }]),
+            )
+            .unwrap();
+        }
+        data
+    }
+
+    /// A version-4 page: one element of each icon kind that resolves, one of
+    /// each kind whose row is missing, and a hidden character icon.
+    fn icon_card() -> CustomProfileCard {
+        serde_json::from_value(serde_json::json!({
+            "characterIcons": [
+                { "objectData": visible_object(1, true), "id": 1 },
+                { "objectData": visible_object(4, true), "id": 99 },
+                { "objectData": visible_object(8, false), "id": 1 }
+            ],
+            "materials": [
+                { "objectData": visible_object(2, true), "id": 3 },
+                { "objectData": visible_object(5, true), "id": 98 }
+            ],
+            "userInterfaceIcons": [
+                { "objectData": visible_object(3, true), "id": 2, "colorId": 2, "alpha": 0.5 },
+                { "objectData": visible_object(6, true), "id": 97, "colorId": 2, "alpha": 1.0 },
+                { "objectData": visible_object(7, true), "id": 2, "colorId": 404, "alpha": 0.3 }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn game_layer_commands(
+        scene: &crate::profile_scene::ResolvedProfileScene,
+        game_layer: i32,
+    ) -> Vec<&crate::SemanticCommandSource> {
+        let layer = scene
+            .layers
+            .iter()
+            .find(|layer| layer.game_layer == game_layer)
+            .expect("every authored element keeps its layer");
+        scene
+            .commands
+            .iter()
+            .filter(|command| command.layer_id == layer.id)
+            .collect()
+    }
+
+    #[test]
+    fn icon_elements_parse_and_request_the_keys_of_their_master_rows() {
+        let card = icon_card();
+        assert_eq!(card.element_count(), 8);
+        let data = icon_tables();
+        let preparation = prepare_profile(&card, None, &data, "icons", "jp").unwrap();
+        let mut keys = preparation
+            .resources
+            .iter()
+            .map(|request| request.resource.key.as_str())
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "custom_profile/character_icon/profile_chr_icon_ichika",
+                "custom_profile/material/profile_icon_item_0003",
+                "custom_profile/user_interface_icon/profile_icon_0002",
+            ]
+        );
+        let scene =
+            compile_profile_scene(&card, None, &data, "icons", "jp", &(), BTreeMap::new()).unwrap();
+        assert_eq!(
+            scene
+                .layers
+                .iter()
+                .map(|layer| layer.game_layer)
+                .collect::<Vec<_>>(),
+            (1..=8).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn icon_elements_draw_their_images_and_skip_missing_rows_and_hidden_elements() {
+        let card = icon_card();
+        let data = icon_tables();
+        let scene =
+            compile_profile_scene(&card, None, &data, "icons", "jp", &(), BTreeMap::new()).unwrap();
+        let image = |game_layer: i32| {
+            let commands = game_layer_commands(&scene, game_layer);
+            assert_eq!(commands.len(), 1, "layer {game_layer}");
+            match &commands[0].payload {
+                crate::SemanticCommandPayload::Image { resource, tint, .. } => {
+                    (resource.key.clone(), *tint)
+                }
+                other => panic!("layer {game_layer} draws {other:?}"),
+            }
+        };
+        assert_eq!(
+            image(1),
+            (
+                "custom_profile/character_icon/profile_chr_icon_ichika".into(),
+                [1.0; 4]
+            )
+        );
+        assert_eq!(
+            image(2),
+            (
+                "custom_profile/material/profile_icon_item_0003".into(),
+                [1.0; 4]
+            )
+        );
+        for game_layer in [4, 5, 6, 8] {
+            let commands = game_layer_commands(&scene, game_layer);
+            assert_eq!(commands.len(), 1, "layer {game_layer}");
+            assert!(
+                matches!(
+                    commands[0].payload,
+                    crate::SemanticCommandPayload::Composite { .. }
+                ),
+                "layer {game_layer}"
+            );
+        }
+        assert!(
+            !scene
+                .layers
+                .iter()
+                .find(|layer| layer.game_layer == 8)
+                .unwrap()
+                .authored_visible
+        );
+    }
+
+    #[test]
+    fn user_interface_icons_are_tinted_by_their_colour_row_and_color32_alpha() {
+        let card = icon_card();
+        let data = icon_tables();
+        let scene =
+            compile_profile_scene(&card, None, &data, "icons", "jp", &(), BTreeMap::new()).unwrap();
+        let tint = |game_layer: i32| match &game_layer_commands(&scene, game_layer)[0].payload {
+            crate::SemanticCommandPayload::Image { resource, tint, .. } => {
+                assert_eq!(
+                    resource.key,
+                    "custom_profile/user_interface_icon/profile_icon_0002"
+                );
+                *tint
+            }
+            other => panic!("layer {game_layer} draws {other:?}"),
+        };
+        // 0.5 * 255 = 127.5 and 0.3 * 255 = 76.5 both round to the even step.
+        assert_eq!(tint(3), [1.0, 128.0 / 255.0, 0.0, 128.0 / 255.0]);
+        // An unknown colour takes the first row, like text and shapes.
+        assert_eq!(
+            tint(7),
+            [
+                0x44 as f32 / 255.0,
+                0x44 as f32 / 255.0,
+                0x66 as f32 / 255.0,
+                76.0 / 255.0
+            ]
+        );
+    }
+
+    #[test]
+    fn master_data_without_the_icon_tables_leaves_icons_out_and_draws_the_rest() {
+        let mut value = serde_json::to_value(icon_card()).unwrap();
+        value["shapes"] = serde_json::json!([{
+            "objectData": visible_object(9, true), "alpha": 1.0, "colorId": 7, "id": 1,
+            "outlineAlpha": 0.0, "outlineColorId": 7, "outlineSize": 0.0
+        }]);
+        let card: CustomProfileCard = serde_json::from_value(value).unwrap();
+        for table in [
+            "customProfileCharacterIconResources",
+            "customProfileMaterialResources",
+            "customProfileUserInterfaceIconResources",
+        ] {
+            assert!(
+                !crate::masterdata::PROFILE_MASTERDATA_TABLES.contains(&table),
+                "{table} is not shipped by every region"
+            );
+            assert!(crate::masterdata::PROFILE_OPTIONAL_MASTERDATA_TABLES.contains(&table));
+        }
+        let data = text_and_shape_tables();
+        let preparation = prepare_profile(&card, None, &data, "no-icon-tables", "cn").unwrap();
+        assert_eq!(
+            preparation
+                .resources
+                .iter()
+                .map(|request| request.resource.key.as_str())
+                .collect::<Vec<_>>(),
+            ["custom_profile/shape/round"]
+        );
+        let scene = compile_profile_scene(
+            &card,
+            None,
+            &data,
+            "no-icon-tables",
+            "cn",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(scene.layers.len(), 9);
+        assert!(matches!(
+            game_layer_commands(&scene, 9)[0].payload,
+            crate::SemanticCommandPayload::Shape { .. }
+        ));
+        for game_layer in 1..=8 {
+            assert!(
+                game_layer_commands(&scene, game_layer)
+                    .iter()
+                    .all(|command| matches!(
+                        command.payload,
+                        crate::SemanticCommandPayload::Composite { .. }
+                    )),
+                "layer {game_layer}"
             );
         }
     }

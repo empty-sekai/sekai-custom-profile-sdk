@@ -2,7 +2,8 @@
 //!
 //! 表映射与生产网关适配层一致：cards / stamps / honors / honorGroups /
 //! bondsHonors / bondsHonorWords / gameCharacterUnits / 7 张 customProfile*
-//! 资源表 / eventStories / unitStoryEpisodeGroups。
+//! 资源表 / eventStories / unitStoryEpisodeGroups，以及只有部分 region 提供的
+//! 3 张图标资源表（[`OPTIONAL_TABLES`]）。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -38,6 +39,14 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "customProfileStoryBackgroundResources",
     "eventStories",
     "unitStoryEpisodeGroups",
+];
+
+/// 只有部分 region 提供的表。缺表是常态：引用它的元素按缺行处理、不绘制，
+/// 也不计入 [`JsonMasterDataProvider::missing_tables`]。
+pub const OPTIONAL_TABLES: &[&str] = &[
+    "customProfileCharacterIconResources",
+    "customProfileMaterialResources",
+    "customProfileUserInterfaceIconResources",
 ];
 
 /// 从 JSON 表集合构建的 MasterDataProvider。
@@ -80,13 +89,17 @@ impl JsonMasterDataProvider {
     }
 
     /// 从目录加载 `<dir>/<table>.json`。缺失的表记 warning 跳过，
-    /// 渲染时对应元素按缺映射处理。
+    /// 渲染时对应元素按缺映射处理；[`OPTIONAL_TABLES`] 缺失时不记 warning。
     pub fn from_dir(dir: &Path) -> Result<Self, String> {
         let mut provider = Self::empty();
-        for name in REQUIRED_TABLES {
+        for name in REQUIRED_TABLES.iter().chain(OPTIONAL_TABLES) {
             let path = dir.join(format!("{name}.json"));
             if !path.exists() {
-                tracing::warn!(table = name, path = %path.display(), "masterdata 表缺失");
+                if OPTIONAL_TABLES.contains(name) {
+                    tracing::debug!(table = name, path = %path.display(), "可选 masterdata 表不存在");
+                } else {
+                    tracing::warn!(table = name, path = %path.display(), "masterdata 表缺失");
+                }
                 continue;
             }
             let json = std::fs::read_to_string(&path)
@@ -195,6 +208,9 @@ impl MasterDataProvider for JsonMasterDataProvider {
             "standing" => "customProfileMemberStandingPictureResources",
             "player_info" => "customProfilePlayerInfoResources",
             "story_bg" => "customProfileStoryBackgroundResources",
+            "character_icon" => "customProfileCharacterIconResources",
+            "material" => "customProfileMaterialResources",
+            "user_interface_icon" => "customProfileUserInterfaceIconResources",
             _ => return None,
         };
         let t = self.table(table_name)?;
@@ -340,6 +356,75 @@ mod tests {
         let p = provider_with("cards", "[]");
         assert!(p.missing_tables().contains(&"stamps"));
         assert!(!p.missing_tables().contains(&"cards"));
+    }
+
+    const ICON_TABLES: [(&str, &str, &str); 3] = [
+        (
+            "customProfileCharacterIconResources",
+            "character_icon",
+            "profile_chr_icon_ichika",
+        ),
+        (
+            "customProfileMaterialResources",
+            "material",
+            "profile_icon_item_0001",
+        ),
+        (
+            "customProfileUserInterfaceIconResources",
+            "user_interface_icon",
+            "profile_icon_0001",
+        ),
+    ];
+
+    fn icon_table_json(resource_type: &str, file_name: &str) -> String {
+        format!(
+            r#"[{{"id": 1, "seq": 1, "customProfileResourceType": "{resource_type}", "resourceLoadType": "assetbundle", "resourceLoadVal": "custom_profile/{resource_type}", "fileName": "{file_name}"}}]"#
+        )
+    }
+
+    #[test]
+    fn icon_resource_tables_resolve_their_rows() {
+        let mut p = JsonMasterDataProvider::empty();
+        for (table, resource_type, file_name) in ICON_TABLES {
+            p.insert_table(table, &icon_table_json(resource_type, file_name))
+                .expect("insert table");
+        }
+        for (_, resource_type, file_name) in ICON_TABLES {
+            let info = p.resolve_resource(resource_type, 1).expect(resource_type);
+            assert_eq!(
+                info.asset_key(),
+                format!("custom_profile/{resource_type}/{file_name}")
+            );
+            assert_eq!(info.resource_type, resource_type);
+            assert!(p.resolve_resource(resource_type, 2).is_none());
+        }
+    }
+
+    #[test]
+    fn a_directory_without_the_icon_tables_is_not_missing_required_tables() {
+        let dir = std::env::temp_dir().join(format!(
+            "sekai-profile-host-optional-tables-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        std::fs::write(dir.join("cards.json"), "[]").expect("write cards");
+        let (table, resource_type, file_name) = ICON_TABLES[1];
+        std::fs::write(
+            dir.join(format!("{table}.json")),
+            icon_table_json(resource_type, file_name),
+        )
+        .expect("write icon table");
+        let loaded = JsonMasterDataProvider::from_dir(&dir);
+        std::fs::remove_dir_all(&dir).expect("remove dir");
+        let p = loaded.expect("provider");
+        assert!(p.resolve_resource(resource_type, 1).is_some());
+        let missing = p.missing_tables();
+        assert!(missing.contains(&"stamps"));
+        for (table, _, _) in ICON_TABLES {
+            assert!(OPTIONAL_TABLES.contains(&table), "{table}");
+            assert!(!REQUIRED_TABLES.contains(&table), "{table}");
+            assert!(!missing.contains(&table), "{table}");
+        }
     }
 
     #[test]

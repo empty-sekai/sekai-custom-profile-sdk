@@ -162,6 +162,12 @@ cargo run --release --bin render-card -- \
   -o output.png
 ```
 
+`customProfileCharacterIconResources`, `customProfileMaterialResources`, and
+`customProfileUserInterfaceIconResources` (`OPTIONAL_TABLES` in the host crate) are shipped by
+some regions only. `--masterdata` and `--masterdata-url` load them when present; without them
+the `characterIcons`, `materials`, and `userInterfaceIcons` elements are not drawn and no
+missing-table warning is reported.
+
 `--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
 `--asset-url-layout game-assets` only when the source follows the extracted game asset
 layout. That explicit mode reuses the shared core canonical mapping for

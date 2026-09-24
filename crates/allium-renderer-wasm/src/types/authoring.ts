@@ -5,16 +5,19 @@ export const AUTHORING_CHECKPOINT_SCHEMA = "allium.renderer-authoring-checkpoint
 export type AuthoringCategory =
   | "bondsHonors"
   | "cardMembers"
+  | "characterIcons"
   | "collections"
   | "generalBackgrounds"
   | "generals"
   | "honors"
+  | "materials"
   | "others"
   | "shapes"
   | "stamps"
   | "standMembers"
   | "storyBackgrounds"
-  | "texts";
+  | "texts"
+  | "userInterfaceIcons";
 
 export type AuthoringCommand =
   | { kind: "create"; page: number; category: AuthoringCategory; element: Record<string, unknown> }

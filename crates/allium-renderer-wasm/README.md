@@ -235,6 +235,8 @@ const masterData = await renderer.loadMasterData(
 );
 ```
 
+`masterData.optionalTables` 列出只有部分区服提供的表（`customProfileCharacterIconResources`、`customProfileMaterialResources`、`customProfileUserInterfaceIconResources`）。loader 以 `optional: true` 被调用；返回 `null` 或 `undefined` 表示该区服没有这张表，可选表加载失败同样跳过。引用缺失表的元素不绘制，名片其余部分照常渲染。
+
 需要逐表控制生命周期时，可直接驱动 session：
 
 ```ts
@@ -242,6 +244,10 @@ const masterData = await renderer.createMasterData("catalog-2026-07");
 
 for (const table of masterData.requiredTables) {
   await masterData.putTable(table, await applicationMasterData.load(table));
+}
+for (const table of masterData.optionalTables) {
+  const value = await applicationMasterData.loadIfPresent(table);
+  if (value != null) await masterData.putTable(table, value);
 }
 
 await masterData.seal();
