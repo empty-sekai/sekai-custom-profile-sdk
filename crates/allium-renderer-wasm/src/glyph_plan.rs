@@ -8,7 +8,7 @@ use super::{atlas::AtlasConfig, FONT_ENGINE_FINGERPRINT, TMP_POINT_SIZE, TMP_SPR
 
 const CACHE_SCHEMA: &str = "allium.glyph-raster-cache.v1";
 const THRESHOLD: u32 = 128;
-const DOWNSAMPLE_VERSION: &str = "box-v1";
+const DOWNSAMPLE_VERSION: &str = "box-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -216,11 +216,11 @@ mod tests {
 
     #[test]
     fn identity_matches_the_existing_browser_cache_namespace() {
-        let contract = "allium-r8-edt-ss2-spread6-threshold128-box-v1";
+        let contract = "allium-r8-edt-ss2-spread6-threshold128-box-v2";
         let planned = identity("cn", &"a".repeat(64), 42, RasterBackend::Edt, 2, contract).unwrap();
         assert_eq!(
             planned.opaque_key,
-            "fbd1658fe3bd464c0a54ee42284e7c15f64b68dd60d270c81e818de61bac9894"
+            "bbe3831d69a962e1a532a659a62c31984b78c4695ab7be41c1dbd8fb1f7be673"
         );
     }
 }
