@@ -452,11 +452,34 @@ pub struct BondsHonorWordEntry {
     pub assetbundle_name: String,
 }
 
+/// Font id drawn for a text element whose `fontId` has no
+/// `customProfileTextFonts` row. The game keeps the text component's default
+/// font in that case; font 1 stands in for it.
+pub const DEFAULT_TEXT_FONT_ID: i32 = 1;
+
 pub trait ProfileMasterData {
     fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String>;
     fn get_card(&self, card_id: i32) -> Option<CardEntry>;
     fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor>;
+    /// Colour of the first `customProfileTextColors` row, or `None` when the
+    /// table is empty or not loaded.
+    fn default_color(&self) -> Option<ResolvedColor> {
+        None
+    }
+    /// Colour a text or shape element draws with. A `colorId` the table does
+    /// not contain uses the table's first row, as the game does.
+    fn resolve_color_or_default(&self, color_id: i32) -> Option<ResolvedColor> {
+        self.resolve_color(color_id)
+            .or_else(|| self.default_color())
+    }
     fn resolve_font(&self, font_id: i32) -> Option<String>;
+    /// Font family a text element draws with. A `fontId` the table does not
+    /// contain keeps the default face ([`DEFAULT_TEXT_FONT_ID`]) instead of
+    /// failing the element.
+    fn resolve_font_or_default(&self, font_id: i32) -> Option<String> {
+        self.resolve_font(font_id)
+            .or_else(|| self.resolve_font(DEFAULT_TEXT_FONT_ID))
+    }
     fn resolve_stamp(&self, stamp_id: i32) -> Option<String>;
     fn resolve_resource(&self, resource_type: &str, id: i32) -> Option<ResourceInfo>;
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor>;
@@ -506,8 +529,10 @@ impl JsonTable {
     }
 }
 
-/// Canonicalizes a region code so the CN font-name mapping and `locale`'s
-/// alias table agree on the same inputs regardless of caller casing.
+/// Canonicalizes a region code or locale tag to one of `cn`, `jp`, `tw`, `en`
+/// or `kr`, ignoring case and surrounding whitespace. This is the only region
+/// alias table: the CN font-name mapping and [`crate::locale`] both use it.
+/// Unknown values are returned lowercased.
 pub fn normalize_region(region: &str) -> String {
     match region.trim().to_ascii_lowercase().as_str() {
         "cn" | "sc" | "zh-cn" | "zh-hans" => "cn".into(),
@@ -570,6 +595,15 @@ impl ProfileMasterData for JsonMasterData {
         ResolvedColor::from_hex(
             self.table("customProfileTextColors")?
                 .get(color_id.into())?
+                .get("colorCode")?
+                .as_str()?,
+        )
+    }
+    fn default_color(&self) -> Option<ResolvedColor> {
+        ResolvedColor::from_hex(
+            self.table("customProfileTextColors")?
+                .rows
+                .first()?
                 .get("colorCode")?
                 .as_str()?,
         )
@@ -1017,6 +1051,42 @@ mod tests {
         let honor = data.resolve_honor(7, 1).unwrap();
         assert_eq!(honor.asset_bundle_name, "honor_live_1");
         assert_eq!(honor.honor_rarity, "low");
+    }
+
+    #[test]
+    fn unknown_color_and_font_ids_fall_back_to_the_default_rows() {
+        let mut data = JsonMasterData::new("jp");
+        data.insert_value(
+            "customProfileTextColors",
+            serde_json::json!([
+                { "id": 5, "colorCode": "#444466" },
+                { "id": 1, "colorCode": "#ffffff" }
+            ]),
+        )
+        .unwrap();
+        data.insert_value(
+            "customProfileTextFonts",
+            serde_json::json!([
+                { "id": 2, "fontName": "Second" },
+                { "id": 1, "fontName": "First" }
+            ]),
+        )
+        .unwrap();
+        let first_row = ResolvedColor {
+            r: 0x44,
+            g: 0x44,
+            b: 0x66,
+            a: 0xff,
+        };
+        assert_eq!(data.resolve_color(404), None);
+        assert_eq!(data.resolve_color_or_default(404), Some(first_row));
+        assert_eq!(
+            data.resolve_color_or_default(1).map(|color| color.r),
+            Some(0xff)
+        );
+        assert_eq!(data.resolve_font_or_default(404).as_deref(), Some("First"));
+        assert_eq!(data.resolve_font_or_default(2).as_deref(), Some("Second"));
+        assert_eq!(JsonMasterData::new("jp").resolve_color_or_default(1), None);
     }
 
     #[test]

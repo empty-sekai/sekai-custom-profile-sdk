@@ -70,7 +70,8 @@ const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
   // Full profile API response; the card document is derived from
-  // userCustomProfileCards (first entry, or pageIndex) and shares its source.
+  // userCustomProfileCards (pages in ascending seq order: the first page, or
+  // pageIndex) and shares its source.
   profile,
   frameMode: "animate",
 });
@@ -114,7 +115,7 @@ The authoring core retains at most 150 history transactions and validates the 15
 
 `createProfileScene()` performs the following work:
 
-1. The SDK derives the card document from `profile.userCustomProfileCards` (`pageIndex` selects the page, first by default) and sends it with the profile, locale, and masterdata session to WASM; the deprecated standalone `card` input is still accepted (without profile data);
+1. WASM takes the page `pageIndex` selects (the first by default) from `profile.userCustomProfileCards` in ascending `seq` order and resolves it with the profile, locale, and masterdata session; the deprecated standalone `card` input is still accepted (without profile data);
 2. The shared semantic core collects scene-local localization demand, and the host provider returns an immutable text snapshot.
 3. WASM resolves authored elements and components with that snapshot and emits the font-family demand actually used by the scene.
 4. The main thread invokes the optional `FontProvider` through a bounded queue, hashes returned bytes, and fixes each family-to-hash mapping for the renderer lifetime. The host may instead call `registerFont()` before scene creation.

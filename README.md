@@ -105,7 +105,7 @@ const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
   // 完整的 profile API 响应；名片文档取自 userCustomProfileCards
-  //（默认第一张，可用 pageIndex 选择），与 profile 数据保证同源。
+  //（按 seq 升序的页序，默认第一页，可用 pageIndex 选择），与 profile 数据保证同源。
   profile,
   frameMode: "animate",
 });

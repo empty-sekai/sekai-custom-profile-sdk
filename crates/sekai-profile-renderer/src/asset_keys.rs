@@ -3,6 +3,10 @@
 use crate::masterdata::MasterData;
 use crate::profile::ProfileData;
 use crate::types::CustomProfileCard;
+use sekai_profile_renderer_core::profile_resolve::{
+    authored_resource, card_artwork_key, AuthoredResource,
+};
+use sekai_profile_renderer_core::profile_scene::ordered_profile_elements;
 use sekai_profile_renderer_core::{masterdata::StandardHonorAssetPlan, ResourceKey};
 
 #[derive(Default)]
@@ -84,40 +88,14 @@ fn card_asset_requirements(
 ) -> AssetRequirements {
     let mut keys = AssetRequirements::default();
 
-    for e in &card.stamps {
-        let abn = md
-            .resolve_stamp(e.id)
-            .unwrap_or_else(|| format!("stamp{:04}", e.id));
-        keys.push(format!("stamp/{abn}/{abn}"));
-    }
-
-    for e in &card.others {
-        if let Some(info) = md.resolve_resource("etc", e.id) {
-            keys.push(format!("{}/{}", info.load_val, info.file_name));
+    // 图片类元素（形状 / 卡面 / 贴纸 / customProfile*Resources）按 core 的
+    // 资源规则取 key；隐藏元素与 masterdata 缺行的元素游戏不会构建，不计入。
+    for element in ordered_profile_elements(card, "asset-keys") {
+        if !element.object().visible {
+            continue;
         }
-    }
-
-    for e in &card.collections {
-        if let Some(info) = md.resolve_resource("collection", e.id) {
-            keys.push(format!("{}/{}", info.load_val, info.file_name));
-        }
-    }
-
-    for e in &card.card_members {
-        let suffix = if e.use_after_special_training.unwrap_or(false) {
-            "after_training"
-        } else {
-            "normal"
-        };
-        let mtype = e.member_type.unwrap_or(2);
-        if let Some(k) = resolve_card_member_key(e.id, mtype, suffix, md) {
-            keys.push(k);
-        }
-    }
-
-    for e in &card.shapes {
-        if let Some(info) = md.resolve_resource("shape", e.id) {
-            keys.push(format!("custom_profile/shape/{}", info.file_name));
+        if let AuthoredResource::Request(request) = authored_resource(element.value, md) {
+            keys.push(request.resource.key);
         }
     }
 
@@ -153,26 +131,11 @@ fn card_asset_requirements(
         );
     }
 
-    for e in &card.stand_members {
-        if let Some(info) = md.resolve_resource("standing", e.id) {
-            keys.push(format!("{}/{}", info.load_val, info.file_name));
-        }
-    }
-    for e in &card.general_backgrounds {
-        if let Some(info) = md.resolve_resource("general_bg", e.id) {
-            keys.push(format!("{}/{}", info.load_val, info.file_name));
-        }
-    }
-    for e in &card.story_backgrounds {
-        if let Some(info) = md.resolve_resource("story_bg", e.id) {
-            keys.push(format!("{}/{}", info.load_val, info.file_name));
-        }
-    }
-
     keys
 }
 
-/// 将 `cardId + type + training` 解析为物理 S3 key。
+/// 将 `cardId + type + training` 解析为卡面素材 key，规则见
+/// [`sekai_profile_renderer_core::profile_resolve::card_artwork_key`]。
 pub fn resolve_card_member_key(
     card_id: i32,
     member_type: i32,
@@ -180,11 +143,11 @@ pub fn resolve_card_member_key(
     md: &MasterData,
 ) -> Option<String> {
     let card = md.get_card(card_id)?;
-    let abn = &card.asset_bundle_name;
-    Some(match member_type {
-        1 => format!("character/member_cutout/{}/{}", abn, training),
-        _ => format!("character/member_small/{}/card_{}", abn, training),
-    })
+    Some(card_artwork_key(
+        &card.asset_bundle_name,
+        member_type,
+        training == "after_training",
+    ))
 }
 
 /// Collects profile-panel asset candidates, including frame alternatives.

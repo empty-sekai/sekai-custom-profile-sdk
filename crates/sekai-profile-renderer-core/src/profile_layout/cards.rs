@@ -4,6 +4,11 @@
 
 use super::{ElementLayout, PanelLayout};
 
+/// Type 5: leader card (997x589).
+///
+/// Entries 1 to 3 place the full-size card overlay relative to the artwork;
+/// the same offsets apply to a full-size `CardMember` element. The star
+/// column is the four-star column, each star as wide as the column.
 pub static LEADER_MEMBER: PanelLayout = PanelLayout {
     w: 997.0,
     h: 589.0,
@@ -15,23 +20,23 @@ pub static LEADER_MEMBER: PanelLayout = PanelLayout {
             h: 530.0,
         }, // Leader card artwork
         ElementLayout {
-            cx: -415.0,
-            cy: -137.0,
-            w: 63.0,
-            h: 203.0,
-        }, // Rarity stars
+            cx: -419.0,
+            cy: -139.0,
+            w: 56.0,
+            h: 200.0,
+        }, // Rarity stars, four-star column
         ElementLayout {
-            cx: 386.0,
-            cy: 219.0,
-            w: 85.0,
+            cx: 385.0,
+            cy: 220.0,
+            w: 88.0,
             h: 92.0,
         }, // Attribute badge
         ElementLayout {
-            cx: 392.0,
-            cy: -187.0,
-            w: 108.0,
-            h: 107.0,
-        }, // Master-rank artwork
+            cx: 393.0,
+            cy: -188.0,
+            w: 104.0,
+            h: 104.0,
+        }, // Master-rank badge
     ],
 };
 
@@ -70,11 +75,11 @@ pub static HONORS: PanelLayout = PanelLayout {
 /// Type 3: main deck (844x305).
 ///
 /// The panel contains one 783x243 deck row with five equally spaced cards.
-/// Each slot is approximately 156.6 pixels wide and 243 pixels high.
+/// Each slot is 156.6 pixels wide and 243 pixels high.
 ///
 /// ## Asset sources
-/// - Card thumbnail: `card_member/{cardId}/1/{normal|after_training}`.
-/// - Source record: `userDeck.members[0..5]` containing five card IDs.
+/// - Card artwork: `character/member_cutout/{assetbundleName}/{normal|after_training}`.
+/// - Source record: `userDeck.member1` to `userDeck.member5`.
 ///
 /// Elements: `[main deck row]`.
 pub static DECK: PanelLayout = PanelLayout {

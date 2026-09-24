@@ -6,7 +6,7 @@
 //! present and typed. Recipe builders in [`crate::general_recipe`] read only
 //! this, so they never touch masterdata or the API payload directly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,6 +85,8 @@ pub struct ProfileComponentSnapshot {
     pub challenge_avatar: Option<ComponentImageSnapshot>,
     #[serde(default)]
     pub music_results: Option<MusicResultsSnapshot>,
+    /// Favorite-story panel slots in order: entry `i` is the story shared as
+    /// `shareNo` `i + 1`.
     #[serde(default)]
     pub story_favorites: Vec<StoryFavoriteSnapshot>,
     #[serde(default)]
@@ -106,6 +108,8 @@ pub struct ComponentImageSnapshot {
     pub descriptor: Option<ResourceDescriptor>,
 }
 
+/// One slot of the favorite-story panel. A slot nobody shares has
+/// `story_id` 0 and no image.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoryFavoriteSnapshot {
     pub story_id: i32,
@@ -124,6 +128,10 @@ pub struct CharacterRankSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CardVisualSnapshot {
     pub card_id: i32,
+    /// The card overlay draws trained rarity stars. This follows the card's
+    /// special-training status, except on the leader card, whose stars follow
+    /// the illustration the player shows. The illustration itself is already
+    /// chosen by `image`.
     pub after_training: bool,
     pub master_rank: i32,
     pub level: i32,
@@ -250,6 +258,10 @@ pub struct ProfileResolveSnapshot {
     pub honor_visuals: BTreeMap<String, HonorVisualSnapshot>,
     #[serde(default)]
     pub card_member_visuals: BTreeMap<String, CardVisualSnapshot>,
+    /// Source keys of elements the game does not build because their
+    /// master-data row does not exist. Their layers stay empty.
+    #[serde(default)]
+    pub omitted_elements: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1203,6 +1215,22 @@ pub fn resource_lookup_key(kind: &str, id: i32, variant: &str) -> String {
     format!("{kind}\0{id}\0{variant}")
 }
 
+/// Lookup key of a card-member element's artwork in
+/// [`ProfileResolveSnapshot::resources`].
+pub fn card_member_lookup_key(value: &CardMemberElement) -> String {
+    let member_type = value.member_type.unwrap_or(2);
+    let training = if value.use_after_special_training.unwrap_or(false) {
+        "after_training"
+    } else {
+        "normal"
+    };
+    resource_lookup_key(
+        "card-member",
+        value.id,
+        &format!("{member_type}:{training}"),
+    )
+}
+
 pub fn resolve_profile_scene(
     card: &CustomProfileCard,
     document_key: &str,
@@ -1226,20 +1254,39 @@ pub fn resolve_profile_scene(
             ),
         ]);
         let command_id = semantic_command_id(&element.source_key, "primary", 0);
-        let (layer_kind, source_content, primary) = lower_primary_command(
-            element.value,
-            element.layer_id,
-            command_id,
-            snapshot,
-            &mut parameters,
-        )?;
+        // The viewer never builds hidden elements, nor elements whose
+        // master-data row is missing; their layers keep an empty composite.
+        let built =
+            element.object().visible && !snapshot.omitted_elements.contains(&element.source_key);
+        let (layer_kind, source_content, primary) = if built {
+            lower_primary_command(
+                element.value,
+                element.layer_id,
+                command_id,
+                snapshot,
+                &mut parameters,
+            )?
+        } else {
+            (
+                LayerKind::Composite,
+                String::new(),
+                SemanticCommandSource::composite(
+                    command_id,
+                    element.layer_id,
+                    kind_name,
+                    Rect::default(),
+                ),
+            )
+        };
         let mut layer_commands = vec![primary];
         let mut layer_regions = Vec::new();
         let mut layer_controls = Vec::new();
-        if matches!(
-            element.value,
-            ProfileElementRef::Honor(_) | ProfileElementRef::BondsHonor(_)
-        ) {
+        if built
+            && matches!(
+                element.value,
+                ProfileElementRef::Honor(_) | ProfileElementRef::BondsHonor(_)
+            )
+        {
             if let Some(visual) = snapshot.honor_visuals.get(&element.source_key) {
                 let layout = crate::profile_layout::ElementLayout {
                     cx: 0.0,
@@ -1266,7 +1313,7 @@ pub fn resolve_profile_scene(
                 ));
             }
         }
-        if let ProfileElementRef::CardMember(card_member) = element.value {
+        if let (true, ProfileElementRef::CardMember(card_member)) = (built, element.value) {
             if card_member.show_master_rank.unwrap_or(false) {
                 if let Some(visual) = snapshot.card_member_visuals.get(&element.source_key) {
                     let bounds = layer_commands[0].bounds;
@@ -1276,6 +1323,7 @@ pub fn resolve_profile_scene(
                         &element.source_key,
                         bounds,
                         visual,
+                        card_member_level_source(snapshot, visual),
                     );
                     layer_commands.extend(
                         overlay
@@ -1286,8 +1334,8 @@ pub fn resolve_profile_scene(
                 }
             }
         }
-        if let (ProfileElementRef::General(general), Some(component)) =
-            (element.value, snapshot.component.as_ref())
+        if let (true, ProfileElementRef::General(general), Some(component)) =
+            (built, element.value, snapshot.component.as_ref())
         {
             if let Some(lowered) = lower_identity_general(
                 general.general_type.unwrap_or_default(),
@@ -1322,6 +1370,32 @@ pub fn resolve_profile_scene(
         interaction_regions,
         controls,
     })
+}
+
+/// Level caption of an authored card-member overlay, in the profile's
+/// localized card-level wording. Without player data there is no locale to
+/// follow, and the caption uses the game's Japanese wording.
+fn card_member_level_source(
+    snapshot: &ProfileResolveSnapshot,
+    visual: &CardVisualSnapshot,
+) -> crate::TextSource {
+    let key = crate::general_recipe::CARD_LEVEL_LOCALIZATION_KEY;
+    let (locale, template) = snapshot
+        .component
+        .as_ref()
+        .and_then(|component| {
+            component
+                .localized_text
+                .get(key)
+                .map(|template| (component.locale.clone(), template.clone()))
+        })
+        .unwrap_or_else(|| {
+            (
+                "ja-JP".into(),
+                crate::locale::resolve("jp", key).unwrap_or_else(|| "{level}".into()),
+            )
+        });
+    crate::general_recipe::card_level_source(&locale, &template, visual.level)
 }
 
 fn lower_primary_command(
@@ -1429,32 +1503,24 @@ fn lower_primary_command(
                 ParameterValue::Bool(value.show_master_rank.unwrap_or(false)),
             );
             let member_type = value.member_type.unwrap_or(2);
-            let training = if value.use_after_special_training.unwrap_or(false) {
-                "after_training"
-            } else {
-                "normal"
-            };
-            let mut resolved = resolved_image(
-                snapshot,
-                "card-member",
-                value.id,
-                &format!("{member_type}:{training}"),
-                layer_id,
-                command_id,
-                "card-member",
-                parameters,
-            )?;
+            let lookup_key = card_member_lookup_key(value);
+            let descriptor = snapshot
+                .resources
+                .get(&lookup_key)
+                .ok_or_else(|| ProfileResolveError::MissingResource(lookup_key.clone()))?;
+            record_resource_parameters(parameters, descriptor);
+            let mut resolved = (
+                LayerKind::Image,
+                String::new(),
+                SemanticCommandSource::image(
+                    command_id,
+                    layer_id,
+                    "card-member",
+                    descriptor.resource.clone(),
+                    descriptor.centered_bounds(),
+                ),
+            );
             if member_type == 1 {
-                let descriptor = snapshot
-                    .resources
-                    .get(&resource_lookup_key(
-                        "card-member",
-                        value.id,
-                        &format!("{member_type}:{training}"),
-                    ))
-                    .ok_or_else(|| {
-                        ProfileResolveError::MissingResource(format!("card-member:{}", value.id))
-                    })?;
                 resolved.2.bounds = Rect {
                     x: -156.0,
                     y: -256.0,

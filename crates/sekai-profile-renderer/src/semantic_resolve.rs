@@ -1,7 +1,8 @@
 //! Native resolve-snapshot adapter for the shared renderer v0.2 profile resolver.
 
+use sekai_profile_renderer_core::profile_resolve::{authored_resource, AuthoredResource};
 use sekai_profile_renderer_core::profile_scene::{
-    ordered_profile_elements, resolve_profile_scene, resource_lookup_key, CardVisualSnapshot,
+    card_member_lookup_key, ordered_profile_elements, resolve_profile_scene, CardVisualSnapshot,
     CharacterRankSnapshot, ComponentImageSnapshot, HonorVisualKind, HonorVisualSnapshot,
     MusicDifficultySnapshot, MusicResultsSnapshot, ProfileComponentSnapshot, ProfileElementRef,
     ProfileResolveError, ProfileResolveSnapshot, ResolvedProfileScene, ResourceDescriptor,
@@ -81,9 +82,15 @@ pub fn resolve_card_commands_with_resources(
     locale: &str,
     resources: ResolveResourceContext<'_>,
 ) -> Result<ResolvedCardCommands, ResolveError> {
-    let mut base = if card.generals.is_empty() {
+    let reads_component = !card.generals.is_empty()
+        || card
+            .card_members
+            .iter()
+            .any(|member| member.show_master_rank.unwrap_or(false));
+    let mut base = if !reads_component {
         // Shared core only reads ProfileResolveSnapshot::component while lowering General
-        // elements. Avoid building the player-wide component graph for text/shape/image pages.
+        // elements and the localized level of card-member overlays. Avoid building the
+        // player-wide component graph for other pages.
         ProfileResolveBaseSnapshot {
             snapshot: ProfileResolveSnapshot::default(),
         }
@@ -218,115 +225,53 @@ fn populate_resolve_snapshot_parts(
     // the legacy AssetStore and the mmap metadata catalog.
     let assets = resources;
     if include_page_overlay {
-        for text in &card.texts {
-            if !snapshot.fonts.contains_key(&text.font_id) {
-                if let Some(font) = md.resolve_font(text.font_id) {
-                    snapshot.fonts.insert(text.font_id, font);
+        for element in ordered_profile_elements(card, document_key) {
+            // The viewer does not build hidden elements.
+            if !element.object().visible {
+                continue;
+            }
+            match element.value {
+                ProfileElementRef::Text(text) => {
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        snapshot.fonts.entry(text.font_id)
+                    {
+                        if let Some(font) = md.resolve_font_or_default(text.font_id) {
+                            entry.insert(font);
+                        }
+                    }
+                    insert_color(snapshot, md, text.color_id);
+                    insert_color(snapshot, md, text.outline_color_id);
+                }
+                ProfileElementRef::Shape(shape) => {
+                    insert_color(snapshot, md, shape.color_id);
+                    insert_color(snapshot, md, shape.outline_color_id);
+                }
+                _ => {}
+            }
+            match authored_resource(element.value, md) {
+                AuthoredResource::None => {}
+                AuthoredResource::MissingRow => {
+                    snapshot.omitted_elements.insert(element.source_key);
+                }
+                AuthoredResource::Request(request) => {
+                    let (table, id) = resource_provenance(element.value);
+                    insert_resource_descriptor(
+                        snapshot,
+                        request.lookup_key,
+                        request.resource.key,
+                        (request.fallback.width, request.fallback.height),
+                        table,
+                        id,
+                        assets,
+                    );
                 }
             }
-            insert_color(snapshot, md, text.color_id);
-            insert_color(snapshot, md, text.outline_color_id);
-        }
-        for shape in &card.shapes {
-            insert_color(snapshot, md, shape.color_id);
-            insert_color(snapshot, md, shape.outline_color_id);
-            let lookup_key = resource_lookup_key("shape", shape.id, "");
-            if snapshot.resources.contains_key(&lookup_key) {
-                continue;
-            }
-            let key = md
-                .resolve_resource("shape", shape.id)
-                .map(|resource| resource.asset_key())
-                .unwrap_or_else(|| format!("custom_profile/shape/{}", shape.id));
-            insert_resource_descriptor(
-                snapshot,
-                lookup_key,
-                key,
-                (1024.0, 1024.0),
-                "customProfileResource",
-                shape.id,
-                assets,
-            );
-        }
-        for value in &card.card_members {
-            let member_type = value.member_type.unwrap_or(2);
-            let training = if value.use_after_special_training.unwrap_or(false) {
-                "after_training"
-            } else {
-                "normal"
-            };
-            let lookup_key = resource_lookup_key(
-                "card-member",
-                value.id,
-                &format!("{member_type}:{training}"),
-            );
-            if snapshot.resources.contains_key(&lookup_key) {
-                continue;
-            }
-            let key = resolve_card_member_key(value.id, member_type, training, md)
-                .unwrap_or_else(|| format!("card_member/{}", value.id));
-            insert_resource_descriptor(
-                snapshot,
-                lookup_key,
-                key,
-                if member_type == 1 {
-                    (312.0, 512.0)
-                } else {
-                    (940.0, 530.0)
-                },
-                "cards",
-                value.id,
-                assets,
-            );
-        }
-        for value in &card.stamps {
-            let lookup_key = resource_lookup_key("stamp", value.id, "");
-            if snapshot.resources.contains_key(&lookup_key) {
-                continue;
-            }
-            let assetbundle_name = md
-                .resolve_stamp(value.id)
-                .unwrap_or_else(|| format!("stamp{:04}", value.id));
-            insert_resource_descriptor(
-                snapshot,
-                lookup_key,
-                format!("stamp/{assetbundle_name}/{assetbundle_name}"),
-                (100.0, 100.0),
-                "stamps",
-                value.id,
-                assets,
-            );
-        }
-        for value in &card.others {
-            insert_master_resource(snapshot, md, "other", "etc", value.id, assets);
-        }
-        for value in &card.collections {
-            insert_master_resource(snapshot, md, "collection", "collection", value.id, assets);
-        }
-        for value in &card.stand_members {
-            insert_master_resource(snapshot, md, "stand-member", "standing", value.id, assets);
-        }
-        for value in &card.general_backgrounds {
-            insert_master_resource(
-                snapshot,
-                md,
-                "general-background",
-                "general_bg",
-                value.id,
-                assets,
-            );
-        }
-        for value in &card.story_backgrounds {
-            insert_master_resource(
-                snapshot,
-                md,
-                "story-background",
-                "story_bg",
-                value.id,
-                assets,
-            );
         }
         for element in ordered_profile_elements(card, document_key) {
+            if !element.object().visible || snapshot.omitted_elements.contains(&element.source_key)
+            {
+                continue;
+            }
             match element.value {
                 ProfileElementRef::Text(text) => {
                     if let Some(mut program) = crate::text::line_indent_program(text, md) {
@@ -386,23 +331,15 @@ fn populate_resolve_snapshot_parts(
                 ProfileElementRef::CardMember(value) if value.show_master_rank.unwrap_or(false) => {
                     if let Some(card) = md.get_card(value.id) {
                         let member_type = value.member_type.unwrap_or(2);
-                        let training = if value.use_after_special_training.unwrap_or(false) {
-                            "after_training"
-                        } else {
-                            "normal"
-                        };
-                        let lookup_key = resource_lookup_key(
-                            "card-member",
-                            value.id,
-                            &format!("{member_type}:{training}"),
-                        );
+                        let lookup_key = card_member_lookup_key(value);
                         let user_card = profile.and_then(|profile| profile.user_card(value.id));
                         snapshot.card_member_visuals.insert(
                             element.source_key,
                             CardVisualSnapshot {
                                 card_id: value.id,
-                                after_training: value.use_after_special_training.unwrap_or_else(
-                                    || user_card.is_some_and(|card| card.after_training),
+                                after_training: user_card.map_or(
+                                    value.use_after_special_training.unwrap_or(false),
+                                    |card| card.special_training_done,
                                 ),
                                 master_rank: user_card.map_or(0, |card| card.master_rank),
                                 level: user_card.map_or(60, |card| card.level),
@@ -436,10 +373,13 @@ fn populate_resolve_snapshot_parts(
             if let Some(font) = md.resolve_font(1) {
                 snapshot.fonts.insert(1, font);
             }
-            let story_favorites = profile
-                .story_favorites
-                .iter()
-                .map(|favorite| StoryFavoriteSnapshot {
+            let story_favorites = sekai_profile_renderer_core::profile_data::story_favorite_slots(
+                &profile.story_favorites,
+                |favorite| favorite.share_no,
+            )
+            .into_iter()
+            .map(|favorite| match favorite {
+                Some(favorite) => StoryFavoriteSnapshot {
                     story_id: favorite.story_id,
                     story_type: favorite.story_type.clone(),
                     image: ComponentImageSnapshot {
@@ -457,8 +397,18 @@ fn populate_resolve_snapshot_parts(
                                 )
                             }),
                     },
-                })
-                .collect();
+                },
+                None => StoryFavoriteSnapshot {
+                    story_id: 0,
+                    story_type: String::new(),
+                    image: ComponentImageSnapshot {
+                        source_field: "userProfile.storyFavorites".into(),
+                        source_id: String::new(),
+                        descriptor: None,
+                    },
+                },
+            })
+            .collect();
             let player_avatar = profile.leader_card.as_ref().and_then(|leader| {
                 let card = md.get_card(leader.card_id)?;
                 let training = if leader.after_training {
@@ -522,7 +472,7 @@ fn populate_resolve_snapshot_parts(
                     };
                     Some(CardVisualSnapshot {
                         card_id: member.card_id,
-                        after_training: member.after_training,
+                        after_training: member.special_training_done,
                         master_rank: member.master_rank,
                         level: member.level,
                         rarity: card.card_rarity_type.clone(),
@@ -966,11 +916,29 @@ fn optional_descriptor(
     Some(static_descriptor(key, fallback_size, table, id, resources))
 }
 
+/// Provenance table and id recorded on an authored element's resource.
+fn resource_provenance(element: ProfileElementRef<'_>) -> (&'static str, i32) {
+    match element {
+        ProfileElementRef::Shape(value) => ("customProfileResource", value.id),
+        ProfileElementRef::CardMember(value) => ("cards", value.id),
+        ProfileElementRef::Stamp(value) => ("stamps", value.id),
+        ProfileElementRef::Other(value) => ("etc", value.id),
+        ProfileElementRef::Collection(value) => ("collection", value.id),
+        ProfileElementRef::StandMember(value) => ("standing", value.id),
+        ProfileElementRef::GeneralBackground(value) => ("general_bg", value.id),
+        ProfileElementRef::StoryBackground(value) => ("story_bg", value.id),
+        ProfileElementRef::Text(_)
+        | ProfileElementRef::Honor(_)
+        | ProfileElementRef::BondsHonor(_)
+        | ProfileElementRef::General(_) => ("", 0),
+    }
+}
+
 fn insert_color(snapshot: &mut ProfileResolveSnapshot, md: &MasterData, color_id: i32) {
     if snapshot.colors.contains_key(&color_id) {
         return;
     }
-    if let Some(color) = md.resolve_color(color_id) {
+    if let Some(color) = md.resolve_color_or_default(color_id) {
         snapshot.colors.insert(
             color_id,
             [
@@ -981,33 +949,6 @@ fn insert_color(snapshot: &mut ProfileResolveSnapshot, md: &MasterData, color_id
             ],
         );
     }
-}
-
-fn insert_master_resource(
-    snapshot: &mut ProfileResolveSnapshot,
-    md: &MasterData,
-    lookup_kind: &str,
-    masterdata_kind: &str,
-    id: i32,
-    resources: ResolveResourceContext<'_>,
-) {
-    let lookup_key = resource_lookup_key(lookup_kind, id, "");
-    if snapshot.resources.contains_key(&lookup_key) {
-        return;
-    }
-    let key = md
-        .resolve_resource(masterdata_kind, id)
-        .map(|resource| format!("{}/{}", resource.load_val, resource.file_name))
-        .unwrap_or_else(|| format!("{masterdata_kind}/{id}"));
-    insert_resource_descriptor(
-        snapshot,
-        lookup_key,
-        key,
-        (100.0, 100.0),
-        masterdata_kind,
-        id,
-        resources,
-    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1419,6 +1360,49 @@ mod tests {
     }
 
     #[test]
+    fn hidden_elements_and_missing_master_rows_stay_empty_like_the_shared_core() {
+        let object = |layer, visible| {
+            serde_json::json!({
+                "layer": layer, "lock": false,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": visible
+            })
+        };
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "shapes": [{
+                "objectData": object(1, true), "alpha": 1.0, "colorId": 1, "id": 5,
+                "outlineAlpha": 0.0, "outlineColorId": 1, "outlineSize": 0.0
+            }],
+            "stamps": [
+                { "objectData": object(2, true), "id": 3 },
+                { "objectData": object(3, false), "id": 3 }
+            ],
+            "cardMembers": [{ "objectData": object(4, true), "id": 7, "type": 2 }]
+        }))
+        .expect("card fixture");
+        let md = MasterData::new(Arc::new(EmptyProvider));
+        let resolved = resolve_card_commands(&card, &md, "omitted").expect("native scene");
+        let shared = sekai_profile_renderer_core::profile_resolve::compile_profile_scene(
+            &card,
+            None,
+            &md,
+            "omitted",
+            "und",
+            &(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("shared scene");
+        assert_shared_semantic_parity(resolved.clone(), shared);
+        assert_eq!(resolved.layers.len(), 4);
+        assert!(resolved
+            .commands
+            .iter()
+            .all(|command| matches!(command.payload, SemanticCommandPayload::Composite { .. })));
+        assert!(crate::asset_keys::collect_card_asset_keys(&card, &md).is_empty());
+    }
+
+    #[test]
     fn authored_card_member_overlay_matches_shared_true_false_contract() {
         let object = |layer| {
             serde_json::json!({
@@ -1451,6 +1435,7 @@ mod tests {
                     9001,
                     crate::profile::UserCardInfo {
                         after_training: true,
+                        special_training_done: false,
                         master_rank: 4,
                         level: 37,
                     },
@@ -1458,7 +1443,8 @@ mod tests {
                 (
                     9002,
                     crate::profile::UserCardInfo {
-                        after_training: true,
+                        after_training: false,
+                        special_training_done: true,
                         master_rank: 2,
                         level: 28,
                     },
@@ -1505,20 +1491,20 @@ mod tests {
         assert!(matches!(
             &cropped[2].payload,
             SemanticCommandPayload::Text {
-                source: sekai_profile_renderer_core::TextSource::ProfileField { field, value },
+                source: sekai_profile_renderer_core::TextSource::Localized { key, value, .. },
                 font_role: FontRole::RegionFontId(1),
                 ..
-            } if field == "userCards.9001.level" && value == "Lv.37"
+            } if key == "custom_profile.general.card_level" && value == "Lv.37"
         ));
         assert!(matches!(
             &cropped[5].payload,
             SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/rarity_star_afterTraining"
+                if resource.key == "card/rarity_star_normal"
         ));
         assert!(matches!(
             &cropped[9].payload,
             SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/masterRank_S_4"
+                if resource.key == "card/masterRank_L_4"
         ));
 
         let full = commands_for(1);
@@ -1526,7 +1512,7 @@ mod tests {
         assert!(matches!(
             &full[3].payload,
             SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/rarity_star_normal"
+                if resource.key == "card/rarity_star_afterTraining"
         ));
         assert!(matches!(
             &full[6].payload,

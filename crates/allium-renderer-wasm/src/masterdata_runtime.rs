@@ -7,7 +7,7 @@ use sekai_profile_renderer_core::profile_resolve::{
     compile_profile_scene, compile_profile_scene_with_localizations, prepare_profile,
     prepare_profile_with_localizations, ResourceAvailability, ResourceMetadata, ResourceMetric,
 };
-use sekai_profile_renderer_core::profile_source::CustomProfileCard;
+use sekai_profile_renderer_core::profile_source::{profile_page_order, CustomProfileCard};
 use sekai_profile_renderer_core::{LineIndentSource, ResourceKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,9 +54,12 @@ struct PutTableRequest {
 #[serde(rename_all = "camelCase")]
 struct PrepareRequest {
     document_key: String,
-    card: CustomProfileCard,
+    #[serde(default)]
+    card: Option<CustomProfileCard>,
     #[serde(default)]
     profile: Option<Value>,
+    #[serde(default)]
+    page_index: Option<usize>,
     #[serde(default)]
     locale: Option<String>,
     #[serde(default)]
@@ -69,9 +72,12 @@ struct PrepareRequest {
 #[serde(rename_all = "camelCase")]
 struct CompileRequest {
     document_key: String,
-    card: CustomProfileCard,
+    #[serde(default)]
+    card: Option<CustomProfileCard>,
     #[serde(default)]
     profile: Option<Value>,
+    #[serde(default)]
+    page_index: Option<usize>,
     #[serde(default)]
     locale: Option<String>,
     #[serde(default)]
@@ -136,6 +142,35 @@ impl ResourceMetadata for ResourceMetricMap {
 
 fn yes() -> bool {
     true
+}
+
+/// The card a request renders: the explicit `card`, or else page
+/// `page_index` (default 0) of the profile in the game's page order.
+fn request_card(
+    card: Option<CustomProfileCard>,
+    profile: Option<&Value>,
+    page_index: Option<usize>,
+) -> Result<CustomProfileCard, String> {
+    if let Some(card) = card {
+        return Ok(card);
+    }
+    let pages = profile
+        .and_then(|profile| profile.get("userCustomProfileCards"))
+        .and_then(Value::as_array)
+        .ok_or("profile response does not contain a userCustomProfileCards array")?;
+    let index = page_index.unwrap_or(0);
+    let order = profile_page_order(pages, |page| {
+        page.get("seq").and_then(Value::as_i64).unwrap_or(0) as i32
+    });
+    let page = order
+        .get(index)
+        .map(|&position| &pages[position])
+        .ok_or_else(|| format!("profile page {index} does not exist"))?;
+    let card = page
+        .get("customProfileCard")
+        .ok_or_else(|| format!("profile page {index} has no customProfileCard"))?;
+    serde_json::from_value(card.clone())
+        .map_err(|error| format!("parse profile page {index} failed: {error}"))
 }
 
 #[derive(Serialize)]
@@ -210,10 +245,11 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
             return Err("master-data session must be sealed before profile preparation".into());
         }
         let locale = request.locale.as_deref().unwrap_or(&session.region);
+        let card = request_card(request.card, request.profile.as_ref(), request.page_index)?;
         if request.demand_only {
             return serde_json::to_string(&serde_json::json!({
                 "localizationDemands": sekai_profile_renderer_core::locale::profile_localization_demands(
-                    &request.card,
+                    &card,
                     &session.region,
                     locale,
                 )
@@ -223,7 +259,7 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
         let profile = request.profile.as_ref().map(ProfileData::from_json);
         let prepared = match request.localized_text.as_ref() {
             Some(localized_text) => prepare_profile_with_localizations(
-                &request.card,
+                &card,
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
@@ -231,7 +267,7 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
                 localized_text,
             ),
             None => prepare_profile(
-                &request.card,
+                &card,
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
@@ -277,6 +313,7 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
                 })
                 .collect(),
         );
+        let card = request_card(request.card, request.profile.as_ref(), request.page_index)?;
         let profile = request.profile.as_ref().map(ProfileData::from_json);
         let mut line_indent = BTreeMap::new();
         for program in request.dynamic_programs {
@@ -300,7 +337,7 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
         let locale = request.locale.as_deref().unwrap_or(&session.region);
         let resolved = match request.localized_text.as_ref() {
             Some(localized_text) => compile_profile_scene_with_localizations(
-                &request.card,
+                &card,
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
@@ -310,7 +347,7 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
                 localized_text,
             ),
             None => compile_profile_scene(
-                &request.card,
+                &card,
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
@@ -409,6 +446,53 @@ mod localization_tests {
             .unwrap()
             .iter()
             .any(|entry| entry["text"] == "External Bio"));
+    }
+
+    #[test]
+    fn profile_pages_are_chosen_in_the_game_page_order() {
+        let created: Value =
+            serde_json::from_str(&create(r#"{"region":"en","revision":"page-test"}"#).unwrap())
+                .unwrap();
+        let handle = created["handle"].as_u64().unwrap() as u32;
+        put_table(
+            handle,
+            r#"{"name":"customProfileTextFonts","table":[{"id":1,"fontName":"SyntheticSans"}]}"#,
+        )
+        .unwrap();
+        seal(handle).unwrap();
+        let page = |text: &str| {
+            serde_json::json!({
+                "texts": [{
+                    "objectData": object(1), "colorId": 1, "fontId": 1, "lineSpacing": 0.0,
+                    "outlineColorId": 1, "outlineSize": 0.0, "size": 32.0, "text": text, "type": 0
+                }]
+            })
+        };
+        let profile = serde_json::json!({
+            "userCustomProfileCards": [
+                { "seq": 7, "customProfileCard": page("second") },
+                { "seq": 3, "customProfileCard": page("first") }
+            ]
+        });
+        let text_of = |page_index: Option<usize>| -> Result<String, String> {
+            let prepared: Value = serde_json::from_str(&prepare(
+                handle,
+                &serde_json::json!({
+                    "documentKey": "pages",
+                    "profile": profile,
+                    "pageIndex": page_index
+                })
+                .to_string(),
+            )?)
+            .unwrap();
+            Ok(prepared["layout_layers"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned())
+        };
+        assert_eq!(text_of(None).unwrap(), "first");
+        assert_eq!(text_of(Some(1)).unwrap(), "second");
+        assert!(text_of(Some(2)).is_err());
     }
 
     fn object(layer: i32) -> Value {

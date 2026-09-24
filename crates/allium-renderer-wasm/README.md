@@ -70,7 +70,7 @@ const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
   // 完整的 profile API 响应；名片文档取自 userCustomProfileCards
-  //（默认第一张，可用 pageIndex 选择），与 profile 数据同源。
+  //（按 seq 升序的页序，默认第一页，可用 pageIndex 选择），与 profile 数据同源。
   profile,
   frameMode: "animate",
 });
@@ -114,7 +114,7 @@ authoring.destroy();
 
 `createProfileScene()` 会依次完成以下语义解析、资源准备与 GPU 初始化流程：
 
-1. SDK 从 `profile.userCustomProfileCards` 解析名片文档（`pageIndex` 选页，默认第一张），随 profile、locale 与 masterdata session 发给 WASM；也兼容已废弃的独立 `card` 入参（此时无 profile 数据）；
+1. WASM 从 `profile.userCustomProfileCards` 按 `seq` 升序取出 `pageIndex` 指定的页（默认第一页），与 profile、locale 和 masterdata session 一起解析；也兼容已废弃的独立 `card` 入参（此时无 profile 数据）；
 2. shared semantic core 收集本场景的 localization demand，调用方 provider 返回不可变文本快照；
 3. WASM 用该文本快照解析 authored elements 与 components，并输出实际使用的 font family demand；
 4. 主线程通过有界队列调用可选 `FontProvider`，对返回 bytes 计算 hash，并把 family→hash 锁定在 renderer 生命周期内；调用方也可以在创建 scene 前直接 `registerFont()`；

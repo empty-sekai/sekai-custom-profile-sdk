@@ -509,7 +509,7 @@ fn semantic_text_glyph<'a>(
     &'a crate::sdf::atlas::MappedSdfAtlas,
     &'a crate::sdf::atlas::SdfAtlasGlyphManifest,
 )> {
-    let primary_family = context.md.resolve_font(font_id)?;
+    let primary_family = context.md.resolve_font_or_default(font_id)?;
     context
         .text_atlases
         .profile_glyph_for_font_family(&primary_family, codepoint)
@@ -908,7 +908,7 @@ fn general_base_tile_plan(
                 let font_id = match font_role {
                     FontRole::RegionFontId(font_id) => *font_id,
                 };
-                let Some(primary_family) = semantic.md.resolve_font(font_id) else {
+                let Some(primary_family) = semantic.md.resolve_font_or_default(font_id) else {
                     return Ok(None);
                 };
                 digest.update(primary_family.as_bytes());
@@ -2324,14 +2324,12 @@ fn append_semantic_text_draws(
     let font_id = match font_role {
         FontRole::RegionFontId(font_id) => *font_id,
     };
-    let family =
-        context
-            .md
-            .resolve_font(font_id)
-            .ok_or_else(|| ProfileCompositorError::SemanticSdf {
-                role: command.role.clone(),
-                reason: format!("missing region fontId={font_id}"),
-            })?;
+    let family = context.md.resolve_font_or_default(font_id).ok_or_else(|| {
+        ProfileCompositorError::SemanticSdf {
+            role: command.role.clone(),
+            reason: format!("missing region fontId={font_id}"),
+        }
+    })?;
     if context
         .text_atlases
         .atlas_for_font_family(&family)

@@ -1,53 +1,33 @@
 //! 卡面合成公共工具。
+//!
+//! 稀有度、星标与裁切规则由 `sekai_profile_renderer_core::general_recipe`
+//! 定义，这里只做转发。
 
-/// object-fit: cover 的源矩形计算。
+use sekai_profile_renderer_core::general_recipe;
+
+/// object-fit: cover 的源矩形计算，返回 `(x, y, w, h)`。
 #[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn cover_crop_rect(src_w: f32, src_h: f32, dst_w: f32, dst_h: f32) -> (f32, f32, f32, f32) {
-    let img_ratio = src_w / src_h;
-    let dst_ratio = dst_w / dst_h;
-    if img_ratio > dst_ratio {
-        let crop_w = src_h * dst_ratio;
-        ((src_w - crop_w) / 2.0, 0.0, crop_w, src_h)
-    } else {
-        let crop_h = src_w / dst_ratio;
-        (0.0, (src_h - crop_h) / 2.0, src_w, crop_h)
-    }
+    let rect = general_recipe::cover_source_rect(src_w, src_h, dst_w, dst_h);
+    (rect.x, rect.y, rect.width, rect.height)
 }
 
 /// 稀有度后缀映射。
 #[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn rarity_suffix(rarity: &str) -> &str {
-    if rarity == "rarity_birthday" {
-        "bd"
-    } else {
-        rarity.rsplit('_').next().unwrap_or("1")
-    }
+    general_recipe::card_rarity_suffix(rarity)
 }
 
 /// 稀有度对应的星级数量。
 #[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn rarity_count(rarity: &str) -> usize {
-    if rarity == "rarity_birthday" {
-        1
-    } else {
-        rarity
-            .rsplit('_')
-            .next()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(1)
-    }
+    general_recipe::card_rarity_star_count(rarity)
 }
 
 /// 星图 key 映射。
 #[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
 pub fn star_icon_key(rarity: &str, trained: bool) -> &'static str {
-    if rarity == "rarity_birthday" {
-        "card/rarity_birthday"
-    } else if trained {
-        "card/rarity_star_afterTraining"
-    } else {
-        "card/rarity_star_normal"
-    }
+    general_recipe::card_rarity_star_key(rarity, trained)
 }
 
 #[cfg(feature = "skia-oracle")]

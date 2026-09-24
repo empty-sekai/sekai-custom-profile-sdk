@@ -4,6 +4,11 @@
 
 use super::{ElementLayout, PanelLayout};
 
+/// Type 16: song completion panel with a clear / full-combo / all-perfect tab
+/// (939x300).
+///
+/// The six difficulty labels share one row (`cy -20`, 43 high) and their
+/// counts share the row below (`cy -63`, 29 high); only the columns differ.
 pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
     w: 939.0,
     h: 300.0,
@@ -16,9 +21,9 @@ pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
         }, // [0] Clear, full-combo, or all-perfect heading
         ElementLayout {
             cx: -349.0,
-            cy: -21.0,
+            cy: -20.0,
             w: 131.0,
-            h: 44.0,
+            h: 43.0,
         }, // [1] EASY label
         ElementLayout {
             cx: -347.0,
@@ -28,9 +33,9 @@ pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
         }, // [2] EASY count
         ElementLayout {
             cx: -213.0,
-            cy: -21.0,
+            cy: -20.0,
             w: 128.0,
-            h: 42.0,
+            h: 43.0,
         }, // [3] NORMAL label
         ElementLayout {
             cx: -213.0,
@@ -40,27 +45,27 @@ pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
         }, // [4] NORMAL count
         ElementLayout {
             cx: -79.0,
-            cy: -21.0,
+            cy: -20.0,
             w: 129.0,
-            h: 39.0,
+            h: 43.0,
         }, // [5] HARD label
         ElementLayout {
             cx: -77.0,
-            cy: -62.0,
+            cy: -63.0,
             w: 55.0,
-            h: 28.0,
+            h: 29.0,
         }, // [6] HARD count
         ElementLayout {
             cx: 58.0,
             cy: -20.0,
             w: 129.0,
-            h: 41.0,
+            h: 43.0,
         }, // [7] EXPERT label
         ElementLayout {
             cx: 57.0,
-            cy: -62.0,
+            cy: -63.0,
             w: 56.0,
-            h: 28.0,
+            h: 29.0,
         }, // [8] EXPERT count
         ElementLayout {
             cx: 193.0,
@@ -70,7 +75,7 @@ pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
         }, // [9] MASTER label
         ElementLayout {
             cx: 193.0,
-            cy: -62.0,
+            cy: -63.0,
             w: 34.0,
             h: 29.0,
         }, // [10] MASTER count
@@ -82,7 +87,7 @@ pub static MUSIC_CLEAR_TAB: PanelLayout = PanelLayout {
         }, // [11] Vertical divider
         ElementLayout {
             cx: 349.0,
-            cy: -19.0,
+            cy: -20.0,
             w: 129.0,
             h: 43.0,
         }, // [12] APPEND label

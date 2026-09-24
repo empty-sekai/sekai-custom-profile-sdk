@@ -4,6 +4,11 @@
 
 use super::{ElementLayout, PanelLayout};
 
+/// Types 11 and 15: character rank and challenge stage (967x872).
+///
+/// Two tabs switch between character rank and challenge stage. Characters are
+/// laid out four per row; entries 2 to 5 give the first avatar, its rank pill
+/// and the column and row pitches of that grid.
 pub static CHAR_RANK: PanelLayout = PanelLayout {
     w: 967.0,
     h: 872.0,
@@ -21,29 +26,29 @@ pub static CHAR_RANK: PanelLayout = PanelLayout {
             h: 59.0,
         }, // [1] Challenge-stage tab
         ElementLayout {
-            cx: -1.0,
-            cy: -40.0,
-            w: 828.0,
-            h: 683.0,
-        }, // [2] Scrollable content area
-        ElementLayout {
-            cx: -317.0,
+            cx: -350.0,
             cy: 259.0,
-            w: 197.0,
-            h: 86.0,
-        }, // [3] First character row
+            w: 76.0,
+            h: 76.0,
+        }, // [2] First character avatar
         ElementLayout {
-            cx: -373.0,
-            cy: 261.0,
-            w: 85.0,
-            h: 84.0,
-        }, // [4] Sample character avatar
+            cx: -300.5,
+            cy: 251.4,
+            w: 175.0,
+            h: 60.8,
+        }, // [3] First rank pill, sharing the avatar's left and bottom edges
         ElementLayout {
-            cx: -288.0,
-            cy: 247.0,
-            w: 39.0,
-            h: 29.0,
-        }, // [5] Sample character rank
+            cx: -150.0,
+            cy: 259.0,
+            w: 76.0,
+            h: 76.0,
+        }, // [4] Second-column avatar
+        ElementLayout {
+            cx: -350.0,
+            cy: 154.0,
+            w: 76.0,
+            h: 76.0,
+        }, // [5] Second-row avatar
     ],
 };
 

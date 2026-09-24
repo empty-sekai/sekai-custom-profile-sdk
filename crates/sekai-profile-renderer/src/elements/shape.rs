@@ -379,18 +379,22 @@ pub(crate) fn capture_shape_sdf_from_affine(
     assets: Option<&AssetStore>,
     observer: &mut dyn FnMut(Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError>),
 ) {
-    let color = md.resolve_color(shape.color_id).unwrap_or(ResolvedColor {
-        r: 128,
-        g: 128,
-        b: 128,
-        a: 255,
-    });
-    let outline_color = md
-        .resolve_color(shape.outline_color_id)
+    // Without any colour table the face is white and the outline black, the
+    // same defaults the shared scene uses.
+    let color = md
+        .resolve_color_or_default(shape.color_id)
         .unwrap_or(ResolvedColor {
             r: 255,
             g: 255,
             b: 255,
+            a: 255,
+        });
+    let outline_color = md
+        .resolve_color_or_default(shape.outline_color_id)
+        .unwrap_or(ResolvedColor {
+            r: 0,
+            g: 0,
+            b: 0,
             a: 255,
         });
     // The sprite comes from the shape's master resource; without one the

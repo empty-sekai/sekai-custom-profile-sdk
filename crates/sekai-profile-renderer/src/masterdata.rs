@@ -175,6 +175,10 @@ pub trait MasterDataProvider: Send + Sync {
     fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String>;
     fn get_card(&self, card_id: i32) -> Option<CardEntry>;
     fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor>;
+    /// `customProfileTextColors` 首行颜色；表为空或未加载时返回 `None`（默认实现）。
+    fn default_color(&self) -> Option<ResolvedColor> {
+        None
+    }
     fn resolve_font(&self, font_id: i32) -> Option<String>;
     fn resolve_stamp(&self, stamp_id: i32) -> Option<String>;
     fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo>;
@@ -245,8 +249,30 @@ impl MasterData {
         self.provider.resolve_color(color_id)
     }
 
+    /// 元素实际绘制的颜色：未知 colorId 回退颜色表首行，规则见
+    /// [`sekai_profile_renderer_core::masterdata::ProfileMasterData::resolve_color_or_default`]。
+    pub fn resolve_color_or_default(&self, color_id: i32) -> Option<ResolvedColor> {
+        sekai_profile_renderer_core::masterdata::ProfileMasterData::resolve_color_or_default(
+            self, color_id,
+        )
+        .map(|value| ResolvedColor {
+            r: value.r,
+            g: value.g,
+            b: value.b,
+            a: value.a,
+        })
+    }
+
     pub fn resolve_font(&self, font_id: i32) -> Option<String> {
         self.provider.resolve_font(font_id)
+    }
+
+    /// 文本元素实际使用的字体：未知 fontId 保持默认字体，规则见
+    /// [`sekai_profile_renderer_core::masterdata::ProfileMasterData::resolve_font_or_default`]。
+    pub fn resolve_font_or_default(&self, font_id: i32) -> Option<String> {
+        sekai_profile_renderer_core::masterdata::ProfileMasterData::resolve_font_or_default(
+            self, font_id,
+        )
     }
 
     pub fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
@@ -326,6 +352,17 @@ impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
         color_id: i32,
     ) -> Option<sekai_profile_renderer_core::masterdata::ResolvedColor> {
         MasterData::resolve_color(self, color_id).map(|value| {
+            sekai_profile_renderer_core::masterdata::ResolvedColor {
+                r: value.r,
+                g: value.g,
+                b: value.b,
+                a: value.a,
+            }
+        })
+    }
+
+    fn default_color(&self) -> Option<sekai_profile_renderer_core::masterdata::ResolvedColor> {
+        self.provider.default_color().map(|value| {
             sekai_profile_renderer_core::masterdata::ResolvedColor {
                 r: value.r,
                 g: value.g,

@@ -105,7 +105,8 @@ const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
   // Full profile API response; the card document is derived from
-  // userCustomProfileCards (first entry, or pageIndex) and shares its source.
+  // userCustomProfileCards (pages in ascending seq order: the first page, or
+  // pageIndex) and shares its source.
   profile,
   frameMode: "animate",
 });

@@ -86,13 +86,16 @@ export type ProfileSceneCreateOptions = {
   documentKey: string;
   /**
    * Full profile API response body. The card document is derived from
-   * `userCustomProfileCards` (first entry unless `pageIndex` says otherwise),
-   * so the card and the profile data can never drift apart.
+   * `userCustomProfileCards` (the first page unless `pageIndex` says
+   * otherwise), so the card and the profile data can never drift apart.
    */
   profile?: unknown;
   /** @deprecated legacy input: a standalone card document without profile data. */
   card?: unknown;
-  /** Zero-based index into `profile.userCustomProfileCards`. Defaults to 0. */
+  /**
+   * Zero-based page number in the order the game shows the pages: ascending
+   * `seq`, not the position in `profile.userCustomProfileCards`. Defaults to 0.
+   */
   pageIndex?: number;
   locale?: string;
   frameMode?: "final" | "animate";
@@ -105,12 +108,13 @@ export type ProfileSceneCreateOptions = {
 };
 
 /**
- * Resolves the authoring card + profile pair from the `profile`-first
- * contract, falling back to the deprecated standalone `card` input.
+ * Resolves the render input from the `profile`-first contract, falling back
+ * to the deprecated standalone `card` input. With a profile, the page itself
+ * is picked by the core resolver in the game's page order.
  */
 function resolveProfileSceneInputs(
   options: ProfileSceneCreateOptions,
-): { card: unknown; profile: unknown } {
+): { card?: unknown; profile: unknown; pageIndex?: number } {
   if (options.profile != null) {
     const cards = (options.profile as Record<string, unknown>).userCustomProfileCards;
     if (!Array.isArray(cards) || cards.length === 0) {
@@ -119,19 +123,26 @@ function resolveProfileSceneInputs(
         "profile response does not contain a userCustomProfileCards array",
       );
     }
-    const index = options.pageIndex ?? 0;
-    const entry = cards[index];
-    const card =
-      entry && typeof entry === "object"
-        ? (entry as Record<string, unknown>).customProfileCard
-        : undefined;
-    if (card == null) {
+    const pageIndex = options.pageIndex ?? 0;
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= cards.length) {
       throw new BrowserRendererError(
         "INVALID_PROFILE_INPUT",
-        `userCustomProfileCards[${index}].customProfileCard is missing`,
+        `pageIndex ${pageIndex} is outside the ${cards.length} profile pages`,
       );
     }
-    return { card, profile: options.profile };
+    const missing = cards.findIndex(
+      (entry) =>
+        entry == null ||
+        typeof entry !== "object" ||
+        (entry as Record<string, unknown>).customProfileCard == null,
+    );
+    if (missing >= 0) {
+      throw new BrowserRendererError(
+        "INVALID_PROFILE_INPUT",
+        `userCustomProfileCards[${missing}].customProfileCard is missing`,
+      );
+    }
+    return { profile: options.profile, pageIndex };
   }
   if (options.card != null) {
     return { card: options.card, profile: undefined };
@@ -247,6 +258,7 @@ export class BrowserRenderer {
           documentKey: options.documentKey,
           card: inputs.card,
           profile: inputs.profile,
+          pageIndex: inputs.pageIndex,
           locale,
           demandOnly: true,
         });
@@ -260,6 +272,7 @@ export class BrowserRenderer {
           documentKey: options.documentKey,
           card: inputs.card,
           profile: inputs.profile,
+          pageIndex: inputs.pageIndex,
           locale,
           localizedText,
           fontDemandOnly: true,
@@ -284,6 +297,7 @@ export class BrowserRenderer {
         documentKey: options.documentKey,
         card: inputs.card,
         profile: inputs.profile,
+        pageIndex: inputs.pageIndex,
         locale,
         localizedText,
       });
@@ -311,6 +325,7 @@ export class BrowserRenderer {
         documentKey: options.documentKey,
         card: inputs.card,
         profile: inputs.profile,
+        pageIndex: inputs.pageIndex,
         locale,
         localizedText,
         frameMode: options.frameMode ?? "animate",

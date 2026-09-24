@@ -37,7 +37,13 @@ impl HonorSlot {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardState {
     pub card_id: i32,
+    /// The player shows the trained illustration (`defaultImage` is
+    /// `special_training`).
     pub after_training: bool,
+    /// The card has finished special training (`specialTrainingStatus` is
+    /// `done`). Rarity stars follow this, not the illustration choice.
+    #[serde(default)]
+    pub special_training_done: bool,
     pub master_rank: i32,
     pub level: i32,
 }
@@ -65,10 +71,35 @@ pub struct CharacterRank {
     pub rank: i32,
 }
 
+/// Story types the favorite-story panel shows; entries of any other type are
+/// left out.
+pub const STORY_FAVORITE_TYPES: [&str; 2] = ["event_story", "unit_story"];
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoryFavorite {
     pub story_id: i32,
     pub story_type: String,
+    /// One-based panel slot (`shareNo`).
+    #[serde(default)]
+    pub share_no: i32,
+}
+
+/// Arranges favorite stories by panel slot: entry `i` is the story shared as
+/// `shareNo` `i + 1`, or `None` when nobody shares that slot. When two stories
+/// name the same slot the later one takes it, as in the game. Stories without
+/// a slot (`shareNo` below 1) are left out.
+pub fn story_favorite_slots<T>(stories: &[T], share_no: impl Fn(&T) -> i32) -> Vec<Option<&T>> {
+    let mut slots = Vec::new();
+    for story in stories {
+        let Ok(slot) = usize::try_from(share_no(story) - 1) else {
+            continue;
+        };
+        if slots.len() <= slot {
+            slots.resize(slot + 1, None);
+        }
+        slots[slot] = Some(story);
+    }
+    slots
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,6 +238,10 @@ impl ProfileData {
                         card_id,
                         after_training: card.get("defaultImage").and_then(Value::as_str)
                             == Some("special_training"),
+                        special_training_done: card
+                            .get("specialTrainingStatus")
+                            .and_then(Value::as_str)
+                            == Some("done"),
                         master_rank: integer(card, "masterRank"),
                         level: card.get("level").and_then(Value::as_i64).unwrap_or(60) as i32,
                     },
@@ -244,10 +279,13 @@ impl ProfileData {
                 .iter()
                 .filter_map(|story| {
                     let story_id = integer(story, "storyId");
-                    let story_type = optional_string(story, "storyType")?;
-                    (story_id > 0).then_some(StoryFavorite {
+                    let share_no = integer(story, "shareNo");
+                    let story_type = optional_string(story, "storyType")
+                        .filter(|value| STORY_FAVORITE_TYPES.contains(&value.as_str()))?;
+                    (story_id > 0 && share_no >= 1).then_some(StoryFavorite {
                         story_id,
                         story_type,
+                        share_no,
                     })
                 })
                 .collect();
@@ -379,6 +417,57 @@ mod tests {
             Some(4)
         );
         assert_eq!(placed_bonds_honor_level(None, 8, 2), Some(2));
+    }
+
+    #[test]
+    fn rarity_training_follows_special_training_status_not_the_illustration() {
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userCards": [
+                { "cardId": 1, "defaultImage": "original", "specialTrainingStatus": "done" },
+                { "cardId": 2, "defaultImage": "special_training", "specialTrainingStatus": "done" },
+                { "cardId": 3, "defaultImage": "original", "specialTrainingStatus": "not_doing" }
+            ]
+        }));
+        let state = |id: i32| {
+            let card = &profile.user_cards[&id];
+            (card.after_training, card.special_training_done)
+        };
+        assert_eq!(state(1), (false, true));
+        assert_eq!(state(2), (true, true));
+        assert_eq!(state(3), (false, false));
+    }
+
+    #[test]
+    fn story_favorites_keep_share_slots_and_only_panel_story_types() {
+        let profile = ProfileData::from_json(&serde_json::json!({
+            "userStoryFavorites": [
+                { "storyId": 30, "storyType": "event_story", "shareNo": 3 },
+                { "storyId": 31, "storyType": "unit_story", "shareNo": 1 },
+                { "storyId": 32, "storyType": "event_story", "shareNo": 0 },
+                { "storyId": 33, "storyType": "card_story", "shareNo": 2 }
+            ]
+        }));
+        assert_eq!(
+            profile
+                .story_favorites
+                .iter()
+                .map(|story| (story.story_id, story.share_no))
+                .collect::<Vec<_>>(),
+            vec![(30, 3), (31, 1)]
+        );
+    }
+
+    #[test]
+    fn story_favorite_slots_follow_share_numbers() {
+        let stories = [(30, 3), (31, 1), (32, 3), (33, 0)];
+        let slots = story_favorite_slots(&stories, |story| story.1);
+        assert_eq!(
+            slots
+                .iter()
+                .map(|slot| slot.map(|story| story.0))
+                .collect::<Vec<_>>(),
+            vec![Some(31), None, Some(32)]
+        );
     }
 
     #[test]

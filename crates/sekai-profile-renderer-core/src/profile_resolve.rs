@@ -11,13 +11,13 @@ use thiserror::Error;
 use crate::masterdata::ProfileMasterData;
 use crate::profile_data::{MusicDifficultyStats as ProfileMusicStats, ProfileData};
 use crate::profile_scene::{
-    ordered_profile_elements, resource_lookup_key, CardVisualSnapshot, CharacterRankSnapshot,
-    ComponentImageSnapshot, HonorVisualKind, HonorVisualSnapshot, MusicDifficultySnapshot,
-    MusicResultsSnapshot, ProfileComponentSnapshot, ProfileElementRef, ProfileResolveSnapshot,
-    ResolvedProfileScene, ResourceDescriptor, StoryFavoriteSnapshot,
+    card_member_lookup_key, ordered_profile_elements, resource_lookup_key, CardVisualSnapshot,
+    CharacterRankSnapshot, ComponentImageSnapshot, HonorVisualKind, HonorVisualSnapshot,
+    MusicDifficultySnapshot, MusicResultsSnapshot, ProfileComponentSnapshot, ProfileElementRef,
+    ProfileResolveSnapshot, ResolvedProfileScene, ResourceDescriptor, StoryFavoriteSnapshot,
 };
-use crate::profile_source::{CardMemberElement, CustomProfileCard};
-use crate::{LineIndentSource, ParameterValue, ResourceKey, StableId};
+use crate::profile_source::CustomProfileCard;
+use crate::{LineIndentSource, ParameterValue, ResourceKey};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceMetric {
@@ -98,232 +98,10 @@ pub struct AuthoredProfilePreparation {
 pub enum AuthoredProfileResolveError {
     #[error("master data did not resolve font id {0}")]
     MissingFont(i32),
-    #[error("profile component and honor resolution requires the extended resolver: {0}")]
-    NeedsExtendedResolution(&'static str),
     #[error("resolved text command references missing layer matrix {0}")]
     MissingLayerMatrix(String),
     #[error(transparent)]
     Scene(#[from] crate::profile_scene::ProfileResolveError),
-}
-
-/// Resolves external dependencies for authored image, shape, and text elements.
-/// Component and honor elements fail explicitly until their normalized visual
-/// records are supplied by the extended resolver.
-pub fn prepare_authored_profile(
-    card: &CustomProfileCard,
-    masterdata: &impl ProfileMasterData,
-    document_key: &str,
-) -> Result<AuthoredProfilePreparation, AuthoredProfileResolveError> {
-    let mut output = AuthoredProfilePreparation::default();
-    for element in ordered_profile_elements(card, document_key) {
-        match element.value {
-            ProfileElementRef::Text(value) => {
-                let family = masterdata
-                    .resolve_font(value.font_id)
-                    .ok_or(AuthoredProfileResolveError::MissingFont(value.font_id))?;
-                output.font_families.insert(family.clone());
-                output.fonts.insert(value.font_id, family.clone());
-                output.glyph_layers.push(ProfileGlyphPreparation {
-                    text: value.text.clone(),
-                    font_id: value.font_id,
-                    font_family: family,
-                });
-            }
-            ProfileElementRef::Shape(value) => {
-                let key = masterdata
-                    .resolve_resource("shape", value.id)
-                    .map(|v| format!("custom_profile/shape/{}", v.file_name))
-                    .unwrap_or_else(|| format!("custom_profile/shape/{}", value.id));
-                push_resource(
-                    &mut output,
-                    "shape",
-                    value.id,
-                    "",
-                    key,
-                    ResourceMetric {
-                        width: 1024.0,
-                        height: 1024.0,
-                    },
-                );
-            }
-            ProfileElementRef::CardMember(value) => {
-                let member_type = value.member_type.unwrap_or(2);
-                let training = if value.use_after_special_training.unwrap_or(false) {
-                    "after_training"
-                } else {
-                    "normal"
-                };
-                let key = masterdata
-                    .get_card(value.id)
-                    .map(|card| {
-                        if member_type == 1 {
-                            format!(
-                                "character/member_cutout/{}/{training}",
-                                card.asset_bundle_name
-                            )
-                        } else {
-                            format!(
-                                "character/member_small/{}/card_{training}",
-                                card.asset_bundle_name
-                            )
-                        }
-                    })
-                    .unwrap_or_else(|| format!("card_member/{}", value.id));
-                push_resource(
-                    &mut output,
-                    "card-member",
-                    value.id,
-                    &format!("{member_type}:{training}"),
-                    key,
-                    if member_type == 1 {
-                        ResourceMetric {
-                            width: 312.0,
-                            height: 512.0,
-                        }
-                    } else {
-                        ResourceMetric {
-                            width: 940.0,
-                            height: 530.0,
-                        }
-                    },
-                );
-                if value.show_master_rank.unwrap_or(false) {
-                    append_default_card_member_overlay_preparation(
-                        &mut output,
-                        value,
-                        masterdata,
-                        &element.source_key,
-                    )?;
-                }
-            }
-            ProfileElementRef::Stamp(value) => {
-                let bundle = masterdata
-                    .resolve_stamp(value.id)
-                    .unwrap_or_else(|| format!("stamp{:04}", value.id));
-                push_resource(
-                    &mut output,
-                    "stamp",
-                    value.id,
-                    "",
-                    format!("stamp/{bundle}/{bundle}"),
-                    ResourceMetric {
-                        width: 100.0,
-                        height: 100.0,
-                    },
-                );
-            }
-            ProfileElementRef::Other(value) => {
-                push_master_resource(&mut output, masterdata, "other", "etc", value.id)
-            }
-            ProfileElementRef::Collection(value) => push_master_resource(
-                &mut output,
-                masterdata,
-                "collection",
-                "collection",
-                value.id,
-            ),
-            ProfileElementRef::StandMember(value) => push_master_resource(
-                &mut output,
-                masterdata,
-                "stand-member",
-                "standing",
-                value.id,
-            ),
-            ProfileElementRef::GeneralBackground(value) => push_master_resource(
-                &mut output,
-                masterdata,
-                "general-background",
-                "general_bg",
-                value.id,
-            ),
-            ProfileElementRef::StoryBackground(value) => push_master_resource(
-                &mut output,
-                masterdata,
-                "story-background",
-                "story_bg",
-                value.id,
-            ),
-            ProfileElementRef::Honor(_) | ProfileElementRef::BondsHonor(_) => {
-                return Err(AuthoredProfileResolveError::NeedsExtendedResolution(
-                    "honor visual",
-                ))
-            }
-            ProfileElementRef::General(_) => {
-                return Err(AuthoredProfileResolveError::NeedsExtendedResolution(
-                    "profile component",
-                ))
-            }
-        }
-    }
-    Ok(output)
-}
-
-pub fn build_authored_profile_snapshot(
-    card: &CustomProfileCard,
-    masterdata: &impl ProfileMasterData,
-    document_key: &str,
-    resource_metadata: &impl ResourceMetadata,
-    line_indent: BTreeMap<String, LineIndentSource>,
-) -> Result<ProfileResolveSnapshot, AuthoredProfileResolveError> {
-    let preparation = prepare_authored_profile(card, masterdata, document_key)?;
-    let mut snapshot = ProfileResolveSnapshot {
-        line_indent,
-        ..ProfileResolveSnapshot::default()
-    };
-    for text in &card.texts {
-        snapshot.fonts.insert(
-            text.font_id,
-            masterdata
-                .resolve_font(text.font_id)
-                .ok_or(AuthoredProfileResolveError::MissingFont(text.font_id))?,
-        );
-        insert_color(&mut snapshot, masterdata, text.color_id);
-        insert_color(&mut snapshot, masterdata, text.outline_color_id);
-    }
-    for shape in &card.shapes {
-        insert_color(&mut snapshot, masterdata, shape.color_id);
-        insert_color(&mut snapshot, masterdata, shape.outline_color_id);
-    }
-    for request in preparation.resources {
-        let metric = resource_metadata
-            .metric(&request.resource)
-            .unwrap_or(request.fallback);
-        snapshot.resources.insert(
-            request.lookup_key,
-            ResourceDescriptor {
-                resource: request.resource,
-                natural_width: metric.width,
-                natural_height: metric.height,
-                provenance: BTreeMap::from([(
-                    "kind".into(),
-                    ParameterValue::Text("master_data".into()),
-                )]),
-            },
-        );
-    }
-    populate_card_member_visuals(card, None, masterdata, document_key, &mut snapshot)?;
-    Ok(snapshot)
-}
-
-pub fn compile_authored_profile_scene(
-    card: &CustomProfileCard,
-    masterdata: &impl ProfileMasterData,
-    document_key: &str,
-    resource_metadata: &impl ResourceMetadata,
-    line_indent: BTreeMap<String, LineIndentSource>,
-) -> Result<ResolvedProfileScene, AuthoredProfileResolveError> {
-    let snapshot = build_authored_profile_snapshot(
-        card,
-        masterdata,
-        document_key,
-        resource_metadata,
-        line_indent,
-    )?;
-    Ok(crate::profile_scene::resolve_profile_scene(
-        card,
-        document_key,
-        &snapshot,
-    )?)
 }
 
 /// Builds the complete environment-neutral resolve snapshot for all authored
@@ -428,12 +206,13 @@ fn build_profile_snapshot_inner(
                     .is_some_and(|honor| honor.is_live_master)
         });
         let component_requires_font = card.generals.iter().any(|general| {
-            general.general_type.is_some_and(|general_type| {
-                crate::general_recipe::general_type_requires_font(
-                    general_type,
-                    has_live_master_honor,
-                )
-            })
+            general.object_data.visible
+                && general.general_type.is_some_and(|general_type| {
+                    crate::general_recipe::general_type_requires_font(
+                        general_type,
+                        has_live_master_honor,
+                    )
+                })
         });
         snapshot.component = Some(build_component(
             profile,
@@ -464,33 +243,32 @@ fn populate_card_member_visuals(
         let ProfileElementRef::CardMember(value) = element.value else {
             continue;
         };
-        if !value.show_master_rank.unwrap_or(false) {
+        if !value.show_master_rank.unwrap_or(false)
+            || !element.object().visible
+            || snapshot.omitted_elements.contains(&element.source_key)
+        {
             continue;
         }
         let Some(entry) = masterdata.get_card(value.id) else {
             continue;
         };
         let member_type = value.member_type.unwrap_or(2);
-        let training = if value.use_after_special_training.unwrap_or(false) {
-            "after_training"
-        } else {
-            "normal"
-        };
         let user_card = profile.and_then(|profile| profile.user_cards.get(&value.id));
-        let after_training = value
-            .use_after_special_training
-            .unwrap_or_else(|| user_card.is_some_and(|card| card.after_training));
-        let lookup_key = resource_lookup_key(
-            "card-member",
-            value.id,
-            &format!("{member_type}:{training}"),
-        );
-        let descriptor = snapshot.resources.get(&lookup_key).cloned();
+        // Card views draw trained stars once special training is done, whatever
+        // illustration the element shows. Without player data the element's
+        // own illustration choice is all there is to go on.
+        let trained = user_card.map_or(value.use_after_special_training.unwrap_or(false), |card| {
+            card.special_training_done
+        });
+        let descriptor = snapshot
+            .resources
+            .get(&card_member_lookup_key(value))
+            .cloned();
         snapshot.card_member_visuals.insert(
             element.source_key,
             CardVisualSnapshot {
                 card_id: value.id,
-                after_training,
+                after_training: trained,
                 master_rank: user_card.map_or(0, |card| card.master_rank),
                 level: user_card.map_or(60, |card| card.level),
                 rarity: entry.card_rarity_type,
@@ -630,8 +408,17 @@ fn prepare_profile_inner(
     for (lookup_key, descriptor) in &snapshot.resources {
         collect_descriptor(&mut resources, lookup_key.clone(), descriptor);
     }
+    let built = ordered_profile_elements(card, document_key)
+        .into_iter()
+        .filter(|element| {
+            element.object().visible && !snapshot.omitted_elements.contains(&element.source_key)
+        })
+        .map(|element| element.source_key)
+        .collect::<BTreeSet<_>>();
     for (source_key, visual) in &snapshot.honor_visuals {
-        collect_honor_descriptors(&mut resources, source_key, visual);
+        if built.contains(source_key) {
+            collect_honor_descriptors(&mut resources, source_key, visual);
+        }
     }
     let scene = crate::profile_scene::resolve_profile_scene(card, document_key, &snapshot)?;
     let layer_matrices = scene
@@ -873,64 +660,93 @@ fn populate_authored_resources(
     resource_metadata: &impl ResourceMetadata,
     snapshot: &mut ProfileResolveSnapshot,
 ) -> Result<(), AuthoredProfileResolveError> {
-    for text in &card.texts {
-        snapshot.fonts.insert(
-            text.font_id,
-            masterdata
-                .resolve_font(text.font_id)
-                .ok_or(AuthoredProfileResolveError::MissingFont(text.font_id))?,
-        );
-        insert_color(snapshot, masterdata, text.color_id);
-        insert_color(snapshot, masterdata, text.outline_color_id);
-    }
-    for shape in &card.shapes {
-        insert_color(snapshot, masterdata, shape.color_id);
-        insert_color(snapshot, masterdata, shape.outline_color_id);
-    }
     for element in ordered_profile_elements(card, document_key) {
-        let request = match element.value {
-            ProfileElementRef::Shape(value) => Some(resource_request(
-                "shape",
-                value.id,
-                "",
-                masterdata
-                    .resolve_resource("shape", value.id)
-                    .map(|v| format!("custom_profile/shape/{}", v.file_name))
-                    .unwrap_or_else(|| format!("custom_profile/shape/{}", value.id)),
-                ResourceMetric {
-                    width: 1024.0,
-                    height: 1024.0,
-                },
-            )),
-            ProfileElementRef::CardMember(value) => {
-                let member_type = value.member_type.unwrap_or(2);
-                let training = if value.use_after_special_training.unwrap_or(false) {
-                    "after_training"
-                } else {
-                    "normal"
-                };
-                let key = masterdata
-                    .get_card(value.id)
-                    .map(|card| {
-                        if member_type == 1 {
-                            format!(
-                                "character/member_cutout/{}/{training}",
-                                card.asset_bundle_name
-                            )
-                        } else {
-                            format!(
-                                "character/member_small/{}/card_{training}",
-                                card.asset_bundle_name
-                            )
-                        }
-                    })
-                    .unwrap_or_else(|| format!("card_member/{}", value.id));
-                Some(resource_request(
-                    "card-member",
-                    value.id,
-                    &format!("{member_type}:{training}"),
-                    key,
-                    if member_type == 1 {
+        // The viewer does not build hidden elements, so they need neither
+        // fonts nor resources.
+        if !element.object().visible {
+            continue;
+        }
+        match element.value {
+            ProfileElementRef::Text(text) => {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    snapshot.fonts.entry(text.font_id)
+                {
+                    entry.insert(
+                        masterdata
+                            .resolve_font_or_default(text.font_id)
+                            .ok_or(AuthoredProfileResolveError::MissingFont(text.font_id))?,
+                    );
+                }
+                insert_color(snapshot, masterdata, text.color_id);
+                insert_color(snapshot, masterdata, text.outline_color_id);
+            }
+            ProfileElementRef::Shape(shape) => {
+                insert_color(snapshot, masterdata, shape.color_id);
+                insert_color(snapshot, masterdata, shape.outline_color_id);
+            }
+            _ => {}
+        }
+        match authored_resource(element.value, masterdata) {
+            AuthoredResource::None => {}
+            AuthoredResource::MissingRow => {
+                snapshot.omitted_elements.insert(element.source_key);
+            }
+            AuthoredResource::Request(request) => {
+                insert_request(snapshot, request, resource_metadata)
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Master-data resource an authored element draws; see [`authored_resource`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum AuthoredResource {
+    /// The element kind draws no master-data resource of its own (text,
+    /// honors and General panels).
+    None,
+    /// The master-data row the element references does not exist. The game
+    /// does not build such an element.
+    MissingRow,
+    /// The resource to load, keyed by [`resource_lookup_key`].
+    Request(ProfileResourceRequest),
+}
+
+/// Resolves the resource an authored image-like element draws: shapes, card
+/// members, stamps and the `customProfile*Resources` image kinds. Keys follow
+/// the master-data rows (`resourceLoadVal/fileName`, card and stamp asset
+/// bundles); a missing row yields [`AuthoredResource::MissingRow`] rather than
+/// an invented key.
+pub fn authored_resource(
+    element: ProfileElementRef<'_>,
+    masterdata: &(impl ProfileMasterData + ?Sized),
+) -> AuthoredResource {
+    let request = match element {
+        ProfileElementRef::Shape(value) => master_resource_request(
+            masterdata,
+            "shape",
+            "shape",
+            value.id,
+            ResourceMetric {
+                width: 1024.0,
+                height: 1024.0,
+            },
+        ),
+        ProfileElementRef::CardMember(value) => {
+            let member_type = value.member_type.unwrap_or(2);
+            masterdata
+                .get_card(value.id)
+                .map(|card| ProfileResourceRequest {
+                    lookup_key: card_member_lookup_key(value),
+                    resource: ResourceKey {
+                        namespace: "assets".into(),
+                        key: card_artwork_key(
+                            &card.asset_bundle_name,
+                            member_type,
+                            value.use_after_special_training.unwrap_or(false),
+                        ),
+                    },
+                    fallback: if member_type == 1 {
                         ResourceMetric {
                             width: 312.0,
                             height: 512.0,
@@ -941,57 +757,80 @@ fn populate_authored_resources(
                             height: 530.0,
                         }
                     },
-                ))
-            }
-            ProfileElementRef::Stamp(value) => {
-                let bundle = masterdata
-                    .resolve_stamp(value.id)
-                    .unwrap_or_else(|| format!("stamp{:04}", value.id));
-                Some(resource_request(
-                    "stamp",
-                    value.id,
-                    "",
-                    format!("stamp/{bundle}/{bundle}"),
-                    ResourceMetric {
+                })
+        }
+        ProfileElementRef::Stamp(value) => {
+            masterdata
+                .resolve_stamp(value.id)
+                .map(|bundle| ProfileResourceRequest {
+                    lookup_key: resource_lookup_key("stamp", value.id, ""),
+                    resource: ResourceKey {
+                        namespace: "assets".into(),
+                        key: format!("stamp/{bundle}/{bundle}"),
+                    },
+                    fallback: ResourceMetric {
                         width: 100.0,
                         height: 100.0,
                     },
-                ))
-            }
-            ProfileElementRef::Other(value) => Some(master_resource_request(
-                masterdata, "other", "etc", value.id,
-            )),
-            ProfileElementRef::Collection(value) => Some(master_resource_request(
-                masterdata,
-                "collection",
-                "collection",
-                value.id,
-            )),
-            ProfileElementRef::StandMember(value) => Some(master_resource_request(
-                masterdata,
-                "stand-member",
-                "standing",
-                value.id,
-            )),
-            ProfileElementRef::GeneralBackground(value) => Some(master_resource_request(
-                masterdata,
-                "general-background",
-                "general_bg",
-                value.id,
-            )),
-            ProfileElementRef::StoryBackground(value) => Some(master_resource_request(
-                masterdata,
-                "story-background",
-                "story_bg",
-                value.id,
-            )),
-            _ => None,
-        };
-        if let Some(request) = request {
-            insert_request(snapshot, request, resource_metadata);
+                })
         }
+        ProfileElementRef::Other(value) => {
+            master_resource_request(masterdata, "other", "etc", value.id, SMALL_RESOURCE)
+        }
+        ProfileElementRef::Collection(value) => master_resource_request(
+            masterdata,
+            "collection",
+            "collection",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::StandMember(value) => master_resource_request(
+            masterdata,
+            "stand-member",
+            "standing",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::GeneralBackground(value) => master_resource_request(
+            masterdata,
+            "general-background",
+            "general_bg",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::StoryBackground(value) => master_resource_request(
+            masterdata,
+            "story-background",
+            "story_bg",
+            value.id,
+            SMALL_RESOURCE,
+        ),
+        ProfileElementRef::Text(_)
+        | ProfileElementRef::Honor(_)
+        | ProfileElementRef::BondsHonor(_)
+        | ProfileElementRef::General(_) => return AuthoredResource::None,
+    };
+    request.map_or(AuthoredResource::MissingRow, AuthoredResource::Request)
+}
+
+const SMALL_RESOURCE: ResourceMetric = ResourceMetric {
+    width: 100.0,
+    height: 100.0,
+};
+
+/// Card artwork key: the cut-out illustration for cropped cards
+/// (`member_type` 1, deck slots) and the small full illustration otherwise.
+pub fn card_artwork_key(asset_bundle_name: &str, member_type: i32, after_training: bool) -> String {
+    let training = if after_training {
+        "after_training"
+    } else {
+        "normal"
+    };
+    if member_type == 1 {
+        format!("character/member_cutout/{asset_bundle_name}/{training}")
+    } else {
+        format!("character/member_small/{asset_bundle_name}/card_{training}")
     }
-    Ok(())
 }
 
 fn build_component(
@@ -1031,33 +870,38 @@ fn build_component(
         source_id,
         descriptor: optional_descriptor("static", key, size, table, id, metadata),
     };
-    let story_favorites = profile
-        .story_favorites
-        .iter()
-        .map(|story| StoryFavoriteSnapshot {
-            story_id: story.story_id,
-            story_type: story.story_type.clone(),
-            image: ComponentImageSnapshot {
-                source_field: "userProfile.storyFavorites".into(),
-                source_id: format!("{}:{}", story.story_type, story.story_id),
-                descriptor: masterdata
-                    .resolve_story_banner(&story.story_type, story.story_id)
-                    .and_then(|key| {
-                        optional_descriptor(
-                            "assets",
-                            key,
-                            ResourceMetric {
-                                width: 400.0,
-                                height: 170.0,
-                            },
-                            "storyFavorites",
-                            story.story_id,
-                            metadata,
-                        )
-                    }),
-            },
-        })
-        .collect();
+    let story_favorites =
+        crate::profile_data::story_favorite_slots(&profile.story_favorites, |story| story.share_no)
+            .into_iter()
+            .map(|story| {
+                let Some(story) = story else {
+                    return empty_story_favorite();
+                };
+                StoryFavoriteSnapshot {
+                    story_id: story.story_id,
+                    story_type: story.story_type.clone(),
+                    image: ComponentImageSnapshot {
+                        source_field: "userProfile.storyFavorites".into(),
+                        source_id: format!("{}:{}", story.story_type, story.story_id),
+                        descriptor: masterdata
+                            .resolve_story_banner(&story.story_type, story.story_id)
+                            .and_then(|key| {
+                                optional_descriptor(
+                                    "assets",
+                                    key,
+                                    ResourceMetric {
+                                        width: 400.0,
+                                        height: 170.0,
+                                    },
+                                    "storyFavorites",
+                                    story.story_id,
+                                    metadata,
+                                )
+                            }),
+                    },
+                }
+            })
+            .collect();
     let character_ranks = profile
         .character_ranks
         .iter()
@@ -1097,28 +941,14 @@ fn build_component(
     });
     let card_visual = |card: &crate::profile_data::CardState,
                        member_type: i32,
+                       trained_stars: bool,
                        field: &str,
                        size: ResourceMetric| {
         masterdata.get_card(card.card_id).map(|entry| {
-            let training = if card.after_training {
-                "after_training"
-            } else {
-                "normal"
-            };
-            let key = if member_type == 1 {
-                format!(
-                    "character/member_cutout/{}/{training}",
-                    entry.asset_bundle_name
-                )
-            } else {
-                format!(
-                    "character/member_small/{}/card_{training}",
-                    entry.asset_bundle_name
-                )
-            };
+            let key = card_artwork_key(&entry.asset_bundle_name, member_type, card.after_training);
             CardVisualSnapshot {
                 card_id: card.card_id,
-                after_training: card.after_training,
+                after_training: trained_stars,
                 master_rank: card.master_rank,
                 level: card.level,
                 rarity: entry.card_rarity_type,
@@ -1141,6 +971,7 @@ fn build_component(
             card_visual(
                 card,
                 1,
+                card.special_training_done,
                 "userProfile.deckMembers",
                 ResourceMetric {
                     width: 600.0,
@@ -1149,10 +980,12 @@ fn build_component(
             )
         })
         .collect();
+    // The leader card's stars follow the illustration the player shows.
     let leader_card = profile.leader_card.as_ref().and_then(|card| {
         card_visual(
             card,
             2,
+            card.after_training,
             "userProfile.leaderCard",
             ResourceMetric {
                 width: 940.0,
@@ -1266,6 +1099,18 @@ pub fn build_profile_component_snapshot(
         localized_text,
         requires_font,
     )
+}
+
+fn empty_story_favorite() -> StoryFavoriteSnapshot {
+    StoryFavoriteSnapshot {
+        story_id: 0,
+        story_type: String::new(),
+        image: ComponentImageSnapshot {
+            source_field: "userProfile.storyFavorites".into(),
+            source_id: String::new(),
+            descriptor: None,
+        },
+    }
 }
 
 fn music_results(value: &crate::profile_data::MusicResults) -> MusicResultsSnapshot {
@@ -1476,43 +1321,22 @@ fn optional_descriptor(
     })
 }
 
-fn resource_request(
-    kind: &str,
-    id: i32,
-    variant: &str,
-    key: String,
-    fallback: ResourceMetric,
-) -> ProfileResourceRequest {
-    ProfileResourceRequest {
-        lookup_key: resource_lookup_key(kind, id, variant),
-        resource: ResourceKey {
-            namespace: "assets".into(),
-            key,
-        },
-        fallback,
-    }
-}
-
 fn master_resource_request(
-    masterdata: &impl ProfileMasterData,
+    masterdata: &(impl ProfileMasterData + ?Sized),
     lookup_kind: &str,
     table_kind: &str,
     id: i32,
-) -> ProfileResourceRequest {
-    let key = masterdata
-        .resolve_resource(table_kind, id)
-        .map(|value| format!("{}/{}", value.load_value, value.file_name))
-        .unwrap_or_else(|| format!("{table_kind}/{id}"));
-    resource_request(
-        lookup_kind,
-        id,
-        "",
-        key,
-        ResourceMetric {
-            width: 100.0,
-            height: 100.0,
+    fallback: ResourceMetric,
+) -> Option<ProfileResourceRequest> {
+    let resource = masterdata.resolve_resource(table_kind, id)?;
+    Some(ProfileResourceRequest {
+        lookup_key: resource_lookup_key(lookup_kind, id, ""),
+        resource: ResourceKey {
+            namespace: "assets".into(),
+            key: format!("{}/{}", resource.load_value, resource.file_name),
         },
-    )
+        fallback,
+    })
 }
 
 fn insert_request(
@@ -1537,117 +1361,6 @@ fn insert_request(
     );
 }
 
-fn push_master_resource(
-    output: &mut AuthoredProfilePreparation,
-    masterdata: &impl ProfileMasterData,
-    lookup_kind: &str,
-    table_kind: &str,
-    id: i32,
-) {
-    let key = masterdata
-        .resolve_resource(table_kind, id)
-        .map(|v| format!("{}/{}", v.load_value, v.file_name))
-        .unwrap_or_else(|| format!("{table_kind}/{id}"));
-    push_resource(
-        output,
-        lookup_kind,
-        id,
-        "",
-        key,
-        ResourceMetric {
-            width: 100.0,
-            height: 100.0,
-        },
-    );
-}
-
-fn push_resource(
-    output: &mut AuthoredProfilePreparation,
-    kind: &str,
-    id: i32,
-    variant: &str,
-    key: String,
-    fallback: ResourceMetric,
-) {
-    output.resources.push(ProfileResourceRequest {
-        lookup_key: resource_lookup_key(kind, id, variant),
-        resource: ResourceKey {
-            namespace: "assets".into(),
-            key,
-        },
-        fallback,
-    });
-}
-
-fn append_default_card_member_overlay_preparation(
-    output: &mut AuthoredProfilePreparation,
-    value: &CardMemberElement,
-    masterdata: &impl ProfileMasterData,
-    source_key: &str,
-) -> Result<(), AuthoredProfileResolveError> {
-    let Some(entry) = masterdata.get_card(value.id) else {
-        return Ok(());
-    };
-    let member_type = value.member_type.unwrap_or(2);
-    let visual = CardVisualSnapshot {
-        card_id: value.id,
-        after_training: value.use_after_special_training.unwrap_or(false),
-        master_rank: 0,
-        level: 60,
-        rarity: entry.card_rarity_type,
-        attribute: entry.attr,
-        image: ComponentImageSnapshot {
-            source_field: "customProfile.cardMembers".into(),
-            source_id: value.id.to_string(),
-            descriptor: None,
-        },
-    };
-    let bounds = if member_type == 1 {
-        let family = masterdata
-            .resolve_font(1)
-            .ok_or(AuthoredProfileResolveError::MissingFont(1))?;
-        output.font_families.insert(family.clone());
-        output.fonts.insert(1, family.clone());
-        output.glyph_layers.push(ProfileGlyphPreparation {
-            text: "Lv.60".into(),
-            font_id: 1,
-            font_family: family,
-        });
-        crate::Rect {
-            x: -156.0,
-            y: -256.0,
-            width: 312.0,
-            height: 512.0,
-        }
-    } else {
-        crate::Rect {
-            x: -470.0,
-            y: -265.0,
-            width: 940.0,
-            height: 530.0,
-        }
-    };
-    for node in crate::general_recipe::build_card_member_overlay_recipe(
-        member_type,
-        StableId::derive("card-member-preparation", source_key.as_bytes()),
-        source_key,
-        bounds,
-        &visual,
-    ) {
-        if let crate::general_recipe::GeneralRecipePayload::Image { resource, .. } = node.payload {
-            output.resources.push(ProfileResourceRequest {
-                lookup_key: format!("card-member-overlay\0{}", node.role),
-                resource,
-                fallback: ResourceMetric {
-                    width: node.bounds.width.abs().max(1.0),
-                    height: node.bounds.height.abs().max(1.0),
-                },
-            });
-        }
-    }
-    Ok(())
-}
-
 fn insert_color(
     snapshot: &mut ProfileResolveSnapshot,
     masterdata: &impl ProfileMasterData,
@@ -1656,7 +1369,7 @@ fn insert_color(
     if snapshot.colors.contains_key(&id) {
         return;
     }
-    if let Some(color) = masterdata.resolve_color(id) {
+    if let Some(color) = masterdata.resolve_color_or_default(id) {
         snapshot.colors.insert(
             id,
             [
@@ -1782,12 +1495,221 @@ mod tests {
         )
         .unwrap();
         data.insert_value("customProfileTextColors", serde_json::json!([{ "id": 1, "colorCode": "#ffffff" }, { "id": 2, "colorCode": "#00000000" }])).unwrap();
-        data.insert_value("customProfileShapeResources", serde_json::json!([{ "id": 8, "fileName": "shape_round", "resourceLoadVal": "ignored", "customProfileResourceType": "shape" }])).unwrap();
-        let scene = compile_authored_profile_scene(&card, &data, "synthetic", &(), BTreeMap::new())
-            .unwrap();
+        data.insert_value("customProfileShapeResources", serde_json::json!([{ "id": 8, "fileName": "shape_round", "resourceLoadVal": "custom_profile/shape", "customProfileResourceType": "shape" }])).unwrap();
+        let scene =
+            compile_profile_scene(&card, None, &data, "synthetic", "cn", &(), BTreeMap::new())
+                .unwrap();
         assert_eq!(scene.layers.len(), 2);
         assert_eq!(scene.commands.len(), 2);
         assert_eq!(scene.commands[0].numeric_text_runs[0].text, "42");
+    }
+
+    fn visible_object(layer: i32, visible: bool) -> serde_json::Value {
+        serde_json::json!({
+            "layer": layer, "lock": false, "visible": visible,
+            "position": {"x":0.0,"y":0.0,"z":0.0},
+            "rotation": {"w":1.0,"x":0.0,"y":0.0,"z":0.0},
+            "scale": {"x":1.0,"y":1.0,"z":1.0}
+        })
+    }
+
+    fn text_and_shape_tables() -> JsonMasterData {
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "customProfileTextFonts",
+            serde_json::json!([{ "id": 1, "fontName": "SyntheticSans" }, { "id": 2, "fontName": "SyntheticRound" }]),
+        )
+        .unwrap();
+        data.insert_value(
+            "customProfileTextColors",
+            serde_json::json!([{ "id": 7, "colorCode": "#444466" }, { "id": 2, "colorCode": "#ffffff" }]),
+        )
+        .unwrap();
+        data.insert_value(
+            "customProfileShapeResources",
+            serde_json::json!([{ "id": 1, "fileName": "round", "resourceLoadVal": "custom_profile/shape", "customProfileResourceType": "shape" }]),
+        )
+        .unwrap();
+        data
+    }
+
+    fn layer_commands(
+        scene: &crate::profile_scene::ResolvedProfileScene,
+        kind: crate::AuthoredElementKind,
+        index: u32,
+    ) -> Vec<&crate::SemanticCommandSource> {
+        let layer = scene
+            .layers
+            .iter()
+            .find(|layer| layer.authored_kind == kind && layer.authored_index == index)
+            .expect("every authored element keeps its layer");
+        scene
+            .commands
+            .iter()
+            .filter(|command| command.layer_id == layer.id)
+            .collect()
+    }
+
+    #[test]
+    fn elements_without_a_master_data_row_are_left_out_instead_of_requesting_invented_keys() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "shapes": [
+                { "objectData": visible_object(1, true), "alpha": 1.0, "colorId": 7, "id": 1, "outlineAlpha": 0.0, "outlineColorId": 7, "outlineSize": 0.0 },
+                { "objectData": visible_object(2, true), "alpha": 1.0, "colorId": 7, "id": 99, "outlineAlpha": 0.0, "outlineColorId": 7, "outlineSize": 0.0 }
+            ],
+            "stamps": [{ "objectData": visible_object(3, true), "id": 5 }],
+            "others": [{ "objectData": visible_object(4, true), "id": 6 }],
+            "cardMembers": [{ "objectData": visible_object(5, true), "id": 7, "type": 1 }]
+        }))
+        .unwrap();
+        let data = text_and_shape_tables();
+        let preparation = prepare_profile(&card, None, &data, "missing-rows", "cn").unwrap();
+        assert_eq!(
+            preparation
+                .resources
+                .iter()
+                .map(|request| request.resource.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["custom_profile/shape/round"]
+        );
+        let scene = compile_profile_scene(
+            &card,
+            None,
+            &data,
+            "missing-rows",
+            "cn",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(scene.layers.len(), 5);
+        for (kind, index) in [
+            (crate::AuthoredElementKind::Shape, 1),
+            (crate::AuthoredElementKind::Stamp, 0),
+            (crate::AuthoredElementKind::Other, 0),
+            (crate::AuthoredElementKind::CardMember, 0),
+        ] {
+            let commands = layer_commands(&scene, kind, index);
+            assert_eq!(commands.len(), 1, "{kind:?}");
+            assert!(
+                matches!(
+                    commands[0].payload,
+                    crate::SemanticCommandPayload::Composite { .. }
+                ),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_elements_are_not_resolved_and_request_nothing() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "texts": [{ "objectData": visible_object(1, false), "colorId": 7, "fontId": 404, "lineSpacing": 0.0, "outlineColorId": 7, "outlineSize": 0.0, "size": 32.0, "text": "hidden", "type": 0 }],
+            "shapes": [{ "objectData": visible_object(2, false), "alpha": 1.0, "colorId": 7, "id": 1, "outlineAlpha": 0.0, "outlineColorId": 7, "outlineSize": 0.0 }]
+        }))
+        .unwrap();
+        let data = text_and_shape_tables();
+        let preparation = prepare_profile(&card, None, &data, "hidden", "cn").unwrap();
+        assert!(preparation.resources.is_empty());
+        assert!(preparation.glyph_layers.is_empty());
+        assert!(preparation.layout_layers.is_empty());
+        let scene = compile_profile_scene(&card, None, &data, "hidden", "cn", &(), BTreeMap::new())
+            .unwrap();
+        assert_eq!(scene.layers.len(), 2);
+        assert!(scene.layers.iter().all(|layer| !layer.authored_visible));
+        assert!(scene.commands.iter().all(|command| matches!(
+            command.payload,
+            crate::SemanticCommandPayload::Composite { .. }
+        )));
+    }
+
+    #[test]
+    fn unknown_font_keeps_the_default_face_and_unknown_colors_use_the_first_row() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "texts": [{ "objectData": visible_object(1, true), "colorId": 404, "fontId": 404, "lineSpacing": 0.0, "outlineColorId": 405, "outlineSize": 0.2, "size": 32.0, "text": "text", "type": 0 }],
+            "shapes": [{ "objectData": visible_object(2, true), "alpha": 0.5, "colorId": 406, "id": 1, "outlineAlpha": 0.25, "outlineColorId": 407, "outlineSize": 0.3 }]
+        }))
+        .unwrap();
+        let data = text_and_shape_tables();
+        let preparation = prepare_profile(&card, None, &data, "fallback", "cn").unwrap();
+        assert_eq!(preparation.layout_layers[0].font_family, "SyntheticSans");
+        let scene =
+            compile_profile_scene(&card, None, &data, "fallback", "cn", &(), BTreeMap::new())
+                .unwrap();
+        let first_row = [
+            0x44 as f32 / 255.0,
+            0x44 as f32 / 255.0,
+            0x66 as f32 / 255.0,
+        ];
+        let text = layer_commands(&scene, crate::AuthoredElementKind::Text, 0);
+        let crate::SemanticCommandPayload::Text {
+            color,
+            outline_color,
+            ..
+        } = &text[0].payload
+        else {
+            panic!("text command expected");
+        };
+        assert_eq!(color[..3], first_row);
+        assert_eq!(outline_color[..3], first_row);
+        let shape = layer_commands(&scene, crate::AuthoredElementKind::Shape, 0);
+        let crate::SemanticCommandPayload::Shape { fill, stroke, .. } = &shape[0].payload else {
+            panic!("shape command expected");
+        };
+        assert_eq!(*fill, [first_row[0], first_row[1], first_row[2], 0.5]);
+        assert_eq!(*stroke, [first_row[0], first_row[1], first_row[2], 0.25]);
+    }
+
+    #[test]
+    fn deck_stars_follow_special_training_and_story_favorites_keep_share_slots() {
+        let raw = serde_json::json!({
+            "userCards": [{
+                "cardId": 1, "defaultImage": "original",
+                "specialTrainingStatus": "done", "masterRank": 0, "level": 5
+            }],
+            "userDeck": { "leader": 1, "member1": 1 },
+            "userStoryFavorites": [
+                { "storyId": 3, "storyType": "event_story", "shareNo": 3 },
+                { "storyId": 4, "storyType": "unit_story", "shareNo": 1 }
+            ]
+        });
+        let profile = ProfileData::from_json(&raw);
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "cards",
+            serde_json::json!([{ "id": 1, "assetbundleName": "card_sample", "cardRarityType": "rarity_4", "attr": "cool", "characterId": 1 }]),
+        )
+        .unwrap();
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({})).unwrap();
+        let snapshot = build_profile_snapshot(
+            &card,
+            Some(&profile),
+            &data,
+            "deck",
+            "cn",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let component = snapshot.component.unwrap();
+        let deck = &component.deck_members[0];
+        assert!(deck.after_training, "trained stars");
+        assert_eq!(
+            deck.image.descriptor.as_ref().unwrap().resource.key,
+            "character/member_cutout/card_sample/normal"
+        );
+        assert!(
+            !component.leader_card.as_ref().unwrap().after_training,
+            "the leader card's stars follow the shown illustration"
+        );
+        assert_eq!(
+            component
+                .story_favorites
+                .iter()
+                .map(|story| story.story_id)
+                .collect::<Vec<_>>(),
+            vec![4, 0, 3]
+        );
     }
 
     #[test]
@@ -1815,6 +1737,10 @@ mod tests {
                 {
                     "objectData": object(3), "id": 1003, "type": 1,
                     "showMasterRank": false
+                },
+                {
+                    "objectData": object(4), "id": 1003, "type": 1,
+                    "showMasterRank": true
                 }
             ]
         }))
@@ -1841,6 +1767,7 @@ mod tests {
                     crate::profile_data::CardState {
                         card_id: 1001,
                         after_training: true,
+                        special_training_done: false,
                         master_rank: 4,
                         level: 37,
                     },
@@ -1849,7 +1776,8 @@ mod tests {
                     1002,
                     crate::profile_data::CardState {
                         card_id: 1002,
-                        after_training: true,
+                        after_training: false,
+                        special_training_done: true,
                         master_rank: 2,
                         level: 28,
                     },
@@ -1902,20 +1830,22 @@ mod tests {
         assert!(matches!(
             &cropped[2].payload,
             crate::SemanticCommandPayload::Text {
-                source: crate::TextSource::ProfileField { field, value },
+                source: crate::TextSource::Localized { key, value, .. },
                 font_role: crate::FontRole::RegionFontId(1),
                 ..
-            } if field == "userCards.1001.level" && value == "Lv.37"
+            } if key == "custom_profile.general.card_level" && value == "Lv.37"
         ));
+        // The cropped card shows the untrained illustration of a trained card
+        // but still draws trained stars and the large master-rank badge.
         assert!(matches!(
             &cropped[5].payload,
             crate::SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/rarity_star_afterTraining"
+                if resource.key == "card/rarity_star_normal"
         ));
         assert!(matches!(
             &cropped[9].payload,
             crate::SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/masterRank_S_4"
+                if resource.key == "card/masterRank_L_4"
         ));
 
         let full = commands_for(1);
@@ -1936,7 +1866,7 @@ mod tests {
         assert!(matches!(
             &full[3].payload,
             crate::SemanticCommandPayload::Image { resource, .. }
-                if resource.key == "card/rarity_star_normal"
+                if resource.key == "card/rarity_star_afterTraining"
         ));
         assert!(matches!(
             &full[6].payload,
@@ -1947,19 +1877,15 @@ mod tests {
         let image_only = commands_for(2);
         assert_eq!(image_only.len(), 1);
         assert_eq!(image_only[0].role, "card-member");
-    }
 
-    #[test]
-    fn rejects_components_instead_of_silently_building_placeholder_commands() {
-        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
-            "generals": [{ "objectData": { "layer": 1, "lock": false, "position": {"x":0.0,"y":0.0,"z":0.0}, "rotation": {"w":1.0,"x":0.0,"y":0.0,"z":0.0}, "scale": {"x":1.0,"y":1.0,"z":1.0}, "visible": true }, "type": 1 }]
-        })).unwrap();
-        let error =
-            prepare_authored_profile(&card, &JsonMasterData::new("cn"), "synthetic").unwrap_err();
-        assert_eq!(
-            error,
-            AuthoredProfileResolveError::NeedsExtendedResolution("profile component")
-        );
+        // A card the player does not own has master rank 0: no badge.
+        let unranked = commands_for(3);
+        assert!(unranked
+            .iter()
+            .all(|command| command.role != "card-member-master-rank"));
+        assert!(unranked
+            .iter()
+            .any(|command| command.role == "card-member-level"));
     }
 
     #[test]

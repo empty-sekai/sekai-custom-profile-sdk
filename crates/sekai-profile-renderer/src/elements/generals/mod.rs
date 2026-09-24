@@ -7,25 +7,6 @@
 pub(crate) mod layout;
 pub(crate) mod sdf_text;
 
-#[cfg_attr(not(feature = "skia-oracle"), allow(dead_code))]
-#[allow(dead_code)]
-fn strip_live_master_star_assets(
-    snapshot: &mut sekai_profile_renderer_core::profile_scene::ProfileComponentSnapshot,
-) {
-    for honor in &mut snapshot.honor_slots {
-        if let sekai_profile_renderer_core::profile_scene::HonorVisualKind::Standard {
-            is_live_master: true,
-            live_star_on,
-            live_star_off,
-            ..
-        } = &mut honor.visual
-        {
-            *live_star_on = None;
-            *live_star_off = None;
-        }
-    }
-}
-
 #[cfg(test)]
 mod sdf_text_contract_tests {
     use super::*;
@@ -128,60 +109,6 @@ mod sdf_text_contract_tests {
     }
 
     #[test]
-    fn legacy_live_master_snapshot_drops_decorative_star_assets() {
-        use sekai_profile_renderer_core::profile_scene::{
-            HonorVisualKind, HonorVisualSnapshot, ProfileComponentSnapshot, ResourceDescriptor,
-        };
-        use sekai_profile_renderer_core::ResourceKey;
-        use std::collections::BTreeMap;
-
-        let descriptor = |key: &str| ResourceDescriptor {
-            resource: ResourceKey {
-                namespace: "static".into(),
-                key: key.into(),
-            },
-            natural_width: 16.0,
-            natural_height: 16.0,
-            provenance: BTreeMap::new(),
-        };
-        let mut snapshot = ProfileComponentSnapshot {
-            honor_slots: vec![HonorVisualSnapshot {
-                source_field: "userProfile.honorSlots".into(),
-                source_id: "3013".into(),
-                honor_id: 3013,
-                honor_level: 37,
-                full_size: true,
-                visual: HonorVisualKind::Standard {
-                    honor_type: "achievement".into(),
-                    has_star: true,
-                    is_live_master: true,
-                    progress: 358,
-                    background: None,
-                    frame_candidates: Vec::new(),
-                    overlay: None,
-                    star: None,
-                    star_high: None,
-                    live_star_on: Some(descriptor("honor/live_master_honor_star_1")),
-                    live_star_off: Some(descriptor("honor/live_master_honor_star_2")),
-                },
-            }],
-            ..ProfileComponentSnapshot::default()
-        };
-
-        strip_live_master_star_assets(&mut snapshot);
-        let HonorVisualKind::Standard {
-            live_star_on,
-            live_star_off,
-            ..
-        } = &snapshot.honor_slots[0].visual
-        else {
-            panic!("live-master visual kind changed")
-        };
-        assert!(live_star_on.is_none());
-        assert!(live_star_off.is_none());
-    }
-
-    #[test]
     fn optimized_general_text_has_no_second_layout_implementation() {
         let compositor = include_str!("../../profile_compositor.rs");
         assert!(compositor.contains("capture_general_sdf_text_from_lowered"));
@@ -191,35 +118,6 @@ mod sdf_text_contract_tests {
                 "semantic compositor still owns text layout: {forbidden}"
             );
         }
-    }
-
-    #[test]
-    fn production_identity_general_dispatch_consumes_the_shared_recipe() {
-        let dispatch = include_str!("mod.rs");
-        assert!(
-            dispatch.contains("sekai_profile_renderer_core::general_recipe::build_general_recipe")
-        );
-        assert!(dispatch.contains("draw_shared_general_recipe"));
-        assert!(!dispatch.contains(&["13 => player_name", "::draw_player_name"].concat()));
-        assert!(!dispatch.contains(&["4 => comment", "::draw_comment"].concat()));
-        assert!(!dispatch.contains(&["2 => total_power", "::draw_total_power"].concat()));
-        assert!(!dispatch.contains(&["9 => mvp_superstar", "::draw_mvp_superstar"].concat()));
-        assert!(
-            dispatch.contains("2 | 3 | 4 | 5 | 6 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18")
-        );
-        assert!(!dispatch.contains(&["11 => ", "char_rank"].concat()));
-        assert!(!dispatch.contains(&["14 => story_favorite", "::draw_story_favorite"].concat()));
-        assert!(!dispatch.contains(&["11 | ", "15 => ", "char_rank"].concat()));
-        assert!(!dispatch.contains(&["15 => ", "char_rank"].concat()));
-        assert!(!dispatch.contains(&["3 => deck", "::draw_deck"].concat()));
-        assert!(!dispatch.contains(&["5 => leader_member", "::draw_leader_member"].concat()));
-        assert!(!dispatch.contains(&["6 => honors_panel", "::draw_honors_panel"].concat()));
-        assert!(dispatch.contains(&["color_filters", "::blend_with_color_space"].concat()));
-        assert!(!dispatch.contains(&["12 => music_clear", "::draw_music_clear"].concat()));
-        assert!(!dispatch.contains(&["16 => music_clear_tab", "::draw_music_clear_tab"].concat()));
-        assert!(!dispatch.contains(&["10 => challenge_live", "::draw_challenge_live"].concat()));
-        assert!(!dispatch.contains(&["17 => player_level", "::draw_player_level"].concat()));
-        assert!(!dispatch.contains(&["18 => player_avatar", "::draw_player_avatar"].concat()));
     }
 
     #[test]

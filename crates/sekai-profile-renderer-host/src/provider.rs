@@ -170,6 +170,11 @@ impl MasterDataProvider for JsonMasterDataProvider {
         ResolvedColor::from_hex(v["colorCode"].as_str()?)
     }
 
+    fn default_color(&self) -> Option<ResolvedColor> {
+        let t = self.table("customProfileTextColors")?;
+        ResolvedColor::from_hex(t.all().first()?["colorCode"].as_str()?)
+    }
+
     fn resolve_font(&self, font_id: i32) -> Option<String> {
         let t = self.table("customProfileTextFonts")?;
         let name = t.by_id(font_id as i64)?["fontName"].as_str()?;
@@ -290,6 +295,7 @@ mod tests {
             r##"[{"id": 1, "colorCode": "#ff8800"}]"##,
         );
         let c = p.resolve_color(1).expect("color");
+        assert_eq!(p.default_color().map(|value| value.r), Some(c.r));
         assert_eq!((c.r, c.g, c.b, c.a), (0xff, 0x88, 0x00, 0xff));
         assert!(p.resolve_color(2).is_none());
         assert_eq!(p.color_count(), 1);

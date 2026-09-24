@@ -46,7 +46,7 @@ render-card：自定义名片渲染 CLI
   --masterdata-url <url> 从 URL 前缀拉取 masterdata（接 /<table>.json）；
                          与 --masterdata 二选一
   --card <file>          名片 JSON：CustomProfileCard 或 UserCustomProfileCard 数组
-  --page <seq>           --card 为数组时选择的页码（默认第一张）
+  --page <seq>           --card 为数组时按 seq 选择页（默认 seq 最小的一页）
   --profile <file>       profile API 响应 JSON（注入 generals 数据与称号等级）
   --assets-dir <dir>     本地素材目录（key = 相对路径去扩展名）
   --assets-url <url>     动态素材 URL 前缀（接 /<key>.png）。本地缺失的 key
@@ -184,7 +184,10 @@ fn card_from_value(
                 .into_iter()
                 .find(|c| c.seq == seq)
                 .ok_or_else(|| format!("未找到 seq={seq} 的名片"))?,
-            None => cards.into_iter().next().expect("非空数组"),
+            // 默认取游戏展示的第一页（seq 最小），而非数组首项。
+            None => sekai_profile_renderer::core::profile_source::profile_page(&cards, 0)
+                .cloned()
+                .expect("非空数组"),
         };
         Ok(card.custom_profile_card)
     } else {

@@ -116,12 +116,12 @@ fn catalog(region: &str) -> Option<&'static BTreeMap<String, String>> {
             })
         }};
     }
-    Some(match region.trim().to_ascii_lowercase().as_str() {
-        "cn" | "zh-cn" | "zh-hans" => locale!(CN, "../locales/cn.json"),
-        "jp" | "ja" | "ja-jp" => locale!(JP, "../locales/jp.json"),
-        "tw" | "zh-tw" | "zh-hant" => locale!(TW, "../locales/tw.json"),
-        "en" | "en-us" | "en-gb" => locale!(EN, "../locales/en.json"),
-        "kr" | "ko" | "ko-kr" => locale!(KR, "../locales/kr.json"),
+    Some(match crate::masterdata::normalize_region(region).as_str() {
+        "cn" => locale!(CN, "../locales/cn.json"),
+        "jp" => locale!(JP, "../locales/jp.json"),
+        "tw" => locale!(TW, "../locales/tw.json"),
+        "en" => locale!(EN, "../locales/en.json"),
+        "kr" => locale!(KR, "../locales/kr.json"),
         _ => return None,
     })
 }
@@ -160,9 +160,12 @@ mod tests {
     fn locale_aliases_and_every_general_label_are_complete() {
         for (region, alias) in [
             ("cn", "zh-CN"),
+            ("cn", "sc"),
             ("jp", "ja-JP"),
             ("tw", "zh-TW"),
+            ("tw", "tc"),
             ("en", "en-US"),
+            ("en", "world"),
             ("kr", "ko-KR"),
         ] {
             for key in GENERAL_LOCALIZATION_KEYS {

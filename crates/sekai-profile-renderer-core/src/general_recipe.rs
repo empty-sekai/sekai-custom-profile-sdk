@@ -631,16 +631,6 @@ pub fn build_general_recipe(
                         ),
                     ]),
                 ));
-            } else {
-                nodes.push(shape_node(
-                    layer_id,
-                    source_key,
-                    "challenge-avatar",
-                    4,
-                    avatar_bounds,
-                    GeneralGeometry::Ellipse,
-                    [0.87, 0.87, 0.87, 1.0],
-                ));
             }
             nodes.push(text_node(
                 layer_id,
@@ -842,16 +832,41 @@ pub fn build_general_recipe(
     }))
 }
 
+/// Localization key of the card level caption (`Lv.{level}`).
+pub const CARD_LEVEL_LOCALIZATION_KEY: &str = "custom_profile.general.card_level";
+
+/// Formats a card level caption from its localized template. Levels below 10
+/// are preceded by two spaces, as the game's card view writes them.
+pub fn card_level_text(template: &str, level: i32) -> String {
+    let level = if level <= 9 {
+        format!("  {level}")
+    } else {
+        level.to_string()
+    };
+    template.replace("{level}", &level)
+}
+
+/// Card level caption as a localized text source.
+pub fn card_level_source(locale: &str, template: &str, level: i32) -> TextSource {
+    TextSource::Localized {
+        key: CARD_LEVEL_LOCALIZATION_KEY.into(),
+        locale: locale.into(),
+        value: card_level_text(template, level),
+    }
+}
+
 /// Builds the authored `CardMember` information overlay from the same recipes
 /// used by General type 3 (cropped deck card) and type 5 (full leader card).
 /// The artwork remains a separate authored command so `showMasterRank=false`
-/// can preserve the original image-only contract.
+/// can preserve the original image-only contract. `level` is the caption the
+/// cropped (type 1) overlay draws; see [`card_level_source`].
 pub fn build_card_member_overlay_recipe(
     member_type: i32,
     layer_id: StableId,
     source_key: &str,
     bounds: Rect,
     card: &CardVisualSnapshot,
+    level: TextSource,
 ) -> Vec<GeneralRecipeNode> {
     let mut nodes = Vec::new();
     if member_type == 1 {
@@ -864,10 +879,7 @@ pub fn build_card_member_overlay_recipe(
             bounds,
             scale,
             card,
-            TextSource::ProfileField {
-                field: format!("userCards.{}.level", card.card_id),
-                value: format!("Lv.{}", card.level),
-            },
+            level,
             Vec::new(),
             &mut nodes,
         );
@@ -893,35 +905,33 @@ fn build_deck_recipe(
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
     const SLOT_COUNT: usize = 5;
-    const CONTAINER_X: f32 = -390.5;
-    const CONTAINER_Y: f32 = -124.5;
-    const CONTAINER_WIDTH: f32 = 783.0;
-    const CONTAINER_HEIGHT: f32 = 243.0;
     const CARD_WIDTH: f32 = 312.0;
     const CARD_HEIGHT: f32 = 512.0;
 
-    let slot_width = CONTAINER_WIDTH / SLOT_COUNT as f32;
-    let scale = (slot_width / CARD_WIDTH).min(CONTAINER_HEIGHT / CARD_HEIGHT);
+    let container = layout_rect(crate::profile_layout::DECK.elements[0]);
+    let slot_width = container.width / SLOT_COUNT as f32;
+    let scale = (slot_width / CARD_WIDTH).min(container.height / CARD_HEIGHT);
     let card_width = CARD_WIDTH * scale;
     let card_height = CARD_HEIGHT * scale;
-    let level_template_key = "custom_profile.general.card_level";
     let level_template = snapshot
         .localized_text
-        .get(level_template_key)
+        .get(CARD_LEVEL_LOCALIZATION_KEY)
         .cloned()
-        .ok_or_else(|| ProfileResolveError::MissingLocalizedText(level_template_key.into()))?;
+        .ok_or_else(|| {
+            ProfileResolveError::MissingLocalizedText(CARD_LEVEL_LOCALIZATION_KEY.into())
+        })?;
 
     for slot_index in 0..SLOT_COUNT {
         let slot = Rect {
-            x: CONTAINER_X + slot_index as f32 * slot_width,
-            y: CONTAINER_Y,
+            x: container.x + slot_index as f32 * slot_width,
             width: slot_width,
-            height: CONTAINER_HEIGHT,
+            ..container
         };
         let center_x = slot.x + slot.width / 2.0;
+        let center_y = container.y + container.height / 2.0;
         let card_bounds = Rect {
             x: center_x - card_width / 2.0,
-            y: -3.0 - card_height / 2.0,
+            y: center_y - card_height / 2.0,
             width: card_width,
             height: card_height,
         };
@@ -975,11 +985,11 @@ fn build_deck_recipe(
             }
             nodes.push(placeholder);
             if let Some(card) = member {
-                let font_size = (CONTAINER_HEIGHT * 0.12).max(10.0);
+                let font_size = (container.height * 0.12).max(10.0);
                 let line_width = (slot_width - 12.0).max(1.0);
                 let center_x = slot.x + 6.0 + line_width / 2.0;
-                let info_center_y = slot.y + CONTAINER_HEIGHT - 10.0 - font_size - 2.0;
-                let level_center_y = slot.y + CONTAINER_HEIGHT - 10.0;
+                let info_center_y = slot.y + container.height - 10.0 - font_size - 2.0;
+                let level_center_y = slot.y + container.height - 10.0;
                 nodes.push(text_node(
                     layer_id,
                     source_key,
@@ -1012,12 +1022,7 @@ fn build_deck_recipe(
                         width: line_width,
                         height: font_size,
                     },
-                    localized_level_source(
-                        snapshot,
-                        level_template_key,
-                        &level_template,
-                        card.level,
-                    ),
+                    card_level_source(&snapshot.locale, &level_template, card.level),
                     font_size,
                     [1.0, 1.0, 1.0, 0.9],
                     GeneralTextAlign::Left,
@@ -1062,7 +1067,7 @@ fn build_deck_recipe(
             card_bounds,
             scale,
             card,
-            localized_level_source(snapshot, level_template_key, &level_template, card.level),
+            card_level_source(&snapshot.locale, &level_template, card.level),
             clip,
             nodes,
         );
@@ -1233,7 +1238,12 @@ fn build_character_rank_recipe(
         &[13, 14, 15, 16],
         &[17, 18, 19, 20],
     ];
-    let columns = [-350.0f32, -150.0, 50.0, 250.0];
+    // Grid geometry: the first avatar, the rank pill sharing its left and
+    // bottom edges, and the next column / next row avatars for the pitches.
+    let first_avatar = panel.elements[2];
+    let first_pill = panel.elements[3];
+    let column_pitch = panel.elements[4].cx - first_avatar.cx;
+    let row_pitch = first_avatar.cy - panel.elements[5].cy;
     let mut slot = 0usize;
     for group in groups {
         for character_id in *group {
@@ -1246,12 +1256,12 @@ fn build_character_rank_recipe(
             };
             let column = slot % 4;
             let row = slot / 4;
-            let cx = columns[column];
-            let cy = -259.0 + row as f32 * 105.0 + shift_y;
+            let cx = first_avatar.cx + column as f32 * column_pitch;
+            let cy = -first_avatar.cy + row as f32 * row_pitch + shift_y;
             slot += 1;
-            let radius = 38.0;
-            let pill_height = 60.8;
-            let pill_width = 175.0;
+            let radius = first_avatar.w / 2.0;
+            let pill_height = first_pill.h;
+            let pill_width = first_pill.w;
             let pill_bounds = Rect {
                 x: cx - radius,
                 y: cy + radius - pill_height,
@@ -1317,6 +1327,8 @@ fn build_character_rank_recipe(
                 ));
             }
             ordinal += 1;
+            // A character without a cleared challenge stage shows stage 1.
+            let challenge_rank = rank.challenge_rank.unwrap_or(1);
             let number_center_x = cx + radius + (137.0 - radius - pill_height / 2.0) / 2.0;
             let number_bounds = Rect {
                 x: number_center_x - (137.0 - radius) / 2.0,
@@ -1329,7 +1341,7 @@ fn build_character_rank_recipe(
                 (
                     "challenge_live_rank",
                     "challengeLiveSoloStages",
-                    rank.challenge_rank.unwrap_or(0),
+                    challenge_rank,
                 ),
             ] {
                 let mut node = text_node(
@@ -1374,7 +1386,7 @@ fn build_character_rank_recipe(
                     ("rank".into(), ParameterValue::I64(rank.rank.into())),
                     (
                         "challenge_rank".into(),
-                        ParameterValue::I64(rank.challenge_rank.unwrap_or(0).into()),
+                        ParameterValue::I64(challenge_rank.into()),
                     ),
                 ]),
             ));
@@ -1388,9 +1400,9 @@ fn build_character_rank_recipe(
             (-active.cy + active.h / 2.0 + shift_y).max(-inactive.cy + inactive.h / 2.0 + shift_y);
         let viewport_bottom = 286.0;
         let viewport = Rect {
-            x: -483.5,
+            x: -panel.w / 2.0,
             y: viewport_top,
-            width: 967.0,
+            width: panel.w,
             height: viewport_bottom - viewport_top,
         };
         let max = (nodes[content_start..]
@@ -1549,8 +1561,12 @@ fn build_story_favorite_recipe(
     ));
     let content_start = nodes.len();
     let region_start = interaction_regions.len();
-    for (index, favorite) in snapshot.story_favorites.iter().enumerate() {
-        let target = panel.elements.get(index + 2).copied().unwrap_or_else(|| {
+    // Every slot is drawn and slots nobody shares stay empty. Slots past the
+    // measured ones continue the two-column grid.
+    let measured_slots = &panel.elements[2..];
+    let slot_count = measured_slots.len().max(snapshot.story_favorites.len());
+    for index in 0..slot_count {
+        let target = measured_slots.get(index).copied().unwrap_or_else(|| {
             let column = index % 2;
             let row = index / 2;
             crate::profile_layout::ElementLayout {
@@ -1562,6 +1578,22 @@ fn build_story_favorite_recipe(
         });
         let bounds = layout_rect(target);
         let role = format!("story-{index}");
+        let Some(favorite) = snapshot
+            .story_favorites
+            .get(index)
+            .filter(|favorite| favorite.story_id > 0)
+        else {
+            nodes.push(shape_node(
+                layer_id,
+                source_key,
+                &format!("{role}-empty"),
+                2 + index as u32,
+                bounds,
+                GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
+                [0.82, 0.82, 0.82, 0.4],
+            ));
+            continue;
+        };
         if let Some(descriptor) = &favorite.image.descriptor {
             nodes.push(image_node(
                 layer_id,
@@ -2239,19 +2271,6 @@ fn transform_card_rect(center_x: f32, center_y: f32, scale: f32, rect: Rect) -> 
     }
 }
 
-fn localized_level_source(
-    snapshot: &ProfileComponentSnapshot,
-    key: &str,
-    template: &str,
-    level: i32,
-) -> TextSource {
-    TextSource::Localized {
-        key: key.into(),
-        locale: snapshot.locale.clone(),
-        value: template.replace("{level}", &level.to_string()),
-    }
-}
-
 fn deck_attribute_color(attribute: &str, alpha: f32) -> [f32; 4] {
     let (red, green, blue) = match attribute {
         "cool" => (97.0, 148.0, 199.0),
@@ -2328,7 +2347,7 @@ fn push_cropped_card_overlay_nodes(
         &format!("{role_prefix}-frame"),
         first_ordinal + 2,
         card_bounds,
-        format!("card/cardFrame_M_{}", rarity_suffix(&card.rarity)),
+        format!("card/cardFrame_M_{}", card_rarity_suffix(&card.rarity)),
         [1.0; 4],
         clips.clone(),
     ));
@@ -2347,7 +2366,7 @@ fn push_cropped_card_overlay_nodes(
         [1.0; 4],
         clips.clone(),
     ));
-    for star_index in 0..rarity_count(&card.rarity) {
+    for star_index in 0..card_rarity_star_count(&card.rarity) {
         nodes.push(static_styled_image_node(
             layer_id,
             source_key,
@@ -2359,30 +2378,32 @@ fn push_cropped_card_overlay_nodes(
                 width: 40.0,
                 height: 40.0,
             }),
-            star_icon_key(&card.rarity, card.after_training).into(),
+            card_rarity_star_key(&card.rarity, card.after_training).into(),
             [1.0; 4],
             clips.clone(),
         ));
     }
-    nodes.push(static_styled_image_node(
-        layer_id,
-        source_key,
-        &format!("{role_prefix}-master-rank"),
-        first_ordinal + 15,
-        transform(Rect {
-            x: CARD_WIDTH / 2.0
-                - 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH
-                - 1.4 * CARD_WIDTH / RAW_ROOT_WIDTH,
-            y: CARD_HEIGHT / 2.0
-                - 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT
-                - 0.8 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
-            width: 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
-            height: 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
-        }),
-        format!("card/masterRank_S_{}", card.master_rank.clamp(0, 5)),
-        [1.0; 4],
-        clips,
-    ));
+    if let Some(key) = card_master_rank_key(card.master_rank) {
+        nodes.push(static_styled_image_node(
+            layer_id,
+            source_key,
+            &format!("{role_prefix}-master-rank"),
+            first_ordinal + 15,
+            transform(Rect {
+                x: CARD_WIDTH / 2.0
+                    - 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH
+                    - 1.4 * CARD_WIDTH / RAW_ROOT_WIDTH,
+                y: CARD_HEIGHT / 2.0
+                    - 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT
+                    - 0.8 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
+                width: 88.0 * CARD_WIDTH / RAW_ROOT_WIDTH,
+                height: 88.0 * CARD_HEIGHT / RAW_ROOT_HEIGHT,
+            }),
+            key,
+            [1.0; 4],
+            clips,
+        ));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2395,13 +2416,20 @@ fn push_full_card_overlay_nodes(
     card: &CardVisualSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) {
+    let layout = &crate::profile_layout::LEADER_MEMBER;
+    let artwork = layout_rect(layout.elements[0]);
+    let stars = layout_rect(layout.elements[1]);
+    let attribute = layout_rect(layout.elements[2]);
+    let master_rank = layout_rect(layout.elements[3]);
+    let right_offset = |rect: Rect| artwork.x + artwork.width - rect.x;
+    let bottom_offset = |rect: Rect| artwork.y + artwork.height - rect.y;
     nodes.push(static_overlay_image_node(
         layer_id,
         source_key,
         &format!("{role_prefix}-frame"),
         first_ordinal,
         bounds,
-        format!("card/cardFrame_L_{}", rarity_suffix(&card.rarity)),
+        format!("card/cardFrame_L_{}", card_rarity_suffix(&card.rarity)),
     ));
     nodes.push(static_overlay_image_node(
         layer_id,
@@ -2409,16 +2437,19 @@ fn push_full_card_overlay_nodes(
         &format!("{role_prefix}-attribute"),
         first_ordinal + 1,
         Rect {
-            x: bounds.x + bounds.width - 128.0,
-            y: bounds.y,
-            width: 88.0,
-            height: 92.0,
+            x: bounds.x + bounds.width - right_offset(attribute),
+            y: bounds.y + (attribute.y - artwork.y),
+            width: attribute.width,
+            height: attribute.height,
         },
         format!("card/icon_attribute_{}_88", card.attribute),
     ));
-    let star_count = rarity_count(&card.rarity);
-    let star_start_y =
-        bounds.y + bounds.height - 225.0 + (4usize.saturating_sub(star_count)) as f32 * 48.0;
+    const STAR_SLOTS: usize = 4;
+    let star_count = card_rarity_star_count(&card.rarity);
+    let star_size = stars.width;
+    let star_pitch = (stars.height - star_size) / (STAR_SLOTS - 1) as f32;
+    let star_start_y = bounds.y + bounds.height - bottom_offset(stars)
+        + (STAR_SLOTS.saturating_sub(star_count)) as f32 * star_pitch;
     for index in 0..star_count {
         nodes.push(static_overlay_image_node(
             layer_id,
@@ -2426,27 +2457,29 @@ fn push_full_card_overlay_nodes(
             &format!("{role_prefix}-star-{index}"),
             first_ordinal + 2 + index as u32,
             Rect {
-                x: bounds.x + 24.0,
-                y: star_start_y + index as f32 * 48.0,
-                width: 56.0,
-                height: 56.0,
+                x: bounds.x + (stars.x - artwork.x),
+                y: star_start_y + index as f32 * star_pitch,
+                width: star_size,
+                height: star_size,
             },
-            star_icon_key(&card.rarity, card.after_training).into(),
+            card_rarity_star_key(&card.rarity, card.after_training).into(),
         ));
     }
-    nodes.push(static_overlay_image_node(
-        layer_id,
-        source_key,
-        &format!("{role_prefix}-master-rank"),
-        first_ordinal + 2 + star_count as u32,
-        Rect {
-            x: bounds.x + bounds.width - 128.0,
-            y: bounds.y + bounds.height - 128.0,
-            width: 104.0,
-            height: 104.0,
-        },
-        format!("card/masterRank_L_{}", card.master_rank.clamp(0, 5)),
-    ));
+    if let Some(key) = card_master_rank_key(card.master_rank) {
+        nodes.push(static_overlay_image_node(
+            layer_id,
+            source_key,
+            &format!("{role_prefix}-master-rank"),
+            first_ordinal + 2 + star_count as u32,
+            Rect {
+                x: bounds.x + bounds.width - right_offset(master_rank),
+                y: bounds.y + bounds.height - bottom_offset(master_rank),
+                width: master_rank.width,
+                height: master_rank.height,
+            },
+            key,
+        ));
+    }
 }
 
 fn build_leader_member_recipe(
@@ -2456,12 +2489,7 @@ fn build_leader_member_recipe(
     nodes: &mut Vec<GeneralRecipeNode>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) {
-    let cover = Rect {
-        x: -471.0,
-        y: -266.0,
-        width: 940.0,
-        height: 530.0,
-    };
+    let cover = layout_rect(crate::profile_layout::LEADER_MEMBER.elements[0]);
     let Some(card) = snapshot.leader_card.as_ref() else {
         nodes.push(shape_node(
             layer_id,
@@ -2787,7 +2815,9 @@ fn static_styled_image_node(
     }
 }
 
-fn cover_source_rect(
+/// Source rectangle that covers a `target_width` x `target_height` box with a
+/// `source_width` x `source_height` image, centred on both axes.
+pub fn cover_source_rect(
     source_width: f32,
     source_height: f32,
     target_width: f32,
@@ -2814,7 +2844,9 @@ fn cover_source_rect(
     }
 }
 
-fn rarity_suffix(rarity: &str) -> &str {
+/// Frame sprite suffix of a `cardRarityType`: `bd` for birthday cards,
+/// otherwise the rarity number.
+pub fn card_rarity_suffix(rarity: &str) -> &str {
     if rarity == "rarity_birthday" {
         "bd"
     } else {
@@ -2822,7 +2854,9 @@ fn rarity_suffix(rarity: &str) -> &str {
     }
 }
 
-fn rarity_count(rarity: &str) -> usize {
+/// Number of rarity stars a card shows: one for birthday cards, otherwise
+/// the rarity number.
+pub fn card_rarity_star_count(rarity: &str) -> usize {
     if rarity == "rarity_birthday" {
         1
     } else {
@@ -2834,7 +2868,8 @@ fn rarity_count(rarity: &str) -> usize {
     }
 }
 
-fn star_icon_key(rarity: &str, trained: bool) -> &'static str {
+/// Rarity star sprite key. `trained` selects the trained star.
+pub fn card_rarity_star_key(rarity: &str, trained: bool) -> &'static str {
     if rarity == "rarity_birthday" {
         "card/rarity_birthday"
     } else if trained {
@@ -2842,6 +2877,11 @@ fn star_icon_key(rarity: &str, trained: bool) -> &'static str {
     } else {
         "card/rarity_star_normal"
     }
+}
+
+/// Master-rank badge sprite key. Card overlays hide the badge at rank 0.
+pub fn card_master_rank_key(master_rank: i32) -> Option<String> {
+    (master_rank >= 1).then(|| format!("card/masterRank_L_{}", master_rank.min(5)))
 }
 
 fn item_region(
@@ -3119,13 +3159,7 @@ fn build_tabbed_music_recipe(
     for (difficulty_index, (role, label_index, number_index, values)) in
         difficulties.iter().enumerate()
     {
-        let measured_label = MUSIC_CLEAR_TAB.elements[*label_index];
-        let label = crate::profile_layout::ElementLayout {
-            cx: measured_label.cx,
-            cy: -20.0,
-            w: measured_label.w,
-            h: 43.0,
-        };
+        let label = MUSIC_CLEAR_TAB.elements[*label_index];
         let mut background = shape_node(
             layer_id,
             source_key,
@@ -3162,20 +3196,14 @@ fn build_tabbed_music_recipe(
                 snapshot,
                 &format!("custom_profile.general.music.difficulty.{role}"),
             )?,
-            43.0 * 0.55,
+            label.h * 0.55,
             [1.0; 4],
             GeneralTextAlign::Center,
             0.0,
             false,
         ));
         ordinal += 1;
-        let measured_number = MUSIC_CLEAR_TAB.elements[*number_index];
-        let number = crate::profile_layout::ElementLayout {
-            cx: measured_number.cx,
-            cy: -63.0,
-            w: measured_number.w,
-            h: 29.0,
-        };
+        let number = MUSIC_CLEAR_TAB.elements[*number_index];
         for option in options {
             let (field, value) = match option {
                 "clear" => ("liveClear", values.clear),
@@ -3192,7 +3220,7 @@ fn build_tabbed_music_recipe(
                     field: format!("userMusicDifficultyClearCount.{role}.{field}"),
                     value: value.to_string(),
                 },
-                29.0,
+                number.h,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Center,
                 0.0,
@@ -4172,6 +4200,284 @@ mod tests {
             }));
         }
         assert_eq!(recipe.interaction_regions.len(), 2);
+    }
+
+    fn overlay_card(
+        master_rank: i32,
+        level: i32,
+        trained: bool,
+    ) -> crate::profile_scene::CardVisualSnapshot {
+        crate::profile_scene::CardVisualSnapshot {
+            card_id: 5001,
+            after_training: trained,
+            master_rank,
+            level,
+            rarity: "rarity_3".into(),
+            attribute: "happy".into(),
+            image: crate::profile_scene::ComponentImageSnapshot {
+                source_field: "userProfile.deckMembers".into(),
+                source_id: "5001".into(),
+                descriptor: Some(crate::profile_scene::ResourceDescriptor {
+                    resource: crate::ResourceKey {
+                        namespace: "assets".into(),
+                        key: "character/member_cutout/demo/normal".into(),
+                    },
+                    natural_width: 600.0,
+                    natural_height: 576.0,
+                    provenance: BTreeMap::new(),
+                }),
+            },
+        }
+    }
+
+    fn deck_snapshot(
+        deck_members: Vec<crate::profile_scene::CardVisualSnapshot>,
+    ) -> ProfileComponentSnapshot {
+        ProfileComponentSnapshot {
+            locale: "en-US".into(),
+            region_fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            localized_text: BTreeMap::from([(
+                super::CARD_LEVEL_LOCALIZATION_KEY.into(),
+                "Lv.{level}".into(),
+            )]),
+            deck_members,
+            ..ProfileComponentSnapshot::default()
+        }
+    }
+
+    fn image_key<'a>(recipe: &'a super::GeneralRecipe, role: &str) -> Option<&'a str> {
+        recipe
+            .nodes
+            .iter()
+            .find(|node| node.role == role)
+            .and_then(|node| match &node.payload {
+                super::GeneralRecipePayload::Image { resource, .. } => Some(resource.key.as_str()),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn card_level_captions_pad_single_digit_levels_with_two_spaces() {
+        assert_eq!(super::card_level_text("Lv.{level}", 5), "Lv.  5");
+        assert_eq!(super::card_level_text("Lv.{level}", 9), "Lv.  9");
+        assert_eq!(super::card_level_text("Lv.{level}", 10), "Lv.10");
+        let recipe = super::build_general_recipe(
+            3,
+            StableId(3),
+            "general:3",
+            &deck_snapshot(vec![overlay_card(1, 5, false)]),
+        )
+        .unwrap()
+        .unwrap();
+        let level = recipe
+            .nodes
+            .iter()
+            .find(|node| node.role == "deck-slot-0-level")
+            .unwrap();
+        assert!(matches!(
+            &level.payload,
+            super::GeneralRecipePayload::Text {
+                source: crate::TextSource::Localized { value, .. },
+                ..
+            } if value == "Lv.  5"
+        ));
+    }
+
+    #[test]
+    fn card_overlays_hide_rank_zero_and_draw_large_master_rank_badges() {
+        let recipe = super::build_general_recipe(
+            3,
+            StableId(3),
+            "general:3",
+            &deck_snapshot(vec![overlay_card(0, 60, true), overlay_card(3, 60, false)]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(image_key(&recipe, "deck-slot-0-master-rank"), None);
+        assert_eq!(
+            image_key(&recipe, "deck-slot-1-master-rank"),
+            Some("card/masterRank_L_3")
+        );
+        assert_eq!(
+            image_key(&recipe, "deck-slot-0-star-0"),
+            Some("card/rarity_star_afterTraining")
+        );
+        assert_eq!(
+            image_key(&recipe, "deck-slot-1-star-0"),
+            Some("card/rarity_star_normal")
+        );
+
+        let leader = super::build_general_recipe(
+            5,
+            StableId(5),
+            "general:5",
+            &ProfileComponentSnapshot {
+                leader_card: Some(overlay_card(0, 60, false)),
+                ..ProfileComponentSnapshot::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(leader
+            .nodes
+            .iter()
+            .all(|node| node.role != "leader-master-rank"));
+    }
+
+    #[test]
+    fn challenge_live_without_a_record_hides_the_character_avatar() {
+        let snapshot = ProfileComponentSnapshot {
+            locale: "en-US".into(),
+            region_fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            localized_text: BTreeMap::from([
+                (
+                    "custom_profile.general.challenge_live.title".into(),
+                    "Challenge Show".into(),
+                ),
+                (
+                    "custom_profile.general.challenge_live.solo".into(),
+                    "Solo".into(),
+                ),
+            ]),
+            ..ProfileComponentSnapshot::default()
+        };
+        let recipe = super::build_general_recipe(10, StableId(10), "general:10", &snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(recipe
+            .nodes
+            .iter()
+            .all(|node| node.role != "challenge-avatar"));
+        assert!(recipe.interaction_regions.is_empty());
+        let score = recipe
+            .nodes
+            .iter()
+            .find(|node| node.role == "challenge-score")
+            .unwrap();
+        assert!(matches!(
+            &score.payload,
+            super::GeneralRecipePayload::Text {
+                source: crate::TextSource::ProfileField { value, .. },
+                ..
+            } if value == "0"
+        ));
+    }
+
+    #[test]
+    fn challenge_stage_without_a_cleared_stage_shows_stage_one() {
+        let snapshot = ProfileComponentSnapshot {
+            locale: "en-US".into(),
+            region_fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            localized_text: BTreeMap::from([
+                (
+                    "custom_profile.general.character_rank.title".into(),
+                    "Character Rank".into(),
+                ),
+                (
+                    "custom_profile.general.character_rank.challenge".into(),
+                    "Challenge".into(),
+                ),
+            ]),
+            character_ranks: vec![crate::profile_scene::CharacterRankSnapshot {
+                character_id: 1,
+                rank: 40,
+                challenge_rank: None,
+                avatar: crate::profile_scene::ComponentImageSnapshot {
+                    source_field: "userProfile.characterRanks".into(),
+                    source_id: "1".into(),
+                    descriptor: None,
+                },
+            }],
+            ..ProfileComponentSnapshot::default()
+        };
+        let recipe = super::build_general_recipe(11, StableId(11), "general:11", &snapshot)
+            .unwrap()
+            .unwrap();
+        let stage = recipe
+            .nodes
+            .iter()
+            .find(|node| node.role == "character-1-challenge_live_rank")
+            .unwrap();
+        assert!(matches!(
+            &stage.payload,
+            super::GeneralRecipePayload::Text {
+                source: crate::TextSource::ProfileField { value, .. },
+                ..
+            } if value == "1"
+        ));
+    }
+
+    #[test]
+    fn story_favorite_slots_without_a_story_are_drawn_empty() {
+        let story = crate::profile_scene::StoryFavoriteSnapshot {
+            story_id: 9,
+            story_type: "event_story".into(),
+            image: crate::profile_scene::ComponentImageSnapshot {
+                source_field: "userProfile.storyFavorites".into(),
+                source_id: "event_story:9".into(),
+                descriptor: None,
+            },
+        };
+        let empty = crate::profile_scene::StoryFavoriteSnapshot {
+            story_id: 0,
+            story_type: String::new(),
+            image: crate::profile_scene::ComponentImageSnapshot {
+                source_field: "userProfile.storyFavorites".into(),
+                source_id: String::new(),
+                descriptor: None,
+            },
+        };
+        let snapshot = ProfileComponentSnapshot {
+            locale: "en-US".into(),
+            region_fonts: BTreeMap::from([(1, "RegionFont".into())]),
+            localized_text: BTreeMap::from([(
+                "custom_profile.general.story_favorite.title".into(),
+                "Favorite stories".into(),
+            )]),
+            story_favorites: vec![empty.clone(), empty, story],
+            ..ProfileComponentSnapshot::default()
+        };
+        let recipe = super::build_general_recipe(14, StableId(14), "general:14", &snapshot)
+            .unwrap()
+            .unwrap();
+        let slots = recipe
+            .nodes
+            .iter()
+            .filter(|node| node.role.starts_with("story-") && !node.role.contains("scroll"))
+            .map(|node| node.role.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            vec![
+                "story-0-empty",
+                "story-1-empty",
+                "story-2-placeholder",
+                "story-3-empty",
+                "story-4-empty",
+                "story-5-empty",
+                "story-6-empty",
+                "story-7-empty",
+            ]
+        );
+        assert_eq!(
+            recipe
+                .interaction_regions
+                .iter()
+                .filter(|region| region.role == "story-2")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn character_rank_grid_pill_shares_the_avatar_left_and_bottom_edges() {
+        let elements = crate::profile_layout::CHAR_RANK.elements;
+        let avatar = super::layout_rect(elements[2]);
+        let pill = super::layout_rect(elements[3]);
+        assert_eq!(pill.x, avatar.x);
+        assert!((pill.y + pill.height - (avatar.y + avatar.height)).abs() < 1e-3);
+        assert_eq!(elements[4].w, avatar.width);
+        assert_eq!(elements[5].w, avatar.width);
     }
 
     #[test]

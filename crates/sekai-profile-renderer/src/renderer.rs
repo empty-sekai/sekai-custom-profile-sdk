@@ -347,7 +347,7 @@ impl CustomProfileRenderer {
                 let font_id = match font_role {
                     FontRole::RegionFontId(font_id) => *font_id,
                 };
-                let Some(primary_family) = md.resolve_font(font_id) else {
+                let Some(primary_family) = md.resolve_font_or_default(font_id) else {
                     continue;
                 };
                 if primary_family == crate::sdf::atlas::PROFILE_TEXT_FALLBACK_FONT_FAMILY {
@@ -405,7 +405,7 @@ impl CustomProfileRenderer {
         let atlases = self.sdf_atlases.load_full();
         let mut requested = BTreeSet::new();
         for text in &card.texts {
-            let Some(primary_family) = md.resolve_font(text.font_id) else {
+            let Some(primary_family) = md.resolve_font_or_default(text.font_id) else {
                 continue;
             };
             if primary_family == crate::sdf::atlas::PROFILE_TEXT_FALLBACK_FONT_FAMILY {

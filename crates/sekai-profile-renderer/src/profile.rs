@@ -58,6 +58,8 @@ pub struct LeaderCardInfo {
 pub struct UserCardInfo {
     /// 是否使用特训后图片。
     pub after_training: bool,
+    /// 是否已完成特训（`specialTrainingStatus` 为 `done`），决定稀有度星标。
+    pub special_training_done: bool,
     /// 突破等级。
     pub master_rank: i32,
     /// 当前卡牌等级。
@@ -71,6 +73,8 @@ pub struct DeckMember {
     pub card_id: i32,
     /// 是否使用特训后图片
     pub after_training: bool,
+    /// 是否已完成特训，决定稀有度星标
+    pub special_training_done: bool,
     /// 突破等级 (0-5)
     pub master_rank: i32,
     /// 当前卡牌等级
@@ -115,6 +119,8 @@ pub struct StoryFavoriteInfo {
     pub story_id: i32,
     /// 剧情类型（用于构建素材路径）
     pub story_type: String,
+    /// 面板格位（`shareNo`，从 1 开始）
+    pub share_no: i32,
 }
 
 // ============================================================
@@ -173,6 +179,7 @@ pub fn neutral_preview_profile() -> ProfileData {
             card_id,
             UserCardInfo {
                 after_training: false, // 只用 normal 确保 S3 一定有
+                special_training_done: false,
                 master_rank: (i + 1) as i32 % 5,
                 level: 60,
             },
@@ -226,30 +233,35 @@ pub fn neutral_preview_profile() -> ProfileData {
             DeckMember {
                 card_id: 3,
                 after_training: false,
+                special_training_done: false,
                 master_rank: 2,
                 level: 60,
             },
             DeckMember {
                 card_id: 7,
                 after_training: false,
+                special_training_done: false,
                 master_rank: 3,
                 level: 60,
             },
             DeckMember {
                 card_id: 11,
                 after_training: false,
+                special_training_done: false,
                 master_rank: 4,
                 level: 60,
             },
             DeckMember {
                 card_id: 15,
                 after_training: false,
+                special_training_done: false,
                 master_rank: 0,
                 level: 60,
             },
             DeckMember {
                 card_id: 4,
                 after_training: false,
+                special_training_done: false,
                 master_rank: 1,
                 level: 60,
             },
@@ -279,18 +291,22 @@ pub fn neutral_preview_profile() -> ProfileData {
             StoryFavoriteInfo {
                 story_id: 1,
                 story_type: "unit".to_string(),
+                share_no: 1,
             },
             StoryFavoriteInfo {
                 story_id: 2,
                 story_type: "unit".to_string(),
+                share_no: 2,
             },
             StoryFavoriteInfo {
                 story_id: 3,
                 story_type: "unit".to_string(),
+                share_no: 3,
             },
             StoryFavoriteInfo {
                 story_id: 4,
                 story_type: "unit".to_string(),
+                share_no: 4,
             },
         ],
         user_honor_missions,
@@ -422,10 +438,13 @@ impl ProfileData {
                         .unwrap_or("normal");
                     let mr = c.get("masterRank").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
                     let level = c.get("level").and_then(|v| v.as_i64()).unwrap_or(60) as i32;
+                    let trained =
+                        c.get("specialTrainingStatus").and_then(|v| v.as_str()) == Some("done");
                     ucm.insert(
                         cid as i32,
                         UserCardInfo {
                             after_training: di == "special_training",
+                            special_training_done: trained,
                             master_rank: mr,
                             level,
                         },
@@ -441,13 +460,13 @@ impl ProfileData {
                 let key = format!("member{i}");
                 if let Some(cid) = deck.get(&key).and_then(|v| v.as_i64()) {
                     let info = ucm.get(&(cid as i32)).copied().unwrap_or(UserCardInfo {
-                        after_training: false,
-                        master_rank: 0,
                         level: 60,
+                        ..UserCardInfo::default()
                     });
                     pd.deck_members.push(DeckMember {
                         card_id: cid as i32,
                         after_training: info.after_training,
+                        special_training_done: info.special_training_done,
                         master_rank: info.master_rank,
                         level: info.level,
                     });
@@ -455,9 +474,8 @@ impl ProfileData {
             }
             if let Some(lid) = deck.get("leader").and_then(|v| v.as_i64()) {
                 let info = ucm.get(&(lid as i32)).copied().unwrap_or(UserCardInfo {
-                    after_training: false,
-                    master_rank: 0,
                     level: 60,
+                    ..UserCardInfo::default()
                 });
                 pd.leader_card = Some(LeaderCardInfo {
                     card_id: lid as i32,
@@ -488,17 +506,24 @@ impl ProfileData {
             }
         }
 
-        // story_favorites（type=14）
+        // story_favorites（type=14）：只保留面板展示的剧情类型与有格位的条目，
+        // 规则与 core `ProfileData::from_json` 一致。
         if let Some(sf) = body.get("userStoryFavorites").and_then(|v| v.as_array()) {
             for s in sf {
-                pd.story_favorites.push(StoryFavoriteInfo {
-                    story_id: s.get("storyId").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                    story_type: s
-                        .get("storyType")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .into(),
-                });
+                let story_id = s.get("storyId").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let share_no = s.get("shareNo").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                let Some(story_type) = s.get("storyType").and_then(|v| v.as_str()).filter(|v| {
+                    sekai_profile_renderer_core::profile_data::STORY_FAVORITE_TYPES.contains(v)
+                }) else {
+                    continue;
+                };
+                if story_id > 0 && share_no >= 1 {
+                    pd.story_favorites.push(StoryFavoriteInfo {
+                        story_id,
+                        story_type: story_type.into(),
+                        share_no,
+                    });
+                }
             }
         }
 
@@ -532,6 +557,7 @@ impl ProfileData {
         let card_state = |card_id: i32, value: UserCardInfo| core::CardState {
             card_id,
             after_training: value.after_training,
+            special_training_done: value.special_training_done,
             master_rank: value.master_rank,
             level: value.level,
         };
@@ -552,6 +578,10 @@ impl ProfileData {
             leader_card: self.leader_card.as_ref().map(|value| core::CardState {
                 card_id: value.card_id,
                 after_training: value.after_training,
+                special_training_done: self
+                    .user_cards
+                    .get(&value.card_id)
+                    .is_some_and(|card| card.special_training_done),
                 master_rank: value.master_rank,
                 level: self
                     .user_cards
@@ -577,6 +607,7 @@ impl ProfileData {
                 .map(|value| core::CardState {
                     card_id: value.card_id,
                     after_training: value.after_training,
+                    special_training_done: value.special_training_done,
                     master_rank: value.master_rank,
                     level: value.level,
                 })
@@ -611,6 +642,7 @@ impl ProfileData {
                 .map(|value| core::StoryFavorite {
                     story_id: value.story_id,
                     story_type: value.story_type.clone(),
+                    share_no: value.share_no,
                 })
                 .collect(),
             honor_mission_progress: self
@@ -668,8 +700,8 @@ mod interaction_profile_tests {
             "userMultiLiveTopScoreCount": { "mvp": 7, "superStar": 8 },
             "userChallengeLiveSoloResult": { "highScore": 987654, "characterId": 2 },
             "userCards": [
-                { "cardId": 10, "defaultImage": "special_training", "masterRank": 3, "level": 60 },
-                { "cardId": 11, "defaultImage": "normal", "masterRank": 1, "level": 55 }
+                { "cardId": 10, "defaultImage": "special_training", "specialTrainingStatus": "done", "masterRank": 3, "level": 60 },
+                { "cardId": 11, "defaultImage": "original", "specialTrainingStatus": "done", "masterRank": 1, "level": 55 }
             ],
             "userDeck": { "leader": 10, "member1": 10, "member2": 11 },
             "userProfileHonors": [
@@ -678,7 +710,11 @@ mod interaction_profile_tests {
             ],
             "userCharacters": [{ "characterId": 2, "characterRank": 31 }],
             "userChallengeLiveSoloStages": [{ "characterId": 2, "rank": 9 }],
-            "userStoryFavorites": [{ "storyId": 30, "storyType": "event_story" }],
+            "userStoryFavorites": [
+                { "storyId": 30, "storyType": "event_story", "shareNo": 2 },
+                { "storyId": 31, "storyType": "card_story", "shareNo": 1 },
+                { "storyId": 32, "storyType": "unit_story", "shareNo": 0 }
+            ],
             "userHonorMissions": [{ "honorMissionType": "live_master", "progress": 50 }],
             "userHonors": [[20, 4, null]],
             "userBondsHonors": [{ "bondsHonorId": 21, "level": 2 }],
