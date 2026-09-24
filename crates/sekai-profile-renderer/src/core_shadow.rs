@@ -113,11 +113,13 @@ pub fn build_text_scene_with_atlases(
                     parameters.insert("font_id".into(), ParameterValue::I64(text.font_id.into()));
                     parameters.insert(
                         "font_family".into(),
-                        ParameterValue::Text(md.resolve_font(text.font_id).unwrap_or_default()),
+                        ParameterValue::Text(
+                            md.resolve_font_or_default(text.font_id).unwrap_or_default(),
+                        ),
                     );
                     parameters.insert("font_size".into(), ParameterValue::F64(text.size.into()));
                     parameters.insert("color_id".into(), ParameterValue::I64(text.color_id.into()));
-                    if let Some(color) = md.resolve_color(text.color_id) {
+                    if let Some(color) = md.resolve_color_or_default(text.color_id) {
                         parameters
                             .insert("color".into(), ParameterValue::Color(color_value(color)));
                     }
@@ -125,7 +127,7 @@ pub fn build_text_scene_with_atlases(
                         "outline_color_id".into(),
                         ParameterValue::I64(text.outline_color_id.into()),
                     );
-                    if let Some(color) = md.resolve_color(text.outline_color_id) {
+                    if let Some(color) = md.resolve_color_or_default(text.outline_color_id) {
                         parameters.insert(
                             "outline_color".into(),
                             ParameterValue::Color(color_value(color)),

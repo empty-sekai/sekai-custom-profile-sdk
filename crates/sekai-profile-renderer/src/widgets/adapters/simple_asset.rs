@@ -55,7 +55,7 @@ impl OtherWidget {
         let asset_key = ctx
             .masterdata
             .and_then(|md| md.resolve_resource("etc", elem.id))
-            .map(|info| format!("{}/{}", info.load_val, info.file_name))?;
+            .map(|info| info.asset_key())?;
         Some(Self {
             id: elem.id,
             asset_key,
@@ -90,7 +90,7 @@ impl CollectionWidget {
         let asset_key = ctx
             .masterdata
             .and_then(|md| md.resolve_resource("collection", elem.id))
-            .map(|info| format!("{}/{}", info.load_val, info.file_name))?;
+            .map(|info| info.asset_key())?;
         Some(Self {
             id: elem.id,
             asset_key,
@@ -125,7 +125,7 @@ impl StandMemberWidget {
         let asset_key = ctx
             .masterdata
             .and_then(|md| md.resolve_resource("standing", elem.id))
-            .map(|info| format!("{}/{}", info.load_val, info.file_name))?;
+            .map(|info| info.asset_key())?;
         Some(Self {
             id: elem.id,
             asset_key,
@@ -160,7 +160,7 @@ impl GeneralBgWidget {
         let asset_key = ctx
             .masterdata
             .and_then(|md| md.resolve_resource("general_bg", elem.id))
-            .map(|info| format!("{}/{}", info.load_val, info.file_name))?;
+            .map(|info| info.asset_key())?;
         Some(Self {
             id: elem.id,
             asset_key,
@@ -195,7 +195,7 @@ impl StoryBgWidget {
         let asset_key = ctx
             .masterdata
             .and_then(|md| md.resolve_resource("story_bg", elem.id))
-            .map(|info| format!("{}/{}", info.load_val, info.file_name))?;
+            .map(|info| info.asset_key())?;
         Some(Self {
             id: elem.id,
             asset_key,

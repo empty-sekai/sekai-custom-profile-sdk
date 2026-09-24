@@ -1150,6 +1150,75 @@ mod tests {
         }
     }
 
+    /// Master data holding one row in each table these tests read: font 1,
+    /// colour 3, which is also the first colour row, shape 1, which loads
+    /// [`SHAPE_KEY`], and `customProfileEtcResources` 1, which loads
+    /// [`OTHER_IMAGE_KEY`].
+    struct SparseRowsProvider;
+
+    const OTHER_IMAGE_KEY: &str = "custom_profile/etc/etc_001";
+    const SHAPE_KEY: &str = "custom_profile/shape_v2/shape_001";
+    const FIRST_COLOR: ResolvedColor = ResolvedColor {
+        r: 12,
+        g: 34,
+        b: 56,
+        a: 255,
+    };
+
+    impl MasterDataProvider for SparseRowsProvider {
+        fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+            EmptyProvider.resolve_story_banner(story_type, story_id)
+        }
+        fn get_card(&self, id: i32) -> Option<CardEntry> {
+            EmptyProvider.get_card(id)
+        }
+        fn resolve_color(&self, id: i32) -> Option<ResolvedColor> {
+            (id == 3).then_some(FIRST_COLOR)
+        }
+        fn default_color(&self) -> Option<ResolvedColor> {
+            Some(FIRST_COLOR)
+        }
+        fn resolve_font(&self, id: i32) -> Option<String> {
+            (id == 1).then(|| "FZLanTingHei-DB-GBK".into())
+        }
+        fn resolve_stamp(&self, id: i32) -> Option<String> {
+            EmptyProvider.resolve_stamp(id)
+        }
+        fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
+            let (file_name, load_val) = match (res_type, id) {
+                ("etc", 1) => ("etc_001", "custom_profile/etc"),
+                ("shape", 1) => ("shape_001", "custom_profile/shape_v2"),
+                _ => return None,
+            };
+            Some(ResourceInfo {
+                file_name: file_name.into(),
+                load_val: load_val.into(),
+                resource_type: res_type.into(),
+            })
+        }
+        fn resolve_honor(&self, id: i32, level: i32) -> Option<ResolvedHonor> {
+            EmptyProvider.resolve_honor(id, level)
+        }
+        fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+            EmptyProvider.get_bonds_honor(id)
+        }
+        fn get_bonds_honor_word(&self, id: i64) -> Option<BondsHonorWordEntry> {
+            EmptyProvider.get_bonds_honor_word(id)
+        }
+        fn get_honor(&self, id: i32) -> Option<HonorEntry> {
+            EmptyProvider.get_honor(id)
+        }
+        fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
+            EmptyProvider.resolve_unit_vs_sd(self_id, partner_id)
+        }
+        fn font_count(&self) -> usize {
+            1
+        }
+        fn color_count(&self) -> usize {
+            1
+        }
+    }
+
     #[test]
     fn live_master_render_object_keeps_dynamic_overlay_semantics() {
         use sha2::Digest as _;
@@ -1395,6 +1464,40 @@ mod tests {
         .expect("shared scene");
         assert_shared_semantic_parity(resolved.clone(), shared);
         assert_eq!(resolved.layers.len(), 4);
+        assert!(resolved
+            .commands
+            .iter()
+            .all(|command| matches!(command.payload, SemanticCommandPayload::Composite { .. })));
+        assert!(crate::asset_keys::collect_card_asset_keys(&card, &md).is_empty());
+    }
+
+    #[test]
+    fn hidden_honors_are_neither_drawn_nor_requested() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "honors": [{
+                "objectData": {
+                    "layer": 1, "lock": false,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": false
+                },
+                "id": 4242, "fullSize": true, "honorLevel": 3
+            }]
+        }))
+        .expect("card fixture");
+        let md = MasterData::new(Arc::new(EmptyProvider));
+        let resolved = resolve_card_commands(&card, &md, "hidden-honor").expect("native scene");
+        let shared = sekai_profile_renderer_core::profile_resolve::compile_profile_scene(
+            &card,
+            None,
+            &md,
+            "hidden-honor",
+            "und",
+            &(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect("shared scene");
+        assert_shared_semantic_parity(resolved.clone(), shared);
         assert!(resolved
             .commands
             .iter()
@@ -1745,6 +1848,61 @@ mod tests {
     }
 
     #[test]
+    fn text_scene_layers_use_the_default_font_and_color_rows_for_unknown_ids() {
+        let text = |layer: i32, font_id: i32, color_id: i32, outline_color_id: i32| {
+            serde_json::json!({
+                "objectData": {
+                    "layer": layer, "lock": false,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+                },
+                "colorId": color_id, "fontId": font_id, "lineSpacing": 0.0,
+                "outlineColorId": outline_color_id, "outlineSize": 0.2, "size": 24.0,
+                "text": "A", "type": 1
+            })
+        };
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "texts": [text(1, 1, 3, 3), text(2, 404, 405, 406)]
+        }))
+        .expect("text card");
+        let md = MasterData::new(Arc::new(SparseRowsProvider));
+        let dump = crate::core_shadow::build_text_scene(&card, &md, "fallback-rows")
+            .expect("text scene")
+            .dump();
+        let drawn = |index: usize| {
+            let parameters = &dump.layers[index].resolved_parameters;
+            ["font_family", "color", "outline_color"].map(|name| parameters.get(name).cloned())
+        };
+        assert!(drawn(0).iter().all(Option::is_some), "{:?}", drawn(0));
+        assert_eq!(drawn(1), drawn(0));
+    }
+
+    #[test]
+    fn image_elements_request_the_keys_of_their_master_rows() {
+        let object = |layer: i32| {
+            serde_json::json!({
+                "layer": layer, "lock": false,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+            })
+        };
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "shapes": [{
+                "objectData": object(1), "alpha": 1.0, "colorId": 3, "id": 1,
+                "outlineAlpha": 0.0, "outlineColorId": 3, "outlineSize": 0.0
+            }],
+            "others": [{ "objectData": object(2), "id": 1 }]
+        }))
+        .expect("image card");
+        let md = MasterData::new(Arc::new(SparseRowsProvider));
+        let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
+        keys.sort();
+        assert_eq!(keys, [OTHER_IMAGE_KEY, SHAPE_KEY]);
+    }
+
+    #[test]
     fn source_images_draw_at_their_pixel_size_without_a_baked_object() {
         let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
             "others": [{
@@ -1758,11 +1916,11 @@ mod tests {
             }]
         }))
         .expect("image card");
-        let md = MasterData::new(Arc::new(EmptyProvider));
+        let md = MasterData::new(Arc::new(SparseRowsProvider));
         let (width, height) = (64u32, 36u32);
         let assets = crate::assets::AssetStore::new(8);
         assets.put(
-            "etc/1".into(),
+            OTHER_IMAGE_KEY.into(),
             crate::codec::png::encode_rgba(width, height, &[255, 0, 0, 255].repeat(64 * 36))
                 .expect("png"),
         );

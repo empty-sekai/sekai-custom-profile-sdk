@@ -274,7 +274,7 @@ fn measure_text_units_tmp(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     scaled: bool,
 ) -> Vec<sekai_profile_renderer_core::MeasuredTextUnit> {
-    let family = md.resolve_font(text.font_id);
+    let family = md.resolve_font_or_default(text.font_id);
     let mut units = Vec::new();
     let mut pending_advance = 0.0f32;
     for seg in segments {
@@ -796,7 +796,7 @@ fn resolve_outline_params(
             outline_size: outline.size,
         });
     }
-    md.resolve_color(text.outline_color_id)
+    md.resolve_color_or_default(text.outline_color_id)
         .map(|oc| crate::sdf::material::SdfOutlineParams {
             outline_r: oc.r as f32 / 255.0,
             outline_g: oc.g as f32 / 255.0,
@@ -883,7 +883,7 @@ fn layout_text_ops(
     capture_timings.rich_parse_ns = capture_elapsed_ns(rich_parse_started);
 
     let font_resolve_started = capture_timing_enabled.then(std::time::Instant::now);
-    let resolved_name = md.resolve_font(text.font_id);
+    let resolved_name = md.resolve_font_or_default(text.font_id);
     let resolved_name_ref = resolved_name.as_deref();
     // Fail closed on an unavailable family. Substituting another face would
     // report metrics that disagree with the atlas built for the declared family,
@@ -912,12 +912,14 @@ fn layout_text_ops(
     let face = PROFILE_FACE;
     let align = text.text_type & 0x07;
 
-    let def_color = md.resolve_color(text.color_id).unwrap_or(ResolvedColor {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 255,
-    });
+    let def_color = md
+        .resolve_color_or_default(text.color_id)
+        .unwrap_or(ResolvedColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
     tracing::debug!(
         color_id = text.color_id,
         r = def_color.r,
@@ -1755,6 +1757,102 @@ mod tests {
         let element = layout_test_element("A\u{6F22}B A\u{6F22}B", 30.0, 0.0, 1);
         let wrapped = super::wrap_rich_text_to_width(&element, &md, 90.0).expect("wrapped text");
         assert!(wrapped.contains('\n'), "{wrapped:?}");
+    }
+
+    #[test]
+    fn unknown_font_and_color_ids_draw_with_the_default_rows() {
+        use crate::masterdata::{MasterData, MasterDataProvider, ResolvedColor};
+        use std::sync::Arc;
+
+        const FIRST_ROW: ResolvedColor = ResolvedColor {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+
+        struct FirstRowsOnly;
+        impl MasterDataProvider for FirstRowsOnly {
+            fn resolve_story_banner(&self, _: &str, _: i32) -> Option<String> {
+                None
+            }
+            fn get_card(&self, _: i32) -> Option<crate::types::CardEntry> {
+                None
+            }
+            fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor> {
+                (color_id == 1).then_some(FIRST_ROW)
+            }
+            fn default_color(&self) -> Option<ResolvedColor> {
+                Some(FIRST_ROW)
+            }
+            fn resolve_font(&self, font_id: i32) -> Option<String> {
+                (font_id == 1).then(|| LAYOUT_TEST_FAMILY.into())
+            }
+            fn resolve_stamp(&self, _: i32) -> Option<String> {
+                None
+            }
+            fn resolve_resource(&self, _: &str, _: i32) -> Option<crate::masterdata::ResourceInfo> {
+                None
+            }
+            fn resolve_honor(&self, _: i32, _: i32) -> Option<crate::masterdata::ResolvedHonor> {
+                None
+            }
+            fn get_bonds_honor(&self, _: i32) -> Option<crate::types::BondsHonorEntry> {
+                None
+            }
+            fn get_bonds_honor_word(&self, _: i64) -> Option<crate::types::BondsHonorWordEntry> {
+                None
+            }
+            fn get_honor(&self, _: i32) -> Option<crate::types::HonorEntry> {
+                None
+            }
+            fn resolve_unit_vs_sd(&self, id: i32, _: i32) -> i32 {
+                id
+            }
+            fn font_count(&self) -> usize {
+                1
+            }
+            fn color_count(&self) -> usize {
+                1
+            }
+        }
+
+        if crate::sdf::outline::load_font_bytes_for_family(LAYOUT_TEST_FAMILY).is_none() {
+            eprintln!("skipping: {LAYOUT_TEST_FAMILY} is not installed");
+            return;
+        }
+        let md = MasterData::new(Arc::new(FirstRowsOnly));
+        let element = |font_id: i32, color_id: i32, outline_color_id: i32| {
+            let mut element = layout_test_element("<line-indent=15%>AB", 24.0, 0.0, 1);
+            element.font_id = font_id;
+            element.color_id = color_id;
+            element.outline_color_id = outline_color_id;
+            element.outline_size = 0.2;
+            element
+        };
+        let capture = |text: &crate::types::TextElement| {
+            let mut glyphs = Vec::new();
+            let mut observer =
+                |result: Result<super::ResolvedTextSdfGlyph, super::TextSdfCaptureError>| {
+                    glyphs.push(result.expect("captured glyph"));
+                };
+            super::capture_text_sdf_from_affine(
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                text,
+                &md,
+                None,
+                &mut observer,
+            );
+            glyphs
+        };
+        let known = element(1, 1, 1);
+        let unknown = element(404, 405, 406);
+        let expected = capture(&known);
+        assert!(!expected.is_empty(), "the known rows must draw glyphs");
+        assert_eq!(capture(&unknown), expected);
+        let program = super::line_indent_program(&known, &md);
+        assert!(program.is_some());
+        assert_eq!(super::line_indent_program(&unknown, &md), program);
     }
 
     #[test]

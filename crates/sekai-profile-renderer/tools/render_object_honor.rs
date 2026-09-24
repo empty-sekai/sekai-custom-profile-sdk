@@ -11,10 +11,9 @@ use sekai_profile_renderer::render_object::{
     bonds_honor_object_key, standard_honor_object_key, MappedRenderObjectStore, RenderObjectKind,
     RenderObjectStoreWriter, RenderObjectWrite, HONOR_RENDER_OBJECT_CONTRACT,
 };
-use sekai_profile_renderer::types::{
-    BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, HonorGroupEntry,
-};
+use sekai_profile_renderer::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use skia_safe::{AlphaType, Color, ColorType, ImageInfo};
 
@@ -108,7 +107,10 @@ pub(super) fn planned_honor_catalog_keys(
 
 struct HonorMasterDataProvider {
     honors: BTreeMap<i32, HonorEntry>,
-    honor_groups: BTreeMap<i32, HonorGroupEntry>,
+    /// `honors` and `honorGroups` rows as loaded; honors resolve through the
+    /// shared row resolver.
+    honor_rows: BTreeMap<i32, Value>,
+    honor_group_rows: BTreeMap<i64, Value>,
     bonds: BTreeMap<i32, BondsPlanEntry>,
     words: BTreeMap<i64, BondsHonorWordEntry>,
     units: Vec<GameCharacterUnit>,
@@ -546,8 +548,8 @@ fn print_build_report(
 
 impl HonorPlan {
     fn load(masterdata_dir: &Path) -> Result<Self, String> {
-        let honors = load_json::<Vec<HonorEntry>>(masterdata_dir, "honors.json")?;
-        let honor_groups = load_json::<Vec<HonorGroupEntry>>(masterdata_dir, "honorGroups.json")?;
+        let honors = load_json::<Vec<Value>>(masterdata_dir, "honors.json")?;
+        let honor_groups = load_json::<Vec<Value>>(masterdata_dir, "honorGroups.json")?;
         let bonds = load_json::<Vec<BondsPlanEntry>>(masterdata_dir, "bondsHonors.json")?;
         let words = load_json::<Vec<BondsHonorWordEntry>>(masterdata_dir, "bondsHonorWords.json")?;
         let units = load_json::<Vec<GameCharacterUnit>>(masterdata_dir, "gameCharacterUnits.json")?;
@@ -564,12 +566,19 @@ impl HonorPlan {
 
     fn from_tables(
         masterdata_identity: String,
-        honors: Vec<HonorEntry>,
-        honor_groups: Vec<HonorGroupEntry>,
+        honor_rows: Vec<Value>,
+        honor_group_rows: Vec<Value>,
         bonds: Vec<BondsPlanEntry>,
         words: Vec<BondsHonorWordEntry>,
         units: Vec<GameCharacterUnit>,
     ) -> Result<Self, String> {
+        let honors = honor_rows
+            .iter()
+            .map(|row| {
+                serde_json::from_value::<HonorEntry>(row.clone())
+                    .map_err(|error| format!("parse honors row failed: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let words_by_group =
             words
                 .iter()
@@ -664,10 +673,15 @@ impl HonorPlan {
         coverage.total =
             u64::try_from(objects.len()).map_err(|_| "Honor object count overflow".to_string())?;
         let provider = Arc::new(HonorMasterDataProvider {
+            honor_rows: honors
+                .iter()
+                .map(|value| value.id)
+                .zip(honor_rows)
+                .collect(),
             honors: honors.into_iter().map(|value| (value.id, value)).collect(),
-            honor_groups: honor_groups
+            honor_group_rows: honor_group_rows
                 .into_iter()
-                .map(|value| (value.id, value))
+                .filter_map(|row| Some((row.get("id")?.as_i64()?, row)))
                 .collect(),
             bonds: bonds.into_iter().map(|value| (value.id, value)).collect(),
             words: words
@@ -911,45 +925,13 @@ impl MasterDataProvider for HonorMasterDataProvider {
     }
 
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
-        let honor = self.honors.get(&honor_id)?;
-        let is_live_master = honor.honor_mission_type.is_some() && honor.assetbundle_name.is_none();
-        let (asset_bundle_name, honor_rarity) = if is_live_master {
-            let level = honor.levels.iter().find(|value| value.level == honor_level);
-            (
-                level
-                    .and_then(|value| value.assetbundle_name.clone())
-                    .unwrap_or_default(),
-                level
-                    .and_then(|value| value.honor_rarity.clone())
-                    .unwrap_or_else(|| "low".into()),
-            )
-        } else {
-            (
-                honor.assetbundle_name.clone().unwrap_or_default(),
-                honor.honor_rarity.clone().unwrap_or_else(|| "low".into()),
-            )
-        };
+        let honor = self.honor_rows.get(&honor_id)?;
         let group = honor
-            .group_id
-            .filter(|id| *id > 0)
-            .and_then(|id| self.honor_groups.get(&id));
-        Some(ResolvedHonor {
-            asset_bundle_name,
-            honor_rarity,
-            honor_type: group
-                .map(|value| value.honor_type.clone())
-                .unwrap_or_else(|| "normal".into()),
-            background_asset_bundle_name: group
-                .and_then(|value| value.background_assetbundle_name.clone())
-                .filter(|value| !value.is_empty()),
-            frame_name: group
-                .and_then(|value| value.frame_name.clone())
-                .filter(|value| !value.is_empty()),
-            is_live_master,
-            has_star: honor.levels.len() > 1,
-            honor_level,
-            honor_mission_type: honor.honor_mission_type.clone(),
-        })
+            .get("groupId")
+            .and_then(Value::as_i64)
+            .and_then(|id| self.honor_group_rows.get(&id));
+        sekai_profile_renderer::core::masterdata::resolve_honor_rows(honor, group, honor_level)
+            .map(|value| ResolvedHonor::from_core(value, honor_level))
     }
 
     fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
@@ -1002,29 +984,15 @@ impl MasterDataProvider for HonorMasterDataProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sekai_profile_renderer::types::HonorLevelEntry;
-
-    fn level(level: i32) -> HonorLevelEntry {
-        HonorLevelEntry {
-            level,
-            assetbundle_name: None,
-            honor_rarity: None,
-            description: None,
-        }
-    }
 
     #[test]
     fn plan_canonicalizes_bonds_sub_and_counts_each_axis_once() {
         let plan = HonorPlan::from_tables(
             "fixture".into(),
-            vec![HonorEntry {
-                id: 1,
-                assetbundle_name: Some("honor".into()),
-                honor_rarity: Some("low".into()),
-                group_id: None,
-                levels: vec![level(1), level(2)],
-                honor_mission_type: None,
-            }],
+            vec![serde_json::json!({
+                "id": 1, "assetbundleName": "honor", "honorRarity": "low", "groupId": null,
+                "levels": [{ "level": 1 }, { "level": 2 }], "honorMissionType": null
+            })],
             Vec::new(),
             vec![BondsPlanEntry {
                 id: 2,
@@ -1072,6 +1040,54 @@ mod tests {
         assert!(bonds_sub
             .iter()
             .all(|object| object.key.contains("/word-00000000/")));
+    }
+
+    #[test]
+    fn honors_resolve_through_the_shared_row_resolver() {
+        let honors = serde_json::json!([
+            {
+                "id": 1, "assetbundleName": null, "honorRarity": null, "groupId": 3,
+                "honorMissionType": "live_master",
+                "levels": [{ "level": 1, "assetbundleName": "honor_live_1", "honorRarity": "high" }]
+            },
+            {
+                "id": 2, "assetbundleName": "honor_0002", "honorRarity": "middle", "groupId": 4,
+                "honorMissionType": null, "levels": [{ "level": 1 }, { "level": 2 }]
+            }
+        ]);
+        let groups = serde_json::json!([
+            { "id": 3, "honorType": "achievement" },
+            { "id": 4, "honorType": "", "frameName": "frame_0004" }
+        ]);
+        let empty = serde_json::json!([]);
+        let dir = tempfile::tempdir().expect("masterdata tempdir");
+        for (name, table) in [
+            ("honors.json", &honors),
+            ("honorGroups.json", &groups),
+            ("bondsHonors.json", &empty),
+            ("bondsHonorWords.json", &empty),
+            ("gameCharacterUnits.json", &empty),
+        ] {
+            std::fs::write(dir.path().join(name), table.to_string()).expect("masterdata table");
+        }
+        let plan = HonorPlan::load(dir.path()).expect("plan");
+        for (id, level) in [(1, 1), (1, 7), (2, 2)] {
+            let row = honors
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["id"] == id))
+                .expect("honor row");
+            let group = groups
+                .as_array()
+                .and_then(|rows| rows.iter().find(|group| group["id"] == row["groupId"]));
+            let expected =
+                sekai_profile_renderer::core::masterdata::resolve_honor_rows(row, group, level)
+                    .map(|value| ResolvedHonor::from_core(value, level));
+            assert_eq!(
+                format!("{:?}", plan.provider.resolve_honor(id, level)),
+                format!("{expected:?}"),
+                "honor {id} level {level}"
+            );
+        }
     }
 
     #[test]

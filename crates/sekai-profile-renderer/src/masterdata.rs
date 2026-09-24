@@ -212,7 +212,7 @@ pub trait MasterDataProvider: Send + Sync {
         match element_type {
             "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
                 if let Some(info) = self.resolve_resource(element_type, id) {
-                    return format!("{}/{}.png", info.load_val, info.file_name);
+                    return format!("{}.png", info.asset_key());
                 }
                 format!("{}/{}.png", element_type, id)
             }
