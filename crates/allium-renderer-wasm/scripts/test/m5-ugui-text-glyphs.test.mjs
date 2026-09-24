@@ -171,11 +171,22 @@ const workerSource = (await readSource("worker.ts")).replace(
   `const RENDERER_WORKER_PROTOCOL = ${JSON.stringify(RENDERER_WORKER_PROTOCOL)};`,
 );
 
+const FALLBACK_FACES = [
+  { family: "Roboto", face_index: 0 },
+  { family: "Noto Sans CJK SC", face_index: 2 },
+];
 const SCENE_COMMANDS = [
   { id: "cover", payload: { kind: "image" } },
-  { id: "a", payload: { kind: "ugui_text", text: "AO", font: { family: "FOT-Omikuji" } } },
-  { id: "b", payload: { kind: "ugui_text", text: "O", font: { family: "FOT-UDMinchoPro-B" } } },
-  { id: "c", payload: { kind: "ugui_text", text: "A", font: { family: "FOT-Omikuji" } } },
+  { id: "a", payload: { kind: "ugui_text", text: "AO", font: { family: "FOT-Omikuji" }, fallback_faces: FALLBACK_FACES } },
+  { id: "b", payload: { kind: "ugui_text", text: "O", font: { family: "FOT-UDMinchoPro-B" }, fallback_faces: FALLBACK_FACES } },
+  { id: "c", payload: { kind: "ugui_text", text: "A", font: { family: "FOT-Omikuji" }, fallback_faces: [] } },
+];
+// A file for every family of the scene's face chains.
+const FONT_FILES = [
+  ["FOT-Omikuji", [1, 2, 3]],
+  ["FOT-UDMinchoPro-B", [4, 5]],
+  ["Roboto", [6]],
+  ["Noto Sans CJK SC", [7, 8]],
 ];
 
 function uguiWorker({ commands = SCENE_COMMANDS, layout } = {}) {
@@ -276,17 +287,19 @@ test("the worker lays out every uGUI command with each family's registered font 
       pages: [{ width: 3, height: 2, pixelsBase64: Buffer.from(pixels).toString("base64") }],
     }),
   });
-  await worker.registerFont("FOT-Omikuji", [1, 2, 3]);
-  await worker.registerFont("FOT-UDMinchoPro-B", [4, 5]);
+  for (const [family, bytes] of FONT_FILES) await worker.registerFont(family, bytes);
   const response = await worker.createScene();
   assert.equal(response.ok, true, JSON.stringify(response.error));
   assert.equal(worker.layoutCalls.length, 1);
   const [{ fonts, input }] = worker.layoutCalls;
-  // Each family's file once, in the order the texts first name them.
-  assert.deepEqual(fonts, [1, 2, 3, 4, 5]);
+  // Each family's file once, in the order the face chains first name them;
+  // the face indices stay in the texts' sources.
+  assert.deepEqual(fonts, [1, 2, 3, 6, 7, 8, 4, 5]);
   assert.deepEqual(input.fonts, [
     { family: "FOT-Omikuji", offset: 0, length: 3 },
-    { family: "FOT-UDMinchoPro-B", offset: 3, length: 2 },
+    { family: "Roboto", offset: 3, length: 1 },
+    { family: "Noto Sans CJK SC", offset: 4, length: 2 },
+    { family: "FOT-UDMinchoPro-B", offset: 6, length: 2 },
   ]);
   // Every uGUI command in command order, its payload as the source.
   assert.deepEqual(input.texts, SCENE_COMMANDS.slice(1).map(({ id, payload }) => ({ id, source: payload })));
@@ -314,11 +327,28 @@ test("a uGUI font without a registered file fails the scene and releases it", as
   await worker.registerFont("FOT-Omikuji", [1, 2, 3]);
   // A prebuilt atlas registration carries no font file.
   await worker.send("registerPrebuiltFont", { region: "cn", family: "FOT-UDMinchoPro-B", sourceHash: "1".repeat(64) });
+  await worker.registerFont("Roboto", [6]);
+  await worker.registerFont("Noto Sans CJK SC", [7, 8]);
   const response = await worker.createScene();
   assert.equal(response.ok, false);
   assert.deepEqual(response.error, {
     code: "FONT_NOT_REGISTERED",
     message: "Required font is not registered: FOT-UDMinchoPro-B",
+  });
+  assert.equal(worker.layoutCalls.length, 0);
+  assert.deepEqual(worker.destroyed, [5]);
+});
+
+test("a fallback family without a registered file fails the scene like the text's own font", async () => {
+  const worker = uguiWorker();
+  await worker.registerFont("FOT-Omikuji", [1, 2, 3]);
+  await worker.registerFont("FOT-UDMinchoPro-B", [4, 5]);
+  await worker.registerFont("Roboto", [6]);
+  const response = await worker.createScene();
+  assert.equal(response.ok, false);
+  assert.deepEqual(response.error, {
+    code: "FONT_NOT_REGISTERED",
+    message: "Required font is not registered: Noto Sans CJK SC",
   });
   assert.equal(worker.layoutCalls.length, 0);
   assert.deepEqual(worker.destroyed, [5]);
@@ -332,8 +362,7 @@ for (const [name, layout, message] of [
 ]) {
   test(`${name} fails the scene and releases it`, async () => {
     const worker = uguiWorker({ layout });
-    await worker.registerFont("FOT-Omikuji", [1]);
-    await worker.registerFont("FOT-UDMinchoPro-B", [2]);
+    for (const [family, bytes] of FONT_FILES) await worker.registerFont(family, bytes);
     const response = await worker.createScene();
     assert.equal(response.ok, false);
     assert.deepEqual(response.error, { code: "UGUI_TEXT_LAYOUT_FAILED", message });
@@ -342,9 +371,12 @@ for (const [name, layout, message] of [
 }
 
 test("a uGUI command without an id or a font family fails the scene", async () => {
+  const font = { family: "FOT-Omikuji" };
   for (const [commands, message] of [
-    [[{ payload: { kind: "ugui_text", font: { family: "FOT-Omikuji" } } }], "uGUI text command has no id"],
-    [[{ id: "x", payload: { kind: "ugui_text" } }], "uGUI text x names no font family"],
+    [[{ payload: { kind: "ugui_text", font, fallback_faces: [] } }], "uGUI text command has no id"],
+    [[{ id: "x", payload: { kind: "ugui_text", fallback_faces: [] } }], "uGUI text x names no font family"],
+    [[{ id: "x", payload: { kind: "ugui_text", font } }], "uGUI text x has no fallback faces"],
+    [[{ id: "x", payload: { kind: "ugui_text", font, fallback_faces: [{ face_index: 2 }] } }], "uGUI text x fallback face 0 names no font family"],
   ]) {
     const worker = uguiWorker({ commands });
     const response = await worker.createScene();

@@ -555,6 +555,12 @@
     "version": 1
   },
   "request": {
+    "fonts": [
+      {
+        "family": "UguiFixture",
+        "file": "ugui-fixture.otf"
+      }
+    ],
     "texts": [
       {
         "id": "title",
@@ -580,6 +586,7 @@
             1.0,
             1.0
           ],
+          "fallback_faces": [],
           "font": {
             "ascent": 14.080001,
             "character_padding": 1,
@@ -689,6 +696,7 @@
             0.30980393,
             1.0
           ],
+          "fallback_faces": [],
           "font": {
             "ascent": 14.080001,
             "character_padding": 1,
@@ -798,6 +806,7 @@
             0.30980393,
             1.0
           ],
+          "fallback_faces": [],
           "font": {
             "ascent": 14.080001,
             "character_padding": 1,
@@ -840,6 +849,7 @@
             1.0,
             1.0
           ],
+          "fallback_faces": [],
           "font": {
             "ascent": 14.080001,
             "character_padding": 1,

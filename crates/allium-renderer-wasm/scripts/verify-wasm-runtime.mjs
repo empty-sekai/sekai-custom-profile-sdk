@@ -146,8 +146,9 @@ assert.deepEqual(
     "static/ui/sekai_badge_normal",
   ],
 );
-assert.deepEqual(collectionPreparation.ugui_font_families, ["FOT-Omikuji"]);
-assert.deepEqual(collectionPreparation.font_families, ["FOT-Omikuji"]);
+// The slip font and the CN client's fallback faces.
+assert.deepEqual(collectionPreparation.ugui_font_families, ["FOT-Omikuji", "Noto Sans CJK SC", "Roboto"]);
+assert.deepEqual(collectionPreparation.font_families, ["FOT-Omikuji", "Noto Sans CJK SC", "Roboto"]);
 const collectionScene = callJsonInput("sdf_renderer_core_profile_create_json", {
   documentKey: "collections",
   card: {
@@ -163,16 +164,20 @@ assert.deepEqual(uguiTexts.map((command) => command.role), [
   "omikuji-description", "omikuji-description", "omikuji-description",
 ]);
 assert.ok(uguiTexts.every((command) => command.payload.font.family === "FOT-Omikuji"));
+assert.ok(uguiTexts.every((command) => JSON.stringify(command.payload.fallback_faces) === JSON.stringify([
+  { family: "Roboto", face_index: 0 },
+  { family: "Noto Sans CJK SC", face_index: 2 },
+])));
 assert.equal(module.ccall("sdf_renderer_core_scene_destroy", "number", ["number"], [collectionScene.handle]), 1);
 assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [collectionMasterData.handle]), 1);
 
-// The wasm FreeType lays the CFF fixture font out exactly as the native
-// FreeType build does: the fixture records the native layout, with each
-// coverage page as its SHA-256.
-const fixtureFont = new Uint8Array(await readFile(new URL("./test/fixtures/ugui-fixture.otf", import.meta.url)));
-const fixture = JSON.parse(await readFile(new URL("./test/fixtures/ugui-fixture-layout.json", import.meta.url), "utf8"));
+// The wasm FreeType lays the synthetic fixture fonts out exactly as the
+// native FreeType build does: each fixture records the native layout, with
+// each coverage page as its SHA-256. The second one draws characters from
+// fallback faces: a TrueType font and faces of a font collection.
+const fixtureFile = async (name) => new Uint8Array(await readFile(new URL(`./test/fixtures/${name}`, import.meta.url)));
 const uguiLayout = (fontBytes, request) => {
-  const fontPointer = module._malloc(fontBytes.byteLength);
+  const fontPointer = module._malloc(Math.max(fontBytes.byteLength, 1));
   try {
     module.HEAPU8.set(fontBytes, fontPointer);
     return callJsonInput("sdf_layout_ugui_text_json", request, [fontPointer, fontBytes.byteLength]);
@@ -180,39 +185,90 @@ const uguiLayout = (fontBytes, request) => {
     module._free(fontPointer);
   }
 };
-const fixtureLayout = uguiLayout(fixtureFont, {
-  fonts: [{ family: "UguiFixture", offset: 0, length: fixtureFont.byteLength }],
-  texts: fixture.request.texts,
-});
-for (const page of fixtureLayout.pages) {
-  const pixels = Buffer.from(page.pixelsBase64, "base64");
-  assert.equal(pixels.byteLength, page.width * page.height);
-  delete page.pixelsBase64;
-  page.pixelsSha256 = createHash("sha256").update(pixels).digest("hex");
-}
-assert.deepEqual(fixtureLayout, fixture.layout);
-// A text whose font is not given fails the layout.
-const missingFont = (() => {
-  const pointer = module._malloc(1);
+// The error of a layout that fails.
+const uguiLayoutError = (fontBytes, request) => {
+  const fontPointer = module._malloc(Math.max(fontBytes.byteLength, 1));
+  const bytes = encoder.encode(JSON.stringify(request));
+  const input = module._malloc(bytes.byteLength);
   try {
-    const bytes = encoder.encode(JSON.stringify({ fonts: [], texts: fixture.request.texts.slice(0, 1) }));
-    const input = module._malloc(bytes.byteLength);
+    module.HEAPU8.set(fontBytes, fontPointer);
+    module.HEAPU8.set(bytes, input);
+    const result = module.ccall(
+      "sdf_layout_ugui_text_json",
+      "number",
+      ["number", "number", "number", "number"],
+      [fontPointer, fontBytes.byteLength, input, bytes.byteLength],
+    );
     try {
-      module.HEAPU8.set(bytes, input);
-      const result = module.ccall("sdf_layout_ugui_text_json", "number", ["number", "number", "number", "number"], [pointer, 0, input, bytes.byteLength]);
-      try {
-        return JSON.parse(readCString(result));
-      } finally {
-        module.ccall("sdf_layout_freetype_free_string", null, ["number"], [result]);
-      }
+      return JSON.parse(readCString(result)).error;
     } finally {
-      module._free(input);
+      module.ccall("sdf_layout_freetype_free_string", null, ["number"], [result]);
     }
   } finally {
-    module._free(pointer);
+    module._free(input);
+    module._free(fontPointer);
   }
-})();
-assert.match(missingFont.error, /font UguiFixture is not registered/);
+};
+let fixture;
+let fixtureLayout;
+let fixtureTexts = 0;
+for (const name of ["ugui-fixture-layout.json", "ugui-fixture-fallback-layout.json"]) {
+  fixture = JSON.parse(await readFile(new URL(`./test/fixtures/${name}`, import.meta.url), "utf8"));
+  const files = await Promise.all(fixture.request.fonts.map((font) => fixtureFile(font.file)));
+  const buffer = new Uint8Array(files.reduce((sum, file) => sum + file.byteLength, 0));
+  const fonts = [];
+  let offset = 0;
+  for (const [index, file] of files.entries()) {
+    buffer.set(file, offset);
+    fonts.push({ family: fixture.request.fonts[index].family, offset, length: file.byteLength });
+    offset += file.byteLength;
+  }
+  fixtureLayout = uguiLayout(buffer, { fonts, texts: fixture.request.texts });
+  for (const page of fixtureLayout.pages) {
+    const pixels = Buffer.from(page.pixelsBase64, "base64");
+    assert.equal(pixels.byteLength, page.width * page.height);
+    delete page.pixelsBase64;
+    page.pixelsSha256 = createHash("sha256").update(pixels).digest("hex");
+  }
+  assert.deepEqual(fixtureLayout, fixture.layout, name);
+  fixtureTexts += fixtureLayout.texts.length;
+}
+// A text whose font is not given fails the layout.
+assert.match(
+  uguiLayoutError(new Uint8Array(0), { fonts: [], texts: fixture.request.texts.slice(0, 1) }),
+  /font UguiFixture is not registered/,
+);
+// So does a missing fallback font, and a face the collection does not have.
+{
+  const [primary, latin] = await Promise.all(["ugui-fixture.otf", "ugui-fixture-latin.ttf"].map(fixtureFile));
+  const buffer = new Uint8Array(primary.byteLength + latin.byteLength);
+  buffer.set(primary, 0);
+  buffer.set(latin, primary.byteLength);
+  const chain = fixture.request.texts.find((text) => text.id === "chain");
+  const missingFallback = uguiLayoutError(buffer, {
+    fonts: [
+      { family: "UguiFixture", offset: 0, length: primary.byteLength },
+      { family: "UguiFixture Latin", offset: primary.byteLength, length: latin.byteLength },
+    ],
+    texts: [chain],
+  });
+  assert.match(missingFallback, /chain: font UguiFixture CJK is not registered/);
+  const cjk = await fixtureFile("ugui-fixture-cjk.ttc");
+  const all = new Uint8Array(buffer.byteLength + cjk.byteLength);
+  all.set(buffer, 0);
+  all.set(cjk, buffer.byteLength);
+  const beyond = structuredClone(chain);
+  beyond.source.fallback_faces[1].face_index = 4;
+  const missingFace = uguiLayoutError(all, {
+    fonts: [
+      { family: "UguiFixture", offset: 0, length: primary.byteLength },
+      { family: "UguiFixture Latin", offset: primary.byteLength, length: latin.byteLength },
+      { family: "UguiFixture CJK", offset: buffer.byteLength, length: cjk.byteLength },
+    ],
+    texts: [beyond],
+  });
+  assert.match(missingFace, /chain: glyphs of UguiFixture, UguiFixture Latin, UguiFixture CJK failed: open font face 4 of font 2/);
+}
 
 const authoring = callJson("sdf_renderer_authoring_create_blank_json", [], []);
 assert.ok(Number.isInteger(authoring.handle) && authoring.handle > 0);
@@ -291,7 +347,7 @@ console.log(JSON.stringify({
   contract: contract.font_engine_fingerprint,
   glyphDemand: demand.requests.length,
   masterDataLifecycle: "pass",
-  uguiTextLayout: fixtureLayout.texts.length,
+  uguiTextLayout: fixtureTexts,
   authoringLifecycle: "pass",
   atlasLifecycle: "pass",
 }));

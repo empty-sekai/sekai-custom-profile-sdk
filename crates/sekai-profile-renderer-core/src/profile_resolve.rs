@@ -94,8 +94,9 @@ pub struct AuthoredProfilePreparation {
     /// Every font family the page draws with: the values of [`Self::fonts`]
     /// and [`Self::ugui_font_families`].
     pub font_families: BTreeSet<String>,
-    /// Families of the uGUI text ([`crate::ugui_text`]) the page draws, whose
-    /// glyphs come from FreeType bitmaps rather than an SDF atlas.
+    /// Families of every face of the uGUI texts ([`crate::ugui_text`]) the
+    /// page draws, fallback faces included. Their glyphs come from FreeType
+    /// bitmaps rather than an SDF atlas.
     #[serde(default)]
     pub ugui_font_families: BTreeSet<String>,
     pub layout_layers: Vec<ProfileTextLayoutPreparation>,
@@ -548,7 +549,9 @@ fn prepare_profile_inner(
                 fallback,
             ),
             crate::SemanticCommandPayload::UguiText(source) => {
-                output.ugui_font_families.insert(source.font.family.clone());
+                output
+                    .ugui_font_families
+                    .extend(source.face_chain().into_iter().map(|face| face.family));
             }
             crate::SemanticCommandPayload::Composite { .. }
             | crate::SemanticCommandPayload::Shape { .. } => {}
@@ -3255,17 +3258,18 @@ mod tests {
             ]
         );
         let preparation = prepare_profile(&card, None, &data, "collections", "jp").unwrap();
+        // The slip font and both fallback faces of the CN client.
+        let ugui_families = ["FOT-Omikuji", "Noto Sans CJK SC", "Roboto"];
         assert_eq!(
             preparation.ugui_font_families,
-            BTreeSet::from(["FOT-Omikuji".to_string()])
+            BTreeSet::from(ugui_families.map(String::from))
         );
-        assert!(preparation.font_families.contains("FOT-Omikuji"));
-        // The slip font is not an SDF font: it has no font id and no glyph
-        // layers.
-        assert!(preparation
-            .fonts
-            .values()
-            .all(|family| family != "FOT-Omikuji"));
+        for family in ugui_families {
+            assert!(preparation.font_families.contains(family), "{family}");
+            // uGUI fonts are not SDF fonts: they have no font id and no
+            // glyph layers.
+            assert!(preparation.fonts.values().all(|sdf| sdf != family));
+        }
         assert!(preparation.glyph_layers.is_empty());
 
         let scene = compile_profile_scene(

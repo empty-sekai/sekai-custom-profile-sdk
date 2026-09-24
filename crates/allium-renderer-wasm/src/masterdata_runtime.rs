@@ -799,15 +799,11 @@ mod tests {
                 "static/ui/sekai_badge_normal",
             ]
         );
-        // The slip's texts draw from their font file, not an SDF atlas.
-        assert_eq!(
-            prepared["ugui_font_families"],
-            serde_json::json!(["FOT-Omikuji"])
-        );
-        assert_eq!(
-            prepared["font_families"],
-            serde_json::json!(["FOT-Omikuji"])
-        );
+        // The slip's texts draw from their font file and the CN client's
+        // fallback faces, not an SDF atlas.
+        let ugui_families = serde_json::json!(["FOT-Omikuji", "Noto Sans CJK SC", "Roboto"]);
+        assert_eq!(prepared["ugui_font_families"], ugui_families);
+        assert_eq!(prepared["font_families"], ugui_families);
         assert_eq!(prepared["fonts"], serde_json::json!({}));
         let response: serde_json::Value =
             serde_json::from_str(&super::create_scene(handle, &request).unwrap()).unwrap();

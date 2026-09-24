@@ -10,6 +10,12 @@
 //! unhinted outlines (`FT_LOAD_NO_HINTING`), the Adobe CFF engine without stem
 //! darkening, and 8-bit anti-aliased coverage (`FT_RENDER_MODE_NORMAL`).
 //!
+//! A character comes from the first face of [`UguiTextSource::face_chain`]
+//! whose character map has it: the font asset's file, then
+//! [`UguiTextSource::fallback_faces`] in order. A glyph from a fallback face
+//! keeps that face's bitmap offsets, size and advance; the padding, advance
+//! rounding, tracking and line metrics are always the font asset's.
+//!
 //! Every glyph becomes a quad over its bitmap with
 //! [`UguiFontAsset::character_padding`] empty texels on each side, mapped one
 //! texel to one pixel. A renderer samples that cell bilinearly
@@ -60,6 +66,17 @@ pub struct UguiFontAsset {
     pub tracking: f32,
     /// Advances are rounded to whole pixels when a glyph is cached.
     pub round_advance: bool,
+}
+
+/// A face of a font file: the file is requested by `family`, and
+/// `face_index` picks the face in it (0 for a file that is not a
+/// collection).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Encode, Decode,
+)]
+pub struct UguiFontFace {
+    pub family: String,
+    pub face_index: u32,
 }
 
 /// A glyph the vertical-text modifier turns and moves after setting the text
@@ -116,6 +133,9 @@ pub struct UguiTextSource {
     /// The string the node displays.
     pub text: String,
     pub font: UguiFontAsset,
+    /// Faces tried in order for a character the font asset's file has no
+    /// glyph for.
+    pub fallback_faces: Vec<UguiFontFace>,
     /// Font size in canvas units.
     pub font_size: i32,
     /// Factor applied to the pitch between lines.
@@ -136,6 +156,19 @@ pub struct UguiTextSource {
     pub backdrop: Option<UguiTextBackdrop>,
 }
 
+impl UguiTextSource {
+    /// The faces glyphs come from, in the order they are tried: the first
+    /// face of the font asset's file, then [`Self::fallback_faces`].
+    pub fn face_chain(&self) -> Vec<UguiFontFace> {
+        std::iter::once(UguiFontFace {
+            family: self.font.family.clone(),
+            face_index: 0,
+        })
+        .chain(self.fallback_faces.iter().cloned())
+        .collect()
+    }
+}
+
 /// A glyph rendered by FreeType at one pixel size.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UguiGlyph {
@@ -149,10 +182,11 @@ pub struct UguiGlyph {
     pub coverage: Vec<u8>,
 }
 
-/// Supplies the glyphs of one font file to [`layout`].
+/// Supplies the glyphs of a text's face chain ([`UguiTextSource::face_chain`])
+/// to [`layout`].
 pub trait UguiGlyphRasterizer {
     /// `ch` rendered at `pixel_size` as the module documentation describes,
-    /// or `None` when the font has no glyph for it.
+    /// from the first face that has a glyph for it, or `None` when none has.
     fn glyph(&mut self, ch: char, pixel_size: u32) -> Option<Arc<UguiGlyph>>;
 }
 
@@ -554,6 +588,7 @@ mod tests {
         UguiTextSource {
             text: text.into(),
             font: mincho("SyntheticMincho"),
+            fallback_faces: Vec::new(),
             font_size,
             line_spacing,
             color: [1.0; 4],

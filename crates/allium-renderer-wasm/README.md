@@ -155,7 +155,22 @@ export interface ResourceProvider {
 
 `namespace`、`key` 和 `role` 表达 renderer 语义；调用方可将其映射到任意资源命名和存储规则。
 
-罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`。`omikuji` 收藏品按元素 `targetId` 指向的 `omikujis` 行绘制签：请求签面图与运势图两张 `assets` 资源，签文以 FreeType 覆盖率（而非 SDF 图集）绘制，所需字体经 `FontProvider` 按字体资源名 `FOT-Omikuji`（2022 年签）或 `FOT-UDMinchoPro-B`（2023–2025 年签）请求字体文件；这两个 family 不走预生成 SDF 图集。字体缺失时场景创建失败，与其他已声明字体一致。
+罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`。`omikuji` 收藏品按元素 `targetId` 指向的 `omikujis` 行绘制签：请求签面图与运势图两张 `assets` 资源，签文以 FreeType 覆盖率（而非 SDF 图集）绘制，所需字体经 `FontProvider` 按字体资源名 `FOT-Omikuji`（2022 年签）或 `FOT-UDMinchoPro-B`（2023–2025 年签）请求字体文件。该字体没有字形的字符取自第一个有该字形的后备 face：先 `Roboto`，再按 master data 区服选取的 Noto Sans CJK face。`FontProvider` 会被请求这三个 family，返回完整文件，由渲染器打开下表所列 face。这些 family 不走预生成 SDF 图集，缺任何一个时场景创建失败，与其他已声明字体一致。
+
+| Family | 文件 | Face |
+|---|---|---|
+| `FOT-Omikuji`（2022 年签） | `FOT-Omikuji.otf` | 0 |
+| `FOT-UDMinchoPro-B`（2023–2025 年签） | `FOT-UDMinchoPro-B.otf` | 0 |
+| `Roboto` | `Roboto-Regular.ttf` | 0 |
+| `Noto Sans CJK SC`（区服 `cn`、`en` 及其他） | `NotoSansCJK-Regular.ttc` | 2 |
+| `Noto Sans CJK TC`（区服 `tw`） | `NotoSansCJK-Regular.ttc` | 3 |
+| `Noto Sans CJK JP`（区服 `jp`） | `NotoSansCJK-Regular.ttc` | 0 |
+| `Noto Sans CJK KR`（区服 `kr`） | `NotoSansCJK-Regular.ttc` | 1 |
+
+两个后备字体文件为 Android 14 原生系统字体：
+
+- `Roboto-Regular.ttf`，SHA-256 `9ca9debb09459bf4e3e7f826f5cd0f35f253902b85684921fce2ba3f28dd0f50`；
+- `NotoSansCJK-Regular.ttc`，SHA-256 `39fb47c543da50618ab99e8b9e5529e54566bdbef41719308165975f627d5c93`。
 
 ### 任意异步来源
 

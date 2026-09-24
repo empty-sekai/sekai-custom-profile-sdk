@@ -1,8 +1,9 @@
 //! Software raster of uGUI text commands.
 //!
 //! The text is laid out by [`sekai_profile_renderer_core::ugui_text::layout`]
-//! with FreeType glyphs at
-//! [`ugui_text::CARD_PIXELS_PER_UNIT`]. Its backdrop is drawn first, as a solid
+//! with FreeType glyphs from its face chain at
+//! [`ugui_text::CARD_PIXELS_PER_UNIT`]; a family of the chain without an
+//! installed font file fails the command. Its backdrop is drawn first, as a solid
 //! rectangle the way shapes are drawn. Each glyph quad then maps its padded
 //! glyph cell onto the canvas: a pixel is covered when its centre lies inside
 //! the quad, it takes the cell's coverage at its centre
@@ -32,10 +33,11 @@ pub(super) fn raster_ugui_text_command(
     translate_y: f32,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
-    let mut glyphs = UguiGlyphs::for_family(&source.font.family).ok_or_else(|| {
+    // Every face of the chain is required, whether or not the text needs it.
+    let mut glyphs = UguiGlyphs::for_chain(&source.face_chain()).map_err(|family| {
         ProfileCompositorError::MissingFont {
             role: command.role.clone(),
-            family: source.font.family.clone(),
+            family,
         }
     })?;
     let mesh = ugui_text::layout(source, ugui_text::CARD_PIXELS_PER_UNIT, &mut glyphs);
@@ -202,6 +204,7 @@ impl GlyphTarget<'_> {
 
 #[cfg(test)]
 mod tests {
+    use sekai_profile_renderer_core::ugui_text::UguiFontFace;
     use sekai_profile_renderer_core::{Rect, StableId};
 
     use super::*;
@@ -367,6 +370,7 @@ mod tests {
         UguiTextSource {
             text: text.into(),
             font: sekai_profile_renderer_core::omikuji::font_asset("DejaVu Sans"),
+            fallback_faces: Vec::new(),
             font_size: 40,
             line_spacing: 1.0,
             color: [1.0; 4],
@@ -414,6 +418,48 @@ mod tests {
         Some((pixels, stats))
     }
 
+    #[test]
+    fn a_fallback_family_without_an_installed_file_fails_the_command() {
+        let mut source = text_source("H", [1.0, 0.0, 0.0, -1.0, 10.0, 110.0]);
+        source.fallback_faces = vec![UguiFontFace {
+            family: "Uninstalled Fallback".into(),
+            face_index: 2,
+        }];
+        let command = SemanticCommandSource::ugui_text(
+            StableId(2),
+            StableId(1),
+            "omikuji-title",
+            Rect::default(),
+            source.clone(),
+        );
+        let result = raster_ugui_text_command(
+            &mut canvas(SIZE, SIZE),
+            SIZE,
+            SIZE,
+            &command,
+            &layer([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            &source,
+            0.0,
+            ImageExecutor::Scalar,
+        );
+        // The text's own font is checked first; "H" needs no fallback, and
+        // the fallback is required all the same.
+        let family = if crate::sdf::outline::resolve_font_path("DejaVu Sans").is_some() {
+            "Uninstalled Fallback"
+        } else {
+            "DejaVu Sans"
+        };
+        match result {
+            Err(ProfileCompositorError::MissingFont {
+                role,
+                family: missing,
+            }) => {
+                assert_eq!((role.as_str(), missing.as_str()), ("omikuji-title", family));
+            }
+            other => panic!("{:?}", other.map(|stats| stats.fragments)),
+        }
+    }
+
     fn alpha_sum(pixels: &[u8], columns: std::ops::Range<u32>) -> u64 {
         (0..SIZE)
             .flat_map(|y| columns.clone().map(move |x| (x, y)))
@@ -427,7 +473,11 @@ mod tests {
         let Some((pixels, stats)) = render(text_source("HH", upright)) else {
             return;
         };
-        let mut glyphs = UguiGlyphs::for_family("DejaVu Sans").expect("font");
+        let mut glyphs = UguiGlyphs::for_chain(&[UguiFontFace {
+            family: "DejaVu Sans".into(),
+            face_index: 0,
+        }])
+        .expect("font");
         let glyph = sekai_profile_renderer_core::ugui_text::UguiGlyphRasterizer::glyph(
             &mut glyphs,
             'H',

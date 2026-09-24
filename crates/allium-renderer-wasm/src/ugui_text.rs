@@ -2,18 +2,20 @@
 //!
 //! The scene's uGUI text commands are laid out by the shared core layout
 //! ([`sekai_profile_renderer_core::ugui_text::layout`]) with glyphs from the
-//! shared FreeType faces ([`UguiFreeTypeFaces`]), exactly as the native
-//! renderer lays them out. The glyph bitmaps are then packed into 8-bit
+//! shared FreeType faces ([`UguiFreeTypeFaces`]) of each text's face chain,
+//! exactly as the native renderer lays them out. Every family of a chain
+//! needs its font file. The glyph bitmaps are then packed into 8-bit
 //! coverage pages for the WebGL executor, which samples them the way
 //! [`sekai_profile_renderer_core::ugui_text::cell_coverage`] does.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use base64::Engine;
 use sekai_profile_renderer_core::ugui_freetype::UguiFreeTypeFaces;
 use sekai_profile_renderer_core::ugui_text::{
-    self, UguiGlyph, UguiGlyphRasterizer, UguiTextSource,
+    self, UguiFontFace, UguiGlyph, UguiGlyphRasterizer, UguiTextSource,
 };
 use sekai_profile_renderer_core::{Quad, Rect};
 use serde::{Deserialize, Serialize};
@@ -113,14 +115,15 @@ struct GlyphPage {
     pixels_base64: String,
 }
 
-/// Glyphs of one family: its faces and the glyphs rendered so far, so a
-/// character repeated across the scene's texts is rendered and packed once.
-struct FamilyGlyphs<'a> {
+/// Glyphs of one face chain: its faces and the glyphs rendered so far, so a
+/// character repeated across the texts of the chain is rendered and packed
+/// once.
+struct ChainGlyphs<'a> {
     faces: UguiFreeTypeFaces<&'a [u8]>,
     rendered: HashMap<(u32, char), Option<Arc<UguiGlyph>>>,
 }
 
-impl UguiGlyphRasterizer for FamilyGlyphs<'_> {
+impl UguiGlyphRasterizer for ChainGlyphs<'_> {
     fn glyph(&mut self, ch: char, pixel_size: u32) -> Option<Arc<UguiGlyph>> {
         if let Some(glyph) = self.rendered.get(&(pixel_size, ch)) {
             return glyph.clone();
@@ -135,40 +138,57 @@ impl UguiGlyphRasterizer for FamilyGlyphs<'_> {
 }
 
 /// Lays out the texts of `input` with the font files in `fonts` and packs
-/// their glyphs. A text whose family has no font file, or whose glyphs
-/// FreeType fails to render, fails the whole layout.
+/// their glyphs. A text with a family of its face chain that has no font
+/// file, or whose glyphs FreeType fails to render, fails the whole layout.
 pub fn layout_json(fonts: &[u8], input: &str) -> Result<String, String> {
     let request: LayoutRequest = serde_json::from_str(input)
         .map_err(|error| format!("parse uGUI text layout failed: {error}"))?;
-    let mut families = BTreeMap::<String, FamilyGlyphs<'_>>::new();
+    let mut files = BTreeMap::<&str, &[u8]>::new();
     for range in &request.fonts {
         let bytes = range
             .offset
             .checked_add(range.length)
             .and_then(|end| fonts.get(range.offset..end))
             .ok_or_else(|| format!("font {} is outside the font buffer", range.family))?;
-        let previous = families.insert(
-            range.family.clone(),
-            FamilyGlyphs {
-                faces: UguiFreeTypeFaces::new([bytes]),
-                rendered: HashMap::new(),
-            },
-        );
-        if previous.is_some() {
+        if files.insert(&range.family, bytes).is_some() {
             return Err(format!("font {} is given twice", range.family));
         }
     }
 
+    let mut chains = BTreeMap::<Vec<UguiFontFace>, ChainGlyphs<'_>>::new();
     let mut texts = Vec::with_capacity(request.texts.len());
     let mut meshes = Vec::with_capacity(request.texts.len());
     for text in &request.texts {
-        let family = &text.source.font.family;
-        let glyphs = families
-            .get_mut(family)
-            .ok_or_else(|| format!("{}: font {family} is not registered", text.id))?;
+        let chain = text.source.face_chain();
+        let families = chain
+            .iter()
+            .map(|face| face.family.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let glyphs = match chains.entry(chain) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let faces = entry
+                    .key()
+                    .iter()
+                    .map(|face| {
+                        files
+                            .get(face.family.as_str())
+                            .map(|bytes| (*bytes, face.face_index))
+                            .ok_or_else(|| {
+                                format!("{}: font {} is not registered", text.id, face.family)
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                entry.insert(ChainGlyphs {
+                    faces: UguiFreeTypeFaces::new(faces),
+                    rendered: HashMap::new(),
+                })
+            }
+        };
         let mesh = ugui_text::layout(&text.source, ugui_text::CARD_PIXELS_PER_UNIT, glyphs);
         if let Some(error) = glyphs.faces.error() {
-            return Err(format!("{}: glyphs of {family} failed: {error}", text.id));
+            return Err(format!("{}: glyphs of {families} failed: {error}", text.id));
         }
         texts.push(TextLayout {
             id: text.id.clone(),
@@ -291,7 +311,23 @@ mod tests {
     use serde_json::Value;
 
     const FIXTURE_FONT: &[u8] = include_bytes!("../scripts/test/fixtures/ugui-fixture.otf");
-    const FIXTURE_LAYOUT: &str = "scripts/test/fixtures/ugui-fixture-layout.json";
+    /// The synthetic fixture fonts by file name.
+    const FIXTURE_FILES: [(&str, &[u8]); 3] = [
+        ("ugui-fixture.otf", FIXTURE_FONT),
+        (
+            "ugui-fixture-latin.ttf",
+            include_bytes!("../scripts/test/fixtures/ugui-fixture-latin.ttf"),
+        ),
+        (
+            "ugui-fixture-cjk.ttc",
+            include_bytes!("../scripts/test/fixtures/ugui-fixture-cjk.ttc"),
+        ),
+    ];
+    /// Recorded layouts: the text's own font alone, and fallback faces.
+    const FIXTURE_LAYOUTS: [&str; 2] = [
+        "ugui-fixture-layout.json",
+        "ugui-fixture-fallback-layout.json",
+    ];
 
     fn glyph(width: u32, rows: u32, fill: u8) -> Arc<UguiGlyph> {
         Arc::new(UguiGlyph {
@@ -365,13 +401,64 @@ mod tests {
         .to_string()
     }
 
-    fn fixture() -> Value {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/scripts/test/fixtures/ugui-fixture-layout.json"
-        );
-        serde_json::from_str(&std::fs::read_to_string(path).expect(FIXTURE_LAYOUT))
+    fn fixture_path(name: &str) -> String {
+        format!(
+            "{}/scripts/test/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    fn fixture_named(name: &str) -> Value {
+        let path = fixture_path(name);
+        serde_json::from_str(&std::fs::read_to_string(&path).expect(&path))
             .expect("fixture layout JSON")
+    }
+
+    fn fixture() -> Value {
+        fixture_named(FIXTURE_LAYOUTS[0])
+    }
+
+    fn fixture_file(name: &str) -> &'static [u8] {
+        FIXTURE_FILES
+            .iter()
+            .find_map(|(file, bytes)| (*file == name).then_some(*bytes))
+            .unwrap_or_else(|| panic!("no fixture font {name}"))
+    }
+
+    /// The font buffer and layout request of a recorded layout: its font
+    /// files one after another, then its texts.
+    fn recorded_request(fixture: &Value) -> (Vec<u8>, String) {
+        let mut buffer = Vec::new();
+        let mut fonts = Vec::new();
+        for font in fixture["request"]["fonts"].as_array().expect("fonts") {
+            let bytes = fixture_file(font["file"].as_str().expect("file"));
+            fonts.push(serde_json::json!({
+                "family": font["family"],
+                "offset": buffer.len(),
+                "length": bytes.len(),
+            }));
+            buffer.extend_from_slice(bytes);
+        }
+        let request = serde_json::json!({ "fonts": fonts, "texts": fixture["request"]["texts"] });
+        (buffer, request.to_string())
+    }
+
+    /// The faces of `source`'s chain from the recorded layout's font files.
+    fn recorded_faces(
+        fixture: &Value,
+        source: &UguiTextSource,
+    ) -> UguiFreeTypeFaces<&'static [u8]> {
+        let fonts = fixture["request"]["fonts"].as_array().expect("fonts");
+        UguiFreeTypeFaces::new(source.face_chain().into_iter().map(|face| {
+            let font = fonts
+                .iter()
+                .find(|font| font["family"] == face.family.as_str())
+                .unwrap_or_else(|| panic!("no fixture font for {}", face.family));
+            (
+                fixture_file(font["file"].as_str().expect("file")),
+                face.face_index,
+            )
+        }))
     }
 
     /// The layout response with every page's pixels replaced by their
@@ -394,38 +481,40 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_font_lays_out_as_the_recorded_native_layout() {
-        let fixture = fixture();
-        let response = layout_json(
-            FIXTURE_FONT,
-            &fixture_request(fixture["request"]["texts"].clone()),
-        )
-        .expect("layout");
-        let actual = hashed(&response);
-        if std::env::var_os("SEKAI_PROFILE_UPDATE_FIXTURES").is_some() {
-            let path = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/scripts/test/fixtures/ugui-fixture-layout.json"
-            );
-            let updated = serde_json::json!({ "request": fixture["request"], "layout": actual });
-            std::fs::write(path, serde_json::to_string_pretty(&updated).unwrap() + "\n").unwrap();
-            return;
+    fn the_fixture_fonts_lay_out_as_the_recorded_native_layouts() {
+        for name in FIXTURE_LAYOUTS {
+            let fixture = fixture_named(name);
+            let (fonts, request) = recorded_request(&fixture);
+            let actual = hashed(&layout_json(&fonts, &request).expect("layout"));
+            if std::env::var_os("SEKAI_PROFILE_UPDATE_FIXTURES").is_some() {
+                let updated =
+                    serde_json::json!({ "request": fixture["request"], "layout": actual });
+                std::fs::write(
+                    fixture_path(name),
+                    serde_json::to_string_pretty(&updated).unwrap() + "\n",
+                )
+                .unwrap();
+                continue;
+            }
+            assert_eq!(actual, fixture["layout"], "{name}");
         }
-        assert_eq!(actual, fixture["layout"]);
     }
 
     #[test]
     fn the_layout_is_the_core_layout_with_the_shared_freetype_faces() {
-        let fixture = fixture();
+        for name in FIXTURE_LAYOUTS {
+            assert_core_layout(&fixture_named(name));
+        }
+    }
+
+    fn assert_core_layout(fixture: &Value) {
         let texts = fixture["request"]["texts"].as_array().expect("texts");
-        let response: Value = serde_json::from_str(
-            &layout_json(FIXTURE_FONT, &fixture_request(Value::Array(texts.clone())))
-                .expect("layout"),
-        )
-        .unwrap();
-        let mut faces = UguiFreeTypeFaces::new([FIXTURE_FONT]);
+        let (fonts, request) = recorded_request(fixture);
+        let response: Value =
+            serde_json::from_str(&layout_json(&fonts, &request).expect("layout")).unwrap();
         for (text, laid_out) in texts.iter().zip(response["texts"].as_array().unwrap()) {
             let source: UguiTextSource = serde_json::from_value(text["source"].clone()).unwrap();
+            let mut faces = recorded_faces(fixture, &source);
             let mesh = ugui_text::layout(&source, ugui_text::CARD_PIXELS_PER_UNIT, &mut faces);
             let drawn = mesh
                 .quads
@@ -471,8 +560,149 @@ mod tests {
                     );
                 }
             }
+            assert_eq!(faces.error(), None);
         }
-        assert_eq!(faces.error(), None);
+    }
+
+    /// The text `id` of the fallback fixture, its layout and its glyphs'
+    /// placements.
+    fn fallback_text(id: &str) -> (UguiTextSource, Value, Vec<Value>) {
+        let fixture = fixture_named(FIXTURE_LAYOUTS[1]);
+        let (fonts, request) = recorded_request(&fixture);
+        let response: Value =
+            serde_json::from_str(&layout_json(&fonts, &request).expect("layout")).unwrap();
+        let index = fixture["request"]["texts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|text| text["id"] == id)
+            .unwrap_or_else(|| panic!("no fallback text {id}"));
+        let source =
+            serde_json::from_value(fixture["request"]["texts"][index]["source"].clone()).unwrap();
+        let laid_out = response["texts"][index].clone();
+        let placements = laid_out["quads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|quad| response["glyphs"][quad["glyph"].as_u64().unwrap() as usize].clone())
+            .collect();
+        (source, laid_out, placements)
+    }
+
+    /// Bitmap offsets, size and advance of `ch` in face `face_index` of a
+    /// fixture file at `pixel_size`.
+    fn face_metrics(file: &str, face_index: u32, ch: char, pixel_size: u32) -> Value {
+        let glyph = UguiFreeTypeFaces::new([(fixture_file(file), face_index)])
+            .render(ch, pixel_size)
+            .expect("render")
+            .unwrap_or_else(|| panic!("{file} face {face_index} has no {ch}"));
+        serde_json::json!({
+            "bitmapLeft": glyph.bitmap_left,
+            "bitmapTop": glyph.bitmap_top,
+            "width": glyph.width,
+            "rows": glyph.rows,
+            "advance26d6": glyph.advance_26_6,
+        })
+    }
+
+    fn metrics_of(placement: &Value) -> Value {
+        serde_json::json!({
+            "bitmapLeft": placement["bitmapLeft"],
+            "bitmapTop": placement["bitmapTop"],
+            "width": placement["width"],
+            "rows": placement["rows"],
+            "advance26d6": placement["advance26d6"],
+        })
+    }
+
+    #[test]
+    fn each_character_comes_from_the_first_face_of_its_chain_that_maps_it() {
+        // "AB关Z": the text's font maps only A; the Latin face maps B (the
+        // collection maps it too, later); the collection's face 2 maps 关;
+        // no face maps Z, which keeps an empty cell.
+        let (source, laid_out, placements) = fallback_text("chain");
+        assert_eq!(source.text, "AB关Z");
+        assert_eq!(placements.len(), 3);
+        assert_eq!(
+            placements.iter().map(metrics_of).collect::<Vec<_>>(),
+            [
+                face_metrics("ugui-fixture.otf", 0, 'A', 40),
+                face_metrics("ugui-fixture-latin.ttf", 0, 'B', 40),
+                face_metrics("ugui-fixture-cjk.ttc", 2, '关', 40),
+            ]
+        );
+        assert_ne!(
+            face_metrics("ugui-fixture-cjk.ttc", 2, 'B', 40),
+            metrics_of(&placements[1])
+        );
+        assert_ne!(
+            face_metrics("ugui-fixture-latin.ttf", 0, 'A', 40),
+            metrics_of(&placements[0])
+        );
+        // Without fallback faces B and 关 are missing too.
+        let (_, alone, _) = fallback_text("no-fallback");
+        assert_eq!(alone["quads"].as_array().unwrap().len(), 1);
+        assert!(laid_out["preferredWidth"].as_f64() > alone["preferredWidth"].as_f64());
+    }
+
+    #[test]
+    fn the_face_index_picks_the_face_of_the_collection() {
+        let metrics = (0..4)
+            .map(|face_index| {
+                let (source, _, placements) = fallback_text(&format!("face-{face_index}"));
+                assert_eq!(source.fallback_faces[1].face_index, face_index);
+                let metrics = metrics_of(&placements[0]);
+                assert_eq!(
+                    metrics,
+                    face_metrics("ugui-fixture-cjk.ttc", face_index, '关', 30)
+                );
+                metrics
+            })
+            .collect::<Vec<_>>();
+        // The four faces draw 关 differently.
+        for (index, a) in metrics.iter().enumerate() {
+            for b in &metrics[index + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn a_fallback_glyph_keeps_the_font_assets_padding_and_advance_rounding() {
+        let (source, laid_out, placements) = fallback_text("chain");
+        let padding = f64::from(source.font.character_padding);
+        assert_eq!(laid_out["cellPadding"], source.font.character_padding);
+        assert!(source.font.round_advance && source.font.tracking == 1.0);
+        let quads = laid_out["quads"].as_array().unwrap();
+        let left = |index: usize| quads[index]["corners"][0][0].as_f64().unwrap();
+        let right = |index: usize| quads[index]["corners"][1][0].as_f64().unwrap();
+        let number = |placement: &Value, key: &str| placement[key].as_f64().unwrap();
+        // Pen positions step by the rounded advances of the glyphs' own
+        // faces.
+        let advance = |placement: &Value| (number(placement, "advance26d6") / 64.0 + 0.5).floor();
+        let latin_advance = number(&placements[1], "advance26d6") / 64.0;
+        assert_ne!(
+            latin_advance.fract(),
+            0.0,
+            "the Latin advance is fractional"
+        );
+        let mut pen = 0.0;
+        for (index, placement) in placements.iter().enumerate() {
+            // Each cell is the bitmap plus the asset's padding on both sides.
+            assert_eq!(
+                left(index),
+                pen + number(placement, "bitmapLeft") - padding,
+                "glyph {index}"
+            );
+            assert_eq!(
+                right(index) - left(index),
+                number(placement, "width") + 2.0 * padding,
+                "glyph {index}"
+            );
+            pen += advance(placement);
+        }
+        // Z adds nothing to the preferred width.
+        assert_eq!(laid_out["preferredWidth"].as_f64().unwrap(), pen);
     }
 
     #[test]
@@ -488,6 +718,32 @@ mod tests {
                 .as_ref()
                 .is_err_and(|error| error.contains("font OtherFamily is not registered")),
             "{missing:?}"
+        );
+        // Every fallback family of the chain needs its file too, whether or
+        // not a character needs it.
+        let mut fallback = text("UguiFixture");
+        fallback[0]["source"]["fallback_faces"] =
+            serde_json::json!([{ "family": "Missing Fallback", "face_index": 0 }]);
+        let missing = layout_json(FIXTURE_FONT, &fixture_request(fallback));
+        assert!(
+            missing.as_ref().is_err_and(
+                |error| error.contains("title: font Missing Fallback is not registered")
+            ),
+            "{missing:?}"
+        );
+        // A face the collection does not have fails the layout.
+        let fixture = fixture_named(FIXTURE_LAYOUTS[1]);
+        let mut beyond = fixture.clone();
+        let texts = beyond["request"]["texts"].as_array_mut().unwrap();
+        texts.truncate(1);
+        texts[0]["source"]["fallback_faces"][1]["face_index"] = serde_json::json!(4);
+        let (fonts, request) = recorded_request(&beyond);
+        let beyond = layout_json(&fonts, &request);
+        assert!(
+            beyond.as_ref().is_err_and(|error| error.contains(
+                "glyphs of UguiFixture, UguiFixture Latin, UguiFixture CJK failed: open font face 4 of font 2"
+            )),
+            "{beyond:?}"
         );
         let broken = layout_json(
             b"not a font",

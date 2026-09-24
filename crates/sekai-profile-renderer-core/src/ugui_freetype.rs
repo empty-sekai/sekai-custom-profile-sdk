@@ -7,8 +7,11 @@
 //! with stem darkening off. The CFF properties are set on a FreeType library
 //! of its own, so no other FreeType user sees them.
 //!
-//! [`UguiFreeTypeFaces`] holds an ordered list of font files. A character is
-//! rendered from the first face whose character map contains it.
+//! [`UguiFreeTypeFaces`] holds a text's face chain
+//! ([`crate::ugui_text::UguiTextSource::face_chain`]): an ordered list of font
+//! files, each with the index of the face to use in it. A character is
+//! rendered from the first face whose character map contains it, at the same
+//! pixel size and with the same settings whichever face that is.
 
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -36,8 +39,8 @@ pub fn char_height_26_6(pixel_size: u32) -> i64 {
     i64::from(pixel_size) * 64
 }
 
-/// Font files in fallback order, each opened as a FreeType face on the first
-/// glyph it is asked for.
+/// Faces of font files in fallback order, each opened on the first glyph it
+/// is asked for.
 pub struct UguiFreeTypeFaces<B> {
     library: Option<Library>,
     faces: Vec<FaceSlot<B>>,
@@ -47,20 +50,23 @@ pub struct UguiFreeTypeFaces<B> {
 struct FaceSlot<B> {
     /// The font file until its face is opened.
     bytes: Option<B>,
+    /// Index of the face in the file.
+    face_index: u32,
     face: Option<Face<B>>,
     /// Pixel size the face is set to; 0 before the first glyph.
     char_size: u32,
 }
 
 impl<B: Borrow<[u8]>> UguiFreeTypeFaces<B> {
-    /// Faces of `fonts`, tried in order.
-    pub fn new(fonts: impl IntoIterator<Item = B>) -> Self {
+    /// Face `face_index` of each font file of `faces`, tried in order.
+    pub fn new(faces: impl IntoIterator<Item = (B, u32)>) -> Self {
         Self {
             library: None,
-            faces: fonts
+            faces: faces
                 .into_iter()
-                .map(|bytes| FaceSlot {
+                .map(|(bytes, face_index)| FaceSlot {
                     bytes: Some(bytes),
+                    face_index,
                     face: None,
                     char_size: 0,
                 })
@@ -106,14 +112,17 @@ impl<B: Borrow<[u8]>> UguiFreeTypeFaces<B> {
         }
         let library = self.library.as_ref().expect("library initialised above");
         let slot = &mut self.faces[index];
-        let bytes = slot
-            .bytes
-            .take()
-            .ok_or_else(|| "open font face: the font failed to open before".to_string())?;
+        let face_index = slot.face_index;
+        let bytes = slot.bytes.take().ok_or_else(|| {
+            format!("open font face {face_index} of font {index}: it failed to open before")
+        })?;
+        let context = || format!("open font face {face_index} of font {index}");
+        let face_argument = isize::try_from(face_index)
+            .map_err(|_| format!("{}: the index is out of range", context()))?;
         slot.face = Some(
             library
-                .new_memory_face2(bytes, 0)
-                .map_err(|error| format!("open font face: {error:?}"))?,
+                .new_memory_face2(bytes, face_argument)
+                .map_err(|error| format!("{}: {error:?}", context()))?,
         );
         Ok(())
     }
@@ -232,7 +241,7 @@ mod tests {
             eprintln!("{DEJAVU} is not installed; skipping");
             return;
         };
-        let mut faces = UguiFreeTypeFaces::new([bytes.as_slice()]);
+        let mut faces = UguiFreeTypeFaces::new([(bytes.as_slice(), 0)]);
         let large = faces.glyph('H', 41).expect("H");
         let small = faces.glyph('H', 21).expect("H");
         assert!(large.rows > small.rows && large.width > small.width);
@@ -254,31 +263,37 @@ mod tests {
             eprintln!("{DEJAVU} is not installed; skipping");
             return;
         };
-        let alone = UguiFreeTypeFaces::new([bytes.as_slice()]).render('H', 30);
+        let font = (bytes.as_slice(), 0);
+        let alone = UguiFreeTypeFaces::new([font]).render('H', 30);
         // A face that cannot be opened fails the glyph rather than being
         // skipped.
-        let mut broken = UguiFreeTypeFaces::new([b"not a font".as_slice(), bytes.as_slice()]);
+        let mut broken = UguiFreeTypeFaces::new([(b"not a font".as_slice(), 0), font]);
         assert!(broken
             .render('H', 30)
-            .is_err_and(|error| error.contains("open font face")));
+            .is_err_and(|error| error.starts_with("open font face 0 of font 0:")));
         // With no face mapping the character, it is missing.
         assert_eq!(
-            UguiFreeTypeFaces::new([bytes.as_slice(), bytes.as_slice()]).render('\u{10FFFD}', 30),
+            UguiFreeTypeFaces::new([font, font]).render('\u{10FFFD}', 30),
             Ok(None)
         );
-        assert_eq!(
-            UguiFreeTypeFaces::new([bytes.as_slice(), bytes.as_slice()]).render('H', 30),
-            alone
-        );
+        assert_eq!(UguiFreeTypeFaces::new([font, font]).render('H', 30), alone);
         assert_eq!(
             UguiFreeTypeFaces::<&[u8]>::new([]).render('H', 30),
             Ok(None)
+        );
+        // A face the file does not have fails the glyph.
+        let beyond = UguiFreeTypeFaces::new([(bytes.as_slice(), 1)]).render('H', 30);
+        assert!(
+            beyond
+                .as_ref()
+                .is_err_and(|error| error.starts_with("open font face 1 of font 0:")),
+            "{beyond:?}"
         );
     }
 
     #[test]
     fn a_font_file_freetype_cannot_open_is_an_error_not_a_missing_glyph() {
-        let mut faces = UguiFreeTypeFaces::new([b"not a font".as_slice()]);
+        let mut faces = UguiFreeTypeFaces::new([(b"not a font".as_slice(), 0)]);
         assert_eq!(faces.glyph('A', 40), None);
         assert!(faces
             .error()

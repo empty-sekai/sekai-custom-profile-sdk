@@ -174,10 +174,29 @@ cargo run --release --bin render-card -- \
 （法线贴图，已列入 CLI 静态清单）；`omikuji` 行指向签的预制体，元素的 `targetId` 选出
 `omikujis` 行，native 与浏览器渲染器按该行绘制签面图、运势图，以及用 FreeType 覆盖率（而非
 SDF）绘制的竖排标题、总评与三段说明；两者共用 core 的版式与 FreeType 字形设置。签面与运势图
-作为普通素材请求；签文字体按字体资源名 `FOT-Omikuji`（2022 年签）与 `FOT-UDMinchoPro-B`
-（2023–2025 年签）请求：native 在字体目录中查找 `FOT-Omikuji.otf` 与 `FOT-UDMinchoPro-B.otf`，
-浏览器经 `FontProvider` 按同名 family 取字体文件，字体缺失时该页渲染失败。`targetId` 缺失或
-指向不存在的行、以及未收录的签预制体都不绘制，也不请求素材。其余类型与缺省值按普通图片绘制。
+作为普通素材请求；签文使用字体资源 `FOT-Omikuji`（2022 年签）或 `FOT-UDMinchoPro-B`
+（2023–2025 年签）。该字体没有字形的字符，取自第一个有该字形的后备 face，字号相同、不加粗：
+先 `Roboto`，再按 master data 表所属区服选取的 Noto Sans CJK face。御神签页面需要签文字体与
+两个后备字体，缺任何一个都渲染失败：
+
+| Family | 文件 | Face |
+|---|---|---|
+| `FOT-Omikuji`（2022 年签） | `FOT-Omikuji.otf` | 0 |
+| `FOT-UDMinchoPro-B`（2023–2025 年签） | `FOT-UDMinchoPro-B.otf` | 0 |
+| `Roboto` | `Roboto-Regular.ttf` | 0 |
+| `Noto Sans CJK SC`（区服 `cn`、`en` 及其他） | `NotoSansCJK-Regular.ttc` | 2 |
+| `Noto Sans CJK TC`（区服 `tw`） | `NotoSansCJK-Regular.ttc` | 3 |
+| `Noto Sans CJK JP`（区服 `jp`） | `NotoSansCJK-Regular.ttc` | 0 |
+| `Noto Sans CJK KR`（区服 `kr`） | `NotoSansCJK-Regular.ttc` | 1 |
+
+native 在字体目录中查找各文件并打开表中的 face；浏览器经 `FontProvider` 按 family 取字体文件。
+两个后备字体文件为 Android 14 原生系统字体：
+
+- `Roboto-Regular.ttf`，SHA-256 `9ca9debb09459bf4e3e7f826f5cd0f35f253902b85684921fce2ba3f28dd0f50`；
+- `NotoSansCJK-Regular.ttc`，SHA-256 `39fb47c543da50618ab99e8b9e5529e54566bdbef41719308165975f627d5c93`。
+
+`targetId` 缺失或指向不存在的行、以及未收录的签预制体都不绘制，也不请求素材。其余类型与缺省值按
+普通图片绘制。
 
 `--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical

@@ -5963,23 +5963,32 @@ mod tests {
         keys.sort();
         assert_eq!(keys, [OMIKUJI_COVER_KEY, OMIKUJI_FORTUNE_KEY]);
         let rendered = renderer.render_full_card_sdf_scalar_f32_transparent_candidate(&card, None);
-        match (
-            crate::sdf::outline::resolve_font_path("FOT-Omikuji"),
-            rendered,
-        ) {
-            // The slip's texts need the font asset's file; without it the page
-            // fails rather than drawing the slip without them.
-            (None, Err(error)) => assert!(
-                error.contains("omikuji-title needs font FOT-Omikuji"),
+        // The slip's texts need the font asset's file and both fallback
+        // faces; without one of them the page fails rather than drawing the
+        // slip without its texts.
+        let client = sekai_profile_renderer_core::omikuji::OmikujiClient::for_masterdata(&md, "");
+        let missing = [
+            "FOT-Omikuji",
+            sekai_profile_renderer_core::omikuji::LATIN_FALLBACK_FAMILY,
+            client.cjk_fallback.family(),
+        ]
+        .into_iter()
+        .find(|family| crate::sdf::outline::resolve_font_path(family).is_none());
+        match (missing, rendered) {
+            (Some(family), Err(error)) => assert!(
+                error.contains(&format!("omikuji-title needs font {family}")),
                 "{error}"
             ),
-            (Some(_), Ok(output)) => {
+            (None, Ok(output)) => {
                 assert_eq!(pixel_at(&output, -600.0, 0.0), cover);
                 assert_eq!(pixel_at(&output, 624.0, 1.0), fortune);
                 // The collection without a row draws nothing.
                 assert_eq!(pixel_at(&output, -600.0, -300.0 - 200.0), [0; 4]);
             }
-            (font, rendered) => panic!("font {font:?}: {:?}", rendered.map(|output| output.width)),
+            (missing, rendered) => panic!(
+                "missing font {missing:?}: {:?}",
+                rendered.map(|output| output.width)
+            ),
         }
     }
 

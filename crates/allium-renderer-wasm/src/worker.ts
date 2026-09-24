@@ -638,13 +638,26 @@ function uguiTextRequests(commands: ReadonlyArray<Record<string, unknown>>): Ugu
   return requests;
 }
 
-/** The family of the font asset a uGUI text draws with. */
-function uguiTextFamily(request: UguiTextRequest): string {
+/**
+ * The families of a uGUI text's face chain: the font asset's, then those of
+ * its fallback faces. Each needs its font file.
+ */
+function uguiTextFamilies(request: UguiTextRequest): string[] {
   const font = request.source.font as Record<string, unknown> | undefined;
   if (typeof font?.family !== "string" || font.family.length === 0) {
     throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI text ${request.id} names no font family`);
   }
-  return font.family;
+  const fallbacks = request.source.fallback_faces;
+  if (!Array.isArray(fallbacks)) {
+    throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI text ${request.id} has no fallback faces`);
+  }
+  return [font.family, ...fallbacks.map((face, index) => {
+    const family = (face as Record<string, unknown> | null)?.family;
+    if (typeof family !== "string" || family.length === 0) {
+      throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI text ${request.id} fallback face ${index} names no font family`);
+    }
+    return family;
+  })];
 }
 
 /**
@@ -655,7 +668,7 @@ function uguiLayoutInput(
   texts: UguiTextRequest[],
   fontFor: (family: string) => ArrayBuffer | undefined,
 ): { input: UguiLayoutInput; missing: string[] } {
-  const families = [...new Set(texts.map(uguiTextFamily))];
+  const families = [...new Set(texts.flatMap(uguiTextFamilies))];
   const files = families.map((family) => [family, fontFor(family)] as const);
   const missing = files.filter(([, bytes]) => bytes == null).map(([family]) => family);
   const present = files.filter((entry): entry is readonly [string, ArrayBuffer] => entry[1] != null);

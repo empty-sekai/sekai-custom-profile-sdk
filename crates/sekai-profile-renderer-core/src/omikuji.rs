@@ -24,13 +24,19 @@
 //! keeps its top edge and its height becomes its title's preferred width plus
 //! [`TITLE_BACKGROUND_FIT_PADDING`]; for `kr` the summary also takes the
 //! descriptions' font size ([`OmikujiClient`]).
+//!
+//! A character the slip's font file has no glyph for comes from the first of
+//! two fallback faces that has one: [`LATIN_FALLBACK_FAMILY`], then the
+//! region's face of the Noto Sans CJK collection ([`CjkFallback`]). Both are
+//! required fonts of every slip text, like the slip's own font.
 
 use serde::{Deserialize, Serialize};
 
 use crate::masterdata::{normalize_region, OmikujiRow, ProfileMasterData};
 use crate::profile_scene::semantic_command_id;
 use crate::ugui_text::{
-    UguiFontAsset, UguiTextBackdrop, UguiTextSource, UguiVerticalModifier, VerticalGlyphOffset,
+    UguiFontAsset, UguiFontFace, UguiTextBackdrop, UguiTextSource, UguiVerticalModifier,
+    VerticalGlyphOffset,
 };
 use crate::{Matrix2d, Rect, ResourceKey, SemanticCommandSource, StableId};
 
@@ -104,6 +110,52 @@ pub fn font_asset(family: &str) -> UguiFontAsset {
     }
 }
 
+/// Family of the first fallback face: the system UI font, whose file is
+/// `Roboto-Regular.ttf`.
+pub const LATIN_FALLBACK_FAMILY: &str = "Roboto";
+
+/// The face of the Noto Sans CJK collection (`NotoSansCJK-Regular.ttc`) a
+/// region's slips fall back to after [`LATIN_FALLBACK_FAMILY`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CjkFallback {
+    Japanese,
+    Korean,
+    /// Also the face of a region without a script of its own.
+    #[default]
+    SimplifiedChinese,
+    TraditionalChinese,
+}
+
+impl CjkFallback {
+    /// Every face, in the order of the collection.
+    pub const ALL: [CjkFallback; 4] = [
+        CjkFallback::Japanese,
+        CjkFallback::Korean,
+        CjkFallback::SimplifiedChinese,
+        CjkFallback::TraditionalChinese,
+    ];
+
+    /// Family the collection file is requested by for this face.
+    pub fn family(self) -> &'static str {
+        match self {
+            CjkFallback::Japanese => "Noto Sans CJK JP",
+            CjkFallback::Korean => "Noto Sans CJK KR",
+            CjkFallback::SimplifiedChinese => "Noto Sans CJK SC",
+            CjkFallback::TraditionalChinese => "Noto Sans CJK TC",
+        }
+    }
+
+    /// Index of the face in the collection file.
+    pub fn face_index(self) -> u32 {
+        match self {
+            CjkFallback::Japanese => 0,
+            CjkFallback::Korean => 1,
+            CjkFallback::SimplifiedChinese => 2,
+            CjkFallback::TraditionalChinese => 3,
+        }
+    }
+}
+
 /// How a region's game client sets the slip up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OmikujiClient {
@@ -112,22 +164,48 @@ pub struct OmikujiClient {
     pub fit_title_backgrounds: bool,
     /// The summary takes the descriptions' font size.
     pub summary_at_description_size: bool,
+    /// The CJK face characters fall back to.
+    pub cjk_fallback: CjkFallback,
 }
 
 impl OmikujiClient {
     /// The setup for a region code or locale tag.
     pub fn for_region(region: &str) -> Self {
         match normalize_region(region).as_str() {
-            "cn" | "tw" => Self {
+            "cn" => Self {
                 fit_title_backgrounds: true,
-                summary_at_description_size: false,
+                ..Self::default()
+            },
+            "tw" => Self {
+                fit_title_backgrounds: true,
+                cjk_fallback: CjkFallback::TraditionalChinese,
+                ..Self::default()
             },
             "kr" => Self {
                 fit_title_backgrounds: true,
                 summary_at_description_size: true,
+                cjk_fallback: CjkFallback::Korean,
+            },
+            "jp" => Self {
+                cjk_fallback: CjkFallback::Japanese,
+                ..Self::default()
             },
             _ => Self::default(),
         }
+    }
+
+    /// Faces a slip text falls back to, in order, after its font file.
+    pub fn fallback_faces(self) -> Vec<UguiFontFace> {
+        vec![
+            UguiFontFace {
+                family: LATIN_FALLBACK_FAMILY.into(),
+                face_index: 0,
+            },
+            UguiFontFace {
+                family: self.cjk_fallback.family().into(),
+                face_index: self.cjk_fallback.face_index(),
+            },
+        ]
     }
 
     /// The setup of the client whose tables `masterdata` holds. `locale`
@@ -217,6 +295,7 @@ impl OmikujiPlan {
             cover: self.cover(),
             fortune: self.fortune(),
             font: font_asset(self.prefab.font_family),
+            fallback_faces: client.fallback_faces(),
             vertical: UguiVerticalModifier { offsets },
             title_background: unit_color(&row.unit),
             fit_title_backgrounds: client.fit_title_backgrounds,
@@ -254,6 +333,8 @@ pub struct OmikujiVisualSnapshot {
     pub cover: ResourceKey,
     pub fortune: ResourceKey,
     pub font: UguiFontAsset,
+    /// Faces every text falls back to after the font asset's file.
+    pub fallback_faces: Vec<UguiFontFace>,
     pub vertical: UguiVerticalModifier,
     /// Colour of the three title backgrounds.
     pub title_background: [f32; 4],
@@ -421,6 +502,7 @@ fn text_source(
     UguiTextSource {
         text: text.into(),
         font: visual.font.clone(),
+        fallback_faces: visual.fallback_faces.clone(),
         font_size,
         line_spacing,
         color,
@@ -746,15 +828,14 @@ mod tests {
     #[test]
     fn regions_fit_the_title_backgrounds_and_the_korean_client_shrinks_the_summary() {
         let jp = OmikujiClient::for_region("jp");
-        assert_eq!(jp, OmikujiClient::default());
-        assert_eq!(OmikujiClient::for_region("en"), jp);
+        assert!(!jp.fit_title_backgrounds && !jp.summary_at_description_size);
+        let en = OmikujiClient::for_region("en");
+        assert_eq!(en, OmikujiClient::default());
+        assert!(!en.fit_title_backgrounds && !en.summary_at_description_size);
         for region in ["cn", "zh-CN", "tw"] {
-            assert_eq!(
-                OmikujiClient::for_region(region),
-                OmikujiClient {
-                    fit_title_backgrounds: true,
-                    summary_at_description_size: false
-                },
+            let client = OmikujiClient::for_region(region);
+            assert!(
+                client.fit_title_backgrounds && !client.summary_at_description_size,
                 "{region}"
             );
         }
@@ -792,6 +873,47 @@ mod tests {
         assert_eq!(summary_size(jp), 36);
         assert_eq!(summary_size(OmikujiClient::for_region("cn")), 36);
         assert_eq!(summary_size(kr), 30);
+    }
+
+    #[test]
+    fn every_text_falls_back_to_roboto_then_the_regions_noto_sans_cjk_face() {
+        let face = |family: &str, face_index: u32| UguiFontFace {
+            family: family.into(),
+            face_index,
+        };
+        for (region, cjk) in [
+            ("cn", face("Noto Sans CJK SC", 2)),
+            ("zh-CN", face("Noto Sans CJK SC", 2)),
+            ("en", face("Noto Sans CJK SC", 2)),
+            ("tw", face("Noto Sans CJK TC", 3)),
+            ("jp", face("Noto Sans CJK JP", 0)),
+            ("kr", face("Noto Sans CJK KR", 1)),
+            ("unknown", face("Noto Sans CJK SC", 2)),
+        ] {
+            let client = OmikujiClient::for_region(region);
+            let chain = vec![face("Roboto", 0), cjk];
+            assert_eq!(client.fallback_faces(), chain, "{region}");
+            let plan = plan("lottery_game/new_year_2023", "idol");
+            let commands = lowered(&plan, client);
+            let texts = texts(&commands);
+            assert_eq!(texts.len(), 7);
+            for (role, source) in texts {
+                // The slip's font file first, then the fallback faces.
+                let mut expected = vec![face("FOT-UDMinchoPro-B", 0)];
+                expected.extend(chain.iter().cloned());
+                assert_eq!(source.face_chain(), expected, "{region} {role}");
+            }
+        }
+        // The collection's faces in file order.
+        assert_eq!(
+            CjkFallback::ALL.map(|cjk| (cjk.family(), cjk.face_index())),
+            [
+                ("Noto Sans CJK JP", 0),
+                ("Noto Sans CJK KR", 1),
+                ("Noto Sans CJK SC", 2),
+                ("Noto Sans CJK TC", 3),
+            ]
+        );
     }
 
     fn apply(m: Matrix2d, [x, y]: [f32; 2]) -> [f32; 2] {

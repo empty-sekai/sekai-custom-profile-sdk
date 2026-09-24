@@ -20,7 +20,7 @@ const TMP_POINT_SIZE: f32 = 75.0;
 /// TextMesh Pro 的 gradient scale：atlas padding（5）加一个 texel。
 const TMP_SPREAD: f32 = 6.0;
 
-const FONT_FILE_MAP: [(&str, &[&str]); 14] = [
+const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
     (
         "FZLanTingHei-DB-GBK",
         &["FOT-RodinNTLGPro-DB.ttf", "FOT-RodinNTLGPro-DB.otf"],
@@ -39,6 +39,13 @@ const FONT_FILE_MAP: [(&str, &[&str]); 14] = [
     // rather than an SDF atlas.
     ("FOT-Omikuji", &["FOT-Omikuji.otf"]),
     ("FOT-UDMinchoPro-B", &["FOT-UDMinchoPro-B.otf"]),
+    // Fallback faces of the omikuji slips' text: the system UI font and the
+    // faces of the Noto Sans CJK collection.
+    ("Roboto", &["Roboto-Regular.ttf"]),
+    ("Noto Sans CJK JP", &["NotoSansCJK-Regular.ttc"]),
+    ("Noto Sans CJK KR", &["NotoSansCJK-Regular.ttc"]),
+    ("Noto Sans CJK SC", &["NotoSansCJK-Regular.ttc"]),
+    ("Noto Sans CJK TC", &["NotoSansCJK-Regular.ttc"]),
     // Source Han Sans is the open-licensed CJK sans shipped alongside the game
     // faces. It carries the same outlines as Noto Sans CJK, which is what the
     // Live Master progress recipe used to reach through fontconfig.
@@ -763,6 +770,27 @@ mod tests {
                 Some(&[format!("{family}.otf").as_str()][..]),
                 "{}",
                 prefab.bundle
+            );
+        }
+    }
+
+    #[test]
+    fn every_omikuji_fallback_face_names_its_font_file() {
+        use sekai_profile_renderer_core::omikuji::{CjkFallback, LATIN_FALLBACK_FAMILY};
+        let files = |family: &str| {
+            FONT_FILE_MAP
+                .iter()
+                .find_map(|(key, files)| (*key == family).then_some(*files))
+        };
+        assert_eq!(
+            files(LATIN_FALLBACK_FAMILY),
+            Some(&["Roboto-Regular.ttf"][..])
+        );
+        for cjk in CjkFallback::ALL {
+            assert_eq!(
+                files(cjk.family()),
+                Some(&["NotoSansCJK-Regular.ttc"][..]),
+                "{cjk:?}"
             );
         }
     }

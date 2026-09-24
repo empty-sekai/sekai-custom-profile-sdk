@@ -176,13 +176,32 @@ CLI's static manifest); `omikuji` rows name a fortune-slip prefab, and the eleme
 `targetId` picks the `omikujis` row it shows. The native and browser renderers draw the slip's
 cover and fortune images and its vertical title, summary and description texts, which are
 rendered from FreeType coverage rather than SDF glyphs; both use the core layout and FreeType
-glyph settings. The two images are requested as ordinary assets. The texts use the font assets
-`FOT-Omikuji` (2022 slips) and `FOT-UDMinchoPro-B` (2023–2025 slips): the native renderer finds
-them as `FOT-Omikuji.otf` and `FOT-UDMinchoPro-B.otf` in the font directory, and the browser
-renderer requests the font files by those family names from its `FontProvider`; without the font
-the page fails to render. A missing `targetId`, one naming no row, and a slip prefab that is
-not laid out draw nothing and request nothing. Every other type, and a missing one, draws as a
-plain image.
+glyph settings. The two images are requested as ordinary assets. The texts use the font asset
+`FOT-Omikuji` (2022 slips) or `FOT-UDMinchoPro-B` (2023–2025 slips). A character that font has
+no glyph for comes from the first fallback face that has one, at the same pixel size and without
+emboldening: `Roboto`, then the Noto Sans CJK face of the region the master-data tables belong
+to. An omikuji page needs its slip font and both fallback fonts, and fails to render without any
+of them:
+
+| Family | File | Face |
+|---|---|---|
+| `FOT-Omikuji` (2022 slips) | `FOT-Omikuji.otf` | 0 |
+| `FOT-UDMinchoPro-B` (2023–2025 slips) | `FOT-UDMinchoPro-B.otf` | 0 |
+| `Roboto` | `Roboto-Regular.ttf` | 0 |
+| `Noto Sans CJK SC` (region `cn`, `en`, any other) | `NotoSansCJK-Regular.ttc` | 2 |
+| `Noto Sans CJK TC` (region `tw`) | `NotoSansCJK-Regular.ttc` | 3 |
+| `Noto Sans CJK JP` (region `jp`) | `NotoSansCJK-Regular.ttc` | 0 |
+| `Noto Sans CJK KR` (region `kr`) | `NotoSansCJK-Regular.ttc` | 1 |
+
+The native renderer finds each file in the font directory and opens the face listed; the browser
+renderer requests each family's file from its `FontProvider`. The two fallback files are the
+stock Android 14 system fonts:
+
+- `Roboto-Regular.ttf`, SHA-256 `9ca9debb09459bf4e3e7f826f5cd0f35f253902b85684921fce2ba3f28dd0f50`;
+- `NotoSansCJK-Regular.ttc`, SHA-256 `39fb47c543da50618ab99e8b9e5529e54566bdbef41719308165975f627d5c93`.
+
+A missing `targetId`, one naming no row, and a slip prefab that is not laid out draw nothing and
+request nothing. Every other type, and a missing one, draws as a plain image.
 
 `--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
 `--asset-url-layout game-assets` only when the source follows the extracted game asset

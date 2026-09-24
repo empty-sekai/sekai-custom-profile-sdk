@@ -156,7 +156,22 @@ export interface ResourceProvider {
 
 `namespace`, `key`, and `role` are renderer semantics, not filesystem conventions. The host may interpret them in any way.
 
-A can-badge collection (`customProfileResourceCollectionType` `can_badge`) requests, besides its image, the normal map `namespace: "static"`, `key: "ui/sekai_badge_normal"`. An omikuji collection draws the fortune slip of the `omikujis` row its `targetId` names: it requests the cover and fortune images as two `assets` resources, and its texts are drawn from FreeType coverage rather than an SDF atlas, from the font file the `FontProvider` returns for the font asset `FOT-Omikuji` (2022 slips) or `FOT-UDMinchoPro-B` (2023–2025 slips). These families are never looked up in a prebuilt SDF atlas. Without the font, scene creation fails, as it does for any other font the scene declares.
+A can-badge collection (`customProfileResourceCollectionType` `can_badge`) requests, besides its image, the normal map `namespace: "static"`, `key: "ui/sekai_badge_normal"`. An omikuji collection draws the fortune slip of the `omikujis` row its `targetId` names: it requests the cover and fortune images as two `assets` resources, and its texts are drawn from FreeType coverage rather than an SDF atlas, from the font file the `FontProvider` returns for the font asset `FOT-Omikuji` (2022 slips) or `FOT-UDMinchoPro-B` (2023–2025 slips). A character that font has no glyph for comes from the first fallback face that has one: `Roboto`, then the Noto Sans CJK face of the master-data region. The `FontProvider` is asked for all three families and returns whole files; the renderer opens the face listed below. These families are never looked up in a prebuilt SDF atlas. Without any of them, scene creation fails, as it does for any other font the scene declares.
+
+| Family | File | Face |
+|---|---|---|
+| `FOT-Omikuji` (2022 slips) | `FOT-Omikuji.otf` | 0 |
+| `FOT-UDMinchoPro-B` (2023–2025 slips) | `FOT-UDMinchoPro-B.otf` | 0 |
+| `Roboto` | `Roboto-Regular.ttf` | 0 |
+| `Noto Sans CJK SC` (region `cn`, `en`, any other) | `NotoSansCJK-Regular.ttc` | 2 |
+| `Noto Sans CJK TC` (region `tw`) | `NotoSansCJK-Regular.ttc` | 3 |
+| `Noto Sans CJK JP` (region `jp`) | `NotoSansCJK-Regular.ttc` | 0 |
+| `Noto Sans CJK KR` (region `kr`) | `NotoSansCJK-Regular.ttc` | 1 |
+
+The two fallback files are the stock Android 14 system fonts:
+
+- `Roboto-Regular.ttf`, SHA-256 `9ca9debb09459bf4e3e7f826f5cd0f35f253902b85684921fce2ba3f28dd0f50`;
+- `NotoSansCJK-Regular.ttc`, SHA-256 `39fb47c543da50618ab99e8b9e5529e54566bdbef41719308165975f627d5c93`.
 
 ### Arbitrary asynchronous sources
 
