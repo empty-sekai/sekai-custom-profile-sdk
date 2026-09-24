@@ -930,12 +930,17 @@ fn lower_honor_visual(
                     [1.0; 4],
                 ));
                 *ordinal += 1;
-            } else if *has_star && matches!(honor_type.as_str(), "character" | "achievement") {
-                if let (Some(star), Some(star_high)) = (star, star_high) {
-                    lower_honor_stars(
-                        source_key, layer_id, honor, layout, star, star_high, ordinal, commands,
-                    );
-                }
+            } else if *has_star {
+                lower_honor_stars(
+                    source_key,
+                    layer_id,
+                    honor,
+                    layout,
+                    star.as_ref(),
+                    star_high.as_ref(),
+                    ordinal,
+                    commands,
+                );
             }
         }
         HonorVisualKind::Bonds {
@@ -1105,31 +1110,35 @@ fn lower_honor_visual(
                 ));
                 *ordinal += 1;
             }
-            if let (Some(star), Some(star_high)) = (star, star_high) {
-                lower_honor_stars(
-                    source_key, layer_id, honor, layout, star, star_high, ordinal, commands,
-                );
-            }
+            lower_honor_stars(
+                source_key,
+                layer_id,
+                honor,
+                layout,
+                star.as_ref(),
+                star_high.as_ref(),
+                ordinal,
+                commands,
+            );
         }
     }
     Ok(())
 }
 
+/// Level stars of a placed honor: the first five levels of every ten use
+/// `star`, the next five draw `star_high` over them.
 #[allow(clippy::too_many_arguments)]
 fn lower_honor_stars(
     source_key: &str,
     layer_id: StableId,
     honor: &HonorVisualSnapshot,
     layout: crate::profile_layout::ElementLayout,
-    star: &ResourceDescriptor,
-    star_high: &ResourceDescriptor,
+    star: Option<&ResourceDescriptor>,
+    star_high: Option<&ResourceDescriptor>,
     ordinal: &mut u32,
     commands: &mut Vec<SemanticCommandSource>,
 ) {
-    let mut level = honor.honor_level % 10;
-    if level == 0 && honor.honor_level > 0 {
-        level = 10;
-    }
+    let level = crate::masterdata::honor_level_star_count(honor.honor_level);
     let origin_x = layout.cx;
     let origin_y = -layout.cy;
     let base_x = if honor.full_size {
@@ -1138,25 +1147,30 @@ fn lower_honor_stars(
         origin_x - 40.0
     };
     let base_y = origin_y - layout.h / 2.0 + 63.0;
-    for index in 0..level.min(5) {
-        let bounds = Rect {
-            x: base_x + index as f32 * 16.0,
-            y: base_y,
-            width: star.natural_width,
-            height: star.natural_height,
-        };
-        commands.push(descriptor_image_command(
-            source_key,
-            layer_id,
-            &format!("honor-{}-star-{index}", honor.honor_id),
-            *ordinal,
-            star,
-            bounds,
-            None,
-            None,
-        ));
-        *ordinal += 1;
+    if let Some(star) = star {
+        for index in 0..level.min(5) {
+            let bounds = Rect {
+                x: base_x + index as f32 * 16.0,
+                y: base_y,
+                width: star.natural_width,
+                height: star.natural_height,
+            };
+            commands.push(descriptor_image_command(
+                source_key,
+                layer_id,
+                &format!("honor-{}-star-{index}", honor.honor_id),
+                *ordinal,
+                star,
+                bounds,
+                None,
+                None,
+            ));
+            *ordinal += 1;
+        }
     }
+    let Some(star_high) = star_high else {
+        return;
+    };
     for index in 0..(level - 5).max(0) {
         let bounds = Rect {
             x: base_x + index as f32 * 16.0,

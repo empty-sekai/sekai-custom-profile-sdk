@@ -152,6 +152,10 @@ fn build_profile_snapshot_inner(
 
     let owned_honors = profile.map(|profile| &profile.owned_honors);
     for element in ordered_profile_elements(card, document_key) {
+        // Hidden honors are not built either.
+        if !element.object().visible {
+            continue;
+        }
         match element.value {
             ProfileElementRef::Honor(value) => {
                 let Some(level) = crate::profile_data::placed_honor_level(
@@ -2494,6 +2498,96 @@ mod tests {
             "userBondsHonors": []
         }));
         assert_eq!(levels(&snapshot(Some(&profile))), BTreeMap::from([(11, 3)]));
+    }
+
+    #[test]
+    fn hidden_honors_are_not_resolved_and_request_nothing() {
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "honors": [{ "objectData": visible_object(1, false), "id": 10, "fullSize": true, "honorLevel": 2 }],
+            "bondsHonors": [{ "objectData": visible_object(2, false), "id": 20, "wordId": 0, "fullSize": false, "inverse": false, "useUnitVirtualSinger": false, "honorLevel": 1 }]
+        }))
+        .unwrap();
+        let mut data = JsonMasterData::new("cn");
+        data.insert_value(
+            "honors",
+            serde_json::json!([{ "id": 10, "assetbundleName": "honor_0010", "honorRarity": "low", "groupId": 1, "levels": [{"level": 1}, {"level": 2}] }]),
+        )
+        .unwrap();
+        data.insert_value(
+            "honorGroups",
+            serde_json::json!([{ "id": 1, "honorType": "character" }]),
+        )
+        .unwrap();
+        data.insert_value(
+            "bondsHonors",
+            serde_json::json!([{ "id": 20, "gameCharacterUnitId1": 1, "gameCharacterUnitId2": 2, "honorRarity": "low" }]),
+        )
+        .unwrap();
+        let snapshot = build_profile_snapshot(
+            &card,
+            None,
+            &data,
+            "hidden-honors",
+            "cn",
+            &(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(snapshot.honor_visuals.is_empty());
+        let preparation = prepare_profile(&card, None, &data, "hidden-honors", "cn").unwrap();
+        assert!(preparation.resources.is_empty());
+    }
+
+    #[test]
+    fn card_honors_draw_level_stars_for_every_multi_level_honor_type() {
+        let honor_card = |level: i32| -> CustomProfileCard {
+            serde_json::from_value(serde_json::json!({
+                "honors": [{ "objectData": honor_object(), "id": 30, "fullSize": true, "honorLevel": level }]
+            }))
+            .unwrap()
+        };
+        for (honor_type, level, stars, high_stars) in [
+            ("limitevent", 3, 3, 0),
+            ("limitevent", 7, 5, 2),
+            ("limitevent", 13, 3, 0),
+            ("character", 4, 4, 0),
+            ("achievement", 10, 5, 5),
+            ("event", 7, 0, 0),
+        ] {
+            let mut data = JsonMasterData::new("cn");
+            data.insert_value(
+                "honors",
+                serde_json::json!([{ "id": 30, "assetbundleName": "honor_0030", "honorRarity": "middle", "groupId": 1, "levels": [{"level": 1}, {"level": 2}] }]),
+            )
+            .unwrap();
+            data.insert_value(
+                "honorGroups",
+                serde_json::json!([{ "id": 1, "honorType": honor_type }]),
+            )
+            .unwrap();
+            let card = honor_card(level);
+            let scene = compile_profile_scene(
+                &card,
+                None,
+                &data,
+                "honor-stars",
+                "cn",
+                &(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            let roles = layer_commands(&scene, crate::AuthoredElementKind::Honor, 0)
+                .into_iter()
+                .map(|command| command.role.clone())
+                .collect::<Vec<_>>();
+            let count = |prefix: &str| roles.iter().filter(|role| role.starts_with(prefix)).count();
+            let high = count("honor-30-star-high-");
+            assert_eq!(
+                (count("honor-30-star-") - high, high),
+                (stars, high_stars),
+                "{honor_type} level {level}: {roles:?}"
+            );
+        }
     }
 
     fn prepared_honor_resource_keys(honor_type: &str, asset_bundle_name: &str) -> Vec<String> {

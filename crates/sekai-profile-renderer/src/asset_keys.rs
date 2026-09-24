@@ -99,8 +99,9 @@ fn card_asset_requirements(
         }
     }
 
+    // 称号按玩家持有的等级取 key；隐藏或未持有的称号不绘制，不计入。
     let owned_honors = profile.map(|profile| &profile.owned_honors);
-    for e in &card.honors {
+    for e in card.honors.iter().filter(|e| e.object_data.visible) {
         if let Some(level) = sekai_profile_renderer_core::profile_data::placed_honor_level(
             owned_honors,
             e.id,
@@ -110,7 +111,7 @@ fn card_asset_requirements(
         }
     }
 
-    for e in &card.bonds_honors {
+    for e in card.bonds_honors.iter().filter(|e| e.object_data.visible) {
         if sekai_profile_renderer_core::profile_data::placed_bonds_honor_level(
             owned_honors,
             e.id,
@@ -481,6 +482,26 @@ mod tests {
             super::missing_card_asset_keys_with_profile(&card, Some(&owned), &md, |_| false)
                 .contains(&"honor/bonds/21".to_string())
         );
+    }
+
+    #[test]
+    fn hidden_bonds_honors_request_no_assets() {
+        let card: crate::types::CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "bondsHonors": [{
+                "objectData": {
+                    "layer": 0, "lock": false, "visible": false,
+                    "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                    "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
+                },
+                "id": 1, "wordId": 5, "fullSize": true, "inverse": false,
+                "useUnitVirtualSinger": false
+            }]
+        }))
+        .expect("card fixture");
+        let md = crate::masterdata::MasterData::new(std::sync::Arc::new(PairHonorProvider));
+        assert!(super::collect_card_asset_keys(&card, &md).is_empty());
+        assert!(super::missing_card_asset_keys(&card, &md, |_| false).is_empty());
     }
 
     #[test]
