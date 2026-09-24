@@ -1,5 +1,5 @@
-//! Pins the WebGL2 SDF and badge shaders to the material formulas the native
-//! executor evaluates, so the two backends cannot drift apart silently.
+//! Pins the WebGL2 SDF, badge and uGUI glyph shaders to the formulas the
+//! native executor evaluates, so the two backends cannot drift apart silently.
 
 use sekai_profile_renderer_core::badge_material::{
     ALPHA_CUTOFF, DIELECTRIC_DIFFUSE, DISTRIBUTION_BIAS, LIGHTS, METALLIC, MIN_LIGHT_HALF_SQUARED,
@@ -10,6 +10,7 @@ use sekai_profile_renderer_core::sdf_material::{
     SHAPE_FACE_THRESHOLD, SHAPE_FACE_THRESHOLD_PER_OUTLINE, SHAPE_OUTER_FILL_RATIO,
     SHAPE_OUTLINE_THRESHOLD_PER_FILL, SHAPE_SDF_SHARPNESS,
 };
+use sekai_profile_renderer_core::ugui_text::TEXEL_CENTRE;
 
 const SEMANTIC_EXECUTOR: &str = include_str!("gpu/webglSemanticCommandExecutor.ts");
 const GLYPH_PIPELINE: &str = include_str!("gpu/webglSdfGlyphPipeline.ts");
@@ -110,5 +111,62 @@ fn badge_shader_uses_the_shared_badge_material() {
             .filter(|line| line.trim().starts_with("specular += badgeSpecular("))
             .count(),
         LIGHTS.len()
+    );
+}
+
+/// The uGUI glyph fragment shader, between its declaration and the next one.
+fn ugui_glyph_shader() -> &'static str {
+    let start = SEMANTIC_EXECUTOR
+        .find("const UGUI_GLYPH_FRAGMENT_SHADER")
+        .expect("uGUI glyph shader");
+    let end = start
+        + SEMANTIC_EXECUTOR[start..]
+            .find("const COMPOSITE_VERTEX_SHADER")
+            .expect("shader after the uGUI glyph shader");
+    &SEMANTIC_EXECUTOR[start..end]
+}
+
+/// The statements of `ugui_text::cell_coverage` and of the native glyph
+/// blend, in the shader's names: the cell texel at the fragment centre less
+/// the texel centre, bilinear between the four nearest texels, empty outside
+/// the bitmap, and the clamped vertex colour, premultiplied, times the
+/// coverage.
+#[test]
+fn ugui_glyph_shader_samples_cells_like_the_shared_core() {
+    let shader = ugui_glyph_shader();
+    for statement in [
+        format!("float x = v_uv.x - {TEXEL_CENTRE:?};"),
+        format!("float y = v_uv.y - {TEXEL_CENTRE:?};"),
+        "float left = floor(x);".to_string(),
+        "float top = floor(y);".to_string(),
+        "float fx = x - left;".to_string(),
+        "float fy = y - top;".to_string(),
+        "int column = int(left);".to_string(),
+        "int row = int(top);".to_string(),
+        "float upper = glyphTexel(column, row) + (glyphTexel(column + 1, row) - glyphTexel(column, row)) * fx;".to_string(),
+        "float lower = glyphTexel(column, row + 1) + (glyphTexel(column + 1, row + 1) - glyphTexel(column, row + 1)) * fx;".to_string(),
+        "float coverage = upper + (lower - upper) * fy;".to_string(),
+        "if (coverage <= 0.0) discard;".to_string(),
+        "int x = column - padding;".to_string(),
+        "int y = row - padding;".to_string(),
+        "if (x < 0 || y < 0 || x >= size.x || y >= size.y) return 0.0;".to_string(),
+        "return texelFetch(u_glyphs, origin + ivec2(x, y), 0).r;".to_string(),
+        "vec4 color = clamp(v_fill, 0.0, 1.0);".to_string(),
+        "outColor = vec4(color.rgb * color.a, color.a) * coverage;".to_string(),
+    ] {
+        assert_statement(shader, &statement);
+    }
+    // Hardware filtering would quantise the interpolation weights.
+    assert!(
+        !shader.contains("texture("),
+        "the glyph shader filters texels itself"
+    );
+    assert_statement(
+        SEMANTIC_EXECUTOR,
+        "programs.push(createProgram(gl, VERTEX_SHADER, UGUI_GLYPH_FRAGMENT_SHADER));",
+    );
+    assert_statement(
+        SEMANTIC_EXECUTOR,
+        "gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, page.width, page.height, 0, gl.RED, gl.UNSIGNED_BYTE, page.pixels);",
     );
 }

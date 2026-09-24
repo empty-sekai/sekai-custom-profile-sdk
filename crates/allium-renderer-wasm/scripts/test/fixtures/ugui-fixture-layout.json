@@ -1,0 +1,944 @@
+{
+  "layout": {
+    "glyphs": [
+      {
+        "advance26d6": 1569,
+        "bitmapLeft": 0,
+        "bitmapTop": 29,
+        "page": 0,
+        "rows": 29,
+        "width": 24,
+        "x": 88,
+        "y": 0
+      },
+      {
+        "advance26d6": 1907,
+        "bitmapLeft": 1,
+        "bitmapTop": 30,
+        "page": 0,
+        "rows": 31,
+        "width": 28,
+        "x": 32,
+        "y": 0
+      },
+      {
+        "advance26d6": 2560,
+        "bitmapLeft": 4,
+        "bitmapTop": 34,
+        "page": 0,
+        "rows": 33,
+        "width": 32,
+        "x": 0,
+        "y": 0
+      },
+      {
+        "advance26d6": 1412,
+        "bitmapLeft": 0,
+        "bitmapTop": 26,
+        "page": 0,
+        "rows": 26,
+        "width": 22,
+        "x": 137,
+        "y": 0
+      },
+      {
+        "advance26d6": 1716,
+        "bitmapLeft": 1,
+        "bitmapTop": 27,
+        "page": 0,
+        "rows": 28,
+        "width": 25,
+        "x": 112,
+        "y": 0
+      },
+      {
+        "advance26d6": 2304,
+        "bitmapLeft": 4,
+        "bitmapTop": 31,
+        "page": 0,
+        "rows": 30,
+        "width": 28,
+        "x": 60,
+        "y": 0
+      },
+      {
+        "advance26d6": 2304,
+        "bitmapLeft": 2,
+        "bitmapTop": 15,
+        "page": 0,
+        "rows": 4,
+        "width": 32,
+        "x": 272,
+        "y": 0
+      },
+      {
+        "advance26d6": 2304,
+        "bitmapLeft": 3,
+        "bitmapTop": 8,
+        "page": 0,
+        "rows": 8,
+        "width": 9,
+        "x": 263,
+        "y": 0
+      },
+      {
+        "advance26d6": 2304,
+        "bitmapLeft": 20,
+        "bitmapTop": 30,
+        "page": 0,
+        "rows": 24,
+        "width": 12,
+        "x": 183,
+        "y": 0
+      },
+      {
+        "advance26d6": 1430,
+        "bitmapLeft": 1,
+        "bitmapTop": 22,
+        "page": 0,
+        "rows": 23,
+        "width": 21,
+        "x": 195,
+        "y": 0
+      },
+      {
+        "advance26d6": 1177,
+        "bitmapLeft": 0,
+        "bitmapTop": 22,
+        "page": 0,
+        "rows": 22,
+        "width": 18,
+        "x": 216,
+        "y": 0
+      },
+      {
+        "advance26d6": 1920,
+        "bitmapLeft": 3,
+        "bitmapTop": 26,
+        "page": 0,
+        "rows": 25,
+        "width": 24,
+        "x": 159,
+        "y": 0
+      },
+      {
+        "advance26d6": 510,
+        "bitmapLeft": 0,
+        "bitmapTop": 10,
+        "page": 0,
+        "rows": 10,
+        "width": 8,
+        "x": 255,
+        "y": 0
+      },
+      {
+        "advance26d6": 620,
+        "bitmapLeft": 0,
+        "bitmapTop": 10,
+        "page": 0,
+        "rows": 11,
+        "width": 10,
+        "x": 245,
+        "y": 0
+      },
+      {
+        "advance26d6": 832,
+        "bitmapLeft": 1,
+        "bitmapTop": 11,
+        "page": 0,
+        "rows": 11,
+        "width": 11,
+        "x": 234,
+        "y": 0
+      },
+      {
+        "advance26d6": 832,
+        "bitmapLeft": 1,
+        "bitmapTop": 3,
+        "page": 0,
+        "rows": 3,
+        "width": 4,
+        "x": 304,
+        "y": 0
+      }
+    ],
+    "pages": [
+      {
+        "height": 33,
+        "pixelsSha256": "a670c337e03bf54e3a1e8ae12fe9225600276176abe6de6f14e8675832338236",
+        "width": 1024
+      }
+    ],
+    "texts": [
+      {
+        "backdrop": {
+          "color": [
+            0.0,
+            0.8,
+            0.73333335,
+            1.0
+          ],
+          "rect": {
+            "height": 129.0,
+            "width": 50.0,
+            "x": -6.0,
+            "y": -210.2
+          }
+        },
+        "cellPadding": 1,
+        "id": "title",
+        "preferredWidth": 95.0,
+        "quads": [
+          {
+            "corners": [
+              [
+                -1.0,
+                95.0
+              ],
+              [
+                25.0,
+                95.0
+              ],
+              [
+                25.0,
+                64.0
+              ],
+              [
+                -1.0,
+                64.0
+              ]
+            ],
+            "glyph": 0
+          },
+          {
+            "corners": [
+              [
+                25.0,
+                96.0
+              ],
+              [
+                55.0,
+                96.0
+              ],
+              [
+                55.0,
+                63.0
+              ],
+              [
+                25.0,
+                63.0
+              ]
+            ],
+            "glyph": 1
+          },
+          {
+            "corners": [
+              [
+                57.5,
+                65.5
+              ],
+              [
+                57.5,
+                99.5
+              ],
+              [
+                92.5,
+                99.5
+              ],
+              [
+                92.5,
+                65.5
+              ]
+            ],
+            "glyph": 2
+          }
+        ]
+      },
+      {
+        "backdrop": null,
+        "cellPadding": 1,
+        "id": "summary",
+        "preferredWidth": 154.0,
+        "quads": [
+          {
+            "corners": [
+              [
+                -1.0,
+                -5.0
+              ],
+              [
+                23.0,
+                -5.0
+              ],
+              [
+                23.0,
+                -33.0
+              ],
+              [
+                -1.0,
+                -33.0
+              ]
+            ],
+            "glyph": 3
+          },
+          {
+            "corners": [
+              [
+                22.0,
+                -4.0
+              ],
+              [
+                49.0,
+                -4.0
+              ],
+              [
+                49.0,
+                -34.0
+              ],
+              [
+                22.0,
+                -34.0
+              ]
+            ],
+            "glyph": 4
+          },
+          {
+            "corners": [
+              [
+                2.000001,
+                -76.0
+              ],
+              [
+                2.0,
+                -46.0
+              ],
+              [
+                34.0,
+                -46.0
+              ],
+              [
+                34.0,
+                -76.0
+              ]
+            ],
+            "glyph": 5
+          },
+          {
+            "corners": [
+              [
+                61.0,
+                -81.0
+              ],
+              [
+                61.0,
+                -47.0
+              ],
+              [
+                67.0,
+                -47.0
+              ],
+              [
+                67.0,
+                -81.0
+              ]
+            ],
+            "glyph": 6
+          },
+          {
+            "corners": [
+              [
+                84.5,
+                -56.5
+              ],
+              [
+                84.5,
+                -45.5
+              ],
+              [
+                94.5,
+                -45.5
+              ],
+              [
+                94.5,
+                -56.5
+              ]
+            ],
+            "glyph": 7
+          },
+          {
+            "corners": [
+              [
+                137.0,
+                -46.0
+              ],
+              [
+                151.0,
+                -46.0
+              ],
+              [
+                151.0,
+                -72.0
+              ],
+              [
+                137.0,
+                -72.0
+              ]
+            ],
+            "glyph": 8
+          }
+        ]
+      },
+      {
+        "backdrop": null,
+        "cellPadding": 1,
+        "id": "horizontal",
+        "preferredWidth": 94.0,
+        "quads": [
+          {
+            "corners": [
+              [
+                0.0,
+                -3.0
+              ],
+              [
+                23.0,
+                -3.0
+              ],
+              [
+                23.0,
+                -28.0
+              ],
+              [
+                0.0,
+                -28.0
+              ]
+            ],
+            "glyph": 9
+          },
+          {
+            "corners": [
+              [
+                29.0,
+                -3.0
+              ],
+              [
+                49.0,
+                -3.0
+              ],
+              [
+                49.0,
+                -27.0
+              ],
+              [
+                29.0,
+                -27.0
+              ]
+            ],
+            "glyph": 10
+          },
+          {
+            "corners": [
+              [
+                66.0,
+                1.0
+              ],
+              [
+                92.0,
+                1.0
+              ],
+              [
+                92.0,
+                -26.0
+              ],
+              [
+                66.0,
+                -26.0
+              ]
+            ],
+            "glyph": 11
+          }
+        ]
+      },
+      {
+        "backdrop": null,
+        "cellPadding": 1,
+        "id": "small",
+        "preferredWidth": 44.0,
+        "quads": [
+          {
+            "corners": [
+              [
+                -1.0,
+                100.0
+              ],
+              [
+                9.0,
+                100.0
+              ],
+              [
+                9.0,
+                88.0
+              ],
+              [
+                -1.0,
+                88.0
+              ]
+            ],
+            "glyph": 12
+          },
+          {
+            "corners": [
+              [
+                7.0,
+                100.0
+              ],
+              [
+                19.0,
+                100.0
+              ],
+              [
+                19.0,
+                87.0
+              ],
+              [
+                7.0,
+                87.0
+              ]
+            ],
+            "glyph": 13
+          },
+          {
+            "corners": [
+              [
+                18.0,
+                88.0
+              ],
+              [
+                18.0,
+                101.0
+              ],
+              [
+                31.0,
+                101.0
+              ],
+              [
+                31.0,
+                88.0
+              ]
+            ],
+            "glyph": 14
+          },
+          {
+            "corners": [
+              [
+                31.5,
+                109.5
+              ],
+              [
+                31.5,
+                115.5
+              ],
+              [
+                36.5,
+                115.5
+              ],
+              [
+                36.5,
+                109.5
+              ]
+            ],
+            "glyph": 15
+          }
+        ]
+      }
+    ],
+    "version": 1
+  },
+  "request": {
+    "texts": [
+      {
+        "id": "title",
+        "source": {
+          "backdrop": {
+            "color": [
+              0.0,
+              0.8,
+              0.73333335,
+              1.0
+            ],
+            "fit_padding": 34.0,
+            "rect": {
+              "height": 126.0,
+              "width": 50.0,
+              "x": -6.0,
+              "y": -210.2
+            }
+          },
+          "color": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "font": {
+            "ascent": 14.080001,
+            "character_padding": 1,
+            "descent": -1.9200001,
+            "family": "UguiFixture",
+            "line_spacing": 32.0,
+            "reference_size": 16.0,
+            "round_advance": true,
+            "tracking": 1.0
+          },
+          "font_size": 40,
+          "line_spacing": 1.0,
+          "node_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "pivot": [
+            0.0,
+            0.0
+          ],
+          "rect_size": [
+            100.0,
+            100.0
+          ],
+          "text": "AOあ",
+          "vertical": {
+            "offsets": [
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゃ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゅ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ょ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "っ"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "、"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "。"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "ー"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "々"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "summary",
+        "source": {
+          "backdrop": null,
+          "color": [
+            0.30980393,
+            0.30980393,
+            0.30980393,
+            1.0
+          ],
+          "font": {
+            "ascent": 14.080001,
+            "character_padding": 1,
+            "descent": -1.9200001,
+            "family": "UguiFixture",
+            "line_spacing": 32.0,
+            "reference_size": 16.0,
+            "round_advance": true,
+            "tracking": 1.0
+          },
+          "font_size": 36,
+          "line_spacing": 0.62,
+          "node_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "pivot": [
+            0.0,
+            1.0
+          ],
+          "rect_size": [
+            418.63428,
+            134.81213
+          ],
+          "text": "AO\nあ ー。「",
+          "vertical": {
+            "offsets": [
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゃ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゅ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ょ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "っ"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "、"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "。"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "ー"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "々"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "horizontal",
+        "source": {
+          "backdrop": null,
+          "color": [
+            0.30980393,
+            0.30980393,
+            0.30980393,
+            1.0
+          ],
+          "font": {
+            "ascent": 14.080001,
+            "character_padding": 1,
+            "descent": -1.9200001,
+            "family": "UguiFixture",
+            "line_spacing": 32.0,
+            "reference_size": 16.0,
+            "round_advance": true,
+            "tracking": 1.0
+          },
+          "font_size": 30,
+          "line_spacing": 0.62,
+          "node_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "pivot": [
+            0.0,
+            1.0
+          ],
+          "rect_size": [
+            416.0,
+            78.0
+          ],
+          "text": "O A\tあ",
+          "vertical": null
+        }
+      },
+      {
+        "id": "small",
+        "source": {
+          "backdrop": null,
+          "color": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "font": {
+            "ascent": 14.080001,
+            "character_padding": 1,
+            "descent": -1.9200001,
+            "family": "UguiFixture",
+            "line_spacing": 32.0,
+            "reference_size": 16.0,
+            "round_advance": true,
+            "tracking": 1.0
+          },
+          "font_size": 13,
+          "line_spacing": 1.0,
+          "node_matrix": [
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "pivot": [
+            0.0,
+            0.0
+          ],
+          "rect_size": [
+            100.0,
+            100.0
+          ],
+          "text": "AOあ。",
+          "vertical": {
+            "offsets": [
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゃ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ゅ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "ょ"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  10.0
+                ],
+                "target": "っ"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "、"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  22.0
+                ],
+                "target": "。"
+              },
+              {
+                "angle_degrees": 0.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "ー"
+              },
+              {
+                "angle_degrees": 90.0,
+                "offset": [
+                  0.0,
+                  0.0
+                ],
+                "target": "々"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

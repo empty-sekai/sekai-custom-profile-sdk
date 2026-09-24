@@ -456,4 +456,8 @@ impl sekai_profile_renderer_core::masterdata::ProfileMasterData for MasterData {
     fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
         MasterData::resolve_omikuji(self, id)
     }
+
+    fn region_code(&self) -> Option<&str> {
+        Some(MasterData::region(self).as_str())
+    }
 }

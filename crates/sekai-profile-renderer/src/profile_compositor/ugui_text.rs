@@ -1,11 +1,13 @@
 //! Software raster of uGUI text commands.
 //!
 //! The text is laid out by [`sekai_profile_renderer_core::ugui_text::layout`]
-//! with FreeType glyphs at one output pixel per canvas unit. Its backdrop is
-//! drawn first, as a solid rectangle the way shapes are drawn. Each glyph quad
-//! then maps its padded glyph cell onto the canvas: a pixel is covered when its
-//! centre lies inside the quad, it samples the cell bilinearly (texels outside
-//! the cell are empty), and it blends the vertex colour times that coverage.
+//! with FreeType glyphs at
+//! [`ugui_text::CARD_PIXELS_PER_UNIT`]. Its backdrop is drawn first, as a solid
+//! rectangle the way shapes are drawn. Each glyph quad then maps its padded
+//! glyph cell onto the canvas: a pixel is covered when its centre lies inside
+//! the quad, it takes the cell's coverage at its centre
+//! ([`ugui_text::cell_coverage`]), and it blends the vertex colour times that
+//! coverage.
 
 use sekai_profile_renderer_core::ugui_text::{self, UguiGlyph, UguiTextSource};
 use sekai_profile_renderer_core::{
@@ -18,9 +20,6 @@ use super::{
     ProfileCompositorError, RasterImageStats,
 };
 use crate::text::ugui_glyphs::UguiGlyphs;
-
-/// Output pixels per canvas unit on the native canvas.
-const PIXELS_PER_UNIT: f32 = 1.0;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raster_ugui_text_command(
@@ -39,7 +38,7 @@ pub(super) fn raster_ugui_text_command(
             family: source.font.family.clone(),
         }
     })?;
-    let mesh = ugui_text::layout(source, PIXELS_PER_UNIT, &mut glyphs);
+    let mesh = ugui_text::layout(source, ugui_text::CARD_PIXELS_PER_UNIT, &mut glyphs);
     if let Some(reason) = glyphs.error() {
         return Err(ProfileCompositorError::GlyphRaster {
             role: command.role.clone(),
@@ -181,7 +180,7 @@ impl GlyphTarget<'_> {
                 if !(0.0..cell_width).contains(&u) || !(0.0..cell_height).contains(&v) {
                     continue;
                 }
-                let coverage = sample_coverage(glyph, padding, u - 0.5, v - 0.5);
+                let coverage = ugui_text::cell_coverage(glyph, padding, u, v);
                 if coverage <= 0.0 {
                     continue;
                 }
@@ -199,29 +198,6 @@ impl GlyphTarget<'_> {
         }
         Ok(fragments)
     }
-}
-
-/// Bilinear coverage at texel coordinates `(x, y)` of the padded cell, whose
-/// texel `(i, j)` has its centre at `(i + 0.5, j + 0.5)`. Texels outside the
-/// glyph bitmap are empty.
-fn sample_coverage(glyph: &UguiGlyph, padding: u32, x: f32, y: f32) -> f32 {
-    let texel = |column: i64, row: i64| -> f32 {
-        let column = column - i64::from(padding);
-        let row = row - i64::from(padding);
-        if column < 0 || row < 0 || column >= i64::from(glyph.width) || row >= i64::from(glyph.rows)
-        {
-            return 0.0;
-        }
-        f32::from(glyph.coverage[row as usize * glyph.width as usize + column as usize]) / 255.0
-    };
-    let left = x.floor();
-    let top = y.floor();
-    let fx = x - left;
-    let fy = y - top;
-    let (column, row) = (left as i64, top as i64);
-    let upper = texel(column, row) + (texel(column + 1, row) - texel(column, row)) * fx;
-    let lower = texel(column, row + 1) + (texel(column + 1, row + 1) - texel(column, row + 1)) * fx;
-    upper + (lower - upper) * fy
 }
 
 #[cfg(test)]

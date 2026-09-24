@@ -16,6 +16,7 @@ fn keep_exports() {
         exports::sdf_layout_freetype_build_glyph_json_edt as *const (),
         exports::sdf_layout_freetype_build_layout_json as *const (),
         exports::sdf_layout_freetype_glyph_demand_json as *const (),
+        exports::sdf_layout_ugui_text_json as *const (),
         exports::sdf_atlas_create_json as *const (),
         exports::sdf_atlas_resolve_json as *const (),
         exports::sdf_atlas_pages_since_json as *const (),

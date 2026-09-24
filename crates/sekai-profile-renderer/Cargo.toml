@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-sekai-profile-renderer-core = { path = "../sekai-profile-renderer-core", version = "0.5.1" }
+sekai-profile-renderer-core = { path = "../sekai-profile-renderer-core", version = "0.5.1", features = ["freetype"] }
 arc-swap = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

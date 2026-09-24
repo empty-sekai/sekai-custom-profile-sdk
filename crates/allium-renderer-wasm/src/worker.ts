@@ -22,6 +22,7 @@ import type {
   GlyphRasterPlan,
 } from "./types/atlas.js";
 import type { AuthoringCheckpoint, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
+import type { UguiGlyphPage, UguiTextLayout } from "./types/uguiText.js";
 
 const scope = globalThis as unknown as DedicatedWorkerGlobalScope;
 const ATLAS_TRANSIENT_HARD_BYTES = 48 * 1024 * 1024;
@@ -429,9 +430,18 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
         if (!Array.isArray(families) || families.some((family) => typeof family !== "string" || family.length === 0)) {
           throw new WorkerError("INVALID_PROFILE_PREPARATION", "Profile preparation did not return valid font families");
         }
+        const atlasFamilies = preparation.fonts;
+        if (!atlasFamilies || typeof atlasFamilies !== "object" || Array.isArray(atlasFamilies)) {
+          throw new WorkerError("INVALID_PROFILE_PREPARATION", "Profile preparation did not return valid SDF fonts");
+        }
         result = {
           kind: "prepareProfile",
-          preparation: { fontDemands: [...families] },
+          preparation: {
+            fontDemands: [...families],
+            // uGUI text draws FreeType bitmaps from the font file; only SDF
+            // text fonts can come from a prebuilt atlas.
+            atlasFontDemands: [...new Set(Object.values(atlasFamilies))],
+          },
         };
         break;
       }
@@ -464,10 +474,19 @@ async function dispatch(request: RendererWorkerRequest): Promise<void> {
         [masterDataHandle(request.payload.masterDataId)],
       );
       assertSchema(response.snapshot.schema_major);
+      let uguiText: UguiTextLayout;
+      try {
+        uguiText = layoutUguiText(await loadedModule(), response.snapshot.semantic_commands);
+      } catch (error) {
+        (await loadedModule()).ccall("sdf_renderer_core_scene_destroy", "number", ["number"], [response.handle]);
+        throw error;
+      }
       const sceneId = `${response.snapshot.scene_id}:${response.handle}`;
       scenes.set(sceneId, response.handle);
       counters.scenes = scenes.size;
-      result = { kind: "createProfileScene", sceneId, response, layout };
+      transfers = uguiText.pages.map((page) => page.pixels.buffer);
+      counters.bridgeBytes += uguiText.pages.reduce((sum, page) => sum + page.pixels.byteLength, 0);
+      result = { kind: "createProfileScene", sceneId, response, layout, uguiText };
       break;
     }
     case "destroyMasterData": {
@@ -593,6 +612,123 @@ function completeLayoutLayers(preparation: Record<string, unknown>): Array<Recor
       fontSourceHash: source.sourceHash,
     };
   });
+}
+
+/** One `ugui_text` command's source, as the layout export reads it. */
+type UguiTextRequest = { id: string; source: Record<string, unknown> };
+
+/** The layout export's input: font files by byte range of one buffer. */
+type UguiLayoutInput = {
+  fonts: Uint8Array;
+  request: {
+    fonts: Array<{ family: string; offset: number; length: number }>;
+    texts: UguiTextRequest[];
+  };
+};
+
+/** The `ugui_text` commands of a scene, in command order. */
+function uguiTextRequests(commands: ReadonlyArray<Record<string, unknown>>): UguiTextRequest[] {
+  const requests: UguiTextRequest[] = [];
+  for (const command of commands) {
+    const payload = command.payload as Record<string, unknown> | undefined;
+    if (payload?.kind !== "ugui_text") continue;
+    if (typeof command.id !== "string") throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", "uGUI text command has no id");
+    requests.push({ id: command.id, source: payload });
+  }
+  return requests;
+}
+
+/** The family of the font asset a uGUI text draws with. */
+function uguiTextFamily(request: UguiTextRequest): string {
+  const font = request.source.font as Record<string, unknown> | undefined;
+  if (typeof font?.family !== "string" || font.family.length === 0) {
+    throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI text ${request.id} names no font family`);
+  }
+  return font.family;
+}
+
+/**
+ * The layout export's input for `texts`, with every family's font file from
+ * `fontFor`. Families `fontFor` has no file for are returned in `missing`.
+ */
+function uguiLayoutInput(
+  texts: UguiTextRequest[],
+  fontFor: (family: string) => ArrayBuffer | undefined,
+): { input: UguiLayoutInput; missing: string[] } {
+  const families = [...new Set(texts.map(uguiTextFamily))];
+  const files = families.map((family) => [family, fontFor(family)] as const);
+  const missing = files.filter(([, bytes]) => bytes == null).map(([family]) => family);
+  const present = files.filter((entry): entry is readonly [string, ArrayBuffer] => entry[1] != null);
+  const fonts = new Uint8Array(present.reduce((sum, [, bytes]) => sum + bytes.byteLength, 0));
+  const ranges: UguiLayoutInput["request"]["fonts"] = [];
+  let offset = 0;
+  for (const [family, bytes] of present) {
+    fonts.set(new Uint8Array(bytes), offset);
+    ranges.push({ family, offset, length: bytes.byteLength });
+    offset += bytes.byteLength;
+  }
+  return { input: { fonts, request: { fonts: ranges, texts } }, missing };
+}
+
+/** A layout export response with its coverage pages decoded. */
+function decodeUguiTextLayout(value: unknown): UguiTextLayout {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", "uGUI text layout is not an object");
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1 || !Array.isArray(raw.texts) || !Array.isArray(raw.glyphs) || !Array.isArray(raw.pages)) {
+    throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", "uGUI text layout has an unsupported shape");
+  }
+  const pages: UguiGlyphPage[] = raw.pages.map((entry, index) => {
+    const page = entry as Record<string, unknown>;
+    const { width, height, pixelsBase64 } = page;
+    if (!Number.isInteger(width) || !Number.isInteger(height) || typeof pixelsBase64 !== "string") {
+      throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI glyph page ${index} is invalid`);
+    }
+    const pixels = base64ToBytes(pixelsBase64);
+    if (pixels.byteLength !== (width as number) * (height as number)) {
+      throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", `uGUI glyph page ${index} holds ${pixels.byteLength} bytes for ${width}x${height}`);
+    }
+    return { width: width as number, height: height as number, pixels };
+  });
+  return {
+    version: 1,
+    texts: raw.texts as UguiTextLayout["texts"],
+    glyphs: raw.glyphs as UguiTextLayout["glyphs"],
+    pages,
+  };
+}
+
+/** A layout with no uGUI text. */
+function emptyUguiTextLayout(): UguiTextLayout {
+  return { version: 1, texts: [], glyphs: [], pages: [] };
+}
+
+/** Lays out the scene's uGUI text commands with their registered font files. */
+function layoutUguiText(mod: EmscriptenModule, commands: Array<Record<string, unknown>>): UguiTextLayout {
+  const texts = uguiTextRequests(commands);
+  if (texts.length === 0) return emptyUguiTextLayout();
+  const { input, missing } = uguiLayoutInput(texts, (family) => {
+    const source = fontSources.get(family);
+    return source ? fonts.get(fontKey(source)) : undefined;
+  });
+  if (missing.length > 0) {
+    throw new WorkerError("FONT_NOT_REGISTERED", `Required font is not registered: ${missing.join(", ")}`);
+  }
+  const fontPointer = input.fonts.byteLength > 0 ? mod._malloc(input.fonts.byteLength) : 0;
+  try {
+    if (fontPointer) mod.HEAPU8.set(input.fonts, fontPointer);
+    const raw = callJsonWithInput<unknown>(
+      mod,
+      "sdf_layout_ugui_text_json",
+      input.request,
+      [fontPointer, input.fonts.byteLength],
+    );
+    return decodeUguiTextLayout(raw);
+  } catch (error) {
+    if (error instanceof WorkerError) throw new WorkerError("UGUI_TEXT_LAYOUT_FAILED", error.message);
+    throw error;
+  } finally {
+    if (fontPointer) mod._free(fontPointer);
+  }
 }
 
 function registeredFontSource(family: string): { region: string; family: string; sourceHash: string } {

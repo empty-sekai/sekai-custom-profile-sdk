@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import createAlliumRenderer from "../dist/allium_renderer_wasm.js";
 
 const module = await createAlliumRenderer({ noInitialRun: true });
@@ -133,13 +135,84 @@ const collectionPreparation = callJsonInput("sdf_renderer_core_profile_prepare_j
     ],
   },
 }, [collectionMasterData.handle]);
-// A can badge requests its image and the static normal map; the browser leaves
-// the omikuji out and requests nothing for it, even with its `omikujis` row.
+// A can badge requests its image and the static normal map; the omikuji its
+// cover and fortune images, and its slip font as a uGUI font.
 assert.deepEqual(
   collectionPreparation.resources.map((request) => `${request.resource.namespace}/${request.resource.key}`).sort(),
-  ["assets/custom_profile/collection/crash/crash_fixture_canbadge", "static/ui/sekai_badge_normal"],
+  [
+    "assets/custom_profile/collection/crash/crash_fixture_canbadge",
+    "assets/lottery_game/new_year_2022_material/bg_omikuji_idol",
+    "assets/lottery_game/new_year_2022_material/unsei_daikichi",
+    "static/ui/sekai_badge_normal",
+  ],
 );
+assert.deepEqual(collectionPreparation.ugui_font_families, ["FOT-Omikuji"]);
+assert.deepEqual(collectionPreparation.font_families, ["FOT-Omikuji"]);
+const collectionScene = callJsonInput("sdf_renderer_core_profile_create_json", {
+  documentKey: "collections",
+  card: {
+    collections: [
+      { objectData: iconObject, id: 1, targetId: null },
+      { objectData: { ...iconObject, layer: 2 }, id: 2, targetId: 7 },
+    ],
+  },
+}, [collectionMasterData.handle]);
+const uguiTexts = collectionScene.snapshot.semantic_commands.filter((command) => command.payload.kind === "ugui_text");
+assert.deepEqual(uguiTexts.map((command) => command.role), [
+  "omikuji-title", "omikuji-title", "omikuji-title", "omikuji-summary",
+  "omikuji-description", "omikuji-description", "omikuji-description",
+]);
+assert.ok(uguiTexts.every((command) => command.payload.font.family === "FOT-Omikuji"));
+assert.equal(module.ccall("sdf_renderer_core_scene_destroy", "number", ["number"], [collectionScene.handle]), 1);
 assert.equal(module.ccall("sdf_renderer_core_masterdata_destroy", "number", ["number"], [collectionMasterData.handle]), 1);
+
+// The wasm FreeType lays the CFF fixture font out exactly as the native
+// FreeType build does: the fixture records the native layout, with each
+// coverage page as its SHA-256.
+const fixtureFont = new Uint8Array(await readFile(new URL("./test/fixtures/ugui-fixture.otf", import.meta.url)));
+const fixture = JSON.parse(await readFile(new URL("./test/fixtures/ugui-fixture-layout.json", import.meta.url), "utf8"));
+const uguiLayout = (fontBytes, request) => {
+  const fontPointer = module._malloc(fontBytes.byteLength);
+  try {
+    module.HEAPU8.set(fontBytes, fontPointer);
+    return callJsonInput("sdf_layout_ugui_text_json", request, [fontPointer, fontBytes.byteLength]);
+  } finally {
+    module._free(fontPointer);
+  }
+};
+const fixtureLayout = uguiLayout(fixtureFont, {
+  fonts: [{ family: "UguiFixture", offset: 0, length: fixtureFont.byteLength }],
+  texts: fixture.request.texts,
+});
+for (const page of fixtureLayout.pages) {
+  const pixels = Buffer.from(page.pixelsBase64, "base64");
+  assert.equal(pixels.byteLength, page.width * page.height);
+  delete page.pixelsBase64;
+  page.pixelsSha256 = createHash("sha256").update(pixels).digest("hex");
+}
+assert.deepEqual(fixtureLayout, fixture.layout);
+// A text whose font is not given fails the layout.
+const missingFont = (() => {
+  const pointer = module._malloc(1);
+  try {
+    const bytes = encoder.encode(JSON.stringify({ fonts: [], texts: fixture.request.texts.slice(0, 1) }));
+    const input = module._malloc(bytes.byteLength);
+    try {
+      module.HEAPU8.set(bytes, input);
+      const result = module.ccall("sdf_layout_ugui_text_json", "number", ["number", "number", "number", "number"], [pointer, 0, input, bytes.byteLength]);
+      try {
+        return JSON.parse(readCString(result));
+      } finally {
+        module.ccall("sdf_layout_freetype_free_string", null, ["number"], [result]);
+      }
+    } finally {
+      module._free(input);
+    }
+  } finally {
+    module._free(pointer);
+  }
+})();
+assert.match(missingFont.error, /font UguiFixture is not registered/);
 
 const authoring = callJson("sdf_renderer_authoring_create_blank_json", [], []);
 assert.ok(Number.isInteger(authoring.handle) && authoring.handle > 0);
@@ -218,6 +291,7 @@ console.log(JSON.stringify({
   contract: contract.font_engine_fingerprint,
   glyphDemand: demand.requests.length,
   masterDataLifecycle: "pass",
+  uguiTextLayout: fixtureLayout.texts.length,
   authoringLifecycle: "pass",
   atlasLifecycle: "pass",
 }));

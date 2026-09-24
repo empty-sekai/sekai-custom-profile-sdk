@@ -172,12 +172,12 @@ cargo run --release --bin render-card -- \
 收藏品按 `customProfileCollectionResources` 行的 `customProfileResourceCollectionType` 绘制：
 `can_badge`（罐徽章）以带光照的徽章材质绘制原图，另需静态素材 `ui/sekai_badge_normal`
 （法线贴图，已列入 CLI 静态清单）；`omikuji` 行指向签的预制体，元素的 `targetId` 选出
-`omikujis` 行，native renderer 按该行绘制签面图、运势图，以及用 FreeType 覆盖率（而非 SDF）
-绘制的竖排标题、总评与三段说明。签面与运势图作为普通素材请求；签文字体按字体资源名
-`FOT-Omikuji`（2022 年签）与 `FOT-UDMinchoPro-B`（2023–2025 年签）在字体目录中查找
-`FOT-Omikuji.otf` 与 `FOT-UDMinchoPro-B.otf`，字体缺失时该页渲染失败。`targetId` 缺失或
-指向不存在的行、以及未收录的签预制体都不绘制，也不请求素材。浏览器渲染器暂不绘制御神签；
-其余类型与缺省值按普通图片绘制。
+`omikujis` 行，native 与浏览器渲染器按该行绘制签面图、运势图，以及用 FreeType 覆盖率（而非
+SDF）绘制的竖排标题、总评与三段说明；两者共用 core 的版式与 FreeType 字形设置。签面与运势图
+作为普通素材请求；签文字体按字体资源名 `FOT-Omikuji`（2022 年签）与 `FOT-UDMinchoPro-B`
+（2023–2025 年签）请求：native 在字体目录中查找 `FOT-Omikuji.otf` 与 `FOT-UDMinchoPro-B.otf`，
+浏览器经 `FontProvider` 按同名 family 取字体文件，字体缺失时该页渲染失败。`targetId` 缺失或
+指向不存在的行、以及未收录的签预制体都不绘制，也不请求素材。其余类型与缺省值按普通图片绘制。
 
 `--assets-url` 默认保持通用的 `flat` 规则（`/<key>.png`）。只有资源源采用游戏解包目录时，
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical

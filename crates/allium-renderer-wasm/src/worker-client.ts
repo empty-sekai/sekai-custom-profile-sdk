@@ -27,6 +27,7 @@ import type {
   GlyphRasterPlan,
 } from "./types/atlas.js";
 import type { AuthoringCheckpoint, AuthoringCommand, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
+import type { UguiTextLayout } from "./types/uguiText.js";
 
 export type RendererWorkerClientOptions = {
   workerUrl?: string | URL;
@@ -429,6 +430,7 @@ export class RendererMasterData {
   async createProfileScene(request: unknown, layoutRequest: unknown): Promise<{
     scene: RendererScene;
     layout: WasmLayoutBatch;
+    uguiText: UguiTextLayout;
   }> {
     this.assertAlive();
     const result = await this.client.sceneRequest("createProfileScene", { masterDataId: this.id, request, layoutRequest });
@@ -436,6 +438,7 @@ export class RendererMasterData {
     return {
       scene: new RendererScene(this.client, result.sceneId, result.response),
       layout: result.layout,
+      uguiText: result.uguiText,
     };
   }
 

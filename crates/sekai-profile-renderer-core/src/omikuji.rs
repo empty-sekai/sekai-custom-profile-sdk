@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::masterdata::{normalize_region, OmikujiRow};
+use crate::masterdata::{normalize_region, OmikujiRow, ProfileMasterData};
 use crate::profile_scene::semantic_command_id;
 use crate::ugui_text::{
     UguiFontAsset, UguiTextBackdrop, UguiTextSource, UguiVerticalModifier, VerticalGlyphOffset,
@@ -128,6 +128,12 @@ impl OmikujiClient {
             },
             _ => Self::default(),
         }
+    }
+
+    /// The setup of the client whose tables `masterdata` holds. `locale`
+    /// stands in when the tables do not name their region.
+    pub fn for_masterdata(masterdata: &(impl ProfileMasterData + ?Sized), locale: &str) -> Self {
+        Self::for_region(masterdata.region_code().unwrap_or(locale))
     }
 }
 

@@ -9,6 +9,7 @@ import type { BrowserImageSource } from "./browserSemanticResources.js";
 import { placeGeneralTextInstances } from "./generalTextRenderPlacement.js";
 import type { GlyphInstance } from "../types/glyph.js";
 import type { SemanticDrawOperation } from "./semanticCommandPlanner.js";
+import type { UguiTextLayout } from "../types/uguiText.js";
 
 export type AuthoredTextHitGeometry = {
   bounds: { x: number; y: number; width: number; height: number };
@@ -27,6 +28,7 @@ export class SemanticWebglSceneRenderer {
     batches: SemanticDrawBatch[];
     imageSources: Map<string, BrowserImageSource>;
     textGlyphBatches: Map<string, Float32Array>;
+    uguiText: UguiTextLayout | null;
   } | null = null;
 
   constructor(gl: WebGL2RenderingContext) {
@@ -38,6 +40,8 @@ export class SemanticWebglSceneRenderer {
     atlas: SdfAtlas | null;
     layout: WasmLayoutBatch;
     imageSources: Map<string, BrowserImageSource>;
+    /** Layout of the scene's uGUI text commands. */
+    uguiText?: UguiTextLayout | null;
   }): Promise<{
     textCommands: number;
     glyphInstances: number;
@@ -46,8 +50,10 @@ export class SemanticWebglSceneRenderer {
   }> {
     const operations = input.plan.operations();
     this.plan = input.plan;
-    const batches = compileSemanticDrawBatches(operations);
+    const uguiText = input.uguiText ?? null;
+    const batches = compileSemanticDrawBatches(operations, uguiText);
     this.executor.setScene(input.plan, batches, input.imageSources);
+    this.executor.setUguiGlyphPages(uguiText?.pages ?? []);
     const atlasUpload = input.atlas
       ? await this.executor.setSdfAtlas(input.atlas)
       : { bytes: 0, rects: 0 };
@@ -73,6 +79,7 @@ export class SemanticWebglSceneRenderer {
       batches,
       imageSources: input.imageSources,
       textGlyphBatches,
+      uguiText,
     };
     this.contextLost = false;
     return {
@@ -130,14 +137,15 @@ export class SemanticWebglSceneRenderer {
         ? await restored.setSdfAtlas(retained.atlas)
         : { bytes: 0, rects: 0 };
       for (const [key, vertices] of retained.textGlyphBatches) restored.setTextGlyphBatch(key, vertices);
+      const uguiPages = restored.setUguiGlyphPages(retained.uguiText?.pages ?? []);
       this.executor = restored;
       this.contextLost = false;
       previous.destroy();
       return {
         atlasUploadBytes: atlasUpload.bytes,
         atlasUploadRects: atlasUpload.rects,
-        textureUploads: retained.imageSources.size,
-        textureBytes: imageSourceBytes(retained.imageSources.values()),
+        textureUploads: retained.imageSources.size + (retained.uguiText?.pages.length ?? 0),
+        textureBytes: imageSourceBytes(retained.imageSources.values()) + uguiPages.bytes,
       };
     } catch (error) {
       restored.destroy();

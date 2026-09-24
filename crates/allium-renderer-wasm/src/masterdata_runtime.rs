@@ -729,6 +729,15 @@ mod tests {
                 "resourceLoadType": "assetbundle", "resourceLoadVal": load, "fileName": file
             })
         };
+        let omikuji_row = serde_json::json!({
+            "id": 7, "unit": "idol", "summary": "夢の実現に\n近づく年",
+            "title1": "願望", "description1": "必ず 叶う", "title2": "健康",
+            "description2": "大変良好", "title3": "待人", "description3": "必ず来る",
+            "fortuneAssetbundleName": "lottery_game/new_year_2022_material",
+            "fortuneFilePath": "unsei_daikichi",
+            "omikujiCoverAssetbundleName": "lottery_game/new_year_2022_material",
+            "omikujiCoverFilePath": "omikuji_idol"
+        });
         super::put_table(
             handle,
             &serde_json::json!({
@@ -744,19 +753,7 @@ mod tests {
         .unwrap();
         super::put_table(
             handle,
-            &serde_json::json!({
-                "name": "omikujis",
-                "table": [{
-                    "id": 7, "unit": "idol", "summary": "s",
-                    "title1": "t1", "description1": "d1", "title2": "t2",
-                    "description2": "d2", "title3": "t3", "description3": "d3",
-                    "fortuneAssetbundleName": "lottery_game/new_year_2022_material",
-                    "fortuneFilePath": "unsei_daikichi",
-                    "omikujiCoverAssetbundleName": "lottery_game/new_year_2022_material",
-                    "omikujiCoverFilePath": "omikuji_idol"
-                }]
-            })
-            .to_string(),
+            &serde_json::json!({ "name": "omikujis", "table": [omikuji_row] }).to_string(),
         )
         .unwrap();
         super::seal(handle).unwrap();
@@ -768,15 +765,13 @@ mod tests {
                 "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }
             })
         };
-        let request = serde_json::json!({
-            "documentKey": "collections",
-            "card": { "collections": [
-                { "objectData": object(1), "id": 1, "targetId": null },
-                { "objectData": object(2), "id": 2, "targetId": 7 },
-                { "objectData": object(3), "id": 3, "targetId": null }
-            ] }
-        })
-        .to_string();
+        let card = serde_json::json!({ "collections": [
+            { "objectData": object(1), "id": 1, "targetId": null },
+            { "objectData": object(2), "id": 2, "targetId": 7 },
+            { "objectData": object(3), "id": 3, "targetId": null },
+            { "objectData": object(4), "id": 2, "targetId": 8 }
+        ] });
+        let request = serde_json::json!({ "documentKey": "collections", "card": card }).to_string();
         let prepared: serde_json::Value =
             serde_json::from_str(&super::prepare(handle, &request).unwrap()).unwrap();
         let mut resources = prepared["resources"]
@@ -792,14 +787,28 @@ mod tests {
             })
             .collect::<Vec<_>>();
         resources.sort();
+        // The omikuji requests its cover and fortune images; the one whose
+        // `omikujis` row does not exist requests nothing.
         assert_eq!(
             resources,
             [
                 "assets/custom_profile/collection/crash/crash_fixture_canbadge",
                 "assets/custom_profile/collection/sticker/sticker_fixture",
+                "assets/lottery_game/new_year_2022_material/bg_omikuji_idol",
+                "assets/lottery_game/new_year_2022_material/unsei_daikichi",
                 "static/ui/sekai_badge_normal",
             ]
         );
+        // The slip's texts draw from their font file, not an SDF atlas.
+        assert_eq!(
+            prepared["ugui_font_families"],
+            serde_json::json!(["FOT-Omikuji"])
+        );
+        assert_eq!(
+            prepared["font_families"],
+            serde_json::json!(["FOT-Omikuji"])
+        );
+        assert_eq!(prepared["fonts"], serde_json::json!({}));
         let response: serde_json::Value =
             serde_json::from_str(&super::create_scene(handle, &request).unwrap()).unwrap();
         let images = response["snapshot"]["semantic_commands"]
@@ -828,19 +837,85 @@ mod tests {
                     }))
                 ),
                 (
+                    "lottery_game/new_year_2022_material/bg_omikuji_idol".to_owned(),
+                    None
+                ),
+                (
+                    "lottery_game/new_year_2022_material/unsei_daikichi".to_owned(),
+                    None
+                ),
+                (
                     "custom_profile/collection/sticker/sticker_fixture".to_owned(),
                     None
                 ),
             ]
         );
-        // The browser does not draw omikuji slips yet: even with its
-        // `omikujis` row the collection requests nothing and draws nothing.
-        assert!(response["snapshot"]["semantic_commands"]
+        // The slip's commands are exactly the ones the core lowers for the
+        // native renderer: CN tables, so the CN client's fitted title
+        // backgrounds.
+        let card: sekai_profile_renderer_core::profile_source::CustomProfileCard =
+            serde_json::from_value(card).unwrap();
+        let slip = sekai_profile_renderer_core::profile_scene::ordered_profile_elements(
+            &card,
+            "collections",
+        )
+        .into_iter()
+        .find(|element| element.object().layer == 2)
+        .unwrap();
+        let plan = sekai_profile_renderer_core::omikuji::OmikujiPlan {
+            prefab: sekai_profile_renderer_core::omikuji::prefab(
+                "lottery_game/new_year_2022",
+                "Prefabs/Omikuji",
+            )
+            .unwrap(),
+            row: serde_json::from_value(omikuji_row).unwrap(),
+        };
+        let expected = sekai_profile_renderer_core::omikuji::lower_omikuji(
+            &slip.source_key,
+            slip.layer_id,
+            &plan.visual(sekai_profile_renderer_core::omikuji::OmikujiClient::for_region("cn")),
+        );
+        let layer_id = serde_json::to_value(slip.layer_id).unwrap();
+        let drawn = response["snapshot"]["semantic_commands"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|command| command["payload"]["kind"] != "ugui_text"
-                && !command["role"].as_str().unwrap().starts_with("omikuji-")));
+            .filter(|command| command["layer_id"] == layer_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        // Compared as serialised, where `f32` values keep their shortest form.
+        assert_eq!(
+            serde_json::Value::Array(drawn),
+            serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&expected).unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|command| matches!(
+                    command.payload,
+                    sekai_profile_renderer_core::SemanticCommandPayload::UguiText(_)
+                ))
+                .count(),
+            7
+        );
+        // The slip without a row keeps an empty layer.
+        let missing = sekai_profile_renderer_core::profile_scene::ordered_profile_elements(
+            &card,
+            "collections",
+        )
+        .into_iter()
+        .find(|element| element.object().layer == 4)
+        .unwrap();
+        let missing_id = serde_json::to_value(missing.layer_id).unwrap();
+        let empty = response["snapshot"]["semantic_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["layer_id"] == missing_id)
+            .map(|command| command["payload"]["kind"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(empty, [serde_json::json!("composite")]);
         assert!(super::super::scene::destroy(
             response["handle"].as_u64().unwrap() as u32
         ));

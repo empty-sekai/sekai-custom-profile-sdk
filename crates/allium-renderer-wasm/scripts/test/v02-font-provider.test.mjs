@@ -84,6 +84,9 @@ test("BrowserRenderer performs a WASM font-demand phase before final glyph prepa
   assert.match(renderer, /fontDemandOnly: true/);
   assert.match(renderer, /preparedFontDemands\(fontPreparation, this\.region\)/);
   assert.match(renderer, /FONT_IDENTITY_CONFLICT/);
-  assert.match(worker, /preparation: \{ fontDemands: \[\.\.\.families\] \}/);
+  assert.match(worker, /fontDemands: \[\.\.\.families\],/);
+  // uGUI text fonts are font files; only SDF text fonts may come from an atlas.
+  assert.match(worker, /atlasFontDemands: \[\.\.\.new Set\(Object\.values\(atlasFamilies\)\)\]/);
+  assert.match(renderer, /preparedAtlasFontDemands\(fontPreparation\)/);
   assert.match(index, /FontProvider/);
 });

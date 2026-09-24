@@ -574,6 +574,13 @@ pub trait ProfileMasterData {
     fn resolve_omikuji(&self, _id: i32) -> Option<OmikujiRow> {
         None
     }
+    /// Region code of the game client the tables come from (`cn`, `jp`, `tw`,
+    /// `en` or `kr`), or `None` when it is not known. Content the clients set
+    /// up differently, such as the omikuji slip ([`crate::omikuji::OmikujiClient`]),
+    /// follows it.
+    fn region_code(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -760,6 +767,9 @@ impl ProfileMasterData for JsonMasterData {
     }
     fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
         self.table("omikujis")?.typed(id.into())
+    }
+    fn region_code(&self) -> Option<&str> {
+        Some(&self.region)
     }
     fn resolve_unit_virtual_singer(&self, self_id: i32, partner_id: i32) -> i32 {
         let Some(table) = self.table("gameCharacterUnits") else {

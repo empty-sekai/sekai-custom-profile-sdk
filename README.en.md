@@ -173,14 +173,16 @@ Collections follow the `customProfileResourceCollectionType` of their
 `customProfileCollectionResources` row: `can_badge` rows draw their image through a lit badge
 material that also needs the static asset `ui/sekai_badge_normal` (a normal map, listed in the
 CLI's static manifest); `omikuji` rows name a fortune-slip prefab, and the element's
-`targetId` picks the `omikujis` row it shows. The native renderer draws the slip's cover and
-fortune images and its vertical title, summary and description texts, which are rendered from
-FreeType coverage rather than SDF glyphs. The two images are requested as ordinary assets. The
-texts use the font assets `FOT-Omikuji` (2022 slips) and `FOT-UDMinchoPro-B` (2023–2025 slips),
-found as `FOT-Omikuji.otf` and `FOT-UDMinchoPro-B.otf` in the font directory; without the font
+`targetId` picks the `omikujis` row it shows. The native and browser renderers draw the slip's
+cover and fortune images and its vertical title, summary and description texts, which are
+rendered from FreeType coverage rather than SDF glyphs; both use the core layout and FreeType
+glyph settings. The two images are requested as ordinary assets. The texts use the font assets
+`FOT-Omikuji` (2022 slips) and `FOT-UDMinchoPro-B` (2023–2025 slips): the native renderer finds
+them as `FOT-Omikuji.otf` and `FOT-UDMinchoPro-B.otf` in the font directory, and the browser
+renderer requests the font files by those family names from its `FontProvider`; without the font
 the page fails to render. A missing `targetId`, one naming no row, and a slip prefab that is
-not laid out draw nothing and request nothing. The browser renderer does not draw omikuji
-collections yet. Every other type, and a missing one, draws as a plain image.
+not laid out draw nothing and request nothing. Every other type, and a missing one, draws as a
+plain image.
 
 `--assets-url` keeps the generic `flat` rule (`/<key>.png`) by default. Pass
 `--asset-url-layout game-assets` only when the source follows the extracted game asset

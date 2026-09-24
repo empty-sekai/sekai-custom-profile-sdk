@@ -102,7 +102,7 @@ test("profile preparation owns complete glyph demand and resolves one atlas", as
   assert.match(worker, /glyph_layers/);
   assert.match(worker, /layout_layers/);
   assert.match(worker, /kind: "createProfileScene"/);
-  assert.match(worker, /response, layout \}/);
+  assert.match(worker, /response, layout, uguiText \}/);
   assert.doesNotMatch(worker, /function authoredLayoutLayers/);
 });
 

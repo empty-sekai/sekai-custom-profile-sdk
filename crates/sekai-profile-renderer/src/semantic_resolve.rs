@@ -272,7 +272,7 @@ fn populate_resolve_snapshot_parts(
                     );
                 }
                 AuthoredResource::Omikuji(plan) => {
-                    let client = OmikujiClient::for_region(md.region().as_str());
+                    let client = OmikujiClient::for_masterdata(md, locale);
                     snapshot
                         .omikuji_visuals
                         .insert(element.source_key, plan.visual(client));
@@ -1467,6 +1467,122 @@ mod tests {
             12
         );
         assert!(resolved.layers.iter().all(|layer| layer.game_layer == 7));
+    }
+
+    /// Collection 2, a 2022 omikuji slip, and its `omikujis` row 7, from the
+    /// tables of `region`.
+    struct OmikujiProvider {
+        region: crate::region::Region,
+    }
+
+    impl MasterDataProvider for OmikujiProvider {
+        fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+            EmptyProvider.resolve_story_banner(story_type, story_id)
+        }
+        fn get_card(&self, id: i32) -> Option<CardEntry> {
+            EmptyProvider.get_card(id)
+        }
+        fn resolve_color(&self, id: i32) -> Option<ResolvedColor> {
+            EmptyProvider.resolve_color(id)
+        }
+        fn resolve_font(&self, id: i32) -> Option<String> {
+            EmptyProvider.resolve_font(id)
+        }
+        fn resolve_stamp(&self, id: i32) -> Option<String> {
+            EmptyProvider.resolve_stamp(id)
+        }
+        fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
+            (res_type == "collection" && id == 2).then(|| ResourceInfo {
+                file_name: sekai_profile_renderer_core::omikuji::PREFAB_FILE.into(),
+                load_val: "lottery_game/new_year_2022".into(),
+                resource_type: res_type.into(),
+                collection_type: crate::masterdata::CollectionResourceType::Omikuji,
+            })
+        }
+        fn resolve_honor(&self, id: i32, level: i32) -> Option<ResolvedHonor> {
+            EmptyProvider.resolve_honor(id, level)
+        }
+        fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+            EmptyProvider.get_bonds_honor(id)
+        }
+        fn get_bonds_honor_word(&self, id: i64) -> Option<BondsHonorWordEntry> {
+            EmptyProvider.get_bonds_honor_word(id)
+        }
+        fn get_honor(&self, id: i32) -> Option<HonorEntry> {
+            EmptyProvider.get_honor(id)
+        }
+        fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
+            EmptyProvider.resolve_unit_vs_sd(self_id, partner_id)
+        }
+        fn font_count(&self) -> usize {
+            1
+        }
+        fn color_count(&self) -> usize {
+            0
+        }
+        fn region(&self) -> crate::region::Region {
+            self.region
+        }
+        fn resolve_omikuji(&self, id: i32) -> Option<crate::masterdata::OmikujiRow> {
+            (id == 7).then(|| crate::masterdata::OmikujiRow {
+                id,
+                unit: "street".into(),
+                summary: "夢の実現に
+近づく年"
+                    .into(),
+                title1: "願望".into(),
+                description1: "必ず 叶う".into(),
+                title2: "健康".into(),
+                description2: "大変良好".into(),
+                title3: "待人".into(),
+                description3: "必ず来る".into(),
+                fortune_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                fortune_file_path: "unsei_kichi".into(),
+                omikuji_cover_assetbundle_name: "lottery_game/new_year_2022_material".into(),
+                omikuji_cover_file_path: "omikuji_street".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn omikuji_slips_lower_like_the_shared_core_in_every_client_region() {
+        let object = |layer: i32| {
+            serde_json::json!({
+                "layer": layer, "lock": false,
+                "position": { "x": 0.0, "y": 0.0, "z": 0.0 },
+                "rotation": { "w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0 },
+                "scale": { "x": 1.0, "y": 1.0, "z": 1.0 }, "visible": true
+            })
+        };
+        let card: CustomProfileCard = serde_json::from_value(serde_json::json!({
+            "collections": [
+                { "objectData": object(1), "id": 2, "targetId": 7 },
+                { "objectData": object(2), "id": 2, "targetId": 8 }
+            ]
+        }))
+        .expect("card fixture");
+        use crate::region::Region;
+        for region in [Region::Cn, Region::Jp, Region::Tw, Region::Kr, Region::En] {
+            let md = MasterData::new(Arc::new(OmikujiProvider { region }));
+            let resolved = resolve_card_commands(&card, &md, "slips").expect("native scene");
+            let shared = sekai_profile_renderer_core::profile_resolve::compile_profile_scene(
+                &card,
+                None,
+                &md,
+                "slips",
+                "und",
+                &(),
+                std::collections::BTreeMap::new(),
+            )
+            .expect("shared scene");
+            let texts = resolved
+                .commands
+                .iter()
+                .filter(|command| matches!(command.payload, SemanticCommandPayload::UguiText(_)))
+                .count();
+            assert_eq!(texts, 7, "{region:?}");
+            assert_shared_semantic_parity(resolved, shared);
+        }
     }
 
     #[test]

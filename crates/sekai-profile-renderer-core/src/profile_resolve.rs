@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::masterdata::{CollectionResourceType, ProfileMasterData, ResourceInfo};
-use crate::omikuji::OmikujiPlan;
+use crate::omikuji::{OmikujiClient, OmikujiPlan};
 use crate::profile_data::{MusicDifficultyStats as ProfileMusicStats, ProfileData};
 use crate::profile_scene::{
     card_member_lookup_key, collection_normal_map_lookup_key, ordered_profile_elements,
@@ -89,8 +89,15 @@ pub struct ProfileGlyphPreparation {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AuthoredProfilePreparation {
+    /// SDF text fonts by master-data font id.
     pub fonts: BTreeMap<i32, String>,
+    /// Every font family the page draws with: the values of [`Self::fonts`]
+    /// and [`Self::ugui_font_families`].
     pub font_families: BTreeSet<String>,
+    /// Families of the uGUI text ([`crate::ugui_text`]) the page draws, whose
+    /// glyphs come from FreeType bitmaps rather than an SDF atlas.
+    #[serde(default)]
+    pub ugui_font_families: BTreeSet<String>,
     pub layout_layers: Vec<ProfileTextLayoutPreparation>,
     pub glyph_layers: Vec<ProfileGlyphPreparation>,
     pub resources: Vec<ProfileResourceRequest>,
@@ -147,6 +154,7 @@ fn build_profile_snapshot_inner(
         card,
         masterdata,
         document_key,
+        locale,
         resource_metadata,
         &mut snapshot,
     )?;
@@ -406,6 +414,7 @@ fn prepare_profile_inner(
     let mut output = AuthoredProfilePreparation {
         font_families: fonts.values().cloned().collect(),
         fonts,
+        ugui_font_families: BTreeSet::new(),
         layout_layers: Vec::new(),
         glyph_layers: Vec::new(),
         resources: Vec::new(),
@@ -538,11 +547,16 @@ fn prepare_profile_inner(
                 resource,
                 fallback,
             ),
+            crate::SemanticCommandPayload::UguiText(source) => {
+                output.ugui_font_families.insert(source.font.family.clone());
+            }
             crate::SemanticCommandPayload::Composite { .. }
-            | crate::SemanticCommandPayload::Shape { .. }
-            | crate::SemanticCommandPayload::UguiText(_) => {}
+            | crate::SemanticCommandPayload::Shape { .. } => {}
         }
     }
+    output
+        .font_families
+        .extend(output.ugui_font_families.iter().cloned());
     output.resources = resources.into_values().collect();
     Ok(output)
 }
@@ -673,6 +687,7 @@ fn populate_authored_resources(
     card: &CustomProfileCard,
     masterdata: &impl ProfileMasterData,
     document_key: &str,
+    locale: &str,
     resource_metadata: &impl ResourceMetadata,
     snapshot: &mut ProfileResolveSnapshot,
 ) -> Result<(), AuthoredProfileResolveError> {
@@ -707,12 +722,14 @@ fn populate_authored_resources(
         }
         match authored_resource(element.value, masterdata) {
             AuthoredResource::None => {}
-            // Only the native renderer draws the text of an omikuji slip, so
-            // this resolver leaves omikuji collections out.
-            AuthoredResource::MissingRow
-            | AuthoredResource::NotDrawn
-            | AuthoredResource::Omikuji(_) => {
+            AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
                 snapshot.omitted_elements.insert(element.source_key);
+            }
+            AuthoredResource::Omikuji(plan) => {
+                let client = OmikujiClient::for_masterdata(masterdata, locale);
+                snapshot
+                    .omikuji_visuals
+                    .insert(element.source_key, plan.visual(client));
             }
             AuthoredResource::Request(request) => {
                 insert_request(snapshot, request, resource_metadata)
@@ -3223,13 +3240,34 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_resolver_leaves_omikuji_collections_out_and_requests_nothing_for_them() {
+    fn the_shared_resolver_draws_omikuji_slips_and_requests_their_images_and_font() {
         let data = omikuji_tables();
+        // A drawn slip, a stand, a slip prefab that is not laid out and a slip
+        // without a target.
         let card = omikuji_card(&[(1, 2, Some(7)), (2, 3, None), (3, 6, Some(7)), (4, 2, None)]);
+        let assets = |key: &str| ("assets".to_string(), key.to_string());
         assert_eq!(
             prepared_keys(&card, &data),
-            [("assets".to_string(), STAND_KEY.to_string())]
+            [
+                assets(STAND_KEY),
+                assets("lottery_game/new_year_2022_material/bg_omikuji_VIRTUAL SINGER"),
+                assets("lottery_game/new_year_2022_material/unsei_daikichi"),
+            ]
         );
+        let preparation = prepare_profile(&card, None, &data, "collections", "jp").unwrap();
+        assert_eq!(
+            preparation.ugui_font_families,
+            BTreeSet::from(["FOT-Omikuji".to_string()])
+        );
+        assert!(preparation.font_families.contains("FOT-Omikuji"));
+        // The slip font is not an SDF font: it has no font id and no glyph
+        // layers.
+        assert!(preparation
+            .fonts
+            .values()
+            .all(|family| family != "FOT-Omikuji"));
+        assert!(preparation.glyph_layers.is_empty());
+
         let scene = compile_profile_scene(
             &card,
             None,
@@ -3240,7 +3278,34 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap();
-        for game_layer in [1, 3, 4] {
+        // The slip is lowered exactly as the native snapshot lowers it: the
+        // tables are CN tables, so the client fits the title backgrounds.
+        let slip = scene
+            .layers
+            .iter()
+            .find(|layer| layer.game_layer == 1)
+            .unwrap();
+        let visual = match authored_resource(
+            crate::profile_scene::ProfileElementRef::Collection(&card.collections[0]),
+            &data,
+        ) {
+            AuthoredResource::Omikuji(plan) => plan.visual(OmikujiClient::for_region("cn")),
+            other => panic!("{other:?}"),
+        };
+        assert!(visual.fit_title_backgrounds);
+        let source_key = crate::profile_scene::ordered_profile_elements(&card, "collections")
+            .into_iter()
+            .find(|element| element.layer_id == slip.id)
+            .unwrap()
+            .source_key;
+        assert_eq!(
+            game_layer_commands(&scene, 1)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            crate::omikuji::lower_omikuji(&source_key, slip.id, &visual)
+        );
+        for game_layer in [3, 4] {
             let commands = game_layer_commands(&scene, game_layer);
             assert_eq!(commands.len(), 1, "layer {game_layer}");
             assert!(
@@ -3252,6 +3317,55 @@ mod tests {
             );
         }
         assert_eq!(image_material(&scene, 2).0, STAND_KEY);
+    }
+
+    #[test]
+    fn the_omikuji_client_follows_the_region_of_the_tables() {
+        let card = omikuji_card(&[(1, 2, Some(7))]);
+        let fitted = |data: &JsonMasterData, locale: &str| {
+            let scene = compile_profile_scene(
+                &card,
+                None,
+                data,
+                "collections",
+                locale,
+                &(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            game_layer_commands(&scene, 1)
+                .into_iter()
+                .filter_map(|command| match &command.payload {
+                    crate::SemanticCommandPayload::UguiText(source) => source
+                        .backdrop
+                        .as_ref()
+                        .map(|backdrop| backdrop.fit_padding),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut jp = JsonMasterData::new("jp");
+        for (name, table) in [
+            (
+                "customProfileCollectionResources",
+                serde_json::json!([{
+                    "id": 2, "customProfileResourceType": "collection",
+                    "customProfileResourceCollectionType": "omikuji",
+                    "resourceLoadType": "assetbundle",
+                    "resourceLoadVal": "lottery_game/new_year_2022", "fileName": "Prefabs/Omikuji"
+                }]),
+            ),
+            (
+                "omikujis",
+                serde_json::json!([crate::masterdata::tests::omikuji_row_value(7, "idol")]),
+            ),
+        ] {
+            jp.insert_value(name, table).unwrap();
+        }
+        let fit = Some(crate::omikuji::TITLE_BACKGROUND_FIT_PADDING);
+        // The tables' region decides, not the locale the page is shown in.
+        assert_eq!(fitted(&omikuji_tables(), "ja-JP"), [fit; 3]);
+        assert_eq!(fitted(&jp, "zh-CN"), [None; 3]);
     }
 
     #[test]

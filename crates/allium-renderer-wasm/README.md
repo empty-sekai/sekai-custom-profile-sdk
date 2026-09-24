@@ -155,7 +155,7 @@ export interface ResourceProvider {
 
 `namespace`、`key` 和 `role` 表达 renderer 语义；调用方可将其映射到任意资源命名和存储规则。
 
-罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`；`omikuji` 收藏品目前只由 native renderer 绘制，浏览器渲染器不绘制，也不请求资源。
+罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`。`omikuji` 收藏品按元素 `targetId` 指向的 `omikujis` 行绘制签：请求签面图与运势图两张 `assets` 资源，签文以 FreeType 覆盖率（而非 SDF 图集）绘制，所需字体经 `FontProvider` 按字体资源名 `FOT-Omikuji`（2022 年签）或 `FOT-UDMinchoPro-B`（2023–2025 年签）请求字体文件；这两个 family 不走预生成 SDF 图集。字体缺失时场景创建失败，与其他已声明字体一致。
 
 ### 任意异步来源
 

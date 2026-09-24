@@ -7,6 +7,7 @@ mod masterdata_runtime;
 mod scene;
 #[cfg(test)]
 mod shader_contract;
+mod ugui_text;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -204,6 +205,34 @@ pub unsafe extern "C" fn sdf_layout_freetype_glyph_demand_json(
         serde_json::to_string(&GlyphBatchError { error: message })
             .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
     }))
+}
+
+/// Lays out uGUI text commands; see [`ugui_text::layout_json`]. `fonts` holds
+/// the font files the JSON input names by byte range.
+///
+/// # Safety
+///
+/// `fonts_ptr` must point to `fonts_len` readable bytes (it may be null when
+/// `fonts_len` is 0), and `input_json_ptr` to `input_json_len` readable bytes.
+/// The returned string must be released with `sdf_layout_freetype_free_string`.
+#[no_mangle]
+pub unsafe extern "C" fn sdf_layout_ugui_text_json(
+    fonts_ptr: *const u8,
+    fonts_len: usize,
+    input_json_ptr: *const u8,
+    input_json_len: usize,
+) -> *mut c_char {
+    core_json_call(|| {
+        let fonts = if fonts_len == 0 {
+            &[][..]
+        } else if fonts_ptr.is_null() {
+            return Err("null font buffer pointer".to_string());
+        } else {
+            slice::from_raw_parts(fonts_ptr, fonts_len)
+        };
+        read_utf8_slice(input_json_ptr, input_json_len)
+            .and_then(|input| ugui_text::layout_json(fonts, input))
+    })
 }
 
 #[no_mangle]

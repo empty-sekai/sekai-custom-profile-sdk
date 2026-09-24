@@ -16,7 +16,7 @@ name = "allium_renderer_wasm"
 path = "src/main.rs"
 
 [dependencies]
-sekai-profile-renderer-core = { path = "../sekai-profile-renderer-core" }
+sekai-profile-renderer-core = { path = "../sekai-profile-renderer-core", features = ["freetype"] }
 base64 = "0.22"
 freetype-rs = "0.38"
 libc = "0.2"

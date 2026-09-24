@@ -12,8 +12,9 @@
 //!
 //! Every glyph becomes a quad over its bitmap with
 //! [`UguiFontAsset::character_padding`] empty texels on each side, mapped one
-//! texel to one pixel. A renderer samples that cell bilinearly and draws the
-//! vertex colour times the coverage.
+//! texel to one pixel. A renderer samples that cell bilinearly
+//! ([`cell_coverage`]) and draws the vertex colour times the coverage.
+//! Both renderers lay the text out at [`CARD_PIXELS_PER_UNIT`].
 //!
 //! All arithmetic is `f32` in the generator's order of operations, so quad
 //! corners come out bit for bit as the engine computes them.
@@ -27,6 +28,12 @@ use crate::{Matrix2d, Quad, Rect};
 
 /// Largest pixel size the generator renders glyphs at.
 pub const MAX_PIXEL_SIZE: u32 = 500;
+/// Output pixels per canvas unit of the card the renderers draw: the card is
+/// rendered at its own size, so glyphs are rendered at the font size.
+pub const CARD_PIXELS_PER_UNIT: f32 = 1.0;
+/// Offset from a texel's corner to its centre, in texels. [`cell_coverage`]
+/// subtracts it before interpolating between texel centres.
+pub const TEXEL_CENTRE: f32 = 0.5;
 /// Added to both rect extents before the text is placed in the rect.
 const EXTENT_EPSILON: f32 = 0.0001;
 /// `cos(90°)` as `f32`: the residue of the quarter turn that sets glyphs
@@ -181,6 +188,33 @@ pub fn pixel_size(font_size: i32, pixels_per_unit: f32) -> u32 {
         return 0;
     }
     (scaled as u32).min(MAX_PIXEL_SIZE)
+}
+
+/// Coverage of a glyph cell at cell coordinates `(u, v)`: texels from the
+/// cell's top-left corner, one texel per bitmap pixel, with `padding` empty
+/// texels around the bitmap. The coverage is interpolated bilinearly between
+/// the centres of the four nearest texels; texels outside the bitmap are
+/// empty.
+pub fn cell_coverage(glyph: &UguiGlyph, padding: u32, u: f32, v: f32) -> f32 {
+    let texel = |column: i64, row: i64| -> f32 {
+        let column = column - i64::from(padding);
+        let row = row - i64::from(padding);
+        if column < 0 || row < 0 || column >= i64::from(glyph.width) || row >= i64::from(glyph.rows)
+        {
+            return 0.0;
+        }
+        f32::from(glyph.coverage[row as usize * glyph.width as usize + column as usize]) / 255.0
+    };
+    let x = u - TEXEL_CENTRE;
+    let y = v - TEXEL_CENTRE;
+    let left = x.floor();
+    let top = y.floor();
+    let fx = x - left;
+    let fy = y - top;
+    let (column, row) = (left as i64, top as i64);
+    let upper = texel(column, row) + (texel(column + 1, row) - texel(column, row)) * fx;
+    let lower = texel(column, row + 1) + (texel(column + 1, row + 1) - texel(column, row + 1)) * fx;
+    upper + (lower - upper) * fy
 }
 
 /// `floor(value + 0.5)`, the generator's rounding.
@@ -811,6 +845,33 @@ mod tests {
             ..backdrop.clone()
         };
         assert_eq!(fixed.resolved_rect(160.0), backdrop.rect);
+    }
+
+    #[test]
+    fn cell_coverage_interpolates_between_texel_centres_and_treats_the_padding_as_empty() {
+        // A 2 x 2 bitmap, opaque top row and half-covered bottom row, in a
+        // 4 x 4 cell.
+        let glyph = UguiGlyph {
+            bitmap_left: 0,
+            bitmap_top: 2,
+            width: 2,
+            rows: 2,
+            advance_26_6: 3 * 64,
+            coverage: vec![255, 255, 128, 128],
+        };
+        let at = |u: f32, v: f32| cell_coverage(&glyph, 1, u, v);
+        // Texel centres return their texels.
+        assert_eq!(at(1.5, 1.5), 1.0);
+        assert_eq!(at(2.5, 2.5), 128.0 / 255.0);
+        assert_eq!(at(0.5, 0.5), 0.0);
+        // Halfway between the padding and the first bitmap column, and
+        // between the two rows.
+        assert_eq!(at(1.0, 1.5), 0.5);
+        assert_eq!(at(1.5, 2.0), (1.0 + 128.0 / 255.0) / 2.0);
+        // The cell edge and beyond it are empty.
+        assert_eq!(at(0.0, 2.0), 0.0);
+        assert_eq!(at(4.0, 2.0), 0.0);
+        assert_eq!(at(-3.0, 9.0), 0.0);
     }
 
     #[test]

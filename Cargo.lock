@@ -1145,6 +1145,7 @@ name = "sekai-profile-renderer-core"
 version = "0.5.1"
 dependencies = [
  "bincode",
+ "freetype-rs",
  "serde",
  "serde_json",
  "sha2",

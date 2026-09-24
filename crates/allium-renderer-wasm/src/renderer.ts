@@ -287,7 +287,7 @@ export class BrowserRenderer {
           const contracts = await resolvePrebuiltFontContracts(
             this.prebuiltSdfAtlasProvider,
             this.region,
-            demands.map((request) => request.family),
+            preparedAtlasFontDemands(fontPreparation),
             abort.signal,
           );
           await Promise.all(contracts.map((contract) => this.worker.registerPrebuiltFont(contract)));
@@ -357,6 +357,7 @@ export class BrowserRenderer {
         atlas,
         layout: compiled.layout,
         imageSources: acquired.sources,
+        uguiText: compiled.uguiText,
       });
       assertActive();
       const scene = new BrowserScene(core, renderer, acquired, atlas, {
@@ -585,6 +586,16 @@ function preparedFontDemands(
     }
     return { region, family };
   });
+}
+
+/** Families whose glyphs a prebuilt SDF atlas can supply. uGUI text fonts are
+ * drawn from their font files and are left out. */
+function preparedAtlasFontDemands(preparation: Record<string, unknown>): string[] {
+  const values = preparation.atlasFontDemands;
+  if (!Array.isArray(values) || values.some((family) => typeof family !== "string" || family.length === 0)) {
+    throw new BrowserRendererError("INVALID_PROFILE_PREPARATION", "Profile preparation did not return atlas font demands");
+  }
+  return values as string[];
 }
 
 function preparedLayoutRequest(

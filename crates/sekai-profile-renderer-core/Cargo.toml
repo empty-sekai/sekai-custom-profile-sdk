@@ -11,7 +11,14 @@ all-features = true
 
 [dependencies]
 bincode = { workspace = true }
+freetype-rs = { version = "0.38", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
+
+[features]
+default = []
+# FreeType glyphs for uGUI text (`ugui_freetype`), shared by the native and
+# browser renderers.
+freetype = ["dep:freetype-rs"]

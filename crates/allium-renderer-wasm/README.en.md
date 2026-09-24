@@ -156,7 +156,7 @@ export interface ResourceProvider {
 
 `namespace`, `key`, and `role` are renderer semantics, not filesystem conventions. The host may interpret them in any way.
 
-A can-badge collection (`customProfileResourceCollectionType` `can_badge`) requests, besides its image, the normal map `namespace: "static"`, `key: "ui/sekai_badge_normal"`. Omikuji collections are drawn by the native renderer only; the browser renderer leaves them out and requests nothing for them.
+A can-badge collection (`customProfileResourceCollectionType` `can_badge`) requests, besides its image, the normal map `namespace: "static"`, `key: "ui/sekai_badge_normal"`. An omikuji collection draws the fortune slip of the `omikujis` row its `targetId` names: it requests the cover and fortune images as two `assets` resources, and its texts are drawn from FreeType coverage rather than an SDF atlas, from the font file the `FontProvider` returns for the font asset `FOT-Omikuji` (2022 slips) or `FOT-UDMinchoPro-B` (2023–2025 slips). These families are never looked up in a prebuilt SDF atlas. Without the font, scene creation fails, as it does for any other font the scene declares.
 
 ### Arbitrary asynchronous sources
 

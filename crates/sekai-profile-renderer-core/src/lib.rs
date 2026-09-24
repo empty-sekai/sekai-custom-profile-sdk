@@ -32,6 +32,7 @@
 //! | [`sdf_material`] | Text and shape SDF material parameters |
 //! | [`badge_material`] | Lit material of can-badge collection images |
 //! | [`ugui_text`] | uGUI text layout drawn from FreeType bitmaps |
+//! | `ugui_freetype` | FreeType glyphs for [`ugui_text`] (feature `freetype`) |
 //! | [`omikuji`] | The fortune slip of omikuji collections |
 //! | [`authoring_document`] | Editable document model |
 //! | [`authoring_session`] | Editing session state and command handling |
@@ -53,6 +54,8 @@ pub mod sdf_geometry;
 pub mod sdf_glyph;
 pub mod sdf_material;
 pub mod tmp_text;
+#[cfg(feature = "freetype")]
+pub mod ugui_freetype;
 pub mod ugui_text;
 
 pub use tmp_text::{wrap_tmp_markup, MeasuredTextUnit};

@@ -5,6 +5,7 @@ import { WebglSdfAtlasTexture } from "./webglSdfAtlasTexture.js";
 import { packPreviewTransformsForTexture } from "./previewTransformTextureLayout.js";
 import type { SdfAtlas } from "../fontSdfAtlas.js";
 import type { BrowserImageSource } from "./browserSemanticResources.js";
+import type { UguiGlyphPage } from "../types/uguiText.js";
 
 const PREVIEW_TRANSFORM_TEXTURE_UNIT = 5;
 const ALPHA_MASK_TEXTURE_UNIT = 6;
@@ -47,6 +48,7 @@ export class WebglSemanticCommandExecutor {
   private textureProgram: WebGLProgram;
   private compositeProgram: WebGLProgram;
   private badgeProgram: WebGLProgram;
+  private uguiGlyphProgram: WebGLProgram;
   private compositeVao: WebGLVertexArrayObject;
   private stateTexture: WebGLTexture;
   private maskTexture: WebGLTexture;
@@ -55,6 +57,7 @@ export class WebglSemanticCommandExecutor {
   private previewTransformTexture: WebGLTexture;
   private batches: GpuBatch[] = [];
   private textures = new Map<string, { texture: WebGLTexture; source: BrowserImageSource; bytes: number }>();
+  private uguiGlyphPages: WebGLTexture[] = [];
   private state = new Float32Array(2);
   private mask = new Uint8Array(1);
   private stateWidth = 1;
@@ -84,6 +87,7 @@ export class WebglSemanticCommandExecutor {
       programs.push(createProgram(gl, VERTEX_SHADER, TEXTURE_FRAGMENT_SHADER));
       programs.push(createProgram(gl, COMPOSITE_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER));
       programs.push(createProgram(gl, VERTEX_SHADER, BADGE_FRAGMENT_SHADER));
+      programs.push(createProgram(gl, VERTEX_SHADER, UGUI_GLYPH_FRAGMENT_SHADER));
       compositeVao = gl.createVertexArray();
       for (let index = 0; index < 5; index += 1) {
         const texture = gl.createTexture();
@@ -98,7 +102,7 @@ export class WebglSemanticCommandExecutor {
       gl.deleteVertexArray(compositeVao);
       throw error;
     }
-    [this.shapeProgram, this.textureProgram, this.compositeProgram, this.badgeProgram] = programs;
+    [this.shapeProgram, this.textureProgram, this.compositeProgram, this.badgeProgram, this.uguiGlyphProgram] = programs;
     [this.stateTexture, this.maskTexture, this.commandMaskTexture, this.commandStateTexture, this.previewTransformTexture] = textures;
     this.compositeVao = compositeVao;
     this.glyphPipeline = glyphPipeline;
@@ -108,6 +112,32 @@ export class WebglSemanticCommandExecutor {
 
   setTextGlyphBatch(commandId: string, vertices: Float32Array): void {
     this.glyphPipeline.upload(commandId, vertices);
+  }
+
+  /** Uploads the coverage pages the scene's `ugui_glyph` batches sample,
+   * replacing any previous pages. */
+  setUguiGlyphPages(pages: readonly UguiGlyphPage[]): { bytes: number } {
+    const gl = this.gl;
+    this.deleteUguiGlyphPages();
+    let bytes = 0;
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    for (const page of pages) {
+      const texture = gl.createTexture();
+      if (!texture) throw new Error("uGUI glyph page allocation failed");
+      this.uguiGlyphPages.push(texture);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      // The fragment stage reads texels with texelFetch and filters them
+      // itself, so the texture is never filtered.
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, page.width, page.height, 0, gl.RED, gl.UNSIGNED_BYTE, page.pixels);
+      bytes += page.pixels.byteLength;
+    }
+    this.textureUploads += pages.length;
+    this.textureBytes += bytes;
+    return { bytes };
   }
 
   async setSdfAtlas(atlas: SdfAtlas): Promise<{ bytes: number; rects: number }> {
@@ -283,6 +313,20 @@ export class WebglSemanticCommandExecutor {
           vertexBytes += glyph.bytes;
           continue;
         }
+        if (batch.source.kind === "ugui_glyph") {
+          const page = this.uguiGlyphPages[batch.source.glyphPage ?? -1];
+          if (!page) throw new Error(`uGUI glyph page ${String(batch.source.glyphPage)} is not uploaded`);
+          gl.useProgram(this.uguiGlyphProgram);
+          this.bindCommon(this.uguiGlyphProgram);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, page);
+          gl.uniform1i(gl.getUniformLocation(this.uguiGlyphProgram, "u_glyphs"), 2);
+          gl.bindVertexArray(batch.vao);
+          gl.drawArrays(gl.TRIANGLES, 0, batch.vertices);
+          drawCalls += 1;
+          vertexBytes += batch.source.vertices.byteLength + batch.source.layerSlots.byteLength + batch.source.commandSlots.byteLength;
+          continue;
+        }
         const program = batch.source.kind === "shape"
           ? this.shapeProgram
           : batch.source.kind === "badge" ? this.badgeProgram : this.textureProgram;
@@ -336,6 +380,7 @@ export class WebglSemanticCommandExecutor {
     this.deleteBatches();
     for (const entry of this.textures.values()) this.gl.deleteTexture(entry.texture);
     this.textures.clear();
+    this.deleteUguiGlyphPages();
     this.gl.deleteTexture(this.stateTexture);
     this.gl.deleteTexture(this.maskTexture);
     this.gl.deleteTexture(this.commandMaskTexture);
@@ -345,6 +390,7 @@ export class WebglSemanticCommandExecutor {
     this.gl.deleteProgram(this.textureProgram);
     this.gl.deleteProgram(this.compositeProgram);
     this.gl.deleteProgram(this.badgeProgram);
+    this.gl.deleteProgram(this.uguiGlyphProgram);
     this.gl.deleteVertexArray(this.compositeVao);
     for (const target of this.isolationTargets) {
       this.gl.deleteFramebuffer(target.framebuffer);
@@ -523,6 +569,11 @@ export class WebglSemanticCommandExecutor {
     this.textures.set(key, { texture, source, bytes });
     this.textureUploads += 1;
     this.textureBytes += bytes;
+  }
+
+  private deleteUguiGlyphPages(): void {
+    for (const texture of this.uguiGlyphPages) this.gl.deleteTexture(texture);
+    this.uguiGlyphPages = [];
   }
 
   private deleteBatches(): void {
@@ -866,6 +917,67 @@ void main() {
   vec3 color = clamp((albedo.rgb * diffuse + vec3(specular)) * v_fill.rgb * alpha, 0.0, 1.0);
   outColor = vec4(color, alpha);
   if (u_hasAlphaMask == 1) outColor *= texture(u_alphaMask, v_shapeUv).a;
+}`;
+
+// uGUI text glyphs: the coverage of the glyph cell at the fragment centre,
+// interpolated between texel centres as the shared core samples a cell
+// (a contract test pins it), times the vertex colour. Texels outside the
+// bitmap are empty.
+const UGUI_GLYPH_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+precision highp int;
+in vec2 v_uv;
+in vec4 v_fill;
+in vec4 v_stroke;
+in vec4 v_params;
+in vec2 v_point;
+in vec4 v_clip01;
+in vec4 v_clip23;
+flat in uint v_visible;
+uniform sampler2D u_glyphs;
+out vec4 outColor;
+float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+bool insideClip() {
+  highp vec2 p[4];
+  p[0] = v_clip01.xy;
+  p[1] = v_clip01.zw;
+  p[2] = v_clip23.xy;
+  p[3] = v_clip23.zw;
+  float c0 = cross2(p[1] - p[0], v_point - p[0]);
+  float c1 = cross2(p[2] - p[1], v_point - p[1]);
+  float c2 = cross2(p[3] - p[2], v_point - p[2]);
+  float c3 = cross2(p[0] - p[3], v_point - p[3]);
+  return (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0) || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0);
+}
+// Coverage of cell texel (column, row); the bitmap starts after the padding.
+float glyphTexel(int column, int row) {
+  // The per-glyph values are equal at every vertex; rounding undoes the
+  // interpolation error.
+  ivec2 origin = ivec2(floor(v_stroke.xy + 0.5));
+  ivec2 size = ivec2(floor(v_stroke.zw + 0.5));
+  int padding = int(floor(v_params.x + 0.5));
+  int x = column - padding;
+  int y = row - padding;
+  if (x < 0 || y < 0 || x >= size.x || y >= size.y) return 0.0;
+  return texelFetch(u_glyphs, origin + ivec2(x, y), 0).r;
+}
+void main() {
+  if (v_visible == uint(0)) discard;
+  if (!insideClip()) discard;
+  float x = v_uv.x - 0.5;
+  float y = v_uv.y - 0.5;
+  float left = floor(x);
+  float top = floor(y);
+  float fx = x - left;
+  float fy = y - top;
+  int column = int(left);
+  int row = int(top);
+  float upper = glyphTexel(column, row) + (glyphTexel(column + 1, row) - glyphTexel(column, row)) * fx;
+  float lower = glyphTexel(column, row + 1) + (glyphTexel(column + 1, row + 1) - glyphTexel(column, row + 1)) * fx;
+  float coverage = upper + (lower - upper) * fy;
+  if (coverage <= 0.0) discard;
+  vec4 color = clamp(v_fill, 0.0, 1.0);
+  outColor = vec4(color.rgb * color.a, color.a) * coverage;
 }`;
 
 const COMPOSITE_VERTEX_SHADER = `#version 300 es

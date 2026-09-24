@@ -1,7 +1,9 @@
 import type { SemanticDrawOperation, SemanticResourceKey } from "./semanticCommandPlanner.js";
+import type { UguiTextLayout, UguiTextMesh } from "../types/uguiText.js";
 
-/** `badge` is an image drawn with the lit badge material. */
-export type SemanticDrawBatchKind = "shape" | "image" | "badge" | "mask" | "text" | "composite";
+/** `badge` is an image drawn with the lit badge material; `ugui_glyph` holds
+ * the glyph quads of uGUI text commands, drawn from one coverage page. */
+export type SemanticDrawBatchKind = "shape" | "image" | "badge" | "mask" | "text" | "ugui_glyph" | "composite";
 export type SemanticBlendMode = "src_over" | "src_in" | "dst_in" | "multiply" | "screen" | "add";
 export type SemanticCompositeOperation = "marker" | "begin_isolation" | "end_isolation";
 
@@ -17,10 +19,17 @@ export type SemanticDrawBatch = {
   normalMapResource: SemanticResourceKey | null;
   blendMode: SemanticBlendMode;
   compositeOperation: SemanticCompositeOperation | null;
+  /** Coverage page of a `ugui_glyph` batch; null for every other kind. */
+  glyphPage: number | null;
 };
 
 /** Per vertex: position, UV, shape UV, fill, stroke, params, clip quad,
- * shape size, and the canvas direction of the command's local +x axis. */
+ * shape size, and the canvas direction of the command's local +x axis.
+ *
+ * A `ugui_glyph` vertex carries the texel position in its glyph cell as UV,
+ * the vertex colour as fill, the bitmap's page rectangle (x, y, width, rows)
+ * as stroke, the cell padding as the first param, and the cell size as shape
+ * size. */
 export const SEMANTIC_FLOATS_PER_VERTEX = 30;
 export function semanticTextBatchKey(commandIds: readonly string[]): string {
   return `semantic-text-batch\0${commandIds.join("\0")}`;
@@ -29,18 +38,160 @@ const UNIT_TRIANGLES = [
   [0, 0], [1, 0], [1, 1],
   [0, 0], [1, 1], [0, 1],
 ] as const;
+/** Quad corner at a unit position: `UNIT_CORNER[y][x]`. */
+const UNIT_CORNER = [[0, 1], [3, 2]] as const;
+
+/** Glyph quads of one uGUI text command that sit on one coverage page. */
+type GlyphRun = {
+  operation: SemanticDrawOperation;
+  mesh: UguiTextMesh;
+  page: number;
+  quads: UguiTextMesh["quads"];
+};
+
+type DrawItem = { operation: SemanticDrawOperation; run: GlyphRun | null };
 
 /** Compile immutable geometry only. Render mask and dynamic translation remain
- * in the dense layer-state textures, so toggles/ticks never rebuild vertices. */
-export function compileSemanticDrawBatches(operations: SemanticDrawOperation[]): SemanticDrawBatch[] {
-  const groups: Array<{ key: string; kind: SemanticDrawBatchKind; resource: SemanticResourceKey | null; maskResource: SemanticResourceKey | null; normalMapResource: SemanticResourceKey | null; blendMode: SemanticBlendMode; compositeOperation: SemanticCompositeOperation | null; operations: SemanticDrawOperation[] }> = [];
+ * in the dense layer-state textures, so toggles/ticks never rebuild vertices.
+ * `uguiText` holds the layout of every `ugui_text` command. */
+export function compileSemanticDrawBatches(
+  operations: SemanticDrawOperation[],
+  uguiText: UguiTextLayout | null = null,
+): SemanticDrawBatch[] {
+  const meshes = new Map((uguiText?.texts ?? []).map((mesh) => [mesh.id, mesh] as const));
+  const groups: Array<{ key: string; kind: SemanticDrawBatchKind; resource: SemanticResourceKey | null; maskResource: SemanticResourceKey | null; normalMapResource: SemanticResourceKey | null; blendMode: SemanticBlendMode; compositeOperation: SemanticCompositeOperation | null; glyphPage: number | null; items: DrawItem[] }> = [];
   for (const operation of operations) {
-    const descriptor = batchDescriptor(operation);
-    const previous = groups.at(-1);
-    if (previous?.key === descriptor.key) previous.operations.push(operation);
-    else groups.push({ ...descriptor, operations: [operation] });
+    for (const item of drawItems(operation, meshes, uguiText)) {
+      const descriptor = item.run
+        ? glyphBatchDescriptor(item.operation, item.run.page)
+        : { ...batchDescriptor(item.operation), glyphPage: null };
+      const previous = groups.at(-1);
+      if (previous?.key === descriptor.key) previous.items.push(item);
+      else groups.push({ ...descriptor, items: [item] });
+    }
   }
-  return groups.map((group) => compileGroup(group.kind, group.resource, group.maskResource, group.normalMapResource, group.blendMode, group.compositeOperation, group.operations));
+  return groups.map((group) => group.kind === "ugui_glyph"
+    ? compileGlyphGroup(group.blendMode, group.glyphPage ?? 0, group.items.map((item) => item.run!), uguiText!)
+    : compileGroup(group.kind, group.resource, group.maskResource, group.normalMapResource, group.blendMode, group.compositeOperation, group.items.map((item) => item.operation)));
+}
+
+/** A uGUI text command draws its backdrop as a solid rectangle, the way
+ * shapes are drawn, then its glyph quads in string order, one run per
+ * stretch of quads on the same coverage page. Every other command draws
+ * itself. */
+function drawItems(
+  operation: SemanticDrawOperation,
+  meshes: ReadonlyMap<string, UguiTextMesh>,
+  uguiText: UguiTextLayout | null,
+): DrawItem[] {
+  if (operation.command.payload.kind !== "ugui_text") return [{ operation, run: null }];
+  const mesh = meshes.get(operation.command.id);
+  if (!mesh || !uguiText) throw new Error(`missing uGUI text layout ${operation.command.id}`);
+  const items: DrawItem[] = [];
+  if (mesh.backdrop) {
+    items.push({
+      operation: {
+        ...operation,
+        command: {
+          ...operation.command,
+          bounds: { ...mesh.backdrop.rect },
+          payload: { kind: "shape", primitive: "rect", fill: [...mesh.backdrop.color], stroke: [0, 0, 0, 0], stroke_width: 0 },
+        },
+      },
+      run: null,
+    });
+  }
+  let run: GlyphRun | null = null;
+  for (const quad of mesh.quads) {
+    const glyph = uguiText.glyphs[quad.glyph];
+    if (!glyph) throw new Error(`uGUI text ${operation.command.id} names missing glyph ${quad.glyph}`);
+    if (!run || run.page !== glyph.page) {
+      run = { operation, mesh, page: glyph.page, quads: [] };
+      items.push({ operation, run });
+    }
+    run.quads.push(quad);
+  }
+  return items;
+}
+
+function glyphBatchDescriptor(operation: SemanticDrawOperation, page: number) {
+  const blendMode = commandBlendMode(operation.command.blend_mode);
+  return {
+    key: `ugui_glyph\0${blendMode}\0${page}`,
+    kind: "ugui_glyph" as const,
+    resource: null,
+    maskResource: null,
+    normalMapResource: null,
+    blendMode,
+    compositeOperation: null,
+    glyphPage: page,
+  };
+}
+
+/** Maps each glyph cell onto its quad: corner k of the quad is corner k of
+ * the cell (top-left, top-right, bottom-right, bottom-left), placed on the
+ * canvas by the layer, command and text-node matrices. */
+function compileGlyphGroup(
+  blendMode: SemanticBlendMode,
+  page: number,
+  runs: GlyphRun[],
+  uguiText: UguiTextLayout,
+): SemanticDrawBatch {
+  const quadCount = runs.reduce((sum, run) => sum + run.quads.length, 0);
+  const vertices = new Float32Array(quadCount * 6 * SEMANTIC_FLOATS_PER_VERTEX);
+  const layerSlots = new Uint32Array(quadCount * 6);
+  const commandSlots = new Uint32Array(quadCount * 6);
+  let vertexOffset = 0;
+  for (const { operation, mesh, quads } of runs) {
+    const commandId = operation.command.id;
+    const payload = operation.command.payload;
+    const commandMatrix = requireMatrix(operation.command.matrix, commandId);
+    const nodeMatrix = requireMatrix(payload.node_matrix, commandId);
+    const clip = commandClip(operation.command.clip, operation.baseMatrix, commandId);
+    const color = requireColor(payload.color, commandId);
+    const axis = linearAxis(operation.baseMatrix, commandMatrix);
+    const padding = mesh.cellPadding;
+    for (const quad of quads) {
+      const glyph = uguiText.glyphs[quad.glyph];
+      const cellWidth = glyph.width + 2 * padding;
+      const cellHeight = glyph.rows + 2 * padding;
+      for (const [unitX, unitY] of UNIT_TRIANGLES) {
+        const [nodeX, nodeY] = quad.corners[UNIT_CORNER[unitY][unitX]];
+        const commandPoint = transformPoint(nodeMatrix, nodeX, nodeY);
+        const layerPoint = transformPoint(commandMatrix, commandPoint[0], commandPoint[1]);
+        const [x, y] = transformPoint(operation.baseMatrix, layerPoint[0], layerPoint[1]);
+        vertices.set([
+          x, y,
+          unitX * cellWidth, unitY * cellHeight,
+          unitX, unitY,
+          ...color,
+          glyph.x, glyph.y, glyph.width, glyph.rows,
+          padding, 0, 0, 0,
+          ...clip[0], ...clip[1], ...clip[2], ...clip[3],
+          cellWidth, cellHeight,
+          ...axis,
+        ], vertexOffset * SEMANTIC_FLOATS_PER_VERTEX);
+        layerSlots[vertexOffset] = operation.layerSlot;
+        commandSlots[vertexOffset] = operation.commandSlot;
+        vertexOffset += 1;
+      }
+    }
+  }
+  const batchOperations = runs.map((run) => run.operation);
+  return {
+    kind: "ugui_glyph",
+    resource: null,
+    maskResource: null,
+    normalMapResource: null,
+    blendMode,
+    compositeOperation: null,
+    glyphPage: page,
+    operations: batchOperations,
+    commandIds: [...new Set(batchOperations.map((operation) => operation.command.id))],
+    vertices,
+    layerSlots,
+    commandSlots,
+  };
 }
 
 function batchDescriptor(operation: SemanticDrawOperation): {
@@ -88,7 +239,7 @@ function compileGroup(
   operations: SemanticDrawOperation[]
 ): SemanticDrawBatch {
   if (kind === "text" || kind === "composite") {
-    return { kind, resource, maskResource, normalMapResource, blendMode, compositeOperation, operations: [...operations], commandIds: operations.map((op) => op.command.id), vertices: new Float32Array(), layerSlots: new Uint32Array(), commandSlots: new Uint32Array() };
+    return { kind, resource, maskResource, normalMapResource, blendMode, compositeOperation, glyphPage: null, operations: [...operations], commandIds: operations.map((op) => op.command.id), vertices: new Float32Array(), layerSlots: new Uint32Array(), commandSlots: new Uint32Array() };
   }
   const vertices = new Float32Array(operations.length * 6 * SEMANTIC_FLOATS_PER_VERTEX);
   const layerSlots = new Uint32Array(operations.length * 6);
@@ -139,6 +290,7 @@ function compileGroup(
     normalMapResource,
     blendMode,
     compositeOperation,
+    glyphPage: null,
     operations: [...operations],
     commandIds: operations.map((operation) => operation.command.id),
     vertices,
@@ -227,6 +379,13 @@ function optionalRect(value: unknown): { x: number; y: number; width: number; he
     width: Number(rect.width ?? 1),
     height: Number(rect.height ?? 1),
   };
+}
+
+function requireColor(value: unknown, commandId: string): number[] {
+  if (!Array.isArray(value) || value.length !== 4 || value.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))) {
+    throw new Error(`invalid command colour ${commandId}`);
+  }
+  return value;
 }
 
 function optionalColor(value: unknown, fallback: number[]): number[] {

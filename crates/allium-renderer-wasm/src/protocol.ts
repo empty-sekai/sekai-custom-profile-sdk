@@ -15,6 +15,7 @@ import type {
   AtlasStats,
 } from "./types/atlas.js";
 import type { AuthoringCheckpoint, AuthoringCommand, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
+import type { UguiTextLayout } from "./types/uguiText.js";
 
 export const RENDERER_WORKER_PROTOCOL = "allium.renderer-worker/2" as const;
 
@@ -146,7 +147,7 @@ export type RendererWorkerResult =
   | { kind: "masterDataReport"; report: Record<string, unknown> }
   | { kind: "prepareProfile"; preparation: Record<string, unknown> }
   | { kind: "destroyMasterData"; destroyed: boolean }
-  | { kind: "createProfileScene"; sceneId: string; response: CoreSceneCreateResponse; layout: WasmLayoutBatch }
+  | { kind: "createProfileScene"; sceneId: string; response: CoreSceneCreateResponse; layout: WasmLayoutBatch; uguiText: UguiTextLayout }
   | { kind: "createScene"; sceneId: string; response: CoreSceneCreateResponse }
   | { kind: "delta"; delta: CoreSceneDelta }
   | { kind: "dumpScene"; dump: CoreSceneDump }
