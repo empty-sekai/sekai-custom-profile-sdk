@@ -15,6 +15,12 @@ pub struct RenderObjectGenerationPin {
 }
 
 impl RenderObjectGenerationPin {
+    /// Pins a store the caller built for one request, for renderers that are
+    /// shared across requests whose render objects differ.
+    pub fn new(store: Arc<crate::render_object::MappedRenderObjectStore>) -> Self {
+        Self { store: Some(store) }
+    }
+
     pub fn store(&self) -> Option<&crate::render_object::MappedRenderObjectStore> {
         self.store.as_deref()
     }
@@ -4088,6 +4094,31 @@ impl CustomProfileRenderer {
         backend: Option<crate::profile_backend::ProfileBackendConfig>,
     ) -> Result<crate::animation::ProfileAnimationExport, String> {
         let generation = self.pin_render_object_generation();
+        self.render_animation_with_profile_backend_generation(
+            card,
+            profile,
+            document_key,
+            region,
+            preset,
+            backend,
+            &generation,
+        )
+    }
+
+    /// [`Self::render_animation_with_profile_backend`] against the render
+    /// objects `generation` pins instead of the renderer's current generation.
+    #[cfg(feature = "animation-export")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_animation_with_profile_backend_generation(
+        &self,
+        card: &CustomProfileCard,
+        profile: Option<&crate::profile::ProfileData>,
+        document_key: &str,
+        region: &str,
+        preset: &crate::animation::ResolvedAnimationPreset,
+        backend: Option<crate::profile_backend::ProfileBackendConfig>,
+        generation: &RenderObjectGenerationPin,
+    ) -> Result<crate::animation::ProfileAnimationExport, String> {
         let md = self.snapshot();
         crate::animation::export_profile_animation(
             self,
