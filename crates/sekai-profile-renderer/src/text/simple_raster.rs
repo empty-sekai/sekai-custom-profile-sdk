@@ -15,9 +15,24 @@
 //! 3. The A8 source-over blend for an opaque white source:
 //!    `out = d + ((255 - d) * (coverage + 1) >> 8)` per channel, fitted the
 //!    same way over every observed `(coverage, destination)` pair.
+//!
+//! Under a transform the recipe follows Skia's FreeType scaler. Glyph
+//! positions stay the hinted advances at the source size, mapped through the
+//! transform and rounded to whole pixels. Glyph images are rendered in device
+//! space: the transform, text size included, is split by a Givens rotation
+//! into an axis scale folded into the character size and a remaining rotation
+//! or skew set as the FreeType transform, and hinting is dropped when the
+//! transform is not axis-aligned.
 
 use freetype::face::LoadFlag;
-use freetype::Library;
+use freetype::{Face, Library, Matrix, Vector};
+
+/// A 2×3 affine transform `[a, b, c, d, e, f]` sending `(x, y)` to
+/// `(a·x + c·y + e, b·x + d·y + f)`.
+pub(crate) type Affine = [f32; 6];
+
+/// Scales below this never reach a pixel; Skia draws nothing for them.
+const NEARLY_ZERO: f32 = 1.0 / 4096.0;
 
 /// Coverage remap Skia applies to anti-aliased text masks drawn with a white
 /// paint (its mask-gamma preblend). Recovered empirically; see the module
@@ -39,9 +54,9 @@ const WHITE_TEXT_COVERAGE: [u8; 256] = [
     255, 255,
 ];
 
-/// Draws `text` in opaque white, horizontally centered on `center_x` with its
-/// baseline at `baseline_y`, over premultiplied RGBA. Returns `false` when the
-/// family's font file is not available.
+/// Draws `text` in opaque white over premultiplied RGBA through `matrix`,
+/// horizontally centered on the local origin with its baseline at local
+/// `baseline`. Returns `false` when the family's font file is not available.
 pub(crate) fn draw_centered_white_text(
     destination: &mut [u8],
     width: u32,
@@ -49,8 +64,8 @@ pub(crate) fn draw_centered_white_text(
     family: &str,
     text: &str,
     font_size: f32,
-    center_x: f32,
-    baseline_y: f32,
+    matrix: Affine,
+    baseline: f32,
 ) -> Result<bool, String> {
     let Some(bytes) = crate::sdf::outline::load_font_bytes_for_family(family) else {
         return Ok(false);
@@ -59,29 +74,46 @@ pub(crate) fn draw_centered_white_text(
     let face = library
         .new_memory_face2(bytes.as_slice(), 0)
         .map_err(|error| format!("加载字体 {family} 失败: {error:?}"))?;
-    face.set_char_size((font_size * 64.0).round() as isize, 0, 72, 72)
-        .map_err(|error| format!("设置字号失败: {error:?}"))?;
+    set_char_size(&face, font_size, font_size)?;
 
-    // Hinted advances feed both the measurement and the pen, so centering and
-    // glyph placement stay on one metric.
-    let mut text_width = 0.0f32;
+    // Hinted advances at the source size feed both the measurement and the
+    // pen, so centering and glyph placement stay on one metric.
+    let mut advances = Vec::new();
     for ch in text.chars() {
         face.load_char(ch as usize, LoadFlag::TARGET_NORMAL)
             .map_err(|error| format!("加载字形 {ch:?} 失败: {error:?}"))?;
-        text_width += face.glyph().raw().advance.x as f32 / 64.0;
+        advances.push(face.glyph().raw().advance.x as f32 / 64.0);
+    }
+    let text_width: f32 = advances.iter().sum();
+
+    let Some(strike) = DeviceStrike::new(matrix, font_size) else {
+        return Ok(true);
+    };
+    set_char_size(&face, strike.scale[0], strike.scale[1])?;
+    let mut flags = if strike.hinted {
+        LoadFlag::TARGET_NORMAL
+    } else {
+        LoadFlag::NO_HINTING
+    };
+    if let Some(mut remaining) = strike.remaining {
+        face.set_transform(&mut remaining, &mut Vector { x: 0, y: 0 });
+        flags |= LoadFlag::NO_BITMAP;
     }
 
     let width = width as i32;
     let height = height as i32;
-    let mut pen_x = center_x - text_width / 2.0;
-    for ch in text.chars() {
-        face.load_char(ch as usize, LoadFlag::TARGET_NORMAL | LoadFlag::RENDER)
+    let [a, b, c, d, e, f] = matrix;
+    let start = -text_width / 2.0;
+    let mut pen_x = a * start + c * baseline + e;
+    let mut pen_y = b * start + d * baseline + f;
+    for (ch, advance) in text.chars().zip(advances) {
+        face.load_char(ch as usize, flags | LoadFlag::RENDER)
             .map_err(|error| format!("渲染字形 {ch:?} 失败: {error:?}"))?;
         let glyph = face.glyph();
         let bitmap = glyph.bitmap();
         // No subpixel positioning: each glyph blits at its rounded pen point.
         let left = (pen_x + 0.5).floor() as i32 + glyph.bitmap_left();
-        let top = (baseline_y + 0.5).floor() as i32 - glyph.bitmap_top();
+        let top = (pen_y + 0.5).floor() as i32 - glyph.bitmap_top();
         let pitch = bitmap.pitch();
         let data = bitmap.buffer();
         for row in 0..bitmap.rows() {
@@ -106,9 +138,87 @@ pub(crate) fn draw_centered_white_text(
                 }
             }
         }
-        pen_x += glyph.advance().x as f32 / 64.0;
+        pen_x += a * advance;
+        pen_y += b * advance;
     }
     Ok(true)
+}
+
+/// Sets the character size in points at 72 dpi, truncated to 26.6 like Skia.
+fn set_char_size<B>(face: &Face<B>, width: f32, height: f32) -> Result<(), String> {
+    face.set_char_size((width * 64.0) as isize, (height * 64.0) as isize, 72, 72)
+        .map_err(|error| format!("设置字号失败: {error:?}"))
+}
+
+/// How a text size is realized under a device transform: the character size,
+/// the FreeType transform left over, and whether glyphs are hinted.
+#[derive(Debug)]
+struct DeviceStrike {
+    scale: [f32; 2],
+    remaining: Option<Matrix>,
+    hinted: bool,
+}
+
+impl DeviceStrike {
+    /// Splits `matrix` scaled by `font_size`; `None` when it collapses the
+    /// text to nothing or is not finite.
+    fn new(matrix: Affine, font_size: f32) -> Option<Self> {
+        let [a, b, c, d] = [matrix[0], matrix[1], matrix[2], matrix[3]].map(|v| v * font_size);
+        // Rotate where the baseline lands onto +x so the diagonal left over
+        // is the axis scale.
+        let (scale_x, scale_y) = if b != 0.0 || c != 0.0 || a < 0.0 || d < 0.0 {
+            let (cos, sin) = givens(a, b);
+            (cos * a - sin * b, sin * c + cos * d)
+        } else {
+            (a, d)
+        };
+        let scale = [scale_x.abs(), scale_y.abs()];
+        if !(scale[0] > NEARLY_ZERO && scale[1] > NEARLY_ZERO)
+            || !scale.iter().all(|v| v.is_finite())
+        {
+            return None;
+        }
+        let [xx, yx, xy, yy] = [a / scale[0], b / scale[0], c / scale[1], d / scale[1]];
+        let remaining = (xx != 1.0 || yx != 0.0 || xy != 0.0 || yy != 1.0).then(|| Matrix {
+            // FreeType's y axis points up, so the off-diagonal terms flip.
+            xx: fixed(xx),
+            xy: fixed(-xy),
+            yx: fixed(-yx),
+            yy: fixed(yy),
+        });
+        let [a, b, c, d] = [matrix[0], matrix[1], matrix[2], matrix[3]];
+        let axis_aligned = (b == 0.0 && c == 0.0) || (a == 0.0 && d == 0.0);
+        Some(Self {
+            scale,
+            remaining,
+            hinted: axis_aligned,
+        })
+    }
+}
+
+/// Cosine and sine of the rotation `[cos, -sin; sin, cos]` that takes the
+/// vector `(x, y)` onto the positive x axis.
+fn givens(x: f32, y: f32) -> (f32, f32) {
+    if y == 0.0 {
+        (1.0f32.copysign(x), 0.0)
+    } else if x == 0.0 {
+        (0.0, -(1.0f32.copysign(y)))
+    } else if y.abs() > x.abs() {
+        let t = x / y;
+        let u = (1.0 + t * t).sqrt().copysign(y);
+        let sin = -1.0 / u;
+        (-sin * t, sin)
+    } else {
+        let t = y / x;
+        let u = (1.0 + t * t).sqrt().copysign(x);
+        let cos = 1.0 / u;
+        (cos, -cos * t)
+    }
+}
+
+/// 16.16 fixed point, truncated toward zero.
+fn fixed(value: f32) -> freetype::ffi::FT_Fixed {
+    (value * 65536.0) as i32 as freetype::ffi::FT_Fixed
 }
 
 #[cfg(test)]
@@ -122,6 +232,45 @@ mod tests {
         for pair in WHITE_TEXT_COVERAGE.windows(2) {
             assert!(pair[0] <= pair[1], "the remap must stay monotone");
         }
+    }
+
+    #[test]
+    fn an_untransformed_or_scaled_run_keeps_hinting_and_needs_no_freetype_transform() {
+        for (matrix, scale) in [
+            ([1.0, 0.0, 0.0, 1.0, 80.0, 20.0], [20.0, 20.0]),
+            ([0.8, 0.0, 0.0, 0.8, 0.0, 0.0], [16.0, 16.0]),
+            ([2.0, 0.0, 0.0, 0.5, 0.0, 0.0], [40.0, 10.0]),
+        ] {
+            let strike = DeviceStrike::new(matrix, 20.0).unwrap();
+            assert_eq!(strike.scale, scale);
+            assert!(strike.remaining.is_none() && strike.hinted, "{matrix:?}");
+        }
+    }
+
+    #[test]
+    fn rotations_and_flips_move_into_the_freetype_transform() {
+        let (sin, cos) = 30f32.to_radians().sin_cos();
+        let rotated = DeviceStrike::new([cos, sin, -sin, cos, 0.0, 0.0], 20.0).unwrap();
+        assert!((rotated.scale[0] - 20.0).abs() < 1e-4 && (rotated.scale[1] - 20.0).abs() < 1e-4);
+        let remaining = rotated.remaining.unwrap();
+        assert_eq!(remaining.xy, -remaining.yx);
+        assert!(!rotated.hinted, "rotated text is drawn unhinted");
+
+        let quarter = DeviceStrike::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], 20.0).unwrap();
+        assert_eq!(quarter.scale, [20.0, 20.0]);
+        assert!(quarter.remaining.is_some() && quarter.hinted);
+
+        let mirrored = DeviceStrike::new([-1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 20.0).unwrap();
+        assert_eq!(mirrored.scale, [20.0, 20.0]);
+        let remaining = mirrored.remaining.unwrap();
+        assert_eq!((remaining.xx, remaining.yy), (-65536, 65536));
+    }
+
+    #[test]
+    fn a_collapsed_or_invalid_transform_draws_nothing() {
+        assert!(DeviceStrike::new([0.0, 0.0, 0.0, 1.0, 0.0, 0.0], 20.0).is_none());
+        assert!(DeviceStrike::new([1.0, 0.0, 0.0, 1e-6, 0.0, 0.0], 20.0).is_none());
+        assert!(DeviceStrike::new([f32::NAN, 0.0, 0.0, 1.0, 0.0, 0.0], 20.0).is_none());
     }
 
     #[test]
