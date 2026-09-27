@@ -1585,14 +1585,9 @@ fn render_live_master_progress_text(
         .unwrap_or(font_size / 2.0);
     let mut local_matrix = command.matrix;
     local_matrix[5] += translate_y;
+    // A placed honor may be scaled or rotated; the digits follow its full
+    // transform with the baseline in the command's local space.
     let matrix = compose_matrix(layer.matrix, local_matrix);
-    // The dependency-free raster reproduces the draw at a rounded pen point,
-    // which is only the same transform when the matrix carries no scale, skew
-    // or rotation. Honor slots are lowered translation-only; anything else
-    // fails closed rather than drifting.
-    if matrix[0] != 1.0 || matrix[1] != 0.0 || matrix[2] != 0.0 || matrix[3] != 1.0 {
-        return unsupported(&command.role, "transformed live-master progress text");
-    }
     let rendered = crate::text::simple_raster::draw_centered_white_text(
         destination,
         width,
@@ -1600,8 +1595,8 @@ fn render_live_master_progress_text(
         crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
         text,
         20.0,
-        matrix[4],
-        matrix[5] + baseline,
+        matrix,
+        baseline,
     )
     .map_err(|reason| ProfileCompositorError::SemanticSdf {
         role: command.role.clone(),
@@ -3904,6 +3899,136 @@ mod tests {
         drop(surface);
 
         assert_eq!(actual, expected);
+    }
+
+    /// A placed honor may be scaled or rotated; its digits land where the Skia
+    /// draw under the same canvas transform puts them. Axis-aligned scales that
+    /// keep whole-pixel hinting and quarter turns match it pixel for pixel;
+    /// other scales and rotations keep the same inked bounds with coverage
+    /// within a few levels.
+    #[test]
+    fn live_master_progress_follows_scaled_and_rotated_honors() {
+        use skia_safe::{
+            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Matrix, Paint, PaintStyle,
+            Point,
+        };
+
+        if crate::sdf::outline::load_font_bytes_for_family(
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        )
+        .is_none()
+        {
+            eprintln!("skipping: FONT_DIR does not provide the progress face");
+            return;
+        }
+
+        let (sin, cos) = 30f32.to_radians().sin_cos();
+        for (matrix, exact) in [
+            ([0.8, 0.0, 0.0, 0.8, 120.3, 60.6], false),
+            ([2.0, 0.0, 0.0, 2.0, 150.0, 40.0], true),
+            ([1.5, 0.0, 0.0, 0.75, 110.0, 70.0], true),
+            ([cos, sin, -sin, cos, 140.0, 60.0], false),
+            ([0.0, 1.0, -1.0, 0.0, 150.0, 60.0], true),
+        ] {
+            let layer_id = StableId(322);
+            let mut command = SemanticCommandSource::profile_text(
+                StableId(323),
+                layer_id,
+                "honor-4244-progress",
+                "userHonorMissions.4244",
+                "2470",
+                FontRole::RegionFontId(1),
+            );
+            command.matrix = matrix;
+            if let SemanticCommandPayload::Text {
+                source,
+                size,
+                color,
+                alignment,
+                ..
+            } = &mut command.payload
+            {
+                *source = TextSource::ProfileField {
+                    field: "userHonorMissions.4244".into(),
+                    value: "2470".into(),
+                };
+                *size = 20.0;
+                *color = [1.0; 4];
+                *alignment = 2;
+            }
+            let scene = scene(
+                test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                vec![command],
+            );
+            let (_temp, store) = store(vec![("dummy", 1, 1, vec![0; 4])]);
+            let mut actual = vec![0; 300 * 120 * 4];
+            render_image_commands_into(
+                &scene,
+                &store,
+                300,
+                120,
+                ImageExecutor::Scalar,
+                &mut actual,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let mut expected = vec![0; actual.len()];
+            let info = ImageInfo::new((300, 120), ColorType::RGBA8888, AlphaType::Premul, None);
+            let mut surface =
+                surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(300 * 4), None).unwrap();
+            let typeface = crate::elements::bundled_typeface(
+                crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+            )
+            .expect("progress face");
+            let font = Font::new(typeface, Some(20.0));
+            let text_width = font.measure_str("2470", None).0;
+            let mut paint = Paint::default();
+            paint.set_style(PaintStyle::Fill);
+            paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
+            paint.set_anti_alias(true);
+            let canvas = surface.canvas();
+            canvas.concat(&Matrix::new_all(
+                matrix[0], matrix[2], matrix[4], matrix[1], matrix[3], matrix[5], 0.0, 0.0, 1.0,
+            ));
+            canvas.draw_str("2470", Point::new(-text_width / 2.0, 10.0), &font, &paint);
+            drop(surface);
+
+            assert!(
+                actual.iter().any(|&value| value != 0),
+                "{matrix:?} drew nothing"
+            );
+            let inked = |pixels: &[u8]| {
+                let mut bounds = (usize::MAX, usize::MAX, 0, 0);
+                for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+                    if pixel[3] != 0 {
+                        let (x, y) = (index % 300, index / 300);
+                        bounds = (
+                            bounds.0.min(x),
+                            bounds.1.min(y),
+                            bounds.2.max(x),
+                            bounds.3.max(y),
+                        );
+                    }
+                }
+                bounds
+            };
+            assert_eq!(inked(&actual), inked(&expected), "{matrix:?}: inked bounds");
+            let largest = actual
+                .iter()
+                .zip(&expected)
+                .map(|(actual, expected)| actual.abs_diff(*expected))
+                .max()
+                .unwrap_or(0);
+            if exact {
+                assert_eq!(largest, 0, "{matrix:?}: pixels differ from Skia");
+            } else {
+                assert!(largest <= 16, "{matrix:?}: coverage differs by {largest}");
+            }
+        }
     }
 
     fn store(
