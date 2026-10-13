@@ -1224,12 +1224,11 @@ mod tests {
         assert!(resolved.fallbacks.is_empty());
     }
 
-    #[cfg(feature = "skia-oracle")]
     #[test]
     fn shadow_plan_does_not_claim_commands_were_executed() {
         let mut telemetry = ProfileRenderTelemetry::new(
             ProfileBackendConfig::default(),
-            PROFILE_RENDER_CONTRACT_LEGACY_SKIA,
+            PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
         );
         telemetry.record_sdf_plan(
             crate::sdf::tile::SdfPlanStats {
@@ -1255,12 +1254,11 @@ mod tests {
         assert_eq!(telemetry.commands[0].command_count, 0);
     }
 
-    #[cfg(feature = "skia-oracle")]
     #[test]
     fn sdf_stats_accumulate_without_losing_command_kind() {
         let mut telemetry = ProfileRenderTelemetry::new(
             ProfileBackendConfig::default(),
-            PROFILE_RENDER_CONTRACT_LEGACY_SKIA,
+            PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
         );
         let plan_stats = crate::sdf::tile::SdfPlanStats {
             command_count: 5,

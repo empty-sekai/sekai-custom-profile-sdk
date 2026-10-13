@@ -35,33 +35,27 @@ impl std::error::Error for CodecError {}
 
 /// Multiplies one colour channel by alpha, rounding to nearest.
 ///
-/// This is the form the compositor consumes, and it is bit-identical to what a
-/// Skia decode produces internally: both compute `round(value * alpha / 255)`.
+/// This is the premultiplied form the compositor consumes:
+/// `round(value * alpha / 255)`.
 #[inline]
 pub fn premultiply_channel(value: u8, alpha: u8) -> u8 {
     ((u32::from(value) * u32::from(alpha) + 127) / 255) as u8
 }
 
-/// Recovers a colour channel from its premultiplied form the way Skia does.
+/// Recovers a colour channel from its premultiplied form.
 ///
-/// Skia stores decoded images premultiplied, so reading one back as
-/// non-premultiplied divides by alpha. The round trip is lossy, and more so as
-/// alpha falls: near half alpha a channel can move by one step, at alpha 3 by
-/// tens of steps. Output that has to match a Skia readback must reproduce that
-/// lossy value exactly.
+/// The round trip through premultiplied storage is lossy, and more so as alpha
+/// falls: near half alpha a channel can move by one step, at alpha 3 by tens of
+/// steps. This function fixes the value read back.
 ///
-/// Skia divides in single precision and converts back with round-half-to-even,
-/// so the result follows f32 representation rather than exact rational
-/// arithmetic. Integer formulas and `truncate(v * 255 + 0.5)` both disagree with
-/// it on hundreds of pairs, and the exact-half cases break in both directions
-/// (1/6 rounds down, 3/10 rounds up). The sequence below is that pipeline in the
-/// same order and precision: normalise through `1/255`, multiply by the
-/// reciprocal of alpha, then round the rescaled result to nearest, ties to even.
-/// `skia-unpremul-table` recorded the ground truth, and this reproduces all
-/// 32 896 reachable (premultiplied, alpha) pairs; `png-parity --exhaustive`
-/// rechecks it against a live Skia.
+/// The division runs in single precision: normalise both inputs through
+/// `1/255`, multiply by the reciprocal of alpha, clamp to `[0, 1]`, then
+/// rescale by 255 and round to nearest with ties to even. The result therefore
+/// follows f32 representation rather than exact rational arithmetic, and the
+/// exact-half cases round both ways: (1, 6) gives 42 and (3, 10) gives 77.
+/// [`premultiply_channel`] is its left inverse on every reachable pair.
 #[inline]
-pub fn unpremultiply_channel_like_skia(premultiplied: u8, alpha: u8) -> u8 {
+pub fn unpremultiply_channel(premultiplied: u8, alpha: u8) -> u8 {
     if alpha == 0 {
         return 0;
     }
@@ -248,26 +242,47 @@ mod tests {
         for alpha in 1..=255u32 {
             let mut previous = 0u8;
             for premultiplied in 0..=alpha {
-                let recovered = unpremultiply_channel_like_skia(premultiplied as u8, alpha as u8);
+                let recovered = unpremultiply_channel(premultiplied as u8, alpha as u8);
                 assert!(recovered >= previous, "not monotone at alpha={alpha}");
                 previous = recovered;
             }
             // A channel at full coverage recovers to full scale.
             assert_eq!(
-                unpremultiply_channel_like_skia(alpha as u8, alpha as u8),
+                unpremultiply_channel(alpha as u8, alpha as u8),
                 255,
                 "alpha={alpha}"
             );
         }
-        assert_eq!(unpremultiply_channel_like_skia(0, 0), 0);
+        assert_eq!(unpremultiply_channel(0, 0), 0);
     }
 
     #[test]
     fn unpremultiply_matches_recorded_float_pipeline_samples() {
         // Two pairs where an exact rational round — either half-up or half-even —
         // disagrees with what the f32 pipeline produces.
-        assert_eq!(unpremultiply_channel_like_skia(1, 6), 42);
-        assert_eq!(unpremultiply_channel_like_skia(3, 10), 77);
+        assert_eq!(unpremultiply_channel(1, 6), 42);
+        assert_eq!(unpremultiply_channel(3, 10), 77);
+    }
+
+    /// Every reachable (premultiplied, alpha) pair, alpha-major, pinned as one
+    /// digest so any change to the single-precision pipeline is caught.
+    #[test]
+    fn unpremultiply_over_every_reachable_pair_is_pinned() {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        let mut pairs = 0usize;
+        for alpha in 0..=255u8 {
+            for premultiplied in 0..=alpha {
+                hasher.update([unpremultiply_channel(premultiplied, alpha)]);
+                pairs += 1;
+            }
+        }
+        assert_eq!(pairs, 32_896);
+        assert_eq!(
+            hex::encode(hasher.finalize()),
+            "1d3633f72ad78c52e63a96ab7c21d5251f80fa68681161abb4e7f7aa68a9663e"
+        );
     }
 
     #[test]
@@ -276,7 +291,7 @@ mod tests {
         // which is what keeps the shape-atlas source hash stable.
         for alpha in 0..=255u32 {
             for premultiplied in 0..=alpha {
-                let recovered = unpremultiply_channel_like_skia(premultiplied as u8, alpha as u8);
+                let recovered = unpremultiply_channel(premultiplied as u8, alpha as u8);
                 assert_eq!(
                     premultiply_channel(recovered, alpha as u8),
                     premultiplied as u8,

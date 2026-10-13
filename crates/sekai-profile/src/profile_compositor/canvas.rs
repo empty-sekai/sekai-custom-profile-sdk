@@ -230,7 +230,7 @@ impl Canvas {
         let mut rgba = self.pixels.clone();
         for p in rgba.chunks_exact_mut(4) {
             for c in 0..3 {
-                p[c] = codec::unpremultiply_channel_like_skia(p[c], p[3]);
+                p[c] = codec::unpremultiply_channel(p[c], p[3]);
             }
         }
         codec::png::encode_rgba(self.width, self.height, &rgba).map_err(|e| e.to_string())

@@ -2102,8 +2102,7 @@ fn unpremultiply_pixel(source: &[u8], destination: &mut [u8]) {
         return;
     }
     for channel in 0..3 {
-        destination[channel] =
-            crate::codec::unpremultiply_channel_like_skia(source[channel], alpha);
+        destination[channel] = crate::codec::unpremultiply_channel(source[channel], alpha);
     }
 }
 

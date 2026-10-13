@@ -1,54 +1,6 @@
 //! 场景元素渲染模块。
 
 pub mod generals;
-/// Offline baking renderer for honor artwork: the render-object store builder
-/// bakes composited honor objects through it. No render entry point reaches
-/// this code.
-/// Builds a Skia face from font bytes the caller supplied.
-///
-/// The element draw path still rasterizes a few labels through Skia, but it
-/// resolves the face the same way the rest of the engine does: from a declared
-/// family mapped to a file under the configured font directory. There is no
-/// system-font lookup, because a substituted face silently renders text in
-/// whatever the host image happens to ship — which is how the card info bar came
-/// to draw its level in DejaVu Sans while declaring a game font.
-///
-/// Returns `None` when the family is not available, so callers skip the label
-/// rather than draw it in an unrelated typeface.
-#[cfg(feature = "skia-oracle")]
-pub(crate) fn bundled_typeface(family: &str) -> Option<skia_safe::Typeface> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<skia_safe::Typeface>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(cached) = cache
-        .lock()
-        .ok()
-        .and_then(|entries| entries.get(family).cloned())
-    {
-        return cached;
-    }
-    let resolved = crate::sdf::outline::load_font_bytes_for_family(family)
-        .and_then(|bytes| skia_safe::FontMgr::new().new_from_data(bytes.as_slice(), None));
-    if resolved.is_none() {
-        tracing::warn!(
-            font_family = family,
-            "declared font family is unavailable; the label is skipped"
-        );
-    }
-    if let Ok(mut entries) = cache.lock() {
-        entries.insert(family.to_string(), resolved.clone());
-    }
-    resolved
-}
-
-#[cfg(feature = "skia-oracle")]
-pub mod honor;
-/// Offline baking renderer for image elements, serving the same store-builder
-/// role as `honor`.
-#[cfg(feature = "skia-oracle")]
-pub mod image;
 pub mod shape;
 
 use crate::types::*;
@@ -162,11 +114,10 @@ pub(crate) struct SdfObservationTimings {
     pub text_capture: crate::text::TextSdfCaptureTimings,
 }
 
-/// Canvas-free capture of one element's SDF command stream. Only Text and
-/// Shape elements produce SDF primitives; the ordered path routes every other
-/// element kind through the image compositor before reaching here. The device
-/// transform composes the surface origin with the element transform exactly as
-/// the canvas stack does, and the parity tests pin both compositions.
+/// Capture of one element's SDF command stream. Only Text and Shape elements
+/// produce SDF primitives; the ordered path routes every other element kind
+/// through the image compositor before reaching here. The device transform is
+/// the surface origin composed with [`element_device_affine`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_element_sdf(
     elem: &RenderElement<'_>,
@@ -220,10 +171,10 @@ pub(crate) fn capture_element_sdf(
 /// Device transform an element's own drawing sits under, as an affine in
 /// `[sx, ky, kx, sy, tx, ty]` layout.
 ///
-/// This is the translate/rotate/scale sequence the element walker applies, in
-/// the same order and with the same skipping thresholds, so a capture that
-/// never touches a canvas resolves the identical matrix. A parity test pins it
-/// against the canvas composition.
+/// The element position is applied first, then its rotation when the angle
+/// exceeds 0.01 degrees, then its scale when either axis differs from 1 by more
+/// than 0.001. Rotations and scales inside those thresholds are skipped
+/// entirely, so the result carries no near-identity rounding noise.
 pub(crate) fn element_device_affine(
     obj: &crate::types::ObjectData,
     canvas_width: f32,
@@ -243,13 +194,13 @@ pub(crate) fn element_device_affine(
     affine
 }
 
-/// Scales an affine by a uniform factor, the way `Canvas::scale` composes.
+/// Scales an affine by a uniform factor applied in local space (`affine · S`).
 pub(crate) fn scale_affine(affine: [f32; 6], factor: f32) -> [f32; 6] {
     concat_affine(affine, [factor, 0.0, 0.0, factor, 0.0, 0.0])
 }
 
-/// `base * local` for affine matrices, with the translation terms folded in the
-/// same order the canvas concatenation uses.
+/// `base * local` for affine matrices in `[sx, ky, kx, sy, tx, ty]` layout. Each
+/// translation term is folded as `x + (y + t)`.
 fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
     [
         base[0] * local[0] + base[2] * local[1],
@@ -261,7 +212,7 @@ fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
     ]
 }
 
-#[cfg(all(test, feature = "skia-oracle"))]
+#[cfg(test)]
 mod tests {
     use crate::types::{ObjectData, Quaternion, Vec3};
 
@@ -289,11 +240,12 @@ mod tests {
         }
     }
 
-    /// The canvas-free element transform must equal the canvas composition it
-    /// replaces, bit for bit, including the thresholds that skip a rotation or
-    /// a scale entirely.
+    /// The element transform composes translate, rotate and scale in that
+    /// order, skips a rotation or a scale inside its threshold, and the text
+    /// path's extra scale composes on top. The pinned values are exact bit
+    /// patterns.
     #[test]
-    fn the_element_affine_matches_the_canvas_transform_stack() {
+    fn the_element_affine_composes_translate_rotate_and_scale() {
         let identity = Quaternion {
             w: 1.0,
             x: 0.0,
@@ -313,50 +265,67 @@ mod tests {
             y: 0.0,
             z: 0.00002,
         };
-        let cases = [
-            object((0.0, 0.0), &identity, (1.0, 1.0)),
-            object((120.5, -80.25), &identity, (1.0, 1.0)),
-            object((120.5, -80.25), &identity, (1.5, 0.75)),
-            object((-33.0, 44.0), &rotated, (1.0, 1.0)),
-            object((-33.0, 44.0), &rotated, (2.25, 1.125)),
-            object((7.5, 9.5), &barely, (1.0005, 0.9995)),
-            object((7.5, 9.5), &barely, (3.0, 3.0)),
+        // (object, element affine, element affine scaled by TEXT_SCALE)
+        let cases: [(ObjectData, [f32; 6], [f32; 6]); 7] = [
+            (
+                object((0.0, 0.0), &identity, (1.0, 1.0)),
+                [1.0, 0.0, 0.0, 1.0, 915.0, 406.0],
+                [2.0, 0.0, 0.0, 2.0, 915.0, 406.0],
+            ),
+            (
+                object((120.5, -80.25), &identity, (1.0, 1.0)),
+                [1.0, 0.0, 0.0, 1.0, 1035.5, 486.25],
+                [2.0, 0.0, 0.0, 2.0, 1035.5, 486.25],
+            ),
+            (
+                object((120.5, -80.25), &identity, (1.5, 0.75)),
+                [1.5, 0.0, 0.0, 0.75, 1035.5, 486.25],
+                [3.0, 0.0, 0.0, 1.5, 1035.5, 486.25],
+            ),
+            (
+                object((-33.0, 44.0), &rotated, (1.0, 1.0)),
+                [
+                    0.86602545,
+                    -0.49999997,
+                    0.49999997,
+                    0.86602545,
+                    882.0,
+                    362.0,
+                ],
+                [1.7320509, -0.99999994, 0.99999994, 1.7320509, 882.0, 362.0],
+            ),
+            (
+                object((-33.0, 44.0), &rotated, (2.25, 1.125)),
+                [1.9485573, -1.1249999, 0.56249994, 0.9742786, 882.0, 362.0],
+                [3.8971145, -2.2499998, 1.1249999, 1.9485573, 882.0, 362.0],
+            ),
+            (
+                object((7.5, 9.5), &barely, (1.0005, 0.9995)),
+                [1.0, 0.0, 0.0, 1.0, 922.5, 396.5],
+                [2.0, 0.0, 0.0, 2.0, 922.5, 396.5],
+            ),
+            (
+                object((7.5, 9.5), &barely, (3.0, 3.0)),
+                [3.0, 0.0, 0.0, 3.0, 922.5, 396.5],
+                [6.0, 0.0, 0.0, 6.0, 922.5, 396.5],
+            ),
         ];
         let (canvas_width, canvas_height) = (
-            crate::transform::CANVAS_WIDTH as f32,
-            crate::transform::CANVAS_HEIGHT as f32,
+            crate::transform::CANVAS_WIDTH,
+            crate::transform::CANVAS_HEIGHT,
         );
-        for (index, obj) in cases.iter().enumerate() {
-            let (x, y, angle, sx, sy) =
-                crate::transform::extract_transform_for_canvas(obj, canvas_width, canvas_height);
-
-            let mut surface = skia_safe::surfaces::null((64, 64)).expect("null surface");
-            let canvas = surface.canvas();
-            canvas.translate(skia_safe::Point::new(x, y));
-            if angle.abs() > 0.01 {
-                canvas.rotate(angle, None);
-            }
-            if (sx - 1.0).abs() > 0.001 || (sy - 1.0).abs() > 0.001 {
-                canvas.scale((sx, sy));
-            }
-            let expected = canvas
-                .local_to_device_as_3x3()
-                .to_affine()
-                .expect("affine canvas transform");
-
+        for (index, (obj, expected, expected_scaled)) in cases.iter().enumerate() {
             let actual = super::element_device_affine(obj, canvas_width, canvas_height);
-            assert_eq!(actual, expected, "case {index}");
-
-            // The text path scales again on top; that must compose the same way.
-            canvas.scale((crate::text::TEXT_SCALE, crate::text::TEXT_SCALE));
-            let expected_scaled = canvas
-                .local_to_device_as_3x3()
-                .to_affine()
-                .expect("affine canvas transform");
             assert_eq!(
-                super::scale_affine(actual, crate::text::TEXT_SCALE),
-                expected_scaled,
-                "case {index} scaled"
+                actual.map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "case {index}: {actual:?}"
+            );
+            let scaled = super::scale_affine(actual, crate::text::TEXT_SCALE);
+            assert_eq!(
+                scaled.map(f32::to_bits),
+                expected_scaled.map(f32::to_bits),
+                "case {index} scaled: {scaled:?}"
             );
         }
     }

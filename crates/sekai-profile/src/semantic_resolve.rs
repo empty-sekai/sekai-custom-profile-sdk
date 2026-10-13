@@ -681,35 +681,6 @@ fn build_standard_honor_visual(
         })
         .copied()
         .unwrap_or_default();
-    let object_key =
-        crate::render_object::standard_honor_object_key(honor_id, honor_level, full_size);
-    if let Some(base) = render_object_descriptor(
-        resources,
-        &object_key,
-        crate::render_object::RenderObjectKind::StandardHonor,
-        honor_id,
-    ) {
-        return Some(HonorVisualSnapshot {
-            source_field: source_field.into(),
-            source_id: honor_id.to_string(),
-            honor_id,
-            honor_level,
-            full_size,
-            visual: HonorVisualKind::Standard {
-                honor_type: resolved.honor_type,
-                has_star: false,
-                is_live_master: resolved.is_live_master,
-                progress,
-                background: Some(base),
-                frame_candidates: Vec::new(),
-                overlay: None,
-                star: None,
-                star_high: None,
-                live_star_on: None,
-                live_star_off: None,
-            },
-        });
-    }
     let plan = resolved.asset_plan(full_size);
     let background = optional_descriptor(
         plan.background.key.clone(),
@@ -785,41 +756,6 @@ fn build_bonds_honor_visual(
     resources: ResolveResourceContext<'_>,
 ) -> Option<HonorVisualSnapshot> {
     md.get_bonds_honor(honor_id)?;
-    let object_key = crate::render_object::bonds_honor_object_key(
-        honor_id,
-        honor_level,
-        full_size,
-        word_id,
-        inverse,
-        use_unit_virtual_singer,
-    );
-    if let Some(base) = render_object_descriptor(
-        resources,
-        &object_key,
-        crate::render_object::RenderObjectKind::BondsHonor,
-        honor_id,
-    ) {
-        return Some(HonorVisualSnapshot {
-            source_field: source_field.into(),
-            source_id: honor_id.to_string(),
-            honor_id,
-            honor_level,
-            full_size,
-            visual: HonorVisualKind::Standard {
-                honor_type: "bonds_prebuilt".into(),
-                has_star: false,
-                is_live_master: false,
-                progress: 0,
-                background: Some(base),
-                frame_candidates: Vec::new(),
-                overlay: None,
-                star: None,
-                star_high: None,
-                live_star_on: None,
-                live_star_off: None,
-            },
-        });
-    }
     let plan = sekai_profile_core::masterdata::bonds_honor_asset_plan(
         md,
         honor_id,
@@ -875,31 +811,6 @@ fn build_bonds_honor_visual(
                 honor_id,
             )),
         },
-    })
-}
-
-fn render_object_descriptor(
-    resources: ResolveResourceContext<'_>,
-    object_key: &str,
-    expected_kind: crate::render_object::RenderObjectKind,
-    id: i32,
-) -> Option<ResourceDescriptor> {
-    let metadata = resources.render_objects?.metadata(object_key)?;
-    if metadata.kind != expected_kind {
-        return None;
-    }
-    Some(ResourceDescriptor {
-        resource: ResourceKey {
-            namespace: "render-object".into(),
-            key: object_key.into(),
-        },
-        natural_width: metadata.width as f32,
-        natural_height: metadata.height as f32,
-        provenance: std::collections::BTreeMap::from([
-            ("kind".into(), ParameterValue::Text("render_object".into())),
-            ("table".into(), ParameterValue::Text("honor_final".into())),
-            ("id".into(), ParameterValue::I64(id.into())),
-        ]),
     })
 }
 
@@ -1258,32 +1169,10 @@ mod tests {
         }
     }
 
+    /// A Live Master honor composed from its parts keeps its volatile progress
+    /// count as a separate text command and draws no live stars.
     #[test]
-    fn live_master_render_object_keeps_dynamic_overlay_semantics() {
-        use sha2::Digest as _;
-
-        use crate::render_object::{
-            standard_honor_object_key, MappedRenderObjectStore, RenderObjectKind,
-            RenderObjectStoreWriter, RenderObjectWrite,
-        };
-
-        let root = tempfile::tempdir().unwrap();
-        let key = standard_honor_object_key(4242, 3, true);
-        let pixels = vec![0u8; 380 * 80 * 4];
-        let mut writer =
-            RenderObjectStoreWriter::create(root.path(), "honor-fixture", 1024 * 1024).unwrap();
-        writer
-            .add(RenderObjectWrite {
-                key: &key,
-                kind: RenderObjectKind::StandardHonor,
-                source_sha256: &hex::encode(sha2::Sha256::digest(b"honor-fixture")),
-                width: 380,
-                height: 80,
-                row_bytes: 380 * 4,
-                pixels: &pixels,
-            })
-            .unwrap();
-        let store = MappedRenderObjectStore::open(writer.finish().unwrap()).unwrap();
+    fn live_master_honor_keeps_its_dynamic_progress_overlay() {
         let md = MasterData::new(Arc::new(EmptyProvider));
         let visual = build_standard_honor_visual(
             "slot-1",
@@ -1292,33 +1181,17 @@ mod tests {
             true,
             None,
             &md,
-            ResolveResourceContext {
-                assets: None,
-                render_objects: Some(&store),
-                catalog_lookup_ns: None,
-            },
+            ResolveResourceContext::default(),
         )
         .unwrap();
         match visual.visual {
             HonorVisualKind::Standard {
                 is_live_master,
-                background,
-                frame_candidates,
-                overlay,
                 live_star_on,
                 live_star_off,
                 ..
             } => {
                 assert!(is_live_master);
-                assert_eq!(
-                    background.unwrap().resource,
-                    ResourceKey {
-                        namespace: "render-object".into(),
-                        key,
-                    }
-                );
-                assert!(frame_candidates.is_empty());
-                assert!(overlay.is_none());
                 assert!(live_star_on.is_none());
                 assert!(live_star_off.is_none());
             }
@@ -1352,10 +1225,7 @@ mod tests {
             "live-master-general",
             Some(&profile),
             "cn",
-            ResolveResourceContext {
-                render_objects: Some(&store),
-                ..ResolveResourceContext::default()
-            },
+            ResolveResourceContext::default(),
         )
         .unwrap();
         assert!(scene

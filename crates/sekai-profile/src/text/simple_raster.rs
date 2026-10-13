@@ -1,28 +1,22 @@
 //! Dependency-free raster for short white text runs (the Live Master progress
-//! digits) with pixels identical to the Skia recipe it replaces.
+//! digits): an anti-aliased opaque white fill without subpixel positioning.
 //!
-//! The replaced path was `SkFont(face, size)` + `Canvas::draw_str` with an
-//! anti-aliased opaque white fill and no subpixel positioning. Its pixels are
-//! reproduced exactly by three pieces:
+//! Three pieces define its pixels:
 //!
 //! 1. FreeType glyphs loaded with normal hinting (`FT_LOAD_TARGET_NORMAL`) and
 //!    rendered to 8-bit coverage; the pen advances by the hinted advance and
 //!    every glyph blits at its rounded pen position.
-//! 2. Skia's text-mask gamma for white paint, a monotone 256-entry coverage
-//!    table. It was recovered empirically by rasterizing the same glyphs
-//!    through both engines over sizes 6..=72 and comparing coverage byte for
-//!    byte: 41,954 samples, zero conflicts, all 256 entries observed.
+//! 2. A text-mask gamma for white paint: a monotone 256-entry table that remaps
+//!    each coverage value before blending.
 //! 3. The A8 source-over blend for an opaque white source:
-//!    `out = d + ((255 - d) * (coverage + 1) >> 8)` per channel, fitted the
-//!    same way over every observed `(coverage, destination)` pair.
+//!    `out = d + ((255 - d) * (coverage + 1) >> 8)` per channel.
 //!
-//! Under a transform the recipe follows Skia's FreeType scaler. Glyph
-//! positions stay the hinted advances at the source size, mapped through the
-//! transform and rounded to whole pixels. Glyph images are rendered in device
-//! space: the transform, text size included, is split by a Givens rotation
-//! into an axis scale folded into the character size and a remaining rotation
-//! or skew set as the FreeType transform, and hinting is dropped when the
-//! transform is not axis-aligned.
+//! Under a transform, glyph positions stay the hinted advances at the source
+//! size, mapped through the transform and rounded to whole pixels. Glyph images
+//! are rendered in device space: the transform, text size included, is split
+//! by a Givens rotation into an axis scale folded into the character size and a
+//! remaining rotation or skew set as the FreeType transform, and hinting is
+//! dropped when the transform is not axis-aligned.
 
 use freetype::face::LoadFlag;
 use freetype::{Face, Library, Matrix, Vector};
@@ -31,12 +25,11 @@ use freetype::{Face, Library, Matrix, Vector};
 /// `(a·x + c·y + e, b·x + d·y + f)`.
 pub(crate) type Affine = [f32; 6];
 
-/// Scales below this never reach a pixel; Skia draws nothing for them.
+/// Scales below this never reach a pixel, so nothing is drawn for them.
 const NEARLY_ZERO: f32 = 1.0 / 4096.0;
 
-/// Coverage remap Skia applies to anti-aliased text masks drawn with a white
-/// paint (its mask-gamma preblend). Recovered empirically; see the module
-/// documentation for the extraction and its sample counts.
+/// Coverage remap applied to anti-aliased text masks drawn with white paint
+/// (a mask-gamma preblend).
 const WHITE_TEXT_COVERAGE: [u8; 256] = [
     0, 13, 22, 28, 34, 38, 42, 46, 50, 53, 56, 59, 61, 64, 66, 69, 71, 73, 75, 77, 79, 81, 83, 85,
     86, 88, 90, 92, 93, 95, 96, 98, 99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115,
@@ -144,7 +137,7 @@ pub(crate) fn draw_centered_white_text(
     Ok(true)
 }
 
-/// Sets the character size in points at 72 dpi, truncated to 26.6 like Skia.
+/// Sets the character size in points at 72 dpi, truncated to 26.6 fixed point.
 fn set_char_size<B>(face: &Face<B>, width: f32, height: f32) -> Result<(), String> {
     face.set_char_size((width * 64.0) as isize, (height * 64.0) as isize, 72, 72)
         .map_err(|error| format!("设置字号失败: {error:?}"))

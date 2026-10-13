@@ -10,10 +10,8 @@ use sekai_profile::render_object::{
 use sekai_profile::render_object_catalog::{
     DesiredRenderObject, DesiredRenderObjectCatalog, RenderObjectDependency,
 };
-mod render_object_honor;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use skia_safe::{AlphaType, ColorType, Data, Image, ImageInfo};
 
 const BUILD_LIST_SCHEMA: &str = "allium.render-object-build-list.v1";
 const DEFAULT_PAGE_MIB: u64 = 512;
@@ -75,18 +73,6 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = std::env::args().collect::<Vec<_>>();
-    if args.get(1).map(String::as_str) == Some("--honor-plan") {
-        return render_object_honor::run_honor_plan(&args);
-    }
-    if args.get(1).map(String::as_str) == Some("--honor-store") {
-        return render_object_honor::run_honor_store(&args);
-    }
-    if args.get(1).map(String::as_str) == Some("--honor-delta-store") {
-        return render_object_honor::run_honor_delta_store(&args);
-    }
-    if args.get(1).map(String::as_str) == Some("--honor-assets-audit") {
-        return render_object_honor::run_honor_assets_audit(&args);
-    }
     if args.get(1).map(String::as_str) == Some("--global-cache-plan") {
         return run_global_cache(&args, false);
     }
@@ -216,15 +202,10 @@ fn run_catalog_from_stores(args: &[String]) -> Result<(), String> {
         for entry in &store.manifest().objects {
             let kind = match entry.kind {
                 RenderObjectKind::Texture => "texture",
-                RenderObjectKind::StandardHonor => "standard_honor",
-                RenderObjectKind::BondsHonor => "bonds_honor",
                 RenderObjectKind::CardMember | RenderObjectKind::Component => "component",
             };
             let recipe_contract = match entry.kind {
                 RenderObjectKind::Texture => "allium.render-object.texture.decode-premul-rgba8.v1",
-                RenderObjectKind::StandardHonor | RenderObjectKind::BondsHonor => {
-                    sekai_profile::render_object::HONOR_RENDER_OBJECT_CONTRACT
-                }
                 RenderObjectKind::CardMember => {
                     sekai_profile::profile_compositor::DECK_ART_VARIANT_CONTRACT
                 }
@@ -291,19 +272,18 @@ fn run_catalog_from_stores(args: &[String]) -> Result<(), String> {
 }
 
 fn run_plan_desired_catalog(args: &[String]) -> Result<(), String> {
-    if args.len() != 7 {
+    if args.len() != 6 {
         return Err(format!(
-            "usage: {} --plan-desired-catalog <catalog-header.json> <masterdata-dir> <asset-files.json> <current-manifest.json> <output-catalog.json>",
+            "usage: {} --plan-desired-catalog <catalog-header.json> <asset-files.json> <current-manifest.json> <output-catalog.json>",
             args.first()
                 .map(String::as_str)
                 .unwrap_or("build-render-object-store")
         ));
     }
     let header_path = PathBuf::from(&args[2]);
-    let masterdata_dir = PathBuf::from(&args[3]);
-    let assets_path = PathBuf::from(&args[4]);
-    let current_manifest_path = PathBuf::from(&args[5]);
-    let output_path = PathBuf::from(&args[6]);
+    let assets_path = PathBuf::from(&args[3]);
+    let current_manifest_path = PathBuf::from(&args[4]);
+    let output_path = PathBuf::from(&args[5]);
     let mut catalog: DesiredRenderObjectCatalog = serde_json::from_slice(
         &std::fs::read(&header_path)
             .map_err(|error| format!("read {} failed: {error}", header_path.display()))?,
@@ -325,18 +305,12 @@ fn run_plan_desired_catalog(args: &[String]) -> Result<(), String> {
         .collect::<BTreeMap<_, _>>();
     for entry in &current.manifest().objects {
         if entry.key.starts_with("texture:assets/")
-            || matches!(
-                entry.kind,
-                RenderObjectKind::StandardHonor | RenderObjectKind::BondsHonor
-            )
             || entry.key.starts_with("component:deck-art-variant/")
         {
             continue;
         }
         let kind = match entry.kind {
             RenderObjectKind::Texture => "texture",
-            RenderObjectKind::StandardHonor => "standard_honor",
-            RenderObjectKind::BondsHonor => "bonds_honor",
             RenderObjectKind::CardMember | RenderObjectKind::Component => "component",
         };
         catalog.objects.push(DesiredRenderObject {
@@ -399,9 +373,6 @@ fn run_plan_desired_catalog(args: &[String]) -> Result<(), String> {
             },
             dependencies: vec![dependency],
         });
-        if is_honor_asset_path(&asset.logical_path) {
-            catalog.build_dependencies.push(asset_dependency(asset));
-        }
     }
 
     let texture_sealed = catalog.clone().seal()?;
@@ -437,41 +408,6 @@ fn run_plan_desired_catalog(args: &[String]) -> Result<(), String> {
             recipe_sha256: deck_recipe_sha.clone(),
             source_identity: String::new(),
             dependencies: texture.dependencies.clone(),
-        });
-    }
-
-    let mut honor_asset_digest = Sha256::new();
-    for dependency in &catalog.build_dependencies {
-        honor_asset_digest.update(dependency.logical_path.as_bytes());
-        honor_asset_digest.update(dependency.sha256.as_bytes());
-    }
-    let honor_asset_identity = hex::encode(honor_asset_digest.finalize());
-    let honor_contract = sekai_profile::render_object::HONOR_RENDER_OBJECT_CONTRACT;
-    let honor_recipe_sha = contract_sha256(honor_contract);
-    let honor_dependencies = vec![
-        RenderObjectDependency {
-            kind: "masterdata".into(),
-            key: catalog.masterdata_object_key.clone(),
-            logical_path: String::new(),
-            object_key: catalog.masterdata_object_key.clone(),
-            sha256: catalog.masterdata_sha256.clone(),
-        },
-        RenderObjectDependency {
-            kind: "builder_static".into(),
-            key: "honor-asset-set".into(),
-            logical_path: String::new(),
-            object_key: String::new(),
-            sha256: honor_asset_identity,
-        },
-    ];
-    for (key, kind) in render_object_honor::planned_honor_catalog_keys(&masterdata_dir)? {
-        catalog.objects.push(DesiredRenderObject {
-            key,
-            kind: kind.into(),
-            recipe_contract: honor_contract.into(),
-            recipe_sha256: honor_recipe_sha.clone(),
-            source_identity: String::new(),
-            dependencies: honor_dependencies.clone(),
         });
     }
 
@@ -516,10 +452,7 @@ fn asset_dependency(asset: &PlannedAssetFile) -> RenderObjectDependency {
 fn render_texture_key(logical_path: &str) -> Option<String> {
     let normalized = logical_path.trim_start_matches('/').replace('\\', "/");
     let (base, extension) = normalized.rsplit_once('.')?;
-    if !matches!(
-        extension.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg"
-    ) {
+    if !extension.eq_ignore_ascii_case("png") {
         return None;
     }
     Some(format!("texture:assets/{base}"))
@@ -905,8 +838,8 @@ fn run_filter_store(args: &[String]) -> Result<(), String> {
         .iter()
         .map(|object| object.page)
         .collect::<std::collections::BTreeSet<_>>();
-    // Empty filtered stores are used as an input to full Honor rebuilds. Keep
-    // one immutable page so the existing non-empty page manifest contract holds.
+    // An empty filtered store keeps one immutable page so the non-empty page
+    // manifest contract holds.
     if retained_pages.is_empty() {
         retained_pages.insert(0);
     }
@@ -1169,7 +1102,7 @@ fn collect_global_sources(
             .extension()
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase);
-        if !matches!(extension.as_deref(), Some("png" | "jpg" | "jpeg")) {
+        if extension.as_deref() != Some("png") {
             continue;
         }
         let relative = path
@@ -1245,12 +1178,12 @@ fn inspect_global_source(key: String, source_path: PathBuf) -> Result<GlobalObje
     let encoded = std::fs::read(&source_path)
         .map_err(|error| format!("read {} failed: {error}", source_path.display()))?;
     let source_sha256 = hex::encode(Sha256::digest(&encoded));
-    let image = Image::from_encoded(Data::new_copy(&encoded))
-        .ok_or_else(|| format!("decode image metadata {} failed", source_path.display()))?;
-    let width = u32::try_from(image.width())
-        .map_err(|_| format!("negative image width for {}", source_path.display()))?;
-    let height = u32::try_from(image.height())
-        .map_err(|_| format!("negative image height for {}", source_path.display()))?;
+    let (width, height) = sekai_profile::codec::png::dimensions(&encoded).map_err(|error| {
+        format!(
+            "read PNG header of {} failed: {error}",
+            source_path.display()
+        )
+    })?;
     let pixel_bytes = u64::from(width)
         .checked_mul(u64::from(height))
         .and_then(|value| value.checked_mul(4))
@@ -1378,12 +1311,13 @@ fn resolve_compiled_resource_source(
     asset_cache_root: &Path,
 ) -> Result<PathBuf, String> {
     let candidates = match resource.namespace.as_str() {
-        "static" => image_candidates(static_root.join(&resource.key)),
+        "static" => vec![static_root.join(&resource.key).with_extension("png")],
         "assets" => {
             let normalized = resource.key.replace('/', "__");
-            let mut candidates = vec![asset_cache_root.join(normalized)];
-            candidates.extend(image_candidates(asset_cache_root.join(&resource.key)));
-            candidates
+            vec![
+                asset_cache_root.join(normalized),
+                asset_cache_root.join(&resource.key).with_extension("png"),
+            ]
         }
         namespace => {
             return Err(format!(
@@ -1429,13 +1363,6 @@ fn resolve_compiled_resource_sources<'a>(
     }
 }
 
-fn image_candidates(base: PathBuf) -> Vec<PathBuf> {
-    ["png", "jpg", "jpeg"]
-        .into_iter()
-        .map(|extension| base.with_extension(extension))
-        .collect()
-}
-
 fn decode_premul_rgba8(
     path: &Path,
     expected_sha256: Option<&str>,
@@ -1451,39 +1378,23 @@ fn decode_premul_rgba8(
             source_sha256
         ));
     }
-    let image = Image::from_encoded(Data::new_copy(&encoded))
-        .ok_or_else(|| format!("decode {} failed", path.display()))?;
-    let width = u32::try_from(image.width())
-        .map_err(|_| format!("negative image width for {}", path.display()))?;
-    let height = u32::try_from(image.height())
-        .map_err(|_| format!("negative image height for {}", path.display()))?;
-    let row_bytes = width
+    let decoded = sekai_profile::codec::png::decode(&encoded)
+        .map_err(|error| format!("decode {} failed: {error}", path.display()))?;
+    let row_bytes = decoded
+        .width
         .checked_mul(4)
         .ok_or_else(|| format!("row_bytes overflow for {}", path.display()))?;
-    let len = row_bytes
-        .checked_mul(height)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| format!("pixel length overflow for {}", path.display()))?;
-    let mut pixels = vec![0u8; len];
-    let info = ImageInfo::new(
-        (image.width(), image.height()),
-        ColorType::RGBA8888,
-        AlphaType::Premul,
-        None,
-    );
-    if !image.read_pixels(
-        &info,
-        &mut pixels,
-        row_bytes as usize,
-        (0, 0),
-        skia_safe::image::CachingHint::Allow,
-    ) {
-        return Err(format!("read premul pixels {} failed", path.display()));
+    let mut pixels = decoded.pixels;
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        let alpha = pixel[3];
+        for channel in &mut pixel[..3] {
+            *channel = sekai_profile::codec::premultiply_channel(*channel, alpha);
+        }
     }
     Ok(DecodedObject {
         source_sha256,
-        width,
-        height,
+        width: decoded.width,
+        height: decoded.height,
         row_bytes,
         pixels,
     })
@@ -1774,18 +1685,6 @@ mod tests {
             ],
             7,
         );
-        let masterdata = root.path().join("masterdata");
-        std::fs::create_dir(&masterdata).expect("masterdata dir");
-        for table in [
-            "honors",
-            "honorGroups",
-            "bondsHonors",
-            "bondsHonorWords",
-            "gameCharacterUnits",
-        ] {
-            std::fs::write(masterdata.join(format!("{table}.json")), b"[]")
-                .expect("masterdata table");
-        }
         let sha_a = "a".repeat(64);
         let sha_b = hex::encode(Sha256::digest([7]));
         let header = DesiredRenderObjectCatalog {
@@ -1834,7 +1733,6 @@ mod tests {
             "build-render-object-store".into(),
             "--plan-desired-catalog".into(),
             header_path.to_string_lossy().into_owned(),
-            masterdata.to_string_lossy().into_owned(),
             assets_path.to_string_lossy().into_owned(),
             current_manifest.to_string_lossy().into_owned(),
             output.to_string_lossy().into_owned(),

@@ -39,32 +39,6 @@ pub const PROFILE_RENDER_OBJECT_PREWARM_PREFIXES: &[&str] = &[
     "component:deck-art-variant/",
 ];
 const PREWARM_PAGE_STRIDE: usize = 4096;
-pub const HONOR_RENDER_OBJECT_CONTRACT: &str = "allium.honor-final.shared-core.v1";
-
-pub fn standard_honor_object_key(honor_id: i32, honor_level: i32, full_size: bool) -> String {
-    format!(
-        "standard_honor:{HONOR_RENDER_OBJECT_CONTRACT}/id-{honor_id:08}/level-{honor_level:03}/{}",
-        if full_size { "main" } else { "sub" }
-    )
-}
-
-pub fn bonds_honor_object_key(
-    honor_id: i32,
-    honor_level: i32,
-    full_size: bool,
-    word_id: i64,
-    inverse: bool,
-    use_unit_virtual_singer: bool,
-) -> String {
-    let word_id = if full_size { word_id } else { 0 };
-    format!(
-        "bonds_honor:{HONOR_RENDER_OBJECT_CONTRACT}/id-{honor_id:08}/level-{honor_level:03}/word-{word_id:08}/inverse-{}/vs-{}/{}",
-        u8::from(inverse),
-        u8::from(use_unit_virtual_singer),
-        if full_size { "main" } else { "sub" }
-    )
-}
-
 pub fn render_object_key_for_resource(resource: &ResourceKey) -> String {
     if resource.namespace == "render-object" {
         resource.key.clone()
@@ -77,8 +51,6 @@ pub fn render_object_key_for_resource(resource: &ResourceKey) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum RenderObjectKind {
     Texture,
-    StandardHonor,
-    BondsHonor,
     CardMember,
     Component,
 }
@@ -1121,18 +1093,6 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn honor_keys_are_canonical_and_sub_ignores_word() {
-        assert_eq!(
-            standard_honor_object_key(42, 3, true),
-            "standard_honor:allium.honor-final.shared-core.v1/id-00000042/level-003/main"
-        );
-        assert_eq!(
-            bonds_honor_object_key(7, 10, false, 1234, true, false),
-            bonds_honor_object_key(7, 10, false, 0, true, false)
-        );
-    }
 
     fn write_generation(root: &Path, identity: &str, value: u8) -> PathBuf {
         let pixels = vec![value; 2 * 2 * 4];

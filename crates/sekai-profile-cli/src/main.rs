@@ -302,8 +302,7 @@ fn encode_candidate_png(
         let alpha = pixel[3];
         if alpha != 0 && alpha != u8::MAX {
             for channel in 0..3 {
-                pixel[channel] =
-                    sekai_profile::codec::unpremultiply_channel_like_skia(pixel[channel], alpha);
+                pixel[channel] = sekai_profile::codec::unpremultiply_channel(pixel[channel], alpha);
             }
         }
     }

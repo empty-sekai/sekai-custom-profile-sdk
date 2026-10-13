@@ -186,10 +186,7 @@ fn desired_object_identity(object: &mut DesiredRenderObject) -> Result<String, S
     if object.key.trim().is_empty() || object.recipe_contract.trim().is_empty() {
         return Err("desired render object key or recipe contract is empty".into());
     }
-    if !matches!(
-        object.kind.as_str(),
-        "texture" | "standard_honor" | "bonds_honor" | "component"
-    ) {
+    if !matches!(object.kind.as_str(), "texture" | "component") {
         return Err(format!(
             "unsupported render object kind {} for {}",
             object.kind, object.key

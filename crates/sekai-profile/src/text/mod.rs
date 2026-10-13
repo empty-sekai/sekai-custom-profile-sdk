@@ -13,8 +13,6 @@ use sekai_profile_core::tmp_text::{
     markup::{CaretCommand, InlineAlign, TextSegment},
     DEFAULT_LINE_SPACING_FACTOR, PROFILE_FACE,
 };
-#[cfg(feature = "skia-oracle")]
-use skia_safe::Matrix;
 
 /// TMP FontAsset 全局缩放因子 (m_FaceInfo.m_Scale)。
 pub const TEXT_SCALE: f32 = PROFILE_FACE.scale;
@@ -52,8 +50,8 @@ pub fn prewarm_profile_font_families<'a>(
 ///
 /// Order: the prebuilt atlas (its metrics are FreeType-derived), then on-demand
 /// SDF generation when no atlas is installed, then FreeType's `hmtx` for glyphs
-/// that have no outline to generate from. Skia is never consulted: it rounds
-/// every advance to a whole pixel, and that error accumulates along a run.
+/// that have no outline to generate from. Advances keep their fractional part,
+/// so no whole-pixel rounding error accumulates along a run.
 fn freetype_advance_x(
     atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
     family: Option<&str>,
@@ -520,7 +518,6 @@ pub(crate) enum TextSdfCommandError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TextSdfCaptureError {
-    PerspectiveTransform,
     UnsupportedFeature { feature: &'static str },
 }
 
@@ -540,42 +537,20 @@ fn capture_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
         .unwrap_or(0)
 }
 
-/// 构造单字形的局部变换矩阵（相对画布当前 CTM 的增量），与渲染循环逐字绘制时
-/// 对 canvas 施加的链式调用保持**逐字节同源**。debug 顶点输出与渲染都只走这一处，
-/// 保证 debug 数值 == 实际渲染。
+/// 单字形的局部仿射变换 `[sx, ky, kx, sy, tx, ty]`（相对当前设备变换的增量）。
+/// 捕获与 debug 顶点输出都只走这一处，保证 debug 数值 == 实际渲染。
 ///
 /// 复合顺序对齐 TMP 的 FX 矩阵（`v' = C + M·(v−C)`，`M = Rotate·Scale`）：
 /// 绕 glyph center（= anchor）施加 **R 外层、S 内层**，italic skew 最内层（TMP
 /// 在 FX 前先改顶点）。即：
 ///   T(anchor) · R(-rotate_deg) · S(scale_x,1) · Skew(skew_x)
 /// 字形随后画在 (-pivot_x, -pivot_y)，使 glyph center 落在 anchor 上。
+/// TMP `<rotate>` 是 Y-up/CCW，设备空间是 Y-down/CW，故角度取负。skew_x=0 时为
+/// `T·R·S`；scale_x=1 或 rotate_deg=0 时 `R·S = S·R`。
 ///
-/// 退化等价：skew_x=0 时为 `T·R·S`；当 scale_x=1 或 rotate_deg=0 其一为平凡，
-/// `R·S = S·R`，与旧 canvas 链 `T·S·R` 逐字节一致——剪切偏差仅在 scale 与 rotate
-/// 同时非平凡时出现，正是 #4 要修的复合。
-#[cfg(feature = "skia-oracle")]
-#[allow(dead_code)]
-fn glyph_local_matrix(op: &DrawCharOp) -> Matrix {
-    let mut m = Matrix::new_identity();
-    m.pre_translate((op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y));
-    if op.rotate_deg.abs() > 0.001 {
-        // TMP <rotate> 是 Unity Y-up/CCW，Skia Y-down/CW，取负翻转（与元素级
-        // transform::quaternion_to_degrees 负号同源）。R 外层。
-        m.pre_rotate(-op.rotate_deg, None);
-    }
-    m.pre_scale((op.scale_x, 1.0), None); // S 内层（先把字形横向拉成矩形）
-    if op.skew_x != 0.0 {
-        // italic skew 最内层：TMP 在 FX 矩阵前先改顶点。
-        m.pre_concat(&Matrix::from_affine(&[1.0, 0.0, op.skew_x, 1.0, 0.0, 0.0]));
-    }
-    m
-}
-
-/// `glyph_local_matrix` 的纯仿射版本，供无 canvas 的捕获路径使用，与 SkMatrix
-/// 链式复合**逐位一致**：T·R 的每一项都是精确值；`pre_scale` 是逐项 f32 乘法；
-/// italic 的 `pre_concat` 按 SkMatrix::setConcat 的语义在 f64 中乘加后一次舍入。
-/// sin/cos 与 Skia 相同：radians = deg·(π/180)，结果绝对值 ≤ 1/65536 时钳到 0。
-/// 有 gated 测试逐位对拍两条路径。
+/// 取整：T·R 的每一项都是精确值；S 是逐项 f32 乘法；italic skew 在 f64 中乘加后
+/// 一次舍入到 f32。sin/cos 按 f32 计算，radians = deg·(π/180)，结果绝对值
+/// ≤ 1/65536 时钳到 0；|rotate_deg| ≤ 0.001 时不旋转。
 fn glyph_local_affine(op: &DrawCharOp) -> [f32; 6] {
     let tx = op.x + op.pivot_x + op.shear_cx;
     let ty = op.y + op.pivot_y;
@@ -602,7 +577,7 @@ fn glyph_local_affine(op: &DrawCharOp) -> [f32; 6] {
     m
 }
 
-/// 计算字形 footprint 四角经 `glyph_local_matrix` 变换后的设备前坐标（TMP 等效坐标系，
+/// 计算字形 footprint 四角经 `glyph_local_affine` 变换后的设备前坐标（TMP 等效坐标系，
 /// 乘 TEXT_SCALE）。footprint 取绕 glyph center 的 ±(size/2 + spread) 盒，即 atlas
 /// 矩形——`pivot` 是墨迹中心偏移而非半展，拿它当半展会系统性偏离；刚性旋转下保持矩形，
 /// 复合产生剪切时退化为平行四边形——四角即可直接量化剪切。
@@ -621,27 +596,8 @@ fn glyph_quad_corners(op: &DrawCharOp) -> [(f32, f32); 4] {
     out
 }
 
-#[cfg(feature = "skia-oracle")]
-#[allow(dead_code)]
-fn resolve_text_sdf_glyph_from_matrix(
-    base: &skia_safe::M44,
-    op: &DrawCharOp,
-    resolved_font_family: Option<&str>,
-) -> Result<ResolvedTextSdfGlyph, TextSdfCaptureError> {
-    let mut local_to_device = base.clone();
-    local_to_device.pre_concat(&skia_safe::M44::from(glyph_local_matrix(op)));
-    let affine = local_to_device
-        .to_m33()
-        .to_affine()
-        .ok_or(TextSdfCaptureError::PerspectiveTransform)?;
-    resolve_text_sdf_glyph_from_affine(affine, op, resolved_font_family)
-}
-
 /// `base * local` for affine matrices in `[sx, ky, kx, sy, tx, ty]` layout.
-///
-/// The translation terms associate as `x + (y + t)` — the fold order of the
-/// 4x4 concatenation this replaces — so the result stays bit-identical to the
-/// canvas route on every input, rotation included.
+/// Each translation term is folded as `x + (y + t)`.
 fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
     [
         base[0] * local[0] + base[2] * local[1],
@@ -653,7 +609,7 @@ fn concat_affine(base: [f32; 6], local: [f32; 6]) -> [f32; 6] {
     ]
 }
 
-/// Canvas-free capture: the device transform arrives as a plain affine.
+/// Capture under a device transform given as an affine.
 fn resolve_text_sdf_glyph_from_base_affine(
     base: [f32; 6],
     op: &DrawCharOp,
@@ -700,9 +656,7 @@ struct TextLayoutRun {
 }
 
 /// Captures the element-path TMP layout (no post-layout placement) against a
-/// device transform supplied directly as an affine. The canvas route resolves
-/// the same glyph stream through an M44 local-to-device, and the two
-/// resolutions are pinned bit-equal.
+/// device transform supplied directly as an affine.
 pub(crate) fn capture_text_sdf_from_affine(
     base_affine: [f32; 6],
     text: &TextElement,
@@ -1340,7 +1294,7 @@ fn layout_text_ops(
                 // rasterized and its pivot is never consumed.
                 let pivot_x = ft_pivot_x.unwrap_or(0.0);
                 // FreeType Y 中心：TMP 使用 FontEngine 的 bearingY - height/2
-                // Skia Y-down 对应: -(bearing_y_75 - height_75/2) * ft_scale
+                // 设备空间 Y-down 对应: -(bearing_y_75 - height_75/2) * ft_scale
                 let ft_pivot_y = atlas_metrics
                     .map(|metrics| -(metrics.bearing_y - metrics.height / 2.0) * ft_scale)
                     .or_else(|| {
@@ -1488,7 +1442,7 @@ fn layout_text_ops(
             })
             .collect();
         // 变换后字形 footprint 四角（[TL,TR,BR,BL]），用于剪切/尺寸的顶点级回归。
-        // 刚性旋转下为矩形；S·R 复合剪切时为平行四边形。与 glyph_local_matrix 同源。
+        // 刚性旋转下为矩形；S·R 复合剪切时为平行四边形。与 glyph_local_affine 同源。
         let char_quads: Vec<(String, [(f32, f32); 4])> = draw_ops
             .iter()
             .map(|op| (op.ch.clone(), glyph_quad_corners(op)))
@@ -2093,7 +2047,7 @@ mod tests {
                 };
             let md = MasterData::new(Arc::new(OutlineProvider));
             // The element is centre-aligned, so a zero-anchor placement is the
-            // identity translation the canvas route historically applied.
+            // identity translation.
             super::capture_text_sdf_with_placement(
                 [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
                 text,
@@ -2222,71 +2176,38 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "skia-oracle")]
+    /// A captured glyph's device transform is the affine base composed with the
+    /// glyph's local transform, under rotation, non-uniform scale and
+    /// fractional translation alike. The pinned values are exact bit patterns.
     #[test]
-    fn direct_capture_matrix_matches_canvas_concat_recipe() {
-        use skia_safe::Point;
-
-        let face = [0.2f32, 0.4, 0.6, 0.75];
-        let op = super::DrawCharOp {
-            ch: "A".into(),
-            x: 13.25,
-            y: -8.5,
-            pivot_x: 4.75,
-            pivot_y: -2.25,
-            half_w: 8.5,
-            half_h: 11.25,
-            shear_cx: 1.5,
-            scale_x: 1.35,
-            skew_x: -0.21,
-            rotate_deg: 37.0,
-            font_size: 0.0,
-            face,
-            sdf_params: Some(crate::sdf::material::SdfOutlineParams {
-                outline_r: 0.8,
-                outline_g: 0.3,
-                outline_b: 0.1,
-                outline_a: 0.9,
-                outline_size: 0.4,
-            }),
-            mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(24.0, true, 193),
-        };
-        let mut surface = skia_safe::surfaces::null((64, 64)).expect("null surface");
-        let canvas = surface.canvas();
-        canvas.translate(Point::new(17.0, -9.0));
-        canvas.rotate(23.0, None);
-        canvas.scale((1.2, 0.8));
-        canvas.scale((super::TEXT_SCALE, super::TEXT_SCALE));
-        let base = canvas.local_to_device();
-
-        canvas.save();
-        canvas.concat(&super::glyph_local_matrix(&op));
-        let canvas_affine = canvas
-            .local_to_device_as_3x3()
-            .to_affine()
-            .expect("canvas affine");
-        let canvas_capture =
-            super::resolve_text_sdf_glyph_from_affine(canvas_affine, &op, Some("test-font"))
-                .expect("canvas capture");
-        canvas.restore();
-        let direct_capture =
-            super::resolve_text_sdf_glyph_from_matrix(&base, &op, Some("test-font"))
-                .expect("direct capture");
-
-        assert_eq!(direct_capture, canvas_capture);
-    }
-
-    /// The canvas-free affine base must resolve exactly the glyph the M44
-    /// canvas route resolves, including under rotation, non-uniform scale and
-    /// fractional translation.
-    #[cfg(feature = "skia-oracle")]
-    #[test]
-    fn affine_capture_base_matches_the_canvas_matrix_route() {
-        let bases: [[f32; 6]; 4] = [
-            [1.0, 0.0, 0.0, 1.0, 80.7, -20.3],
-            [2.0, 0.0, 0.0, 2.0, 0.25, 0.75],
-            [0.9271839, 0.3746066, -0.3746066, 0.9271839, 17.0, -9.0],
-            [1.2, -0.15, 0.35, 0.8, -3.25, 41.5],
+    fn affine_capture_composes_the_base_with_the_glyph_transform() {
+        // (device base, resolved local-to-device transform)
+        let cases: [([f32; 6], [f32; 6]); 4] = [
+            (
+                [1.0, 0.0, 0.0, 1.0, 80.7, -20.3],
+                [1.078158, -0.81245023, 0.3754018, 0.9692501, 100.2, -31.05],
+            ),
+            (
+                [2.0, 0.0, 0.0, 2.0, 0.25, 0.75],
+                [2.156316, -1.6249005, 0.7508036, 1.9385002, 39.25, -20.75],
+            ),
+            (
+                [0.9271839, 0.3746066, -0.3746066, 0.9271839, 17.0, -9.0],
+                [
+                    1.304,
+                    -0.34940565,
+                    -0.0150209665,
+                    1.0393012,
+                    39.10711,
+                    -11.662399,
+                ],
+            ),
+            (
+                [1.2, -0.15, 0.35, 0.8, -3.25, 41.5],
+                [
+                    1.0094321, -0.8116839, 0.7897197, 0.7190898, 16.3875, 29.975002,
+                ],
+            ),
         ];
         let face = [0.2f32, 0.4, 0.6, 0.75];
         let op = super::DrawCharOp {
@@ -2306,24 +2227,42 @@ mod tests {
             sdf_params: None,
             mesh_carrier: crate::sdf::material::runtime_like_mesh_carrier(24.0, true, 193),
         };
-        for base in bases {
-            let m44 = skia_safe::M44::from(skia_safe::Matrix::from_affine(&base));
-            let matrix_route =
-                super::resolve_text_sdf_glyph_from_matrix(&m44, &op, Some("test-font"))
-                    .expect("matrix route");
-            let affine_route =
+        for (base, expected) in cases {
+            let glyph =
                 super::resolve_text_sdf_glyph_from_base_affine(base, &op, Some("test-font"))
                     .expect("affine route");
-            assert_eq!(affine_route, matrix_route, "base {base:?}");
+            let device = glyph.local_to_device;
+            let actual = [
+                device.scale_x,
+                device.skew_y,
+                device.skew_x,
+                device.scale_y,
+                device.translate_x,
+                device.translate_y,
+            ];
+            assert_eq!(
+                actual.map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "base {base:?}: {actual:?}"
+            );
+            assert_eq!(glyph.text, "字");
+            assert_eq!(glyph.font_family.as_deref(), Some("test-font"));
+            assert_eq!(
+                glyph.baseline_origin,
+                crate::sdf::tile::Point2::new(-op.pivot_x, -op.pivot_y)
+            );
         }
     }
 
-    /// The pure-affine glyph transform must equal the SkMatrix chain bit for
-    /// bit on every composition the layout can produce: plain, rotated,
-    /// scaled, italic-skewed, and all of those combined.
-    #[cfg(feature = "skia-oracle")]
+    /// The glyph transform is pinned bit for bit on every composition the
+    /// layout can produce: plain, rotated (including a rotation below the
+    /// threshold), scaled, italic-skewed, and all of those combined. The 36
+    /// transforms are digested in loop order.
     #[test]
-    fn glyph_local_affine_matches_the_skia_matrix_chain() {
+    fn glyph_local_affine_composes_rotation_scale_and_skew_exactly() {
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
         let mut case = 0u32;
         for rotate_deg in [0.0f32, 0.0005, 37.0, -218.4, 90.0, 179.99] {
             for scale_x in [1.0f32, 1.35, 0.4821] {
@@ -2347,22 +2286,32 @@ mod tests {
                             24.0, false, 255,
                         ),
                     };
-                    let matrix = super::glyph_local_matrix(&op)
-                        .to_affine()
-                        .expect("affine matrix");
                     let affine = super::glyph_local_affine(&op);
-                    for (lane, (a, b)) in affine.iter().zip(matrix.iter()).enumerate() {
+                    if rotate_deg.abs() <= 0.001 {
+                        // No rotation: the X scale stays on its lane, Y is
+                        // untouched and the translation is the anchor.
                         assert_eq!(
-                            a.to_bits(),
-                            b.to_bits(),
-                            "rotate {rotate_deg} scale {scale_x} skew {skew_x} lane {lane}: {a} vs {b}"
+                            [affine[0], affine[1], affine[3], affine[4], affine[5]]
+                                .map(f32::to_bits),
+                            [scale_x, 0.0, 1.0, 19.5, -10.75].map(f32::to_bits),
+                            "scale {scale_x} skew {skew_x}"
                         );
+                        if skew_x == 0.0 {
+                            assert_eq!(affine[2].to_bits(), 0.0f32.to_bits());
+                        }
+                    }
+                    for value in affine {
+                        hasher.update(value.to_bits().to_le_bytes());
                     }
                     case += 1;
                 }
             }
         }
         assert_eq!(case, 36);
+        assert_eq!(
+            hex::encode(hasher.finalize()),
+            "f950a70f677a93b78fdc482cbd7b0cdd6b1c65d1536db706e135007f4bbf398c"
+        );
     }
 
     /// The debug footprint is the atlas rect the rasterizer samples: the glyph

@@ -1,6 +1,6 @@
 //! Ordered software composition for compiled custom-profile image commands.
 //!
-//! The scalar path is the correctness oracle for the Turin-C compositor. It
+//! The scalar path is the correctness reference for the packet executor. It
 //! consumes mmap-backed premultiplied RGBA8 objects directly and deliberately
 //! fails closed on command features whose pixel contract is not implemented.
 
@@ -133,8 +133,6 @@ pub enum ProfileCompositorError {
     IsolationUnderflow(String),
     #[error("profile compositor finished with {0} unclosed isolation layer(s)")]
     UnclosedIsolation(usize),
-    #[error("profile compositor Skia reference failed: {0}")]
-    SkiaReference(String),
     #[error("profile compositor semantic SDF command {role} failed: {reason}")]
     SemanticSdf { role: String, reason: String },
     #[error("profile compositor command {role} needs font {family}, which is not installed")]
@@ -216,8 +214,8 @@ pub fn render_image_scene_scalar(
     render_image_scene(scene, store, width, height, ImageExecutor::Scalar)
 }
 
-/// Render the same Image/Composite subset with the Turin-C packet executor.
-/// The scalar entry point remains the independent byte oracle.
+/// Render the same Image/Composite subset with the AVX-512 packet executor.
+/// The scalar entry point is the byte reference it must match.
 pub fn render_image_scene_simd(
     scene: &ResolvedProfileScene,
     store: &MappedRenderObjectStore,
@@ -1772,325 +1770,6 @@ pub fn visible_scene_device_bounds(
     Ok(Some((left, top, width, height)))
 }
 
-/// Validation-only Skia implementation of the same image command subset.
-/// It is intentionally separate from the scalar oracle and is never selected
-/// by the production backend.
-#[cfg(feature = "skia-oracle")]
-pub fn render_image_scene_skia_reference(
-    scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    width: u32,
-    height: u32,
-) -> Result<ProfileCompositorOutput, ProfileCompositorError> {
-    use skia_safe::canvas::{SaveLayerRec, SrcRectConstraint};
-    use skia_safe::{
-        images, surfaces, AlphaType, Color, ColorType, Data, Image, ImageInfo, Matrix, Paint,
-        Rect as SkiaRect,
-    };
-
-    let started = Instant::now();
-    let pixel_bytes = canvas_bytes(width, height)?;
-    let layers = collect_layers(scene)?;
-    let dimensions = (
-        i32::try_from(width)
-            .map_err(|_| ProfileCompositorError::InvalidCanvas { width, height })?,
-        i32::try_from(height)
-            .map_err(|_| ProfileCompositorError::InvalidCanvas { width, height })?,
-    );
-    let mut surface = surfaces::raster_n32_premul(dimensions)
-        .ok_or_else(|| ProfileCompositorError::SkiaReference("create raster surface".into()))?;
-    surface.canvas().clear(Color::TRANSPARENT);
-    let mut images_by_key = BTreeMap::<String, Image>::new();
-    let mut isolation_depth = 0usize;
-    let mut stats = ProfileCompositorStats {
-        output_bytes: pixel_bytes as u64,
-        scratch_peak_bytes: pixel_bytes as u64,
-        ..ProfileCompositorStats::default()
-    };
-
-    for command in &scene.commands {
-        let layer = layers.get(&command.layer_id).copied().ok_or_else(|| {
-            ProfileCompositorError::MissingLayer(format!("{:?}", command.layer_id))
-        })?;
-        if !layer.authored_visible {
-            continue;
-        }
-        match &command.payload {
-            SemanticCommandPayload::Text { .. } | SemanticCommandPayload::UguiText(_) => {
-                stats.skipped_text_command_count =
-                    stats.skipped_text_command_count.saturating_add(1);
-            }
-            SemanticCommandPayload::Shape { .. } => {
-                stats.skipped_shape_command_count =
-                    stats.skipped_shape_command_count.saturating_add(1);
-            }
-            SemanticCommandPayload::Image {
-                resource,
-                uv,
-                tint,
-                clip,
-                alpha_mask,
-                material,
-            } => {
-                let matrix = compose_matrix(layer.matrix, command.matrix);
-                let (command_clip, image_clip) = validate_image_command(
-                    &command.role,
-                    command.clip.as_ref(),
-                    command.bounds,
-                    layer.matrix,
-                    matrix,
-                    clip.as_ref(),
-                    &command.metadata,
-                )?;
-                if !tint.iter().all(|value| value.to_bits() == 1.0f32.to_bits()) {
-                    return unsupported(&command.role, "Skia reference tint");
-                }
-                if !material.is_plain() {
-                    return unsupported(&command.role, "Skia reference image material");
-                }
-                let object_key = render_object_key_for_resource(resource);
-                if !images_by_key.contains_key(&object_key) {
-                    let object = store
-                        .object(&object_key)
-                        .ok_or_else(|| ProfileCompositorError::MissingObject(object_key.clone()))?;
-                    validate_object(object, &command.role)?;
-                    let info = ImageInfo::new(
-                        (object.entry.width as i32, object.entry.height as i32),
-                        ColorType::RGBA8888,
-                        AlphaType::Premul,
-                        None,
-                    );
-                    let image = images::raster_from_data(
-                        &info,
-                        Data::new_copy(object.pixels),
-                        object.entry.row_bytes as usize,
-                    )
-                    .ok_or_else(|| {
-                        ProfileCompositorError::SkiaReference(format!("create image {object_key}"))
-                    })?;
-                    images_by_key.insert(object_key.clone(), image);
-                }
-                let image = images_by_key
-                    .get(&object_key)
-                    .ok_or_else(|| ProfileCompositorError::MissingObject(object_key.clone()))?;
-                validate_geometry(command.bounds, *uv, *tint, matrix, &command.role)?;
-                let canvas = surface.canvas();
-                canvas.save();
-                if let Some(clip) = command_clip {
-                    canvas.clip_rect(
-                        SkiaRect::new(clip.min_x, clip.min_y, clip.max_x, clip.max_y),
-                        None,
-                        Some(false),
-                    );
-                }
-                canvas.concat(&Matrix::from_affine(&matrix));
-                let destination = SkiaRect::from_xywh(
-                    command.bounds.x,
-                    command.bounds.y,
-                    command.bounds.width,
-                    command.bounds.height,
-                );
-                if let Some(clip) = image_clip {
-                    match clip {
-                        ImageClipGeometry::RoundedRect { radius } => {
-                            canvas.clip_rrect(
-                                skia_safe::RRect::new_rect_xy(destination, radius[0], radius[1]),
-                                None,
-                                Some(false),
-                            );
-                        }
-                        ImageClipGeometry::Ellipse => {
-                            let mut builder = skia_safe::PathBuilder::new();
-                            builder.add_oval(destination, None, None);
-                            canvas.clip_path(
-                                &builder.detach(),
-                                skia_safe::ClipOp::Intersect,
-                                false,
-                            );
-                        }
-                    }
-                }
-                // A mask is applied by drawing the image into an isolated layer
-                // and then drawing the mask over it with DstIn, which is the
-                // recipe the element path uses.
-                let mask_image = match alpha_mask {
-                    Some(resource) => {
-                        let mask_key = render_object_key_for_resource(resource);
-                        let object = store.object(&mask_key).ok_or_else(|| {
-                            ProfileCompositorError::MissingObject(mask_key.clone())
-                        })?;
-                        validate_object(object, &command.role)?;
-                        let info = ImageInfo::new(
-                            (object.entry.width as i32, object.entry.height as i32),
-                            ColorType::RGBA8888,
-                            AlphaType::Premul,
-                            None,
-                        );
-                        Some(
-                            images::raster_from_data(
-                                &info,
-                                Data::new_copy(object.pixels),
-                                object.entry.row_bytes as usize,
-                            )
-                            .ok_or_else(|| {
-                                ProfileCompositorError::SkiaReference(format!(
-                                    "create mask {mask_key}"
-                                ))
-                            })?,
-                        )
-                    }
-                    None => None,
-                };
-                if mask_image.is_some() {
-                    canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(
-                        &SkiaRect::from_xywh(
-                            command.bounds.x,
-                            command.bounds.y,
-                            command.bounds.width,
-                            command.bounds.height,
-                        ),
-                    ));
-                }
-                let mut paint = Paint::default();
-                paint.set_blend_mode(skia_blend_mode(command.blend_mode));
-                let source = SkiaRect::from_xywh(
-                    uv.x * object_width(image),
-                    uv.y * object_height(image),
-                    uv.width * object_width(image),
-                    uv.height * object_height(image),
-                );
-                if uses_implicit_full_source(*uv, &command.metadata) {
-                    canvas.draw_image_rect(image, None, destination, &paint);
-                } else {
-                    let constraint = match command.metadata.get("source_constraint") {
-                        Some(ParameterValue::Text(value)) if value == "strict" => {
-                            SrcRectConstraint::Strict
-                        }
-                        _ => SrcRectConstraint::Fast,
-                    };
-                    canvas.draw_image_rect(image, Some((&source, constraint)), destination, &paint);
-                }
-                if let Some(mask) = mask_image {
-                    let mut mask_paint = Paint::default();
-                    mask_paint.set_blend_mode(skia_safe::BlendMode::DstIn);
-                    canvas.draw_image_rect(&mask, None, destination, &mask_paint);
-                    canvas.restore();
-                }
-                canvas.restore();
-                stats.image_command_count = stats.image_command_count.saturating_add(1);
-            }
-            SemanticCommandPayload::Composite {
-                operation,
-                opacity,
-                clip,
-            } => {
-                stats.composite_command_count = stats.composite_command_count.saturating_add(1);
-                validate_composite_command(&command.role, *opacity, clip.as_ref())?;
-                match operation {
-                    CompositeOperation::Marker => {}
-                    CompositeOperation::BeginIsolation => {
-                        surface.canvas().save_layer(&SaveLayerRec::default());
-                        isolation_depth = isolation_depth.saturating_add(1);
-                        stats.isolation_count = stats.isolation_count.saturating_add(1);
-                        stats.maximum_isolation_depth =
-                            stats.maximum_isolation_depth.max(isolation_depth as u64);
-                    }
-                    CompositeOperation::EndIsolation => {
-                        if isolation_depth == 0 {
-                            return Err(ProfileCompositorError::IsolationUnderflow(
-                                command.role.clone(),
-                            ));
-                        }
-                        surface.canvas().restore();
-                        isolation_depth -= 1;
-                    }
-                }
-            }
-        }
-    }
-    if isolation_depth != 0 {
-        return Err(ProfileCompositorError::UnclosedIsolation(isolation_depth));
-    }
-
-    let info = ImageInfo::new(dimensions, ColorType::RGBA8888, AlphaType::Premul, None);
-    let mut pixels = vec![0; pixel_bytes];
-    if !surface.read_pixels(&info, &mut pixels, width as usize * 4, (0, 0)) {
-        return Err(ProfileCompositorError::SkiaReference(
-            "read RGBA8 pixels".into(),
-        ));
-    }
-    stats.render_ns = elapsed_ns(started);
-    Ok(ProfileCompositorOutput {
-        schema: PROFILE_COMPOSITOR_SCHEMA.into(),
-        width,
-        height,
-        pixels,
-        stats,
-    })
-}
-
-#[cfg(feature = "skia-oracle")]
-fn skia_blend_mode(blend_mode: BlendMode) -> skia_safe::BlendMode {
-    match blend_mode {
-        BlendMode::SrcOver => skia_safe::BlendMode::SrcOver,
-        BlendMode::SrcIn => skia_safe::BlendMode::SrcIn,
-        BlendMode::DstIn => skia_safe::BlendMode::DstIn,
-        BlendMode::Multiply => skia_safe::BlendMode::Multiply,
-        BlendMode::Screen => skia_safe::BlendMode::Screen,
-        // `Add` saturates each channel, which is Skia's `Plus`.
-        BlendMode::Add => skia_safe::BlendMode::Plus,
-    }
-}
-
-#[cfg(feature = "skia-oracle")]
-fn object_width(image: &skia_safe::Image) -> f32 {
-    image.width() as f32
-}
-
-#[cfg(feature = "skia-oracle")]
-fn object_height(image: &skia_safe::Image) -> f32 {
-    image.height() as f32
-}
-
-#[cfg(feature = "skia-oracle")]
-fn uses_implicit_full_source(uv: Rect, metadata: &BTreeMap<String, ParameterValue>) -> bool {
-    let full = uv.x.to_bits() == 0.0f32.to_bits()
-        && uv.y.to_bits() == 0.0f32.to_bits()
-        && uv.width.to_bits() == 1.0f32.to_bits()
-        && uv.height.to_bits() == 1.0f32.to_bits();
-    full && !matches!(
-        metadata.get("source_constraint"),
-        Some(ParameterValue::Text(value)) if value == "fast" || value == "strict"
-    )
-}
-
-#[cfg(feature = "skia-oracle")]
-pub fn encode_profile_compositor_png(
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, ProfileCompositorError> {
-    use skia_safe::{images, AlphaType, ColorType, Data, EncodedImageFormat, ImageInfo};
-
-    let expected = canvas_bytes(width, height)?;
-    if pixels.len() != expected {
-        return Err(ProfileCompositorError::InvalidCanvas { width, height });
-    }
-    let info = ImageInfo::new(
-        (width as i32, height as i32),
-        ColorType::RGBA8888,
-        AlphaType::Premul,
-        None,
-    );
-    let image = images::raster_from_data(&info, Data::new_copy(pixels), width as usize * 4)
-        .ok_or_else(|| ProfileCompositorError::SkiaReference("create PNG image".into()))?;
-    let context: Option<&mut skia_safe::gpu::DirectContext> = None;
-    let encoded = image
-        .encode(context, EncodedImageFormat::PNG, Some(100))
-        .ok_or_else(|| ProfileCompositorError::SkiaReference("encode PNG".into()))?;
-    Ok(encoded.as_bytes().to_vec())
-}
-
 fn collect_layers(
     scene: &ResolvedProfileScene,
 ) -> Result<BTreeMap<sekai_profile_core::StableId, &LayerSource>, ProfileCompositorError> {
@@ -2451,15 +2130,6 @@ mod capture_error_tests {
                     if role == "profile-text" && actual == feature
             ));
         }
-        let error = super::text_capture_error(
-            "profile-text",
-            crate::text::TextSdfCaptureError::PerspectiveTransform,
-        );
-        assert!(matches!(
-            error,
-            super::ProfileCompositorError::SemanticSdf { role, reason }
-                if role == "profile-text" && reason == "PerspectiveTransform"
-        ));
     }
 }
 
@@ -2474,10 +2144,6 @@ fn text_capture_error(
                 feature: feature.into(),
             }
         }
-        error => ProfileCompositorError::SemanticSdf {
-            role: role.into(),
-            reason: format!("{error:?}"),
-        },
     }
 }
 
@@ -3086,14 +2752,9 @@ fn load_source_fallback_object(
     let row_bytes = usize::try_from(width)
         .ok()
         .and_then(|value| value.checked_mul(4))
-        .ok_or_else(|| {
-            ProfileCompositorError::SkiaReference(format!("fallback row overflow {}", resource.key))
-        })?;
+        .ok_or_else(|| ProfileCompositorError::InvalidObject(resource.key.clone()))?;
     if pixels.len() != row_bytes.saturating_mul(height as usize) {
-        return Err(ProfileCompositorError::SkiaReference(format!(
-            "fallback pixel size mismatch {}",
-            resource.key
-        )));
+        return Err(ProfileCompositorError::InvalidObject(resource.key.clone()));
     }
     let object_key = render_object_key_for_resource(resource);
     let pixel_sha256 = hex::encode(Sha256::digest(&pixels));
@@ -3457,9 +3118,7 @@ fn elapsed_ns(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-// The compositor's tests compare against the raster-backend oracle, so they run
-// with that backend available.
-#[cfg(all(test, feature = "skia-oracle"))]
+#[cfg(test)]
 mod tests {
     use sekai_profile_core::profile_scene::{
         ComponentControlSource, ComponentControlState, ResolvedProfileScene,
@@ -3595,6 +3254,27 @@ mod tests {
         }
     }
 
+    /// SHA-256 of the face the Live Master progress tests pin their pixels to:
+    /// `SourceHanSansSC-Medium.otf` from Source Han Sans 2.005.
+    const PROGRESS_FACE_SHA256: &str =
+        "1df61d31687d04fd2f928a3bb6ca6cd61f0e988cc267cf317f32406edbb49f70";
+
+    /// Whether the configured progress face is the one the pinned pixels were
+    /// rendered with. Without it, or with another face, the pixel checks skip.
+    fn progress_face_is_pinned() -> bool {
+        let Some(bytes) = crate::sdf::outline::load_font_bytes_for_family(
+            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        ) else {
+            eprintln!("skipping: FONT_DIR does not provide the progress face");
+            return false;
+        };
+        if hex::encode(Sha256::digest(bytes.as_slice())) != PROGRESS_FACE_SHA256 {
+            eprintln!("skipping: the progress face is not SourceHanSansSC-Medium 2.005");
+            return false;
+        }
+        true
+    }
+
     #[test]
     fn native_compositor_filters_inactive_tab_commands() {
         let layer_id = StableId(10);
@@ -3705,13 +3385,9 @@ mod tests {
         );
         let (_temp, store) = store(vec![("dummy", 1, 1, vec![0; 4])]);
         let assets = AssetStore::new(8);
-        let mut surface = skia_safe::surfaces::raster_n32_premul((2, 2)).unwrap();
-        surface.canvas().clear(skia_safe::Color::RED);
-        let encoded = surface
-            .image_snapshot()
-            .encode(None, skia_safe::EncodedImageFormat::PNG, Some(100))
-            .unwrap();
-        assets.put("missing/source".into(), encoded.as_bytes().to_vec());
+        let encoded = crate::codec::png::encode_rgba(2, 2, &[255, 0, 0, 255].repeat(4))
+            .expect("encode the source PNG");
+        assets.put("missing/source".into(), encoded);
         let mut pixels = vec![0; 16];
         let stats = render_image_commands_into(
             &scene,
@@ -3733,18 +3409,12 @@ mod tests {
         assert_eq!(stats.image_command_count, 1);
     }
 
+    /// The progress count draws as a plain anti-aliased white fill through the
+    /// FreeType raster, not through the SDF atlas: "73" at 20 px, centred on
+    /// x = 80 with its baseline at y = 30.
     #[test]
-    fn live_master_progress_uses_legacy_simple_text_pixels_without_sdf() {
-        use skia_safe::{
-            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Paint, PaintStyle, Point,
-        };
-
-        if crate::sdf::outline::load_font_bytes_for_family(
-            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
-        )
-        .is_none()
-        {
-            eprintln!("skipping: FONT_DIR does not provide the progress face");
+    fn live_master_progress_draws_simple_text_pixels_without_sdf() {
+        if !progress_face_is_pinned() {
             return;
         }
 
@@ -3794,49 +3464,28 @@ mod tests {
         )
         .unwrap();
 
-        let mut expected = vec![0; actual.len()];
-        let info = ImageInfo::new((200, 80), ColorType::RGBA8888, AlphaType::Premul, None);
-        let mut surface =
-            surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(200 * 4), None).unwrap();
-        // The reference draw resolves its face exactly as the compositor does,
-        // so this compares the recipe rather than two font lookups.
-        let typeface =
-            crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
-                .expect("the progress face is present, guarded above");
-        let font = Font::new(typeface, Some(20.0));
-        let text_width = font.measure_str("73", None).0;
-        let mut paint = Paint::default();
-        paint.set_style(PaintStyle::Fill);
-        paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-        paint.set_anti_alias(true);
-        surface.canvas().draw_str(
-            "73",
-            Point::new(80.0 - text_width / 2.0, 30.0),
-            &font,
-            &paint,
+        // White over transparency stays premultiplied white: every channel
+        // equals the coverage.
+        assert!(actual
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[0] == pixel[3] && pixel[1] == pixel[3] && pixel[2] == pixel[3]));
+        assert!(actual.iter().any(|&value| value != 0), "drew nothing");
+        assert_eq!(
+            hex::encode(Sha256::digest(&actual)),
+            "be9bb8841d6ce8748fe6b1c8e24924dd88f2aec57805b1e2082462e2e1a9c4e6"
         );
-
-        assert_eq!(actual, expected);
         assert_eq!(stats.text_command_count, 1);
         assert_eq!(stats.skipped_text_command_count, 0);
     }
 
-    /// The dependency-free digit raster must also blend exactly like the Skia
-    /// draw over content that is already on the page, not just over
-    /// transparency.
-    #[cfg(feature = "skia-oracle")]
+    /// The digit raster blends over content that is already on the page, not
+    /// just over transparency: opaque white source-over each destination
+    /// channel by the remapped coverage, at a fractional placement.
     #[test]
     fn live_master_progress_blends_exactly_over_existing_content() {
-        use skia_safe::{
-            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Paint, PaintStyle, Point,
-        };
-
-        if crate::sdf::outline::load_font_bytes_for_family(
-            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
-        )
-        .is_none()
-        {
-            eprintln!("skipping: FONT_DIR does not provide the progress face");
+        if !progress_face_is_pinned() {
             return;
         }
 
@@ -3905,58 +3554,50 @@ mod tests {
         )
         .unwrap();
 
-        let mut expected = background;
-        let info = ImageInfo::new((200, 80), ColorType::RGBA8888, AlphaType::Premul, None);
-        let mut surface =
-            surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(200 * 4), None).unwrap();
-        let typeface =
-            crate::elements::bundled_typeface(crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS)
-                .expect("progress face");
-        let font = Font::new(typeface, Some(20.0));
-        let text_width = font.measure_str("2470", None).0;
-        let mut paint = Paint::default();
-        paint.set_style(PaintStyle::Fill);
-        paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-        paint.set_anti_alias(true);
-        surface.canvas().draw_str(
-            "2470",
-            Point::new(100.7 - text_width / 2.0, 50.3 + 10.0),
-            &font,
-            &paint,
+        assert_ne!(actual, background, "drew nothing");
+        assert_eq!(
+            hex::encode(Sha256::digest(&actual)),
+            "2043606f53726ff5064d0e02ae3e02cdc08e21dd33489bf4db5143a03e60de22"
         );
-        drop(surface);
-
-        assert_eq!(actual, expected);
     }
 
-    /// A placed honor may be scaled or rotated; its digits land where the Skia
-    /// draw under the same canvas transform puts them. Axis-aligned scales that
-    /// keep whole-pixel hinting and quarter turns match it pixel for pixel;
-    /// other scales and rotations keep the same inked bounds with coverage
-    /// within a few levels.
+    /// A placed honor may be scaled or rotated, and its digits follow the
+    /// honor's transform: a fractional down-scale, whole-pixel and anisotropic
+    /// up-scales, a 30 degree rotation and a quarter turn each ink a pinned
+    /// pixel box with pinned pixels.
     #[test]
     fn live_master_progress_follows_scaled_and_rotated_honors() {
-        use skia_safe::{
-            surfaces, AlphaType, Color4f, ColorType, Font, ImageInfo, Matrix, Paint, PaintStyle,
-            Point,
-        };
-
-        if crate::sdf::outline::load_font_bytes_for_family(
-            crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
-        )
-        .is_none()
-        {
-            eprintln!("skipping: FONT_DIR does not provide the progress face");
+        if !progress_face_is_pinned() {
             return;
         }
 
         let (sin, cos) = 30f32.to_radians().sin_cos();
-        for (matrix, exact) in [
-            ([0.8, 0.0, 0.0, 0.8, 120.3, 60.6], false),
-            ([2.0, 0.0, 0.0, 2.0, 150.0, 40.0], true),
-            ([1.5, 0.0, 0.0, 0.75, 110.0, 70.0], true),
-            ([cos, sin, -sin, cos, 140.0, 60.0], false),
-            ([0.0, 1.0, -1.0, 0.0, 150.0, 60.0], true),
+        for (matrix, bounds, digest) in [
+            (
+                [0.8, 0.0, 0.0, 0.8, 120.3, 60.6],
+                (103, 57, 137, 68),
+                "82280760f6d67309701d18835534180563b11865cdbf3b4ba89ac4c3f5e67258",
+            ),
+            (
+                [2.0, 0.0, 0.0, 2.0, 150.0, 40.0],
+                (107, 30, 192, 60),
+                "b6e0ba809c3a812d9dc26d07683d6a7fdfe8093078095888408bed33cbe9e1e1",
+            ),
+            (
+                [1.5, 0.0, 0.0, 0.75, 110.0, 70.0],
+                (78, 67, 142, 77),
+                "933cc09291d5dec6bea60fc42248c18e419db78461c16b44a2804c4e7132b4bc",
+            ),
+            (
+                [cos, sin, -sin, cos, 140.0, 60.0],
+                (116, 46, 159, 77),
+                "57d1236a0e40dd17b422f5e6608f664907550399d6a610cc6170e3599730bf98",
+            ),
+            (
+                [0.0, 1.0, -1.0, 0.0, 150.0, 60.0],
+                (140, 38, 154, 81),
+                "e9a9e2e25777c02b7f69825b392e131e3c4a4b039b17fb0bcedad3ad8966fe09",
+            ),
         ] {
             let layer_id = StableId(322);
             let mut command = SemanticCommandSource::profile_text(
@@ -4004,27 +3645,6 @@ mod tests {
             )
             .unwrap();
 
-            let mut expected = vec![0; actual.len()];
-            let info = ImageInfo::new((300, 120), ColorType::RGBA8888, AlphaType::Premul, None);
-            let mut surface =
-                surfaces::wrap_pixels(&info, expected.as_mut_slice(), Some(300 * 4), None).unwrap();
-            let typeface = crate::elements::bundled_typeface(
-                crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
-            )
-            .expect("progress face");
-            let font = Font::new(typeface, Some(20.0));
-            let text_width = font.measure_str("2470", None).0;
-            let mut paint = Paint::default();
-            paint.set_style(PaintStyle::Fill);
-            paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, 1.0), None);
-            paint.set_anti_alias(true);
-            let canvas = surface.canvas();
-            canvas.concat(&Matrix::new_all(
-                matrix[0], matrix[2], matrix[4], matrix[1], matrix[3], matrix[5], 0.0, 0.0, 1.0,
-            ));
-            canvas.draw_str("2470", Point::new(-text_width / 2.0, 10.0), &font, &paint);
-            drop(surface);
-
             assert!(
                 actual.iter().any(|&value| value != 0),
                 "{matrix:?} drew nothing"
@@ -4044,18 +3664,12 @@ mod tests {
                 }
                 bounds
             };
-            assert_eq!(inked(&actual), inked(&expected), "{matrix:?}: inked bounds");
-            let largest = actual
-                .iter()
-                .zip(&expected)
-                .map(|(actual, expected)| actual.abs_diff(*expected))
-                .max()
-                .unwrap_or(0);
-            if exact {
-                assert_eq!(largest, 0, "{matrix:?}: pixels differ from Skia");
-            } else {
-                assert!(largest <= 16, "{matrix:?}: coverage differs by {largest}");
-            }
+            assert_eq!(inked(&actual), bounds, "{matrix:?}: inked bounds");
+            assert_eq!(
+                hex::encode(Sha256::digest(&actual)),
+                digest,
+                "{matrix:?}: pixels"
+            );
         }
     }
 
@@ -4227,42 +3841,12 @@ mod tests {
             3,
         )
         .expect("render");
-        assert_eq!(
-            &output.pixels[20..28],
-            &[0, 0, 255, 255, 255, 255, 255, 255]
-        );
+        // The right half of the strip (blue, white) lands one pixel right and
+        // one row down; nothing else is drawn.
+        let mut expected = vec![0u8; 4 * 3 * 4];
+        expected[20..28].copy_from_slice(&[0, 0, 255, 255, 255, 255, 255, 255]);
+        assert_eq!(output.pixels, expected);
         assert_eq!(output.stats.sampled_fragment_count, 2);
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference = render_image_scene_skia_reference(
-                &scene(
-                    test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-                    vec![image_command(
-                        "right-half-reference",
-                        layer_id,
-                        "strip",
-                        Rect {
-                            x: 0.0,
-                            y: 0.0,
-                            width: 2.0,
-                            height: 1.0,
-                        },
-                        Rect {
-                            x: 0.5,
-                            y: 0.0,
-                            width: 0.5,
-                            height: 1.0,
-                        },
-                        BlendMode::SrcOver,
-                    )],
-                ),
-                &store,
-                4,
-                3,
-            )
-            .expect("Skia reference");
-            assert_eq!(output.pixels, reference.pixels);
-        }
     }
 
     #[test]
@@ -4451,50 +4035,6 @@ mod tests {
         assert_eq!(output.pixels, vec![255, 0, 0, 255, 0, 0, 0, 0]);
         assert_eq!(output.stats.isolation_count, 1);
         assert_eq!(output.stats.maximum_isolation_depth, 1);
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference_commands = vec![
-                composite_command("begin-ref", layer_id, CompositeOperation::BeginIsolation),
-                image_command(
-                    "background-ref",
-                    layer_id,
-                    "background",
-                    bounds,
-                    Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 1.0,
-                        height: 1.0,
-                    },
-                    BlendMode::SrcOver,
-                ),
-                image_command(
-                    "mask-ref",
-                    layer_id,
-                    "mask",
-                    bounds,
-                    Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        width: 1.0,
-                        height: 1.0,
-                    },
-                    BlendMode::DstIn,
-                ),
-                composite_command("end-ref", layer_id, CompositeOperation::EndIsolation),
-            ];
-            let reference = render_image_scene_skia_reference(
-                &scene(
-                    test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
-                    reference_commands,
-                ),
-                &store,
-                2,
-                1,
-            )
-            .expect("Skia reference");
-            assert_eq!(output.pixels, reference.pixels);
-        }
     }
 
     #[test]
@@ -4522,12 +4062,11 @@ mod tests {
             image_command("clipped", layer_id, "pixel", bounds, uv, BlendMode::SrcOver);
         clipped.clip = Some([[-0.5, 0.0], [1.5, 0.0], [1.5, 1.0], [-0.5, 1.0]]);
         let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.5, 0.0]);
-        let output =
-            render_image_scene_scalar(&scene(layer.clone(), vec![clipped.clone()]), &store, 2, 1)
-                .expect("containing clip");
+        let output = render_image_scene_scalar(&scene(layer.clone(), vec![clipped]), &store, 2, 1)
+            .expect("containing clip");
         let unclipped = render_image_scene_scalar(
             &scene(
-                layer.clone(),
+                layer,
                 vec![image_command(
                     "unclipped",
                     layer_id,
@@ -4543,13 +4082,9 @@ mod tests {
         )
         .expect("unclipped");
         assert_eq!(output.pixels, unclipped.pixels);
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference =
-                render_image_scene_skia_reference(&scene(layer, vec![clipped]), &store, 2, 1)
-                    .expect("Skia reference");
-            assert_eq!(output.pixels, reference.pixels);
-        }
+        // The image spans x 0.75..1.75, which holds only the second pixel's
+        // centre.
+        assert_eq!(output.pixels, vec![0, 0, 0, 0, 255, 255, 255, 255]);
     }
 
     /// An alpha mask scales the source's coverage, which is what a `DstIn` draw
@@ -4637,18 +4172,10 @@ mod tests {
             key: "half".into(),
         });
         let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        let output =
-            render_image_scene_scalar(&scene(layer.clone(), vec![command.clone()]), &store, 1, 1)
-                .expect("partial mask");
+        let output = render_image_scene_scalar(&scene(layer, vec![command]), &store, 1, 1)
+            .expect("partial mask");
         // round(255 * 128 / 255) on every channel, alpha included.
         assert_eq!(output.pixels, vec![128, 128, 128, 128]);
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference =
-                render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 1, 1)
-                    .expect("Skia reference");
-            assert_eq!(output.pixels, reference.pixels);
-        }
     }
 
     /// A shape command's blend mode is honoured rather than assumed to be
@@ -5005,17 +4532,23 @@ mod tests {
         }
     }
 
-    /// Multiply, Screen and Add are separable modes the command contract has
-    /// always declared. They are checked against Skia over semi-transparent
-    /// input, where a formula written for non-premultiplied colour would differ.
+    /// Multiply, Screen and Add are the separable modes the command contract
+    /// declares. On premultiplied channels Multiply is
+    /// `s·(1 − da) + d·(1 − sa) + s·d`, Screen is `s + d − s·d` and Add is a
+    /// saturating sum. The semi-transparent input is where a formula written
+    /// for non-premultiplied colour would differ.
     #[test]
-    fn separable_blend_modes_match_skia_over_semi_transparent_pixels() {
+    fn separable_blend_modes_over_semi_transparent_pixels() {
         // The store requires strictly increasing keys.
         let (_temp, store) = store(vec![
             ("texture:assets/over", 1, 1, vec![64, 200, 128, 144]),
             ("texture:assets/under", 1, 1, vec![160, 96, 32, 200]),
         ]);
-        for blend_mode in [BlendMode::Multiply, BlendMode::Screen, BlendMode::Add] {
+        for (blend_mode, expected) in [
+            (BlendMode::Multiply, [124, 160, 58, 231]),
+            (BlendMode::Screen, [184, 221, 144, 231]),
+            (BlendMode::Add, [224, 255, 160, 255]),
+        ] {
             let layer_id = StableId::derive("layer", b"separable");
             let unit = Rect {
                 x: 0.0,
@@ -5028,16 +4561,9 @@ mod tests {
                 image_command("over", layer_id, "over", unit, unit, blend_mode),
             ];
             let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-            let scalar =
-                render_image_scene_scalar(&scene(layer.clone(), commands.clone()), &store, 1, 1)
-                    .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
-            #[cfg(feature = "skia-oracle")]
-            {
-                let reference =
-                    render_image_scene_skia_reference(&scene(layer, commands), &store, 1, 1)
-                        .unwrap_or_else(|error| panic!("{blend_mode:?} reference: {error}"));
-                assert_eq!(scalar.pixels, reference.pixels, "{blend_mode:?}");
-            }
+            let scalar = render_image_scene_scalar(&scene(layer, commands), &store, 1, 1)
+                .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
+            assert_eq!(scalar.pixels, expected, "{blend_mode:?}");
         }
     }
 
@@ -5058,8 +4584,11 @@ mod tests {
         }
     }
 
+    /// An axis-aligned clip is hard-edged: a pixel draws only when its centre
+    /// lies inside the clip, so a clip over 49% of the pixel leaves it
+    /// untouched.
     #[test]
-    fn partial_axis_aligned_clip_matches_skia() {
+    fn partial_axis_aligned_clip_keeps_only_covered_pixel_centres() {
         let (_temp, store) = store(vec![(
             "texture:assets/pixel",
             1,
@@ -5087,33 +4616,16 @@ mod tests {
         );
         command.clip = Some([[0.0, 0.0], [0.49, 0.0], [0.49, 1.0], [0.0, 1.0]]);
         let layer = test_layer(layer_id, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        let output =
-            render_image_scene_scalar(&scene(layer.clone(), vec![command.clone()]), &store, 1, 1)
-                .expect("partial axis-aligned clip");
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference =
-                render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 1, 1)
-                    .expect("Skia reference");
-            assert_eq!(output.pixels, reference.pixels);
-        }
+        let output = render_image_scene_scalar(&scene(layer, vec![command]), &store, 1, 1)
+            .expect("partial axis-aligned clip");
+        assert_eq!(output.pixels, vec![0, 0, 0, 0]);
     }
 
-    /// The recipes declare avatar ellipse clips anti-aliased, and Skia's
-    /// anti-aliased scan conversion produces fractional edge coverage of the
-    /// quad-approximated oval. The native compositor currently renders a hard
-    /// edge, so every pixel Skia leaves partially covered differs. This pins
-    /// the divergence so a future coverage implementation must revisit it
-    /// deliberately; nothing in the byte-exact page corpus reaches this path.
-    #[cfg(feature = "skia-oracle")]
+    /// An ellipse image clip is hard-edged: a pixel draws in full when its
+    /// centre lies inside the ellipse and not at all otherwise, with no
+    /// fractional edge coverage.
     #[test]
-    fn ellipse_image_clip_differs_from_the_antialiased_reference_only_at_edges() {
-        if !packet_simd_available() {
-            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
-            return;
-        }
-        use skia_safe::{surfaces, AlphaType, Color, ColorType, ImageInfo, Paint, Rect as SkRect};
-
+    fn ellipse_image_clip_has_a_hard_edge() {
         let (_temp, store) = store(vec![(
             "texture:assets/pixel",
             1,
@@ -5147,50 +4659,36 @@ mod tests {
         let output = render_image_scene_scalar(&scene(layer, vec![command]), &store, 8, 8)
             .expect("ellipse clip");
 
-        // Anti-aliased oval clip, exactly as apply_general_clips issues it.
-        let mut surface = surfaces::raster_n32_premul((8, 8)).expect("surface");
-        let canvas = surface.canvas();
-        canvas.clear(Color::TRANSPARENT);
-        let mut builder = skia_safe::PathBuilder::new();
-        builder.add_oval(SkRect::from_xywh(0.0, 0.0, 8.0, 8.0), None, None);
-        canvas.clip_path(&builder.detach(), skia_safe::ClipOp::Intersect, true);
-        let mut paint = Paint::default();
-        paint.set_color(Color::WHITE);
-        paint.set_anti_alias(false);
-        canvas.draw_rect(SkRect::from_xywh(0.0, 0.0, 8.0, 8.0), &paint);
-        let info = ImageInfo::new((8, 8), ColorType::RGBA8888, AlphaType::Premul, None);
-        let mut reference = vec![0u8; 8 * 8 * 4];
-        surface.read_pixels(&info, &mut reference, 32, (0, 0));
-
-        let mut interior_diffs = 0usize;
-        let mut edge_diffs = 0usize;
-        for (actual, expected) in output.pixels.chunks_exact(4).zip(reference.chunks_exact(4)) {
-            if actual == expected {
-                continue;
-            }
-            // A partially covered reference pixel is an anti-aliased edge.
-            if expected[3] > 0 && expected[3] < 255 {
-                edge_diffs += 1;
-            } else {
-                interior_diffs += 1;
+        let mask = [
+            "..####..", ".######.", "########", "########", "########", "########", ".######.",
+            "..####..",
+        ];
+        for (y, row) in mask.iter().enumerate() {
+            for (x, cell) in row.bytes().enumerate() {
+                let (dx, dy) = ((x as f32 + 0.5 - 4.0) / 4.0, (y as f32 + 0.5 - 4.0) / 4.0);
+                assert_eq!(
+                    cell == b'#',
+                    dx * dx + dy * dy < 1.0,
+                    "pixel ({x}, {y}) centre"
+                );
             }
         }
-        assert_eq!(
-            interior_diffs, 0,
-            "fully covered and fully clipped pixels must already agree"
-        );
-        assert!(
-            edge_diffs > 0,
-            "the divergence is real; if this reaches zero the hard edge was replaced"
-        );
+        assert_eq!(output.pixels, mask_pixels(&mask));
     }
 
+    /// Expands rows of `#` (opaque white) and `.` (transparent) into
+    /// premultiplied RGBA8.
+    fn mask_pixels(rows: &[&str]) -> Vec<u8> {
+        rows.iter()
+            .flat_map(|row| row.bytes())
+            .flat_map(|cell| if cell == b'#' { [255u8; 4] } else { [0; 4] })
+            .collect()
+    }
+
+    /// On a 4x4 ellipse the four corner pixels have their centres outside the
+    /// ellipse and are dropped, symmetrically, by both executors.
     #[test]
-    fn ellipse_image_clip_has_only_the_known_skia_edge_tie_difference() {
-        if !packet_simd_available() {
-            eprintln!("skipping: this host has no AVX-512F+BW packet executor");
-            return;
-        }
+    fn ellipse_image_clip_drops_the_corner_pixels_on_both_executors() {
         let (_temp, store) = store(vec![(
             "texture:assets/pixel",
             1,
@@ -5224,24 +4722,17 @@ mod tests {
         let output =
             render_image_scene_scalar(&scene(layer.clone(), vec![command.clone()]), &store, 4, 4)
                 .expect("ellipse clip");
-        let simd =
-            render_image_scene_simd(&scene(layer.clone(), vec![command.clone()]), &store, 4, 4)
-                .expect("SIMD ellipse clip");
-        assert_eq!(simd.pixels, output.pixels);
-        assert_eq!(&output.pixels[0..4], &[0, 0, 0, 0]);
-        #[cfg(feature = "skia-oracle")]
-        {
-            let reference =
-                render_image_scene_skia_reference(&scene(layer, vec![command]), &store, 4, 4)
-                    .expect("Skia reference");
-            let different_pixels = output
-                .pixels
-                .chunks_exact(4)
-                .zip(reference.pixels.chunks_exact(4))
-                .filter(|(actual, expected)| actual != expected)
-                .count();
-            assert_eq!(different_pixels, 2, "only Skia's aliased edge ties differ");
+        assert_eq!(
+            output.pixels,
+            mask_pixels(&[".##.", "####", "####", ".##."])
+        );
+        if !packet_simd_available() {
+            eprintln!("skipping the packet executor: this host has no AVX-512F+BW");
+            return;
         }
+        let simd = render_image_scene_simd(&scene(layer, vec![command]), &store, 4, 4)
+            .expect("SIMD ellipse clip");
+        assert_eq!(simd.pixels, output.pixels);
     }
 
     #[test]
@@ -5380,8 +4871,8 @@ mod tests {
     }
 }
 
-// Executor, cache-variant and clip coverage that needs no raster-backend
-// oracle, so it also runs in builds without one.
+// Executor, cache-variant, clip and lit-badge coverage over the scene entry
+// points.
 #[cfg(test)]
 mod software_tests {
     use std::sync::Arc;

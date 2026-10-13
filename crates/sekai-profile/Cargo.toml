@@ -18,7 +18,6 @@ memmap2 = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 rayon = { version = "1.11", optional = true }
-skia-safe = { version = "0.97", optional = true }
 # The text engine: glyph outlines, metrics and SDF generation. Independent of
 # any raster backend.
 freetype-rs = { version = "0.38" }
@@ -43,9 +42,6 @@ features = ["jpeg-turbo"]
 
 [features]
 default = []
-# Skia as a comparison oracle: the reference compositor and the parity tests
-# that pin the native pipeline against it. Rendering never requires it.
-skia-oracle = ["dep:skia-safe"]
 # Bundled FreeType C sources for hosts without pkg-config.
 bundled-freetype = ["freetype-rs/bundled"]
 # Vendored libjpeg-turbo plus the raw-YUV encoder used by profile backends.
@@ -55,50 +51,20 @@ parallel = ["dep:rayon"]
 # Animation encoders. Layer rasterization runs through the ordered SDF path
 # selected by the profile backend config.
 animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
-dev = ["skia-oracle", "parallel", "dep:tracing-subscriber"]
+# Diagnostics for the SDF generators (`compare_sdf`).
+dev = ["dep:tracing-subscriber"]
 
 [[example]]
 name = "compare_sdf"
 required-features = ["dev"]
 
-[[example]]
-name = "render_bonds_honor"
-required-features = ["dev"]
-
-[[bin]]
-name = "calibrate-text"
-path = "tools/calibrate_text.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "check-fonts"
-path = "tools/check_fonts.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "font-metric-parity"
-path = "tools/font_metric_parity.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "png-parity"
-path = "tools/png_parity.rs"
-required-features = ["dev"]
-
 [[bin]]
 name = "dump-outline-sdf"
 path = "tools/dump_outline_sdf.rs"
-required-features = ["dev"]
-
-[[bin]]
-name = "skia-unpremul-table"
-path = "tools/skia_unpremul_table.rs"
-required-features = ["dev"]
 
 [[bin]]
 name = "build-sdf-atlas"
 path = "tools/build_sdf_atlas.rs"
-required-features = ["dev"]
 
 [[bin]]
 name = "build-shape-sdf-atlas"
@@ -107,7 +73,6 @@ path = "tools/build_shape_sdf_atlas.rs"
 [[bin]]
 name = "build-render-object-store"
 path = "tools/build_render_object_store.rs"
-required-features = ["dev"]
 
 [[example]]
 name = "ordered_pages"

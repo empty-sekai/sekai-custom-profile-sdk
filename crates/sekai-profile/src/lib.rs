@@ -4,12 +4,13 @@
 //!
 //! ## Render path
 //! Profile JSON → `types::CustomProfileCard` → `elements::flatten_and_sort()` orders
-//! elements by layer → each element is drawn through the raster backend.
+//! elements by layer → each element is lowered to ordered commands and drawn by
+//! the CPU compositor.
 //!
 //! ## Modules
 //! - `profile`: player data model
 //! - `init`: startup initialization (font installation)
-//! - `assets`: decoded asset cache
+//! - `assets`: encoded asset cache, decoded on demand
 //! - `semantic_resolve` / `profile_compositor`: backend-neutral command lowering and compositing
 
 #![deny(clippy::unwrap_used)]
