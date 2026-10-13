@@ -1,8 +1,25 @@
+#[cfg(all(feature = "animation-export", target_arch = "x86_64"))]
+use super::animation_layer::find_opaque_bounds_avx512;
+#[cfg(feature = "animation-export")]
+use super::animation_layer::{
+    animation_sdf_retained_surface_bytes, crop_pixels_lossless, find_opaque_bounds,
+    find_opaque_bounds_scalar,
+};
+use super::authored::resolve_native_profile_scene;
+use super::capture::{
+    align_substituted_text_sdf_command, captured_text_sdf_glyph_is_invisible,
+    sdf_command_device_magnification, TextSdfSamplingGrid,
+};
+use super::fallback::extend_profile_fallback_codepoints;
+use super::realtime_edt::{realtime_edt_request_key, realtime_edt_sampling_spread};
 use super::*;
 use crate::masterdata::{
     CollectionResourceType, MasterDataProvider, OmikujiRow, ResolvedColor, ResolvedHonor,
     ResourceInfo,
 };
+use crate::output::RenderedPage;
+#[cfg(feature = "animation-export")]
+use crate::render_config::Executor;
 use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
 
 #[test]
@@ -221,24 +238,28 @@ fn substituted_text_tier_preserves_primary_sample_grid() {
     assert_eq!(aligned.atlas_rect, target_glyph.rect);
 }
 
+#[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_short_row_stride() {
     let result = crop_pixels_lossless(&[0; 16], 12, 4, 1, 0, 0, 1, 1);
     assert!(matches!(result, Err(_)));
 }
 
+#[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_out_of_bounds_rect() {
     let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 4, 0, 1, 1);
     assert!(matches!(result, Err(_)));
 }
 
+#[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_zero_sized_rect() {
     let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 0, 0, 0, 1);
     assert!(matches!(result, Err(_)));
 }
 
+#[cfg(feature = "animation-export")]
 #[test]
 fn direct_opaque_bounds_match_scalar_and_vector_paths() {
     let surface_width = 4u32;
