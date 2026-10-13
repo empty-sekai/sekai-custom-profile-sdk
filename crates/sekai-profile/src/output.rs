@@ -115,6 +115,7 @@ impl Default for JpegOptions {
 }
 
 impl JpegOptions {
+    #[cfg(feature = "jpeg-turbo")]
     pub(crate) fn validate(&self) -> Result<(), String> {
         if !(1..=100).contains(&self.quality) {
             return Err(format!(
