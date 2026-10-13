@@ -103,7 +103,9 @@ fn rgba_delta_rect(
     let mut max_y = 0;
     let mut changed = false;
     for (index, (before, after)) in previous
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .zip(current.chunks_exact(4))
         .enumerate()
     {

@@ -56,7 +56,13 @@ impl GifPaletteLookup {
     }
 
     pub(in crate::animation) fn set_palette(&mut self, palette: &[u8]) {
-        for (index, color) in palette.chunks_exact(3).take(self.active_colors).enumerate() {
+        for (index, color) in palette
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .take(self.active_colors)
+            .enumerate()
+        {
             self.palette_r[index] = color[0] as u32;
             self.palette_g[index] = color[1] as u32;
             self.palette_b[index] = color[2] as u32;
@@ -253,7 +259,9 @@ where
         let pixel_count = rgba.len() / 4;
         let stride = pixel_count.div_ceil(pixels_per_frame).max(1);
         quantization_pixels.extend(
-            rgba.chunks_exact(4)
+            rgba.as_chunks::<4>()
+                .0
+                .iter()
                 .step_by(stride)
                 .take(pixels_per_frame)
                 .flatten()
@@ -305,7 +313,13 @@ where
     let mut palette_lookup = GifPaletteLookup::new(lookup_budget, active_colors);
     palette_lookup.set_palette(&palette);
     let palette_lookup_bytes = palette_lookup.heap_bytes();
-    for (index, color) in palette.chunks_exact(3).take(active_colors).enumerate() {
+    for (index, color) in palette
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .take(active_colors)
+        .enumerate()
+    {
         let key = rgb_key(color);
         if palette_lookup.get(key).is_none() {
             palette_lookup.insert(key, index as u8);
@@ -595,7 +609,7 @@ fn gif_quantizer_speed(quality: u8) -> i32 {
 
 fn build_gif_palette(samples: &mut [u8], speed: i32) -> Vec<u8> {
     let mut exact = std::collections::BTreeSet::new();
-    for pixel in samples.chunks_exact_mut(4) {
+    for pixel in samples.as_chunks_mut::<4>().0 {
         if pixel[3] == 0 {
             continue;
         }
@@ -612,7 +626,7 @@ fn build_gif_palette(samples: &mut [u8], speed: i32) -> Vec<u8> {
     // GIF only supports one-bit transparency. Palette training therefore uses
     // opaque RGB samples and reserves the 256th table entry for transparent
     // delta pixels instead of spending color capacity on alpha shades.
-    for pixel in samples.chunks_exact_mut(4) {
+    for pixel in samples.as_chunks_mut::<4>().0 {
         pixel[3] = 255;
     }
     color_quant::NeuQuant::new(speed, 255, samples).color_map_rgb()
@@ -685,7 +699,9 @@ pub(in crate::animation) fn gif_changed_bounds_scalar(
     let mut max_x = 0;
     let mut max_y = 0;
     for (index, (before, after)) in previous
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .zip(current.chunks_exact(4))
         .enumerate()
     {
@@ -773,7 +789,9 @@ fn index_gif_pixels(rgba: &[u8], palette: &[u8], palette_lookup: &mut GifPalette
         // contract and the kernel handles its non-ZMM tail separately.
         return unsafe { index_gif_pixels_avx512(rgba, palette, palette_lookup) };
     }
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| nearest_gif_palette_index(pixel, palette, palette_lookup))
         .collect()
 }
@@ -829,7 +847,9 @@ unsafe fn index_gif_pixels_avx512(
         if missing != 0 {
             let mut best_distances = _mm512_set1_epi32(i32::MAX);
             for (index, color) in palette
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .take(palette_lookup.active_colors)
                 .enumerate()
             {
@@ -908,7 +928,13 @@ pub(in crate::animation) fn nearest_gif_palette_index_scalar(
 ) -> u8 {
     let mut best_index = 0u8;
     let mut best_distance = u32::MAX;
-    for (index, color) in palette.chunks_exact(3).take(active_colors).enumerate() {
+    for (index, color) in palette
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .take(active_colors)
+        .enumerate()
+    {
         let dr = pixel[0] as i32 - color[0] as i32;
         let dg = pixel[1] as i32 - color[1] as i32;
         let db = pixel[2] as i32 - color[2] as i32;

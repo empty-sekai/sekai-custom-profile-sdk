@@ -19,7 +19,8 @@ pub(super) fn animation_loop_period_ticks(
             .checked_div(divisor)?
             .checked_mul(timeline.period_ticks)?;
     }
-    (common_period <= maximum_tick && maximum_tick % common_period == 0).then_some(common_period)
+    (common_period <= maximum_tick && maximum_tick.is_multiple_of(common_period))
+        .then_some(common_period)
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {

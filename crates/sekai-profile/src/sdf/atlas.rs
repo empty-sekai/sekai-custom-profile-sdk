@@ -41,7 +41,7 @@ pub(crate) fn prewarm_mapped_page(bytes: &[u8], report: &mut SdfAtlasPrewarmRepo
         report.checksum = report.checksum.rotate_left(1) ^ u64::from(*value);
         report.page_touch_count = report.page_touch_count.saturating_add(1);
     }
-    if bytes.len() > 1 && (bytes.len() - 1) % SDF_PREWARM_PAGE_STRIDE != 0 {
+    if bytes.len() > 1 && !(bytes.len() - 1).is_multiple_of(SDF_PREWARM_PAGE_STRIDE) {
         report.checksum = report.checksum.rotate_left(1) ^ u64::from(bytes[bytes.len() - 1]);
     }
 }

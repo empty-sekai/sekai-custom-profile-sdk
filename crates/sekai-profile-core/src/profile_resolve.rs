@@ -440,7 +440,7 @@ fn prepare_profile_inner(
     let layer_matrices = scene
         .layers
         .iter()
-        .map(|layer| (layer.id.clone(), layer.matrix))
+        .map(|layer| (layer.id, layer.matrix))
         .collect::<BTreeMap<_, _>>();
     let source_keys = ordered_profile_elements(card, document_key)
         .into_iter()

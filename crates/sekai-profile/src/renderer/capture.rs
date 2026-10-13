@@ -535,9 +535,7 @@ pub(super) fn map_captured_sdf_commands(
     let generated = requests.iter().map(generate).collect::<Vec<_>>();
 
     let runtime_set = u16::try_from(text_atlases.len() + usize::from(shape_atlas.is_some())).ok();
-    let pages = runtime_text_pages
-        .as_deref_mut()
-        .expect("runtime pages were checked before collecting requests");
+    let pages = runtime_text_pages.expect("runtime pages were checked before collecting requests");
     let mut runtime_requests = (0..requests.len())
         .map(|_| None)
         .collect::<Vec<Option<RuntimeRequest>>>();
@@ -639,7 +637,7 @@ pub(super) fn map_captured_sdf_commands(
             }
         }
     }
-    if let Some(records) = realtime_edt_telemetry.as_deref_mut() {
+    if let Some(records) = realtime_edt_telemetry {
         for (request_index, runtime) in runtime_requests.iter().enumerate() {
             let Some(runtime) = runtime else {
                 continue;
@@ -662,7 +660,7 @@ pub(super) fn map_captured_sdf_commands(
         }
     }
     batch.batch_wall_ns = elapsed_ns(batch_started);
-    if let Some(report) = realtime_edt_batch_telemetry.as_deref_mut() {
+    if let Some(report) = realtime_edt_batch_telemetry {
         report.accumulate(&batch);
     }
     Ok(commands)

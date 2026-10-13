@@ -138,7 +138,7 @@ pub fn wrap_static_png(
     // premultiplied space, so premultiply on the way in and recover on the way
     // out.
     let mut source = decoded.pixels;
-    for pixel in source.chunks_exact_mut(4) {
+    for pixel in source.as_chunks_mut::<4>().0 {
         let alpha = pixel[3];
         for channel in 0..3 {
             pixel[channel] = crate::codec::premultiply_channel(pixel[channel], alpha);

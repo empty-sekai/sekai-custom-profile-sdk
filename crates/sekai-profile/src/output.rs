@@ -73,7 +73,7 @@ impl RenderedPage {
 
 /// Straightens premultiplied RGBA8 in place with the engine's rounding.
 fn unpremultiply(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = pixel[3];
         if alpha != 0 && alpha != u8::MAX {
             for channel in &mut pixel[..3] {

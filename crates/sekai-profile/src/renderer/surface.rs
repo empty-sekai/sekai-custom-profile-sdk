@@ -628,7 +628,7 @@ fn fill_premultiplied_clear(pixels: &mut [u8], clear: [u8; 4]) {
         crate::codec::premultiply_channel(clear[2], alpha),
         alpha,
     ];
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.copy_from_slice(&premultiplied);
     }
 }

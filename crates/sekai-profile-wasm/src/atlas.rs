@@ -438,7 +438,7 @@ fn prepare_row(page: &mut AtlasPage, glyph_width: usize, page_width: usize) {
 }
 
 thread_local! {
-    static ATLASES: RefCell<BTreeMap<u32, AtlasSession>> = RefCell::new(BTreeMap::new());
+    static ATLASES: RefCell<BTreeMap<u32, AtlasSession>> = const { RefCell::new(BTreeMap::new()) };
     static NEXT_HANDLE: RefCell<u32> = const { RefCell::new(1) };
 }
 

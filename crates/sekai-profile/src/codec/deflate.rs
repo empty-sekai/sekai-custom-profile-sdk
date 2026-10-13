@@ -313,7 +313,7 @@ fn code_lengths(frequencies: &[u32], limit: u8) -> Vec<u8> {
         }
         for frequency in scaled.iter_mut() {
             if *frequency > 1 {
-                *frequency = (*frequency + 1) / 2;
+                *frequency = (*frequency).div_ceil(2);
             }
         }
     }

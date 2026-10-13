@@ -107,7 +107,7 @@ impl SdfTilePlan {
             });
         }
         if let SdfDestination::Clear(clear) = destination {
-            for pixel in output.chunks_exact_mut(4) {
+            for pixel in output.as_chunks_mut::<4>().0 {
                 pixel.copy_from_slice(&clear);
             }
         }
@@ -319,7 +319,7 @@ impl SdfTilePlan {
             }
             // SAFETY: every target feature required by the implementation was
             // checked immediately above; page bounds remain checked in Rust.
-            return unsafe {
+            unsafe {
                 simd_x86::execute(
                     self,
                     atlas,
@@ -327,7 +327,7 @@ impl SdfTilePlan {
                     output,
                     accumulation,
                 )
-            };
+            }
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -352,7 +352,7 @@ impl SdfTilePlan {
             {
                 return Err(SdfTileError::SimdUnavailable);
             }
-            return unsafe {
+            unsafe {
                 simd_x86::execute(
                     self,
                     atlas,
@@ -360,7 +360,7 @@ impl SdfTilePlan {
                     output,
                     SdfAccumulationMode::F32Tile,
                 )
-            };
+            }
         }
         #[cfg(not(target_arch = "x86_64"))]
         {

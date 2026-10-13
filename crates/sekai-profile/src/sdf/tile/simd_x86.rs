@@ -51,7 +51,7 @@ pub(super) unsafe fn execute(
         return execute_axis_shape_direct_over(plan, output);
     }
     if let SdfDestination::Clear(clear) = destination {
-        for pixel in output.chunks_exact_mut(4) {
+        for pixel in output.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&clear);
         }
     }
@@ -491,7 +491,10 @@ fn validate_page(command: &PlannedCommand, page: SdfSwizzledPage<'_>) -> Result<
         })
         .and_then(|texels| texels.checked_mul(channels))
         .ok_or(SdfTileError::SizeOverflow)?;
-    if page.width % 8 != 0 || page.height % 8 != 0 || page.payload.len() != expected_bytes {
+    if !page.width.is_multiple_of(8)
+        || !page.height.is_multiple_of(8)
+        || page.payload.len() != expected_bytes
+    {
         return Err(SdfTileError::SimdAtlasUnavailable {
             atlas_set: command.source.atlas_set,
             page: command.source.atlas_page,

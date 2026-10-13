@@ -330,13 +330,12 @@ pub(super) fn raster_image_command(
             #[cfg(target_arch = "x86_64")]
             if affine_packet_blend {
                 let destination_offset = ((y as usize * canvas_width as usize) + x as usize) * 4;
-                let destination_packet =
-                    destination.get_mut(destination_offset..).ok_or_else(|| {
-                        ProfileCompositorError::InvalidCanvas {
-                            width: canvas_width,
-                            height: canvas_height,
-                        }
-                    })?;
+                let destination_packet = destination.get_mut(destination_offset..).ok_or({
+                    ProfileCompositorError::InvalidCanvas {
+                        width: canvas_width,
+                        height: canvas_height,
+                    }
+                })?;
                 let active_mask = unsafe {
                     simd_x86::sample_affine_and_blend_rgba8_packet(
                         destination_packet.as_mut_ptr(),
@@ -408,13 +407,12 @@ pub(super) fn raster_image_command(
             let active_fragments = u64::from(active_mask.count_ones());
             if active_mask != 0 && packet_blend {
                 let destination_offset = ((y as usize * canvas_width as usize) + x as usize) * 4;
-                let destination_packet =
-                    destination.get_mut(destination_offset..).ok_or_else(|| {
-                        ProfileCompositorError::InvalidCanvas {
-                            width: canvas_width,
-                            height: canvas_height,
-                        }
-                    })?;
+                let destination_packet = destination.get_mut(destination_offset..).ok_or({
+                    ProfileCompositorError::InvalidCanvas {
+                        width: canvas_width,
+                        height: canvas_height,
+                    }
+                })?;
                 #[cfg(target_arch = "x86_64")]
                 unsafe {
                     simd_x86::blend_rgba8_packet(
@@ -435,7 +433,7 @@ pub(super) fn raster_image_command(
                         ((y as usize * canvas_width as usize) + packet_x as usize) * 4;
                     let destination_pixel = destination
                         .get_mut(destination_offset..destination_offset + 4)
-                        .ok_or_else(|| ProfileCompositorError::InvalidCanvas {
+                        .ok_or(ProfileCompositorError::InvalidCanvas {
                             width: canvas_width,
                             height: canvas_height,
                         })?;

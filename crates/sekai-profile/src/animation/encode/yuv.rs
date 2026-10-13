@@ -22,7 +22,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
     config: &H264EncoderConfig,
     yuv: &mut Vec<u8>,
 ) -> Result<(), String> {
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err("YUV420 conversion requires positive even dimensions".into());
     }
     let pixels = width as usize * height as usize;
@@ -73,7 +73,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
     config: &H264EncoderConfig,
     yuv: &mut Vec<u8>,
 ) -> Result<(), String> {
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err("YUV420 macroblock conversion requires positive even dimensions".into());
     }
     let pixels = width as usize * height as usize;

@@ -161,19 +161,15 @@ pub struct ResourceKey {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BlendMode {
+    #[default]
     SrcOver,
     SrcIn,
     DstIn,
     Multiply,
     Screen,
     Add,
-}
-
-impl Default for BlendMode {
-    fn default() -> Self {
-        Self::SrcOver
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Encode, Decode)]

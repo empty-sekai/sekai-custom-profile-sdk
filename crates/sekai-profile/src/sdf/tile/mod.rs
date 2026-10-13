@@ -138,7 +138,7 @@ impl PixelOcclusionMask {
         }
 
         let mut newly_opaque = 0u64;
-        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
             if pixel[3] != u8::MAX {
                 continue;
             }

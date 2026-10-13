@@ -729,7 +729,7 @@ impl RenderObjectStoreWriter {
             || object.width == 0
             || object.height == 0
             || object.row_bytes < object.width.saturating_mul(4)
-            || object.row_bytes % 4 != 0
+            || !object.row_bytes.is_multiple_of(4)
         {
             return Err(RenderObjectError::Invalid(format!(
                 "invalid object input {}",

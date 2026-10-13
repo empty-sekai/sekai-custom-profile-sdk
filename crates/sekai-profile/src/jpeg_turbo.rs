@@ -116,7 +116,7 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
             rgba.len()
         ));
     }
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(format!(
             "AVX-512 JPEG YUV420 requires positive even dimensions, got {width}x{height}"
         ));
@@ -213,7 +213,7 @@ impl Yuv420Buffer<'_> {
 }
 
 pub fn yuv420_scratch_len(width: u32, height: u32) -> Result<usize, String> {
-    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+    if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(format!(
             "JPEG YUV420 scratch requires positive even dimensions, got {width}x{height}"
         ));

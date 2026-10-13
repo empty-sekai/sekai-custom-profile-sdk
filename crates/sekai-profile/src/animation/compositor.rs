@@ -76,7 +76,7 @@ fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
     for y in rect.top..rect.bottom {
         let start = y as usize * row_bytes + rect.left as usize * 4;
         let end = start + (rect.right - rect.left) as usize * 4;
-        for pixel in canvas[start..end].chunks_exact_mut(4) {
+        for pixel in canvas[start..end].as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&WHITE);
         }
     }
@@ -663,7 +663,12 @@ pub(super) fn read_canvas_rgba_into(
     if rgba.len() != required || canvas.len() != required {
         return Err("animation frame RGBA buffer has the wrong length".into());
     }
-    for (source, destination) in canvas.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+    for (source, destination) in canvas
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgba.chunks_exact_mut(4))
+    {
         unpremultiply_pixel(source, destination);
     }
     Ok(())
@@ -772,7 +777,9 @@ pub(super) fn mark_changed_macroblocks_for_region(
     let region_width = (region.right - region.left) as usize;
     let region_height = (region.bottom - region.top) as usize;
     let packed_row_bytes = region_width * 4;
-    if rgba.len() % row_bytes != 0 || packed_region.len() != packed_row_bytes * region_height {
+    if !rgba.len().is_multiple_of(row_bytes)
+        || packed_region.len() != packed_row_bytes * region_height
+    {
         return Err("invalid exact dirty-region buffers".into());
     }
     let mb_width = width.div_ceil(16);

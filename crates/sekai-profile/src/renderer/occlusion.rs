@@ -77,7 +77,12 @@ pub(super) fn build_pixel_occlusion_dry_run(
             continue;
         }
         eligible_image_count = eligible_image_count.saturating_add(1);
-        if scratch.chunks_exact(4).any(|pixel| pixel[3] == u8::MAX) {
+        if scratch
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel[3] == u8::MAX)
+        {
             Arc::make_mut(&mut opaque_above)
                 .union_opaque_rgba8(&scratch)
                 .map_err(|error| error.to_string())?;

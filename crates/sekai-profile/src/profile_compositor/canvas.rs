@@ -42,7 +42,7 @@ impl Image {
             return Err("invalid or oversized image".into());
         }
         let source = hex::encode(Sha256::digest(&pixels));
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             for c in 0..3 {
                 pixel[c] = codec::premultiply_channel(pixel[c], pixel[3]);
             }
@@ -93,7 +93,7 @@ impl Canvas {
             clear[3],
         ];
         let mut pixels = vec![0; len];
-        for p in pixels.chunks_exact_mut(4) {
+        for p in pixels.as_chunks_mut::<4>().0 {
             p.copy_from_slice(&color)
         }
         Ok(Self {
@@ -239,7 +239,7 @@ impl Canvas {
     }
     pub fn encode_png(&self) -> Result<Vec<u8>, String> {
         let mut rgba = self.pixels.clone();
-        for p in rgba.chunks_exact_mut(4) {
+        for p in rgba.as_chunks_mut::<4>().0 {
             for c in 0..3 {
                 p[c] = codec::unpremultiply_channel(p[c], p[3]);
             }

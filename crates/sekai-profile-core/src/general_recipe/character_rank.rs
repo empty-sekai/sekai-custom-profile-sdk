@@ -328,7 +328,7 @@ pub(super) fn build_character_rank_recipe(
                 ]),
             ));
         }
-        if slot % 4 != 0 {
+        if !slot.is_multiple_of(4) {
             slot = (slot / 4 + 1) * 4;
         }
     }

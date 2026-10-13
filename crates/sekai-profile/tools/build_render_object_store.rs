@@ -1250,7 +1250,7 @@ fn run_compiled_report(args: &[String]) -> Result<(), String> {
         decoded_bytes = decoded_bytes.saturating_add(decoded.pixels.len() as u64);
         writer
             .add(RenderObjectWrite {
-                key: &render_object_key,
+                key: render_object_key,
                 kind: RenderObjectKind::Texture,
                 source_sha256: &decoded.source_sha256,
                 width: decoded.width,

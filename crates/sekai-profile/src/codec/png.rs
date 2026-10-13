@@ -183,7 +183,12 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
                 if body.len() % 3 != 0 {
                     return Err(CodecError::Format("PLTE length is not a multiple of 3"));
                 }
-                palette = body.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+                palette = body
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| [c[0], c[1], c[2]])
+                    .collect();
             }
             // A colour key is stored in two bytes per sample. At bit depth 8
             // only the low byte applies; the high one is masked off.

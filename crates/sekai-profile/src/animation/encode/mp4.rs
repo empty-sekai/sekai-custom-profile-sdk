@@ -212,7 +212,7 @@ pub(in crate::animation) fn encode_mp4_into<F>(
 where
     F: FnMut(u32, &mut Vec<u8>) -> Result<FrameCompositeUpdate, String>,
 {
-    if spec.width % 2 != 0 || spec.height % 2 != 0 {
+    if !spec.width.is_multiple_of(2) || !spec.height.is_multiple_of(2) {
         return Err("H.264 yuv420p requires even animation dimensions".into());
     }
     config.validate()?;
