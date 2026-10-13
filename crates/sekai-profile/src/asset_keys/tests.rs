@@ -3,9 +3,7 @@ use super::{key_to_s3_path, logical_path_to_asset_key};
 const PREFIX: &str = "assets/cn/";
 
 #[test]
-fn approved_ugc_prefixes_are_read_literally() {
-    // 已审核通过的前缀:key 即完整 S3 路径,原样返回。
-    // 当前 ugc/ 公开前缀(CDN 可服务)+ 历史 uploads/ 遗留前缀 + presets/ 官方预设。
+fn listed_prefixes_are_read_literally() {
     for key in [
         "ugc/editor_image/2026-06/abc",
         "ugc/avatar/2026-06/xyz",
@@ -17,30 +15,31 @@ fn approved_ugc_prefixes_are_read_literally() {
         assert_eq!(
             key_to_s3_path(key, PREFIX),
             key,
-            "已审前缀应原样返回: {key}"
+            "a key under a listed prefix is returned as is: {key}"
         );
     }
 }
 
 #[test]
-fn unapproved_uploads_prefixes_do_not_resolve_to_themselves() {
-    // 越权关键:待审/暂存/裸 uploads 路径不得原样返回,
-    // 否则用户可手工构造文档引用未通过审核的对象绕过复核。
+fn other_upload_paths_resolve_under_the_prefix() {
     for key in [
-        "uploads/_pending_review/2026-06/abc",
-        "uploads/_staging/2026-06/abc",
-        "uploads/editor_image", // 缺尾部斜杠,不匹配白名单
+        "uploads/review/2026-06/abc",
+        "uploads/temp/2026-06/abc",
+        "uploads/editor_image", // no trailing slash, so not a listed prefix
         "uploads/../secret",
         "uploads/other/abc",
-        // 已审前缀下的 `..` 段经 URL 规范化后会落到白名单外。
-        "ugc/editor_image/../../uploads/_pending_review/abc",
-        "presets/../uploads/_staging/abc",
+        // A `..` segment under a listed prefix normalizes to a path outside it.
+        "ugc/editor_image/../../uploads/review/abc",
+        "presets/../uploads/temp/abc",
     ] {
         let got = key_to_s3_path(key, PREFIX);
-        assert_ne!(got, key, "未授权 key 不应原样返回: {key}");
+        assert_ne!(
+            got, key,
+            "a key outside the listed prefixes is not returned as is: {key}"
+        );
         assert!(
             got.starts_with(PREFIX),
-            "未授权 key 应落到 prefix 分支: {key} -> {got}"
+            "a key outside the listed prefixes resolves under the prefix: {key} -> {got}"
         );
     }
 }

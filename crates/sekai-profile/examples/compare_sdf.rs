@@ -8,7 +8,7 @@
 //!
 //! 环境变量: SEKAI_PROFILE_FONT_DIR 字体目录
 //!
-//! 解析法是当前生产用的、视觉正确的输出，作为真值。EDT 法误差越小越好。
+//! 解析法是渲染默认使用的方法，作为真值；EDT 法误差越小越好。
 
 use sekai_profile::sdf::outline::benchmark_methods;
 

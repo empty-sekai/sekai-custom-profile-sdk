@@ -281,7 +281,7 @@ fn resolve_glyph_id(font_path: &Path, ch: char) -> Option<u32> {
 
 /// EDT 加速开关 + 超采样因子（运行时配置，默认关闭走解析法）。
 ///
-/// `SEKAI_PROFILE_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，现有生产行为）。
+/// `SEKAI_PROFILE_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，默认）。
 /// 设为 1-4 → EDT 法，值即超采样因子（按该倍数的点阵光栅化后做距离变换，
 /// 倍数越高边缘越精确、光栅化越慢）。
 fn edt_supersample() -> Option<usize> {

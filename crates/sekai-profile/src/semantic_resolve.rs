@@ -224,8 +224,7 @@ fn populate_resolve_snapshot_parts(
     include_page_overlay: bool,
     include_profile_base: bool,
 ) {
-    // Keep the existing call sites compact while the value now carries both
-    // the legacy AssetStore and the mmap metadata catalog.
+    // The context carries both the AssetStore and the mmap metadata catalog.
     let assets = resources;
     if include_page_overlay {
         for element in ordered_profile_elements(card, document_key) {

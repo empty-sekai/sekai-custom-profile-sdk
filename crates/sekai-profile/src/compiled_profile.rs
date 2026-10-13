@@ -441,9 +441,9 @@ mod tests {
         assert_eq!(
             render_object_key_for_resource(&ResourceKey {
                 namespace: "render-object".into(),
-                key: "standard_honor:contract/id-1".into(),
+                key: "component:general-base/id-1".into(),
             }),
-            "standard_honor:contract/id-1"
+            "component:general-base/id-1"
         );
     }
 
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn render_object_misses_mark_only_affected_pages_for_legacy_fallback() {
+    fn render_object_misses_mark_only_the_pages_that_use_them() {
         let complete_page = vec!["texture:assets/complete".to_string()];
         let missing_page = vec![
             "texture:assets/complete".to_string(),

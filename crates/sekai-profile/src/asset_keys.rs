@@ -280,15 +280,13 @@ fn collect_bonds_honor_keys(
     }
 }
 
-/// 将渲染用的 asset key 映射为 S3 对象路径。
+/// 将渲染用的 asset key 映射为对象存储路径。
+///
+/// `ugc/editor_image/`、`ugc/avatar/`、`uploads/editor_image/`、`uploads/avatar/`
+/// 与 `presets/` 下的 key 本身就是完整对象路径：各段都非空、不是 `.`/`..` 且不含
+/// 反斜杠时原样返回。其余 key（包括这些前缀下含 `..` 段的 key）解析为
+/// `<prefix><key>.png`；羁绊称号的角色与文字素材按其素材包目录拼接。
 pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
-    // 用户上传文件直读:仅放行已审核通过的 UGC 前缀,key 即完整 S3 路径。
-    // - ugc/{editor_image,avatar}/  当前已审通过图(CDN 可服务的公开前缀)
-    // - uploads/{editor_image,avatar}/  历史已审图(遗留前缀,兼容旧文档引用)
-    // - presets/  官方预设素材(游戏自带,免审核;私有 ACL,服务端用桶凭证直读)
-    // 其余 uploads/ 子路径(如 _staging/、_pending_review/、越权猜测路径)不在白名单内,
-    // 落到普通分支拼成读不到的路径,从而无法绕过审核渲染未通过/他人的对象。
-    // 含空段、`.`/`..` 段或反斜杠的 key 同样不放行:经 URL 规范化后它们会指向白名单外。
     if (key.starts_with("ugc/editor_image/")
         || key.starts_with("ugc/avatar/")
         || key.starts_with("uploads/editor_image/")

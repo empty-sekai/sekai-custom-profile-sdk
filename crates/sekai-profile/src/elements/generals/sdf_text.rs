@@ -106,8 +106,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
             spec.element.text = wrapped;
         }
     }
-    // The lowered capture used to scale a canvas by TEXT_SCALE after the
-    // content transform; the same composition expressed directly.
+    // TEXT_SCALE applies after the content transform.
     let scaled_base = [
         base_affine[0] * TEXT_SCALE,
         base_affine[1] * TEXT_SCALE,
