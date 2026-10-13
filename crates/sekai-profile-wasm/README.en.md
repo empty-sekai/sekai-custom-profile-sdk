@@ -353,7 +353,7 @@ When browser persistence is unnecessary, pass `createHttpPrebuiltSdfAtlasProvide
 Packages are the output of the native crate's `build-sdf-atlas` tool, served unchanged as `<baseUrl>/<family>/manifest.json` plus its page files:
 
 ```sh
-SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --features dev --release \
+SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --release \
   --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
   --output font-atlases/FZLanTingHei-DB-GBK
 ```
@@ -484,7 +484,7 @@ npm run measure:wasm:size
 npm run audit:public
 ```
 
-The FreeType build enables only the TrueType, CFF, SFNT, PS auxiliary/name, and smooth raster modules used by the runtime. CPU EDT is the production glyph SDF backend; the analytic backend is an explicit debug and parity option.
+The FreeType build enables only the TrueType, CFF, SFNT, PS auxiliary/name, and smooth raster modules used by the runtime. CPU EDT is the default glyph SDF backend; the analytic backend is an explicit debug and parity option.
 
 ## License
 

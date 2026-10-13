@@ -46,9 +46,9 @@ const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
     ("Noto Sans CJK KR", &["NotoSansCJK-Regular.ttc"]),
     ("Noto Sans CJK SC", &["NotoSansCJK-Regular.ttc"]),
     ("Noto Sans CJK TC", &["NotoSansCJK-Regular.ttc"]),
-    // Source Han Sans is the open-licensed CJK sans shipped alongside the game
-    // faces. It carries the same outlines as Noto Sans CJK, which is what the
-    // Live Master progress recipe used to reach through fontconfig.
+    // Source Han Sans is the open-licensed CJK sans installed alongside the
+    // game faces. It carries the same outlines as Noto Sans CJK, the face the
+    // Live Master progress digits are drawn with.
     (
         "Source Han Sans SC",
         &["SourceHanSansSC-Medium.otf", "SourceHanSansSC-Regular.otf"],
@@ -144,6 +144,24 @@ impl OutlineSdfGlyph {
     }
 }
 
+static FONT_DIRS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Sets the directories font files are looked up in, ahead of the
+/// directories the `SEKAI_PROFILE_FONT_DIR` and `FONT_DIR` environment
+/// variables name. The setting is process-wide; families resolved before it
+/// are resolved again.
+pub fn set_font_dirs<I>(dirs: I)
+where
+    I: IntoIterator,
+    I::Item: Into<PathBuf>,
+{
+    *FONT_DIRS.write().unwrap_or_else(|error| error.into_inner()) =
+        dirs.into_iter().map(Into::into).collect();
+    if let Ok(mut cache) = font_path_cache().lock() {
+        cache.clear();
+    }
+}
+
 fn font_path_cache() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -177,7 +195,10 @@ fn glyph_id_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<u32>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 按 family name 查找字体文件。
+/// The font file of `family`: the first of its known file names found in
+/// the directories [`set_font_dirs`] sets, then in those the
+/// `SEKAI_PROFILE_FONT_DIR` and `FONT_DIR` environment variables name, then
+/// in `assets/fonts`.
 pub fn resolve_font_path(family: &str) -> Option<PathBuf> {
     if let Some(cached) = font_path_cache()
         .lock()
@@ -200,16 +221,20 @@ pub fn resolve_font_path(family: &str) -> Option<PathBuf> {
 }
 
 fn font_path_candidates(file_names: &[&str]) -> Vec<PathBuf> {
-    let configured_dirs = ["SEKAI_PROFILE_FONT_DIR", "FONT_DIR"]
-        .into_iter()
-        .filter_map(|name| std::env::var_os(name).map(PathBuf::from))
-        .collect::<Vec<_>>();
+    let mut configured_dirs = FONT_DIRS
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    configured_dirs.extend(
+        ["SEKAI_PROFILE_FONT_DIR", "FONT_DIR"]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(PathBuf::from)),
+    );
     let mut candidates = Vec::new();
     for file_name in file_names {
         for directory in &configured_dirs {
             candidates.push(directory.join(file_name));
         }
-        candidates.push(PathBuf::from("/usr/share/fonts/custom").join(file_name));
         candidates.push(PathBuf::from("assets/fonts").join(file_name));
     }
     candidates

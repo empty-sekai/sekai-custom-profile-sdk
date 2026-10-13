@@ -372,7 +372,7 @@ pub struct AnimationExportTelemetry {
     pub gif_quality: u8,
     pub encode_attempts: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+    pub render_telemetry: Option<crate::telemetry::RenderTelemetry>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -728,10 +728,10 @@ fn deferred_source_window(
 }
 
 fn record_deferred_window_execution(
-    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
     rendered: &crate::renderer::RenderedDeferredAnimationWindow,
 ) {
-    if let Some(telemetry) = profile_backend.as_mut() {
+    if let Some(telemetry) = render_telemetry.as_mut() {
         telemetry.bytes.scratch_peak_bytes = telemetry
             .bytes
             .scratch_peak_bytes
@@ -750,7 +750,7 @@ fn render_deferred_animation_window_cached(
     window: PixelRect,
     layer_index: usize,
     cache: &mut DeferredSdfTileCache,
-    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
 ) -> Result<crate::renderer::RenderedDeferredAnimationWindow, String> {
     let width = u32::try_from(window.right - window.left)
         .map_err(|_| "deferred animation window width overflow")?;
@@ -764,7 +764,7 @@ fn render_deferred_animation_window_cached(
             width,
             height,
         )?;
-        record_deferred_window_execution(profile_backend, &rendered);
+        record_deferred_window_execution(render_telemetry, &rendered);
         return Ok(rendered);
     }
 
@@ -797,7 +797,7 @@ fn render_deferred_animation_window_cached(
                     .map_err(|_| "deferred cache tile height overflow")?,
             };
             let cached = cache.get(key);
-            if let Some(telemetry) = profile_backend.as_mut() {
+            if let Some(telemetry) = render_telemetry.as_mut() {
                 if cached.is_some() {
                     telemetry.caches.layer.hits = telemetry.caches.layer.hits.saturating_add(1);
                 } else {
@@ -811,7 +811,7 @@ fn render_deferred_animation_window_cached(
                     layer, key.x, key.y, key.width, key.height,
                 )?;
                 scratch_peak_bytes = scratch_peak_bytes.max(rendered.scratch_peak_bytes);
-                record_deferred_window_execution(profile_backend, &rendered);
+                record_deferred_window_execution(render_telemetry, &rendered);
                 let pixels = rendered.pixels.clone();
                 cache.insert(key, pixels.clone());
                 pixels
@@ -844,12 +844,6 @@ fn render_deferred_animation_window_cached(
         width,
         height,
         scratch_peak_bytes,
-        execution: crate::renderer::FullCardSdfExecutionOutput {
-            width,
-            height,
-            clear_rgba: [0, 0, 0, 0],
-            ..crate::renderer::FullCardSdfExecutionOutput::default()
-        },
     })
 }
 
@@ -893,7 +887,7 @@ struct AnimationFrameCompositor<'a> {
     readback_scratch: Vec<u8>,
     changed_macroblock_flags: Vec<u8>,
     telemetry: FrameCompositeTelemetry,
-    profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: Option<crate::telemetry::RenderTelemetry>,
     deferred_cache: DeferredSdfTileCache,
 }
 
@@ -953,8 +947,8 @@ pub(crate) fn export_profile_animation(
     md: &MasterData,
     assets: Option<&AssetStore>,
     preset: &ResolvedAnimationPreset,
-    backend: Option<crate::profile_backend::ProfileBackendConfig>,
-    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    config: &crate::render_config::RenderConfig,
+    render_object_store: &crate::render_object::MappedRenderObjectStore,
 ) -> Result<ProfileAnimationExport, String> {
     let (mut scene, resolved_scene) = if card.generals.is_empty() {
         let text_atlases = renderer.mapped_text_sdf_atlases();
@@ -1027,7 +1021,7 @@ pub(crate) fn export_profile_animation(
                 budget_step: preset.budget_step,
                 gif_quality: preset.gif_quality,
                 encode_attempts: 0,
-                profile_backend: None,
+                render_telemetry: None,
             },
         });
     }
@@ -1089,7 +1083,7 @@ pub(crate) fn export_profile_animation(
     let retained_layer_budget = preset
         .export_memory_budget_bytes
         .saturating_sub(frame_bytes.saturating_mul(2));
-    let (layers, layer_raster_bytes, layer_scratch_peak_bytes, profile_backend) =
+    let (layers, layer_raster_bytes, layer_scratch_peak_bytes, render_telemetry) =
         rasterize_animation_groups(
             renderer,
             card,
@@ -1099,7 +1093,7 @@ pub(crate) fn export_profile_animation(
             resolved_scene.as_ref(),
             &dynamic_expansions,
             &groups,
-            backend,
+            config,
             render_object_store,
             retained_layer_budget,
         )?;
@@ -1141,7 +1135,7 @@ pub(crate) fn export_profile_animation(
         width,
         height,
         scale,
-        profile_backend,
+        render_telemetry,
         deferred_cache_budget,
     )?;
     let encode_started = std::time::Instant::now();
@@ -1178,13 +1172,13 @@ pub(crate) fn export_profile_animation(
     };
     let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
     let frame_telemetry = compositor.telemetry;
-    if let Some(telemetry) = compositor.profile_backend.as_mut() {
+    if let Some(telemetry) = compositor.render_telemetry.as_mut() {
         telemetry.bytes.layer_cache_bytes = telemetry
             .bytes
             .layer_cache_bytes
             .saturating_add(compositor.deferred_cache.peak_bytes as u64);
     }
-    let profile_backend = compositor.profile_backend.take();
+    let render_telemetry = compositor.render_telemetry.take();
     let core_telemetry = render_scene.dump().telemetry;
     Ok(ProfileAnimationExport {
         animated: true,
@@ -1231,7 +1225,7 @@ pub(crate) fn export_profile_animation(
             budget_step: preset.budget_step,
             gif_quality: preset.gif_quality,
             encode_attempts: 1,
-            profile_backend,
+            render_telemetry,
         },
     })
 }
@@ -1296,97 +1290,56 @@ fn rasterize_animation_groups(
     resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
     _dynamic_expansions: &std::collections::BTreeMap<sekai_profile_core::LayerId, [i32; 4]>,
     groups: &[AnimationRasterGroup],
-    backend: Option<crate::profile_backend::ProfileBackendConfig>,
-    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    config: &crate::render_config::RenderConfig,
+    render_object_store: &crate::render_object::MappedRenderObjectStore,
     retained_layer_budget: usize,
 ) -> Result<
     (
         Vec<RasterLayer>,
         usize,
         usize,
-        Option<crate::profile_backend::ProfileRenderTelemetry>,
+        Option<crate::telemetry::RenderTelemetry>,
     ),
     String,
 > {
-    use crate::profile_backend::ProfileRenderTelemetry;
+    use crate::telemetry::RenderTelemetry;
 
-    let Some(config) = backend else {
-        return Err(
-            "animation rendering requires a profile backend config selecting SDF executors".into(),
-        );
-    };
     let started = std::time::Instant::now();
-    let selection = renderer.resolve_animation_profile_backend(&config)?;
-    let mut telemetry = ProfileRenderTelemetry::new(
-        config.clone(),
-        crate::profile_backend::PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
-    );
-    telemetry.apply_selection(selection.clone());
-    if selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia {
-        telemetry.fallback_glyph_cache = match resolved_scene {
-            Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, md)?,
-            None => renderer.prepare_profile_fallback_for_animation_card(card, md)?,
-        };
-    }
+    let executor = renderer.resolve_executor(config)?;
+    let mut telemetry = RenderTelemetry::new(config.clone(), executor.public());
+    telemetry.fallback_glyph_cache = match resolved_scene {
+        Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, md)?,
+        None => renderer.prepare_profile_fallback_for_animation_card(card, md)?,
+    };
     telemetry.work.page_count = 1;
     telemetry.work.dynamic_layer_count = groups
         .iter()
         .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
         .count() as u64;
 
-    let sdf_selected = animation_selection_grants_sdf_executors(&selection);
-    let (layers, bytes, scratch) = if sdf_selected {
-        let forbid_legacy_elements =
-            selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
-        renderer.record_animation_profile_atlas_identities(
-            &mut telemetry,
-            selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia,
-            selection.shape_sdf != crate::profile_backend::ShapeSdfExecutor::Skia,
-            ANIMATION_LAYER_RASTER_USAGE,
-        );
-        rasterize_animation_groups_ordered(
-            renderer,
-            card,
-            md,
-            assets,
-            profile,
-            groups,
-            selection.text_sdf,
-            selection.shape_sdf,
-            forbid_legacy_elements,
-            config.tile_width,
-            config.tile_height,
-            &mut telemetry,
-            render_object_store,
-            retained_layer_budget,
-        )?
-    } else {
-        return Err(
-            "the animation backend selection resolved to the retired legacy layer raster; \
-             request SDF executors"
-                .into(),
-        );
-    };
+    renderer.record_atlas_identities(&mut telemetry, ANIMATION_LAYER_RASTER_USAGE);
+    let (layers, bytes, scratch) = rasterize_animation_groups_ordered(
+        renderer,
+        card,
+        md,
+        assets,
+        profile,
+        groups,
+        executor,
+        config.tile_width,
+        config.tile_height,
+        &mut telemetry,
+        render_object_store,
+        retained_layer_budget,
+    )?;
     telemetry.bytes.layer_cache_bytes = bytes as u64;
     telemetry.bytes.scratch_peak_bytes = scratch as u64;
     telemetry.timings.total_ns = elapsed_ns(started);
     Ok((layers, bytes, scratch, Some(telemetry)))
 }
 
-/// Whether a resolved backend grants an executor the ordered layer raster can
-/// run on. Animation frames come from the same ordered SDF path pages use, and
-/// there is no layer raster behind it, so a selection that grants neither
-/// executor is rejected rather than degraded.
-fn animation_selection_grants_sdf_executors(
-    selection: &crate::profile_backend::ResolvedProfileBackend,
-) -> bool {
-    selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia
-        || selection.shape_sdf != crate::profile_backend::ShapeSdfExecutor::Skia
-}
-
 /// Rasterizes each animation group through the ordered SDF path — the same
-/// pipeline the profile backend uses for pages — with the executors the
-/// backend selection granted.
+/// pipeline pages use — on `executor`.
 ///
 /// Oversized glyphs are generated once for the whole export rather than once
 /// per layer: every group's card contributes to a single realtime-EDT batch
@@ -1400,13 +1353,11 @@ fn rasterize_animation_groups_ordered(
     assets: Option<&AssetStore>,
     profile: Option<&crate::profile::ProfileData>,
     groups: &[AnimationRasterGroup],
-    text_sdf: crate::profile_backend::TextSdfExecutor,
-    shape_sdf: crate::profile_backend::ShapeSdfExecutor,
-    forbid_legacy_elements: bool,
+    executor: crate::render_config::Executor,
     tile_width: u16,
     tile_height: u16,
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+    telemetry: &mut crate::telemetry::RenderTelemetry,
+    render_object_store: &crate::render_object::MappedRenderObjectStore,
     retained_layer_budget: usize,
 ) -> Result<(Vec<RasterLayer>, usize, usize), String> {
     let mut layers = Vec::with_capacity(groups.len());
@@ -1441,10 +1392,8 @@ fn rasterize_animation_groups_ordered(
                 md,
                 assets,
                 profile,
-                text_sdf,
-                shape_sdf,
+                executor,
                 animation_group_uses_dynamic_bounds(*dynamic_layer_id),
-                forbid_legacy_elements,
                 tile_width,
                 tile_height,
                 render_object_store,
@@ -1467,8 +1416,8 @@ fn rasterize_animation_groups_ordered(
 
 /// Folds one layer's SDF execution record into the export-wide telemetry.
 fn record_animation_layer_execution(
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    output: &crate::renderer::FullCardSdfExecutionOutput,
+    telemetry: &mut crate::telemetry::RenderTelemetry,
+    output: &crate::renderer::SurfaceOutput,
 ) {
     telemetry.work.realtime_edt_glyph_count =
         telemetry.work.realtime_edt_glyph_count.saturating_add(
@@ -1503,7 +1452,7 @@ fn record_animation_layer_execution(
     telemetry.work.element_run_count = telemetry
         .work
         .element_run_count
-        .saturating_add(output.sdf_run_count.saturating_add(output.legacy_run_count));
+        .saturating_add(output.sdf_run_count);
     telemetry.bytes.atlas_mapped_bytes = output.atlas_mapped_bytes;
     telemetry.timings.surface_create_ns = telemetry
         .timings
@@ -1553,10 +1502,6 @@ fn record_animation_layer_execution(
         .timings
         .sdf_execute_ns
         .saturating_add(output.timings.execute_ns);
-    telemetry.timings.legacy_element_draw_ns = telemetry
-        .timings
-        .legacy_element_draw_ns
-        .saturating_add(output.timings.legacy_draw_ns);
     telemetry.timings.rgba_snapshot_ns = telemetry
         .timings
         .rgba_snapshot_ns
@@ -1576,20 +1521,10 @@ fn record_animation_layer_execution(
     );
     telemetry.record_sdf_plan(output.plan_stats, output.plan_bytes, output.span_bytes);
     telemetry.record_sdf_execution(output.execution_stats);
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Text,
-        output.legacy_text_count,
-        0,
-    );
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Shape,
-        output.legacy_shape_count,
-        0,
-    );
-    telemetry.record_legacy_commands(
-        crate::profile_backend::ProfileCommandKind::Image,
-        output.legacy_image_count,
-        output.timings.legacy_draw_ns,
+    telemetry.record_commands(
+        crate::telemetry::CommandKind::Image,
+        output.software_image_count,
+        output.timings.image_composite_ns,
     );
 }
 
@@ -1719,6 +1654,7 @@ fn plan_ticks(
 }
 
 impl<'a> AnimationFrameCompositor<'a> {
+    #[cfg(test)]
     fn new(width: u32, height: u32, scale: f32) -> Result<Self, String> {
         Self::new_inner(None, width, height, scale, None, 0)
     }
@@ -1728,7 +1664,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         width: u32,
         height: u32,
         scale: f32,
-        profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+        render_telemetry: Option<crate::telemetry::RenderTelemetry>,
         deferred_cache_budget: usize,
     ) -> Result<Self, String> {
         Self::new_inner(
@@ -1736,7 +1672,7 @@ impl<'a> AnimationFrameCompositor<'a> {
             width,
             height,
             scale,
-            profile_backend,
+            render_telemetry,
             deferred_cache_budget,
         )
     }
@@ -1746,7 +1682,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         width: u32,
         height: u32,
         scale: f32,
-        profile_backend: Option<crate::profile_backend::ProfileRenderTelemetry>,
+        render_telemetry: Option<crate::telemetry::RenderTelemetry>,
         deferred_cache_budget: usize,
     ) -> Result<Self, String> {
         let bytes = frame_byte_len(width, height)?;
@@ -1762,7 +1698,7 @@ impl<'a> AnimationFrameCompositor<'a> {
             readback_scratch: Vec::new(),
             changed_macroblock_flags: Vec::new(),
             telemetry: FrameCompositeTelemetry::default(),
-            profile_backend,
+            render_telemetry,
             deferred_cache: DeferredSdfTileCache::new(deferred_cache_budget),
         })
     }
@@ -1809,7 +1745,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         let (mut update, dirty_regions) = if !sequential {
             redraw_full_frame(
                 self.renderer,
-                &mut self.profile_backend,
+                &mut self.render_telemetry,
                 &mut self.canvas,
                 self.width,
                 self.height,
@@ -1840,7 +1776,7 @@ impl<'a> AnimationFrameCompositor<'a> {
                 for region in &dirty.regions {
                     redraw_dirty_frame(
                         self.renderer,
-                        &mut self.profile_backend,
+                        &mut self.render_telemetry,
                         &mut self.canvas,
                         self.width,
                         self.height,
@@ -1945,7 +1881,7 @@ fn pixel_bounds_for_destination(destination: FrameRect, width: u32, height: u32)
 
 fn redraw_full_frame(
     renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
@@ -1958,7 +1894,7 @@ fn redraw_full_frame(
     fill_white(canvas, width, full);
     draw_animation_layers(
         renderer,
-        profile_backend,
+        render_telemetry,
         canvas,
         width,
         height,
@@ -1972,7 +1908,7 @@ fn redraw_full_frame(
 
 fn redraw_dirty_frame(
     renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
@@ -1985,7 +1921,7 @@ fn redraw_dirty_frame(
     fill_white(canvas, width, dirty);
     draw_animation_layers(
         renderer,
-        profile_backend,
+        render_telemetry,
         canvas,
         width,
         height,
@@ -1999,7 +1935,7 @@ fn redraw_dirty_frame(
 
 fn draw_animation_layers(
     renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    profile_backend: &mut Option<crate::profile_backend::ProfileRenderTelemetry>,
+    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
     canvas: &mut [u8],
     width: u32,
     height: u32,
@@ -2039,7 +1975,7 @@ fn draw_animation_layers(
                     window,
                     layer_index,
                     deferred_cache,
-                    profile_backend,
+                    render_telemetry,
                 )?;
                 let dx = state.destination.left() / scale - layer.x;
                 let dy = state.destination.top() / scale - layer.y;
@@ -2240,6 +2176,7 @@ unsafe fn rgba_segment_changed_avx512(before: &[u8], after: &[u8]) -> bool {
     _mm512_cmpeq_epi8_mask(left, right) != u64::MAX
 }
 
+#[cfg(test)]
 fn composite_frame(
     scene: &sekai_profile_core::Scene,
     layers: &[RasterLayer],
@@ -3697,6 +3634,7 @@ fn build_avc_moov(
     })
 }
 
+#[cfg(test)]
 fn rgba_to_yuv420p(
     rgba: &[u8],
     width: u32,
@@ -5521,12 +5459,11 @@ mod tests {
             None,
             vec![(sekai_profile_core::AuthoredElementKind::Shape, 0)],
         )];
-        let config = crate::profile_backend::ProfileBackendConfig {
-            shape_sdf: crate::profile_backend::ShapeSdfExecutor::ScalarOracle,
-            collect_telemetry: true,
-            ..crate::profile_backend::ProfileBackendConfig::default()
+        let config = crate::render_config::RenderConfig {
+            executor: crate::render_config::SdfExecutor::Scalar,
+            ..crate::render_config::RenderConfig::default()
         };
-        let md = renderer.snapshot_masterdata();
+        let md = renderer.masterdata();
         let (layers, _bytes, _scratch, telemetry) = rasterize_animation_groups(
             &renderer,
             &card,
@@ -5536,14 +5473,14 @@ mod tests {
             None,
             &std::collections::BTreeMap::new(),
             &groups,
-            Some(config),
-            None,
+            &config,
+            crate::render_object::MappedRenderObjectStore::empty(),
             usize::MAX,
         )
         .expect("rasterize the shape layer");
         assert_eq!(layers.len(), 1, "the shape group produced one raster layer");
 
-        let telemetry = telemetry.expect("a configured backend reports telemetry");
+        let telemetry = telemetry.expect("rasterizing layers reports telemetry");
 
         assert!(
             !telemetry.atlas_identities.is_empty(),
@@ -5596,41 +5533,6 @@ mod tests {
             telemetry.timings.realtime_edt_generation_ns, glyph_generation_ns,
             "the generation-time total disagrees with the per-glyph records",
         );
-    }
-
-    #[test]
-    fn animation_layers_reject_a_selection_without_sdf_executors() {
-        use crate::profile_backend::{
-            ProfileSurfaceBackend, ResolvedProfileBackend, ShapeSdfExecutor, TextSdfExecutor,
-        };
-
-        let legacy_only = ResolvedProfileBackend {
-            surface: ProfileSurfaceBackend::SkiaRasterCpu,
-            text_sdf: TextSdfExecutor::LegacySkia,
-            shape_sdf: ShapeSdfExecutor::Skia,
-            fallbacks: Vec::new(),
-        };
-        assert!(!animation_selection_grants_sdf_executors(&legacy_only));
-
-        for (text_sdf, shape_sdf) in [
-            (TextSdfExecutor::Simd, ShapeSdfExecutor::Skia),
-            (TextSdfExecutor::LegacySkia, ShapeSdfExecutor::Simd),
-            (
-                TextSdfExecutor::ScalarOracle,
-                ShapeSdfExecutor::ScalarOracle,
-            ),
-        ] {
-            let selection = ResolvedProfileBackend {
-                surface: ProfileSurfaceBackend::SkiaRasterCpu,
-                text_sdf,
-                shape_sdf,
-                fallbacks: Vec::new(),
-            };
-            assert!(
-                animation_selection_grants_sdf_executors(&selection),
-                "{text_sdf:?}/{shape_sdf:?} grants an ordered executor",
-            );
-        }
     }
 
     #[test]
@@ -6663,33 +6565,6 @@ mod tests {
             plan_page_execution(true, "wrap"),
             Ok(PageExecution::Animation)
         );
-    }
-
-    #[test]
-    fn a_selection_without_sdf_executors_reports_a_readable_error() {
-        let renderer =
-            crate::renderer::CustomProfileRenderer::new(std::sync::Arc::new(SingleShapeProvider));
-        let md = renderer.snapshot_masterdata();
-        let card: CustomProfileCard =
-            serde_json::from_value(serde_json::json!({})).expect("empty card");
-        let error = match rasterize_animation_groups(
-            &renderer,
-            &card,
-            None,
-            &md,
-            None,
-            None,
-            &std::collections::BTreeMap::new(),
-            &[],
-            Some(crate::profile_backend::ProfileBackendConfig::default()),
-            None,
-            usize::MAX,
-        ) {
-            Ok(_) => panic!("a legacy-only selection must be rejected"),
-            Err(error) => error,
-        };
-        assert!(error.contains("request SDF executors"), "{error}");
-        assert!(!error.contains("  "), "{error:?}");
     }
 
     #[test]

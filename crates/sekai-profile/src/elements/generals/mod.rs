@@ -96,33 +96,4 @@ mod sdf_text_contract_tests {
         assert_eq!(spec.render_placement, placement);
         assert!(spec.element.text.contains("玩家名称\n个性签名"));
     }
-
-    #[test]
-    fn general_sdf_text_module_has_no_fast_text_fallback() {
-        let sources = include_str!("sdf_text.rs");
-        for forbidden in ["draw_str", "measure_str", "legacy_make_typeface"] {
-            assert!(
-                !sources.contains(forbidden),
-                "general SDF module owns a fast-text fallback: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn optimized_general_text_has_no_second_layout_implementation() {
-        let compositor = include_str!("../../profile_compositor.rs");
-        assert!(compositor.contains("capture_general_sdf_text_from_lowered"));
-        for forbidden in ["space_advance", "line_widths", "cursor_x += advance"] {
-            assert!(
-                !compositor.contains(forbidden),
-                "semantic compositor still owns text layout: {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn general_text_never_applies_a_canvas_clip() {
-        let source = include_str!("sdf_text.rs");
-        assert!(!source.contains(&["canvas.clip_", "rect(spec.clip"].concat()));
-    }
 }

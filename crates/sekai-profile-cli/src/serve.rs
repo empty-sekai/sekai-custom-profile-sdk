@@ -1,30 +1,38 @@
-//! `--serve` 常驻模式：stdin/stdout NDJSON 协议。
+//! `serve`: render requests read as NDJSON from stdin.
 //!
-//! 每行一个 JSON 请求，按到达顺序严格串行处理（匹配生产单 worker 模型）。
-//! 响应写 stdout（每行一个 JSON），日志只走 stderr。
+//! Each line is one JSON request. Requests are handled one at a time in the
+//! order they arrive, and each gets one JSON response line on stdout. Logs go
+//! to stderr.
 //!
-//! 请求格式：
+//! Requests:
 //!   {"id": 1, "method": "render", "params": {...}}
 //!   {"id": 2, "method": "reload_masterdata", "params": {"dir": "..."}}
 //!   {"id": 3, "method": "ping"}
 //!   {"id": 4, "method": "shutdown"}
 //!
-//! `render` params：
-//!   card: CustomProfileCard 或 UserCustomProfileCard 数组（必填）
-//!   page: 数组时按 seq 选页（可选，i32 整数）
-//!   profile: profile API 响应 JSON 对象（可选）
-//!   format: jpeg|png|png-transparent（默认 jpeg）
-//!   output: 输出文件路径（与 inline 二选一；都缺省时报错）
-//!   inline: true 时响应 data 字段返 base64（默认 false）
-//! 可选参数缺省或为 null 时取默认值；类型不符时该请求报错。
+//! `render` params:
+//!   profile: Profile API response object (optional)
+//!   card: customProfileCard object or userCustomProfileCards array; defaults
+//!         to the profile's userCustomProfileCards
+//!   page: page number counted from 1 in the order the game shows them
+//!         (default 1)
+//!   seq: render the page with this seq instead of `page`
+//!   format: "jpeg" or "png" (default "jpeg")
+//!   transparent: keep the background transparent, PNG only (default false)
+//!   quality: JPEG quality 1-100 (default 90)
+//!   output: path to write the image to
+//!   inline: return the image base64-encoded in `data` (default false)
+//! At least one of `output` and `inline` is required. An absent or null
+//! parameter takes its default; a parameter of the wrong type fails the
+//! request.
 //!
-//! `render` 响应：
+//! `render` response:
 //!   {"id": 1, "ok": true, "result": {"path": "...", "bytes": 12345,
 //!     "missing_assets": [...], "warnings": [...]}}
-//! 失败：
+//! Failure:
 //!   {"id": 1, "ok": false, "error": "..."}
 //!
-//! stdin EOF 与 `shutdown` 同义。
+//! End of input is the same as `shutdown`.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -34,10 +42,12 @@ use base64::Engine;
 use sekai_profile::assets::AssetStore;
 use sekai_profile::masterdata::JsonMasterDataProvider;
 use sekai_profile::region::Region;
-use sekai_profile::renderer::CustomProfileRenderer;
+use sekai_profile::{Background, CustomProfileRenderer, RenderConfig};
 use serde_json::{json, Value};
 
-/// 可选的素材 URL 前缀：缺失素材按需从此拉取（动态 + 静态）。
+use crate::{OutputFormat, PageSelection};
+
+/// URL prefixes assets missing from the store are fetched from.
 #[derive(Clone, Default)]
 pub struct AssetUrls {
     pub dynamic: Option<String>,
@@ -53,7 +63,7 @@ pub fn run(
 ) -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    tracing::info!("serve 模式就绪，等待 NDJSON 请求");
+    tracing::info!("waiting for NDJSON requests on stdin");
     session(
         stdin.lock(),
         &mut stdout.lock(),
@@ -64,10 +74,10 @@ pub fn run(
     )
 }
 
-/// 逐行处理请求，直到输入结束或收到 `shutdown`。
+/// Answers requests line by line until the input ends or `shutdown` arrives.
 ///
-/// 单行请求出错（非 UTF-8、非法 JSON、参数错误）只回报该请求的错误，
-/// 会话继续处理后续请求。
+/// A line that is not UTF-8 or JSON, or a request with bad parameters, gets an
+/// error response; the session goes on with the next line.
 fn session(
     mut input: impl BufRead,
     output: &mut impl Write,
@@ -84,7 +94,7 @@ fn session(
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
-                tracing::error!("读取 stdin 失败: {err}");
+                tracing::error!("reading stdin failed: {err}");
                 break;
             }
         }
@@ -93,7 +103,7 @@ fn session(
             Err(err) => {
                 write_response(
                     output,
-                    &json!({"id": null, "ok": false, "error": format!("请求不是合法 UTF-8: {err}")}),
+                    &json!({"id": null, "ok": false, "error": format!("the request is not UTF-8: {err}")}),
                 );
                 continue;
             }
@@ -107,7 +117,7 @@ fn session(
             Err(err) => {
                 write_response(
                     output,
-                    &json!({"id": null, "ok": false, "error": format!("请求不是合法 JSON: {err}")}),
+                    &json!({"id": null, "ok": false, "error": format!("the request is not JSON: {err}")}),
                 );
                 continue;
             }
@@ -134,13 +144,13 @@ fn session(
             other => {
                 write_response(
                     output,
-                    &json!({"id": id, "ok": false, "error": format!("未知方法: {other}")}),
+                    &json!({"id": id, "ok": false, "error": format!("unknown method {other}")}),
                 );
             }
         }
     }
 
-    tracing::info!("stdin 关闭，退出");
+    tracing::info!("stdin closed");
     ExitCode::SUCCESS
 }
 
@@ -157,7 +167,7 @@ fn write_response(output: &mut impl Write, value: &Value) {
         .and_then(|_| output.write_all(b"\n"))
         .and_then(|_| output.flush())
     {
-        tracing::error!("写 stdout 失败: {err}");
+        tracing::error!("writing stdout failed: {err}");
     }
 }
 
@@ -169,7 +179,7 @@ fn handle_reload(
     let dir = request
         .pointer("/params/dir")
         .and_then(|d| d.as_str())
-        .ok_or("reload_masterdata 缺少 params.dir")?;
+        .ok_or("reload_masterdata needs params.dir")?;
     let provider = JsonMasterDataProvider::from_dir(std::path::Path::new(dir))?.with_region(region);
     let missing = provider.missing_tables();
     renderer.swap_masterdata(Arc::new(provider));
@@ -182,46 +192,43 @@ fn handle_render(
     asset_urls: &AssetUrls,
     request: &Value,
 ) -> Result<Value, String> {
-    let params = request.get("params").ok_or("render 缺少 params")?;
-    let card_value = params
-        .get("card")
-        .cloned()
-        .ok_or("render 缺少 params.card")?;
+    let params = request.get("params").ok_or("render needs params")?;
     let RenderParams {
-        page,
+        card,
+        profile,
+        selection,
         format,
+        transparent,
+        quality,
         inline,
         output,
-        profile,
     } = render_params(params)?;
     if !inline && output.is_none() {
-        return Err("render 需要 params.output（或 inline:true）".into());
+        return Err("render needs params.output or inline: true".into());
+    }
+    if transparent && format == OutputFormat::Jpeg {
+        return Err("JPEG has no transparency; ask for a PNG".into());
     }
 
-    let card = crate::card_from_value(card_value, page)?;
+    let card = crate::select_card(card.cloned(), profile, selection)?;
     let profile = profile.map(sekai_profile::profile::ProfileData::from_json);
-
     let warnings = renderer.validate_card(&card);
-
-    // 配了 --assets-url 时，按需从 URL 补齐本地缺失的素材。
-    if let Some(dyn_url) = &asset_urls.dynamic {
-        let want =
-            crate::missing_asset_keys_with_profile(renderer, &card, profile.as_ref(), assets);
-        if !want.is_empty() {
-            let (ok, fail) = crate::fetch::load_assets_url(
-                assets,
-                &want,
-                dyn_url,
-                asset_urls.static_.as_deref(),
-                asset_urls.layout,
-            );
-            tracing::debug!(ok, fail, "serve 素材 URL 拉取完成");
-        }
-    }
-
+    crate::fetch_assets(
+        assets,
+        asset_urls,
+        &crate::missing_asset_keys(renderer, &card, profile.as_ref(), assets),
+    );
     let missing_assets = crate::missing_asset_keys(renderer, &card, profile.as_ref(), assets);
 
-    let data = crate::render_with_format(renderer, &card, profile.as_ref(), format)?;
+    let config = RenderConfig {
+        background: if transparent {
+            Background::Transparent
+        } else {
+            Background::White
+        },
+        ..RenderConfig::default()
+    };
+    let data = crate::render_page(renderer, &card, profile.as_ref(), &config, format, quality)?;
 
     let mut result = json!({
         "bytes": data.len(),
@@ -229,7 +236,7 @@ fn handle_render(
         "warnings": warnings,
     });
     if let Some(path) = output {
-        std::fs::write(path, &data).map_err(|e| format!("写出 {path} 失败: {e}"))?;
+        std::fs::write(path, &data).map_err(|e| format!("write {path} failed: {e}"))?;
         result["path"] = json!(path);
     }
     if inline {
@@ -238,28 +245,63 @@ fn handle_render(
     Ok(result)
 }
 
-/// `render` 的可选参数。
+/// The parameters of a `render` request.
 struct RenderParams<'a> {
-    page: Option<i32>,
-    format: &'a str,
+    card: Option<&'a Value>,
+    profile: Option<&'a Value>,
+    selection: PageSelection,
+    format: OutputFormat,
+    transparent: bool,
+    quality: u8,
     inline: bool,
     output: Option<&'a str>,
-    profile: Option<&'a Value>,
 }
 
-/// 读取 `render` 的可选参数。缺省或 `null` 取默认值；给出但类型或范围不符时报错，
-/// 不静默回落到默认值。
+/// Reads the parameters of a `render` request. An absent or null parameter
+/// takes its default; a parameter of the wrong type or out of range is an
+/// error rather than a silent default.
 fn render_params(params: &Value) -> Result<RenderParams<'_>, String> {
+    let page = optional_param(params, "page", "an integer of at least 1", |value| {
+        value
+            .as_u64()
+            .filter(|page| *page >= 1)
+            .and_then(|page| usize::try_from(page - 1).ok())
+    })?;
+    let seq = optional_param(params, "seq", "an i32 integer", |value| {
+        value.as_i64().and_then(|seq| i32::try_from(seq).ok())
+    })?;
+    let selection = match (page, seq) {
+        (Some(_), Some(_)) => return Err("render takes params.page or params.seq, not both".into()),
+        (_, Some(seq)) => PageSelection::Seq(seq),
+        (index, None) => PageSelection::Index(index.unwrap_or(0)),
+    };
+    let format = optional_param(params, "format", "\"jpeg\" or \"png\"", |value| match value
+        .as_str()?
+    {
+        "jpeg" | "jpg" => Some(OutputFormat::Jpeg),
+        "png" => Some(OutputFormat::Png),
+        _ => None,
+    })?;
     Ok(RenderParams {
-        page: optional_param(params, "page", "i32 范围内的整数", |value| {
-            value.as_i64().and_then(|page| i32::try_from(page).ok())
+        card: optional_param(params, "card", "an object or an array", |value| {
+            (value.is_object() || value.is_array()).then_some(value)
         })?,
-        format: optional_param(params, "format", "字符串", Value::as_str)?.unwrap_or("jpeg"),
-        inline: optional_param(params, "inline", "布尔值", Value::as_bool)?.unwrap_or(false),
-        output: optional_param(params, "output", "字符串", Value::as_str)?,
-        profile: optional_param(params, "profile", "对象", |value| {
+        profile: optional_param(params, "profile", "an object", |value| {
             value.is_object().then_some(value)
         })?,
+        selection,
+        format: format.unwrap_or(OutputFormat::Jpeg),
+        transparent: optional_param(params, "transparent", "a boolean", Value::as_bool)?
+            .unwrap_or(false),
+        quality: optional_param(params, "quality", "an integer from 1 to 100", |value| {
+            value
+                .as_u64()
+                .filter(|quality| (1..=100).contains(quality))
+                .map(|quality| quality as u8)
+        })?
+        .unwrap_or(90),
+        inline: optional_param(params, "inline", "a boolean", Value::as_bool)?.unwrap_or(false),
+        output: optional_param(params, "output", "a string", Value::as_str)?,
     })
 }
 
@@ -273,7 +315,7 @@ fn optional_param<'a, T>(
         None | Some(Value::Null) => Ok(None),
         Some(value) => read(value)
             .map(Some)
-            .ok_or_else(|| format!("render params.{name} 必须是{expected}，收到 {value}")),
+            .ok_or_else(|| format!("render params.{name} must be {expected}, got {value}")),
     }
 }
 
@@ -327,32 +369,49 @@ mod tests {
     fn render_params_accept_absent_and_null_values() {
         let absent = json!({ "page": null, "profile": null });
         let params = render_params(&absent).expect("params");
-        assert_eq!(params.page, None);
-        assert_eq!(params.format, "jpeg");
+        assert_eq!(params.selection, PageSelection::Index(0));
+        assert_eq!(params.format, OutputFormat::Jpeg);
+        assert!(!params.transparent);
+        assert_eq!(params.quality, 90);
         assert!(!params.inline);
         assert_eq!(params.output, None);
         assert!(params.profile.is_none());
+        assert!(params.card.is_none());
         let given = json!({
-            "page": 3, "format": "png", "inline": true, "output": "out.png", "profile": {}
+            "page": 3, "format": "png", "transparent": true, "quality": 70,
+            "inline": true, "output": "out.png", "profile": {}, "card": []
         });
         let params = render_params(&given).expect("params");
-        assert_eq!(params.page, Some(3));
-        assert_eq!(params.format, "png");
+        assert_eq!(params.selection, PageSelection::Index(2));
+        assert_eq!(params.format, OutputFormat::Png);
+        assert!(params.transparent);
+        assert_eq!(params.quality, 70);
         assert!(params.inline);
         assert_eq!(params.output, Some("out.png"));
         assert!(params.profile.is_some());
+        assert!(params.card.is_some());
+        let by_seq = json!({ "seq": -2 });
+        let by_seq = render_params(&by_seq).expect("params");
+        assert_eq!(by_seq.selection, PageSelection::Seq(-2));
     }
 
     #[test]
     fn render_params_of_the_wrong_type_or_range_are_rejected() {
         for params in [
-            json!({ "page": 4_294_967_297_i64 }),
+            json!({ "page": 0 }),
             json!({ "page": "2" }),
             json!({ "page": 1.5 }),
+            json!({ "seq": 4_294_967_297_i64 }),
+            json!({ "page": 1, "seq": 1 }),
+            json!({ "format": "webp" }),
             json!({ "format": 1 }),
+            json!({ "transparent": "true" }),
+            json!({ "quality": 0 }),
+            json!({ "quality": 101 }),
             json!({ "inline": "true" }),
             json!({ "output": 7 }),
             json!({ "profile": "profile.json" }),
+            json!({ "card": "card.json" }),
         ] {
             assert!(render_params(&params).is_err(), "{params} was accepted");
         }

@@ -62,7 +62,7 @@ pub fn build_scene_with_resolved(
     let scene = Scene::new(SceneSource {
         scene_id,
         region: region.into(),
-        font_engine_fingerprint: "native-skia-freetype-semantic-v2".into(),
+        font_engine_fingerprint: "native-freetype-semantic-v3".into(),
         raster_contract: "production-sdf-semantic-v2".into(),
         layers: resolved.layers.clone(),
         glyphs: Vec::new(),
@@ -190,7 +190,7 @@ pub fn build_text_scene_with_atlases(
     Scene::new(SceneSource {
         scene_id,
         region: region.into(),
-        font_engine_fingerprint: "native-skia-freetype-shadow-v1".into(),
+        font_engine_fingerprint: "native-freetype-shadow-v2".into(),
         raster_contract: "production-sdf-shadow-v1".into(),
         layers,
         glyphs: Vec::new(),

@@ -354,7 +354,7 @@ const renderer = await BrowserRenderer.create({
 atlas 包即 native crate 自带 `build-sdf-atlas` 工具的输出目录，原样发布为 `<baseUrl>/<family>/manifest.json` 及其页文件：
 
 ```sh
-SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --features dev --release \
+SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --release \
   --bin build-sdf-atlas -- --font-family FZLanTingHei-DB-GBK \
   --output font-atlases/FZLanTingHei-DB-GBK
 ```
@@ -485,7 +485,7 @@ npm run measure:wasm:size
 npm run audit:public
 ```
 
-FreeType 只启用 runtime 所需的 TrueType、CFF、SFNT、PS auxiliary/name 和 smooth raster modules。CPU EDT 是 production glyph SDF backend；analytic backend 仅用于显式 debug 与 parity 分析。
+FreeType 只启用 runtime 所需的 TrueType、CFF、SFNT、PS auxiliary/name 和 smooth raster modules。CPU EDT 是默认 glyph SDF backend；analytic backend 仅用于显式 debug 与 parity 分析。
 
 ## License
 

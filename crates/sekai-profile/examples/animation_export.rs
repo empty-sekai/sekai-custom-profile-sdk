@@ -5,25 +5,20 @@
 //!
 //! ```sh
 //! animation_export --masterdata <dir> --card <cards.json> --profile <profile.json> \
-//!   --assets-dir <dir> --font-dir <dir> \
-//!   --text-atlas <manifest.json>... --shape-atlas <manifest.json> \
+//!   --assets-dir <dir> --font-dir <dir> --atlas-dir <dir> \
 //!   --render-objects <manifest.json> \
 //!   --preset qq-v2 --formats gif,mp4 --executor scalar --out-dir <dir>
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use sekai_profile::animation::{resolve_preset, validate_magic, AnimationFormat};
-use sekai_profile::assets::AssetStore;
-use sekai_profile::masterdata::JsonMasterDataProvider;
 use sekai_profile::profile::ProfileData;
-use sekai_profile::profile_backend::{
-    BackendFallbackPolicy, ProfileBackendConfig, ProfileSurfaceBackend, ShapeSdfExecutor,
-    TextSdfExecutor,
-};
-use sekai_profile::renderer::CustomProfileRenderer;
 use sekai_profile::types::UserCustomProfileCard;
+use sekai_profile::{
+    AssetStore, CustomProfileRenderer, JsonMasterDataProvider, RenderConfig, SdfExecutor,
+};
 use sha2::{Digest, Sha256};
 
 struct Args {
@@ -32,8 +27,7 @@ struct Args {
     profile: Option<PathBuf>,
     assets_dir: Option<PathBuf>,
     font_dir: Option<PathBuf>,
-    text_atlases: Vec<PathBuf>,
-    shape_atlas: Option<PathBuf>,
+    atlas_dir: PathBuf,
     render_objects: Option<PathBuf>,
     out_dir: Option<PathBuf>,
     preset: String,
@@ -59,8 +53,7 @@ fn parse_args() -> Result<Args, String> {
         profile: None,
         assets_dir: None,
         font_dir: None,
-        text_atlases: Vec::new(),
-        shape_atlas: None,
+        atlas_dir: PathBuf::from("atlases"),
         render_objects: None,
         out_dir: None,
         preset: "qq-v2".into(),
@@ -77,8 +70,7 @@ fn parse_args() -> Result<Args, String> {
             "--profile" => args.profile = Some(PathBuf::from(value()?)),
             "--assets-dir" => args.assets_dir = Some(PathBuf::from(value()?)),
             "--font-dir" => args.font_dir = Some(PathBuf::from(value()?)),
-            "--text-atlas" => args.text_atlases.push(PathBuf::from(value()?)),
-            "--shape-atlas" => args.shape_atlas = Some(PathBuf::from(value()?)),
+            "--atlas-dir" => args.atlas_dir = PathBuf::from(value()?),
             "--render-objects" => args.render_objects = Some(PathBuf::from(value()?)),
             "--out-dir" => args.out_dir = Some(PathBuf::from(value()?)),
             "--preset" => args.preset = value()?,
@@ -99,87 +91,31 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-fn load_assets(dir: &Path, store: &AssetStore) -> Result<usize, String> {
-    let mut count = 0usize;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in std::fs::read_dir(&current)
-            .map_err(|error| format!("read {} failed: {error}", current.display()))?
-        {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(dir)
-                .map_err(|error| error.to_string())?
-                .with_extension("");
-            let key = relative.to_string_lossy().replace('\\', "/");
-            let bytes =
-                std::fs::read(&path).map_err(|error| format!("read {key} failed: {error}"))?;
-            store.put(key, bytes);
-            count += 1;
-        }
+fn parse_executor(value: &str) -> Result<SdfExecutor, String> {
+    match value {
+        "auto" => Ok(SdfExecutor::Auto),
+        "scalar" => Ok(SdfExecutor::Scalar),
+        "simd" => Ok(SdfExecutor::Simd),
+        other => Err(format!("unknown executor {other}")),
     }
-    Ok(count)
-}
-
-fn backend_config(executor: &str) -> Result<Option<ProfileBackendConfig>, String> {
-    let (text_sdf, shape_sdf) = match executor {
-        // A pre-retirement build renders the legacy layer raster when no
-        // backend config is supplied; current builds reject the request.
-        "legacy" => return Ok(None),
-        "scalar" => (
-            TextSdfExecutor::ScalarOracle,
-            ShapeSdfExecutor::ScalarOracle,
-        ),
-        "simd" => (TextSdfExecutor::Simd, ShapeSdfExecutor::Simd),
-        other => return Err(format!("unknown executor {other}")),
-    };
-    Ok(Some(ProfileBackendConfig {
-        surface: ProfileSurfaceBackend::SkiaRasterCpu,
-        text_sdf,
-        shape_sdf,
-        tile_width: 32,
-        tile_height: 32,
-        collect_telemetry: true,
-        fallback_policy: BackendFallbackPolicy::FailClosed,
-        ..ProfileBackendConfig::default()
-    }))
 }
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;
     if let Some(font_dir) = &args.font_dir {
-        std::env::set_var("FONT_DIR", font_dir);
+        sekai_profile::set_font_dirs([font_dir]);
     }
 
     let provider = JsonMasterDataProvider::from_dir(&args.masterdata)
         .map_err(|error| format!("load masterdata: {error}"))?;
     let asset_store = AssetStore::new(1024);
     if let Some(dir) = &args.assets_dir {
-        let injected = load_assets(dir, &asset_store)?;
-        eprintln!("assets injected: {injected}");
+        let loaded = asset_store.load_png_dir(dir)?;
+        eprintln!("assets loaded: {loaded}");
     }
-    let mut renderer =
-        CustomProfileRenderer::new(Arc::new(provider)).with_assets(Arc::new(asset_store));
-    for manifest in &args.text_atlases {
-        let atlas = sekai_profile::sdf::atlas::MappedSdfAtlas::open(manifest)
-            .map_err(|error| format!("open text atlas {}: {error}", manifest.display()))?;
-        renderer = renderer
-            .with_sdf_atlas(Arc::new(atlas))
-            .map_err(|error| format!("install text atlas: {error}"))?;
-    }
-    if let Some(manifest) = &args.shape_atlas {
-        let atlas = sekai_profile::sdf::shape_atlas::MappedShapeSdfAtlas::open(manifest)
-            .map_err(|error| format!("open shape atlas: {error}"))?;
-        renderer = renderer.with_shape_sdf_atlas(Arc::new(atlas));
-    }
+    let mut renderer = CustomProfileRenderer::new(Arc::new(provider))
+        .with_assets(Arc::new(asset_store))
+        .with_atlas_dir(&args.atlas_dir)?;
     if let Some(manifest) = &args.render_objects {
         let store = sekai_profile::render_object::MappedRenderObjectStore::open(manifest)
             .map_err(|error| format!("open render objects: {error}"))?;
@@ -201,24 +137,27 @@ fn main() -> Result<(), String> {
         None => None,
     };
     let profile = profile_body.as_ref().map(ProfileData::from_json);
-    let config = backend_config(&args.executor)?;
+    let config = RenderConfig {
+        executor: parse_executor(&args.executor)?,
+        ..RenderConfig::default()
+    };
     if let Some(out_dir) = &args.out_dir {
         std::fs::create_dir_all(out_dir)
             .map_err(|error| format!("create {}: {error}", out_dir.display()))?;
     }
 
     for user_card in &cards {
-        let card = user_card.custom_profile_card.clone();
+        let card = &user_card.custom_profile_card;
         for format in &args.formats {
             let preset = resolve_preset(&args.preset, Some(*format))?;
             let document_key = format!("seq{}-{}", user_card.seq, preset.format.extension());
-            let export = match renderer.render_animation_with_profile_backend(
-                &card,
+            let export = match renderer.render_animation(
+                card,
                 profile.as_ref(),
                 &document_key,
                 &args.region,
                 &preset,
-                config.clone(),
+                &config,
             ) {
                 Ok(export) => export,
                 Err(error) => {

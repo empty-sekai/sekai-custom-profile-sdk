@@ -1,7 +1,14 @@
-//! 场景图渲染器高层 API。
+//! [`CustomProfileRenderer`]: renders custom profile pages and animations.
 
 use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, MasterDataProvider};
+#[cfg(feature = "jpeg-turbo")]
+use crate::output::JpegEncoder;
+use crate::output::{EncodedPage, JpegOptions, RenderedBatch, RenderedPage};
+use crate::render_config::{
+    sdf_simd_available, Executor, PixelOcclusion, RenderCapabilities, RenderConfig, RenderError,
+};
+use crate::telemetry::{CommandKind, FallbackCode, RenderTelemetry, SurfaceIdentity};
 use crate::types::CustomProfileCard;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -75,7 +82,11 @@ fn extend_profile_fallback_codepoints(
     }
 }
 
-/// 自定义名片渲染器。
+/// Renders custom profile pages and animations.
+///
+/// A renderer holds the master data, the asset store and the installed
+/// atlases and render objects; one renderer serves any number of concurrent
+/// renders.
 pub struct CustomProfileRenderer {
     md_source: RwLock<Arc<dyn MasterDataProvider>>,
     assets: Option<Arc<AssetStore>>,
@@ -96,13 +107,13 @@ pub struct CustomProfileRenderer {
 }
 
 impl CustomProfileRenderer {
-    /// 用 MasterData provider 初始化渲染器。
+    /// A renderer over `provider` with nothing installed.
     pub fn new(provider: Arc<dyn MasterDataProvider>) -> Self {
         let md = MasterData::new(Arc::clone(&provider));
         tracing::info!(
             colors = md.color_count(),
             fonts = md.font_count(),
-            "自定义名片渲染器初始化完成"
+            "custom profile renderer created"
         );
         Self {
             md_source: RwLock::new(provider),
@@ -120,7 +131,7 @@ impl CustomProfileRenderer {
         }
     }
 
-    /// 设置素材缓存。
+    /// Installs the asset store images and fonts are read from.
     pub fn with_assets(mut self, assets: Arc<AssetStore>) -> Self {
         self.assets = Some(assets);
         self
@@ -195,6 +206,9 @@ impl CustomProfileRenderer {
         if let Some(shape) = atlases.shape {
             self = self.with_shape_sdf_atlas(shape);
         }
+        if let Some(fallback) = atlases.fallback {
+            self = self.with_profile_fallback_sdf_cache(fallback);
+        }
         Ok(self.with_realtime_oversized_glyph_generation(realtime))
     }
 
@@ -258,37 +272,20 @@ impl CustomProfileRenderer {
         Ok(demand)
     }
 
-    pub fn profile_backend_capabilities(
-        &self,
-    ) -> crate::profile_backend::ProfileBackendCapabilities {
-        let simd = turin_sdf_simd_available();
-        let sdf_atlases_available = !self.sdf_atlases.load().is_empty();
-        crate::profile_backend::ProfileBackendCapabilities {
-            skia_raster_cpu: true,
-            skia_opengl_llvmpipe: false,
-            skia_vulkan_lavapipe: false,
-            // The native surface renders every element through the software
-            // image path, so it needs the packet executor, both atlas kinds,
-            // and the pre-decoded render-object store to all be installed.
-            native_raster_cpu: simd
-                && sdf_atlases_available
-                && self.shape_sdf_atlas.is_some()
-                && self.render_object_generations.is_some(),
-            text_legacy_skia: true,
-            text_simd: simd && sdf_atlases_available,
-            text_scalar_oracle: sdf_atlases_available,
-            shape_skia: true,
-            shape_simd: simd && self.shape_sdf_atlas.is_some(),
-            shape_scalar_oracle: self.shape_sdf_atlas.is_some(),
+    /// The resources this renderer has installed.
+    pub fn capabilities(&self) -> RenderCapabilities {
+        RenderCapabilities {
+            simd: sdf_simd_available(),
+            text_atlases: self.sdf_atlases.load().len(),
+            shape_atlas: self.shape_sdf_atlas.is_some(),
+            render_objects: self.render_object_generations.is_some(),
+            fallback_glyphs: self.profile_fallback_sdf_cache.is_some(),
         }
     }
 
-    /// Pre-warms the FreeType fallback glyphs this card needs.
-    ///
-    /// A no-op unless a fallback cache is installed, so callers that supply
-    /// complete atlases pay nothing. Resolving the card here keeps glyph
-    /// generation off the compositing path.
-    /// and compatibility callers may retain the bounded realtime EDT path.
+    /// Whether a glyph drawn larger than every installed atlas tier is
+    /// generated from its font during the request (`true`, the default) or
+    /// sampled from the largest installed tier that holds it.
     pub fn with_realtime_oversized_glyph_generation(mut self, enabled: bool) -> Self {
         self.realtime_oversized_glyph_generation = enabled;
         self
@@ -407,27 +404,26 @@ impl CustomProfileRenderer {
         }
     }
 
-    /// immutable atlas identities actually installed in this process.
-    pub fn profile_backend_cache_identity(
-        &self,
-        config: &crate::profile_backend::ProfileBackendConfig,
-    ) -> Result<String, String> {
+    /// An identity for caching rendered pages: it changes whenever `config`,
+    /// an installed atlas or the published render-object store changes.
+    pub fn cache_identity(&self, config: &RenderConfig) -> Result<String, String> {
         let generation = self.pin_render_object_generation();
-        self.profile_backend_cache_identity_for_generation(config, &generation)
+        self.cache_identity_pinned(config, &generation)
     }
 
-    pub fn profile_backend_cache_identity_for_generation(
+    /// [`Self::cache_identity`] for the render objects `generation` pins.
+    pub fn cache_identity_pinned(
         &self,
-        config: &crate::profile_backend::ProfileBackendConfig,
+        config: &RenderConfig,
         generation: &RenderObjectGenerationPin,
     ) -> Result<String, String> {
         use sha2::{Digest, Sha256};
 
         let mut digest = Sha256::new();
-        digest.update(crate::profile_backend::PROFILE_RENDER_CACHE_SCHEMA.as_bytes());
+        digest.update(crate::telemetry::PROFILE_RENDER_CACHE_SCHEMA.as_bytes());
         digest.update(
             serde_json::to_vec(config)
-                .map_err(|error| format!("serialize profile backend config: {error}"))?,
+                .map_err(|error| format!("serialize render config: {error}"))?,
         );
         let sdf_atlases = self.sdf_atlases.load_full();
         for atlas in sdf_atlases.iter() {
@@ -442,7 +438,7 @@ impl CustomProfileRenderer {
             digest.update(store.manifest_sha256().as_bytes());
         }
         let identity = hex::encode(digest.finalize());
-        Ok(format!("profile-backend-{}", &identity[..16]))
+        Ok(format!("profile-render-{}", &identity[..16]))
     }
 
     /// Generates any codepoints the declared fonts' atlases lack, from the
@@ -577,13 +573,14 @@ impl CustomProfileRenderer {
         Ok(Some(report))
     }
 
-    /// 热替换 MasterData provider。
+    /// Replaces the master data. Renders already running keep the master
+    /// data they started with.
     pub fn swap_masterdata(&self, new_provider: Arc<dyn MasterDataProvider>) {
         let md = MasterData::new(Arc::clone(&new_provider));
         tracing::info!(
             colors = md.color_count(),
             fonts = md.font_count(),
-            "MasterData 热替换完成"
+            "master data replaced"
         );
         *self.md_source.write().unwrap_or_else(|e| e.into_inner()) = new_provider;
     }
@@ -597,50 +594,54 @@ impl CustomProfileRenderer {
         MasterData::new(provider)
     }
 
-    pub fn snapshot_masterdata(&self) -> MasterData {
-        self.snapshot()
-    }
-
-    /// 获取 MasterData 快照。
+    /// The current master data.
     pub fn masterdata(&self) -> MasterData {
         self.snapshot()
     }
 
-    /// 获取内部 AssetStore。
+    /// The installed asset store.
     pub fn assets(&self) -> Option<&Arc<AssetStore>> {
         self.assets.as_ref()
     }
 
-    /// 预校验名片数据。
+    /// Lists the colours, fonts, shapes and icons `card` refers to that the
+    /// master data does not define. Such references draw with defaults or not
+    /// at all.
     pub fn validate_card(&self, card: &CustomProfileCard) -> Vec<String> {
         let md = self.snapshot();
         let mut warnings = Vec::new();
         for (i, text) in card.texts.iter().enumerate() {
             if md.resolve_color(text.color_id).is_none() {
                 warnings.push(format!(
-                    "texts[{i}]: colorId={} 不在映射表中",
+                    "texts[{i}]: colorId {} is not in the master data",
                     text.color_id
                 ));
             }
             if md.resolve_font(text.font_id).is_none() {
-                warnings.push(format!("texts[{i}]: fontId={} 不在映射表中", text.font_id));
+                warnings.push(format!(
+                    "texts[{i}]: fontId {} is not in the master data",
+                    text.font_id
+                ));
             }
         }
         for (i, shape) in card.shapes.iter().enumerate() {
             if md.resolve_color(shape.color_id).is_none() {
                 warnings.push(format!(
-                    "shapes[{i}]: colorId={} 不在映射表中",
+                    "shapes[{i}]: colorId {} is not in the master data",
                     shape.color_id
                 ));
             }
             if md.resolve_resource("shape", shape.id).is_none() {
-                warnings.push(format!("shapes[{i}]: shapeId={} 不在映射表中", shape.id));
+                warnings.push(format!(
+                    "shapes[{i}]: shape id {} is not in the master data",
+                    shape.id
+                ));
             }
         }
         for (i, icon) in card.user_interface_icons.iter().enumerate() {
             if md.resolve_color(icon.color_id).is_none() {
                 warnings.push(format!(
-                    "userInterfaceIcons[{i}]: colorId={} 不在映射表中",
+                    "userInterfaceIcons[{i}]: colorId {} is not in the master data",
                     icon.color_id
                 ));
             }
@@ -649,23 +650,27 @@ impl CustomProfileRenderer {
                 .is_none()
             {
                 warnings.push(format!(
-                    "userInterfaceIcons[{i}]: id={} 不在映射表中",
+                    "userInterfaceIcons[{i}]: icon id {} is not in the master data",
                     icon.id
                 ));
             }
         }
         if !warnings.is_empty() {
-            tracing::warn!(count = warnings.len(), "名片数据校验发现缺失映射");
+            tracing::warn!(
+                count = warnings.len(),
+                "the card refers to entries the master data lacks"
+            );
         }
         warnings
     }
 
-    /// Decode and validate the fixed game Shape sources before the worker is
-    /// declared ready. This keeps source RG8 hashing out of the first unseen
-    /// profile request while preserving the atlas/source identity gate.
-    pub fn prewarm_profile_backend_resources(&self) -> Result<ProfileBackendPrewarmReport, String> {
+    /// Touches every installed resource once so the first render does not
+    /// pay for it: decodes and checks each shape source against the shape
+    /// atlas, faults in atlas and render-object pages, resolves the atlas
+    /// fonts, and allocates the page and encoder scratch buffers.
+    pub fn prewarm(&self) -> Result<PrewarmReport, String> {
         let started = std::time::Instant::now();
-        let mut report = ProfileBackendPrewarmReport::default();
+        let mut report = PrewarmReport::default();
         if let Some(atlas) = self.shape_sdf_atlas.as_deref() {
             let assets = self
                 .assets
@@ -810,347 +815,32 @@ impl CustomProfileRenderer {
         Ok(report)
     }
 
-    /// Executes only asset-backed Shape elements through the typed RG8 scalar
-    /// oracle. This is a comparison primitive, not a production surface: any
-    /// missing resource, asset, identity or affine transform fails closed.
-    pub fn render_shape_sdf_scalar_oracle(
+    /// Draws a full page. Glyphs larger than every installed atlas tier are
+    /// generated once for the page first, unless the caller already installed
+    /// a batch of them.
+    fn render_full_card(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<ShapeSdfScalarOracleOutput, String> {
-        self.render_shape_sdf_candidate(card, profile, ShapeSdfCandidateExecutor::ScalarRgba8)
-    }
-
-    /// Executes Shape commands with the Turin AVX-512 FP32 tile candidate.
-    /// Unsupported CPUs and non-swizzled atlases fail closed.
-    pub fn render_shape_sdf_simd_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<ShapeSdfExecutionOutput, String> {
-        self.render_shape_sdf_candidate(card, profile, ShapeSdfCandidateExecutor::SimdF32)
-    }
-
-    /// Executes the ordered Text+Shape layer through the scalar FP32 oracle.
-    /// Missing atlas entries and unsupported transforms fail closed.
-    pub fn render_sdf_layer_scalar_f32_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<SdfLayerExecutionOutput, String> {
-        self.render_sdf_layer_candidate(card, profile, SdfLayerCandidateExecutor::ScalarF32)
-    }
-
-    /// Executes the exact same ordered Text+Shape plan through the Turin
-    /// AVX-512 FP32 executor. Unsupported CPUs fail closed.
-    pub fn render_sdf_layer_simd_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<SdfLayerExecutionOutput, String> {
-        self.render_sdf_layer_candidate(card, profile, SdfLayerCandidateExecutor::SimdF32)
-    }
-
-    fn render_sdf_layer_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        executor: SdfLayerCandidateExecutor,
-    ) -> Result<SdfLayerExecutionOutput, String> {
-        let total_started = std::time::Instant::now();
-        let width = crate::transform::CANVAS_WIDTH as u32;
-        let height = crate::transform::CANVAS_HEIGHT as u32;
-        let md = self.snapshot();
-        let sdf_atlases = self.sdf_atlases.load_full();
-
-        let capture_started = std::time::Instant::now();
-        let captured = capture_sdf_primitives(
-            card,
-            &md,
-            self.assets.as_deref(),
-            Some(&sdf_atlases),
-            profile,
-            width,
-            height,
-            SdfCaptureKinds::TEXT_AND_SHAPE,
-        )?;
-        let capture_ns = elapsed_ns(capture_started);
-
-        let source = crate::sdf::tile::MixedSdfAtlasSource::new(
-            &sdf_atlases,
-            self.shape_sdf_atlas.as_deref(),
-        )
-        .map_err(|error| error.to_string())?;
-        let mapping_started = std::time::Instant::now();
-        let commands = map_captured_sdf_commands(
-            &captured.primitives,
-            &sdf_atlases,
-            self.shape_sdf_atlas.as_deref(),
-            &source,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        let command_mapping_ns = elapsed_ns(mapping_started);
-
-        let plan_started = std::time::Instant::now();
-        let plan = crate::sdf::tile::SdfTilePlan::build(
-            crate::sdf::tile::TileGrid::new(width, height),
-            &commands,
-            &source,
-        )
-        .map_err(|error| error.to_string())?;
-        let plan_build_ns = elapsed_ns(plan_started);
-
-        let mut rgba = vec![0u8; width as usize * height as usize * 4];
-        let execute_started = std::time::Instant::now();
-        let execution_stats = match executor {
-            SdfLayerCandidateExecutor::ScalarF32 => plan
-                .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
-                .map_err(|error| error.to_string())?,
-            SdfLayerCandidateExecutor::SimdF32 => plan
-                .execute_simd(
-                    &source,
-                    [0, 0, 0, 0],
-                    &mut rgba,
-                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
-                )
-                .map_err(|error| error.to_string())?,
-        };
-        let execute_ns = elapsed_ns(execute_started);
-        Ok(SdfLayerExecutionOutput {
-            rgba,
-            width,
-            height,
-            captured_text_count: captured.text_count,
-            captured_shape_count: captured.shape_count,
-            plan_stats: plan.stats(),
-            execution_stats,
-            atlas_mapped_bytes: sdf_atlases.mapped_bytes().saturating_add(
-                self.shape_sdf_atlas.as_deref().map_or(
-                    0,
-                    crate::sdf::shape_atlas::MappedShapeSdfAtlas::mapped_bytes,
-                ),
-            ),
-            plan_bytes: plan.resident_bytes(),
-            span_bytes: plan.span_bytes(),
-            timings: SdfLayerExecutionTimings {
-                capture_ns,
-                command_mapping_ns,
-                plan_build_ns,
-                execute_ns,
-                total_ns: elapsed_ns(total_started),
-            },
-        })
-    }
-
-    /// Renders a complete card while replacing every contiguous Text/Shape
-    /// run with the scalar FP32 SDF oracle. Non-SDF elements continue through
-    /// the existing Skia raster path at their authored positions.
-    pub fn render_full_card_sdf_scalar_f32_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            32,
-            32,
-            false,
-            false,
-            [255, 255, 255, 255],
-        )
-    }
-
-    /// Formal mixed path used by the first opt-in stage: Text uses the scalar
-    /// atlas oracle while Shape and all other elements remain on legacy Skia.
-    pub fn render_full_card_text_sdf_scalar_f32_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            None,
-            32,
-            32,
-            false,
-            false,
-            [255, 255, 255, 255],
-        )
-    }
-
-    /// Renders the same ordered full-card plan through the Turin AVX-512
-    /// executor. Unsupported CPUs and missing atlas entries fail closed.
-    pub fn render_full_card_sdf_simd_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::SimdF32),
-            Some(FullCardSdfCandidateExecutor::SimdF32),
-            32,
-            32,
-            false,
-            false,
-            [255, 255, 255, 255],
-        )
-    }
-
-    /// Production-shape-preserving Text-only Turin candidate. Shape and all
-    /// non-Text elements remain on legacy Skia so the approved Text oracle can
-    /// be inherited independently from the still-unapproved Shape backend.
-    pub fn render_full_card_text_sdf_simd_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::SimdF32),
-            None,
-            32,
-            32,
-            false,
-            false,
-            [255, 255, 255, 255],
-        )
-    }
-
-    /// Transparent counterpart used to quantify alpha coverage and bounds.
-    pub fn render_full_card_sdf_scalar_f32_transparent_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            32,
-            32,
-            false,
-            false,
-            [0, 0, 0, 0],
-        )
-    }
-
-    pub fn render_full_card_text_sdf_scalar_f32_transparent_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::ScalarF32),
-            None,
-            32,
-            32,
-            false,
-            false,
-            [0, 0, 0, 0],
-        )
-    }
-
-    /// Transparent AVX-512 counterpart. Unsupported CPUs still fail closed.
-    pub fn render_full_card_sdf_simd_transparent_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        self.render_full_card_sdf_candidate(
-            card,
-            profile,
-            Some(FullCardSdfCandidateExecutor::SimdF32),
-            Some(FullCardSdfCandidateExecutor::SimdF32),
-            32,
-            32,
-            false,
-            false,
-            [0, 0, 0, 0],
-        )
-    }
-
-    fn render_full_card_sdf_candidate(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        text_executor: Option<FullCardSdfCandidateExecutor>,
-        shape_executor: Option<FullCardSdfCandidateExecutor>,
-        tile_width: u16,
-        tile_height: u16,
-        pixel_occlusion_dry_run: bool,
-        pixel_occlusion_execute: bool,
+        pass: SdfPass,
         clear_rgba: [u8; 4],
-    ) -> Result<FullCardSdfExecutionOutput, String> {
-        let generation = self.pin_render_object_generation();
-        self.render_full_card_sdf_candidate_with_scene(
-            card,
-            profile,
-            text_executor,
-            shape_executor,
-            tile_width,
-            tile_height,
-            pixel_occlusion_dry_run,
-            pixel_occlusion_execute,
-            clear_rgba,
-            false,
-            None,
-            generation.store(),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_full_card_sdf_candidate_with_scene(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        text_executor: Option<FullCardSdfCandidateExecutor>,
-        shape_executor: Option<FullCardSdfCandidateExecutor>,
-        tile_width: u16,
-        tile_height: u16,
-        pixel_occlusion_dry_run: bool,
-        pixel_occlusion_execute: bool,
-        clear_rgba: [u8; 4],
-        forbid_legacy_elements: bool,
         pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
-        render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
+        render_object_store: &crate::render_object::MappedRenderObjectStore,
+    ) -> Result<SurfaceOutput, String> {
         let md = self.snapshot();
         let render = || {
-            self.render_ordered_sdf_surface_candidate(
+            self.render_ordered_sdf_surface(
                 card,
                 profile,
-                text_executor,
-                shape_executor,
-                tile_width,
-                tile_height,
-                pixel_occlusion_dry_run,
-                pixel_occlusion_execute,
-                OrderedSdfSurfaceSpec::full_card(clear_rgba)
-                    .with_forbid_legacy_elements(forbid_legacy_elements),
+                pass,
+                OrderedSdfSurfaceSpec::full_card(clear_rgba),
                 &md,
                 self.assets.as_deref(),
                 pre_resolved_scene,
                 render_object_store,
             )
         };
-        if text_executor.is_none()
-            || !self.realtime_oversized_glyph_generation
-            || active_realtime_edt_batch().is_some()
-        {
+        if !self.realtime_oversized_glyph_generation || active_realtime_edt_batch().is_some() {
             return render();
         }
         let prepared = self.prepare_realtime_edt_batch(
@@ -1170,34 +860,34 @@ impl CustomProfileRenderer {
         Ok(output)
     }
 
+    /// Draws the visible elements of `card` in layer order onto a surface
+    /// `spec` describes: text and shapes as ordered SDF runs, every other
+    /// element through the image compositor.
     #[allow(clippy::too_many_arguments)]
-    fn render_ordered_sdf_surface_candidate(
+    fn render_ordered_sdf_surface(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        text_executor: Option<FullCardSdfCandidateExecutor>,
-        shape_executor: Option<FullCardSdfCandidateExecutor>,
-        tile_width: u16,
-        tile_height: u16,
-        pixel_occlusion_dry_run: bool,
-        pixel_occlusion_execute: bool,
+        pass: SdfPass,
         spec: OrderedSdfSurfaceSpec,
         md: &MasterData,
         assets: Option<&AssetStore>,
         pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
-        render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
-    ) -> Result<FullCardSdfExecutionOutput, String> {
+        render_object_store: &crate::render_object::MappedRenderObjectStore,
+    ) -> Result<SurfaceOutput, String> {
         let total_started = std::time::Instant::now();
         let semantic_resolve_started = std::time::Instant::now();
-        let resolved_scene = if render_object_store.is_some() && pre_resolved_scene.is_none() {
+        let resolved_scene = if pre_resolved_scene.is_none() {
             Some(
-                resolve_native_profile_scene(card, md, profile, assets, render_object_store)
+                resolve_native_profile_scene(card, md, profile, assets, Some(render_object_store))
                     .map_err(|error| format!("resolve ordered profile scene: {error}"))?,
             )
         } else {
             None
         };
-        let semantic_scene = pre_resolved_scene.or(resolved_scene.as_ref());
+        let semantic_scene = pre_resolved_scene
+            .or(resolved_scene.as_ref())
+            .ok_or_else(|| "the page scene was not resolved".to_string())?;
         let semantic_resolve_ns = elapsed_ns(semantic_resolve_started);
         let surface_started = std::time::Instant::now();
         let width = spec.surface_width;
@@ -1207,52 +897,37 @@ impl CustomProfileRenderer {
         let surface_create_ns = elapsed_ns(surface_started);
 
         let sdf_atlases = self.sdf_atlases.load_full();
-        let empty_text_atlases = crate::sdf::atlas::MappedSdfAtlasSet::new();
-        let text_atlases = if text_executor.is_some() {
-            &sdf_atlases
-        } else {
-            &empty_text_atlases
-        };
-        let shape_atlas = shape_executor
-            .is_some()
-            .then_some(self.shape_sdf_atlas.as_deref())
-            .flatten();
+        let text_atlases = sdf_atlases.as_ref();
+        let shape_atlas = self.shape_sdf_atlas.as_deref();
         let source = crate::sdf::tile::MixedSdfAtlasSource::new(text_atlases, shape_atlas)
             .map_err(|error| error.to_string())?;
-        let fallback_assets = crate::assets::AssetStore::new(1);
         let grid = crate::sdf::tile::TileGrid {
             canvas_width: width,
             canvas_height: height,
-            tile_width,
-            tile_height,
+            tile_width: pass.tile_width,
+            tile_height: pass.tile_height,
         };
         let elements = crate::elements::flatten_and_sort(card);
-        let occlusion_dry_run = if pixel_occlusion_dry_run || pixel_occlusion_execute {
-            match (semantic_scene, render_object_store) {
-                (Some(scene), Some(store)) => Some(build_pixel_occlusion_dry_run(
-                    card,
-                    &elements,
-                    scene,
-                    store,
-                    text_executor.is_some(),
-                    shape_executor.is_some(),
-                    width,
-                    height,
-                )?),
-                _ => None,
-            }
+        let pixel_occlusion_execute = pass.pixel_occlusion == PixelOcclusion::Cull;
+        let occlusion_dry_run = if pass.pixel_occlusion.enabled() {
+            Some(build_pixel_occlusion_dry_run(
+                card,
+                &elements,
+                semantic_scene,
+                render_object_store,
+                width,
+                height,
+            )?)
         } else {
             None
         };
         let mut pending = Vec::new();
         let mut pending_executor = None;
         let mut pending_occlusion_mask = None;
-        let mut aggregate = FullCardSdfRunAggregate::default();
+        let mut aggregate = SurfaceAggregate::default();
         aggregate.prepare_direct_axis_shape = spec.prepare_direct_axis_shape;
         aggregate.realtime_oversized_glyph_generation = self.realtime_oversized_glyph_generation;
-        aggregate.render_object_mapped_bytes = render_object_store
-            .map(crate::render_object::MappedRenderObjectStore::mapped_bytes)
-            .unwrap_or_default();
+        aggregate.render_object_mapped_bytes = render_object_store.mapped_bytes();
         aggregate.timings.semantic_resolve_ns = semantic_resolve_ns;
         aggregate.timings.surface_create_ns = surface_create_ns;
         if let Some(dry_run) = occlusion_dry_run.as_ref() {
@@ -1270,15 +945,16 @@ impl CustomProfileRenderer {
         }
         aggregate.timings.surface_clear_ns = elapsed_ns(clear_started);
         let origin = [spec.canvas_origin_x, spec.canvas_origin_y];
-        let mut last_element_was_legacy = false;
 
         for (element_index, element) in elements.into_iter().enumerate() {
             if !element.visible() {
                 continue;
             }
             match element {
-                crate::elements::RenderElement::Text(_) if text_executor.is_some() => {
-                    last_element_was_legacy = false;
+                crate::elements::RenderElement::Text(_) => {
+                    if text_atlases.is_empty() {
+                        return Err("the card draws text but no text atlas is installed".into());
+                    }
                     aggregate.sdf_text_element_count =
                         aggregate.sdf_text_element_count.saturating_add(1);
                     select_full_card_sdf_executor(
@@ -1286,7 +962,7 @@ impl CustomProfileRenderer {
                         &mut pending,
                         &mut pending_executor,
                         &mut pending_occlusion_mask,
-                        text_executor.expect("guarded Text SDF executor"),
+                        pass.executor,
                         occlusion_dry_run
                             .as_ref()
                             .and_then(|dry_run| dry_run.masks_by_element[element_index].clone()),
@@ -1354,8 +1030,10 @@ impl CustomProfileRenderer {
                         return Err(error);
                     }
                 }
-                crate::elements::RenderElement::Shape(_) if shape_executor.is_some() => {
-                    last_element_was_legacy = false;
+                crate::elements::RenderElement::Shape(_) => {
+                    if shape_atlas.is_none() {
+                        return Err("the card draws shapes but no shape atlas is installed".into());
+                    }
                     aggregate.sdf_shape_element_count =
                         aggregate.sdf_shape_element_count.saturating_add(1);
                     select_full_card_sdf_executor(
@@ -1363,7 +1041,7 @@ impl CustomProfileRenderer {
                         &mut pending,
                         &mut pending_executor,
                         &mut pending_occlusion_mask,
-                        shape_executor.expect("guarded Shape SDF executor"),
+                        pass.executor,
                         occlusion_dry_run
                             .as_ref()
                             .and_then(|dry_run| dry_run.masks_by_element[element_index].clone()),
@@ -1421,113 +1099,89 @@ impl CustomProfileRenderer {
                         &self.shape_row_program_cache,
                         &mut aggregate,
                     )?;
-                    let software_identity = match (semantic_scene, render_object_store) {
-                        (Some(_), Some(_))
-                            if !matches!(
-                                element,
-                                crate::elements::RenderElement::Text(_)
-                                    | crate::elements::RenderElement::Shape(_)
-                            ) =>
-                        {
-                            render_element_authored_identity(card, &element)
-                        }
-                        _ => None,
-                    };
-                    if let (Some(scene), Some(store), Some((kind, index))) =
-                        (semantic_scene, render_object_store, software_identity)
-                    {
-                        last_element_was_legacy = false;
-                        let draw_started = std::time::Instant::now();
-                        let stats = render_authored_image_into_pixels(
-                            rgba.as_mut_slice(),
-                            scene,
-                            store,
-                            text_executor.is_some().then_some(text_atlases),
-                            md,
-                            assets,
-                            kind,
-                            index,
-                            spec.surface_width,
-                            spec.surface_height,
-                            spec.canvas_origin_x,
-                            spec.canvas_origin_y,
-                            // The image compositor follows the page's executor
-                            // choice so a scalar host runs a scalar pipeline.
-                            text_executor
-                                .or(shape_executor)
-                                .unwrap_or(FullCardSdfCandidateExecutor::SimdF32),
-                        )?;
-                        aggregate.software_image_count =
-                            aggregate.software_image_count.saturating_add(1);
-                        aggregate.software_text_command_count = aggregate
-                            .software_text_command_count
-                            .saturating_add(stats.text_command_count);
-                        aggregate.software_shape_command_count = aggregate
-                            .software_shape_command_count
-                            .saturating_add(stats.shape_command_count);
-                        aggregate.software_skipped_text_command_count = aggregate
-                            .software_skipped_text_command_count
-                            .saturating_add(stats.skipped_text_command_count);
-                        aggregate.software_skipped_shape_command_count = aggregate
-                            .software_skipped_shape_command_count
-                            .saturating_add(stats.skipped_shape_command_count);
-                        aggregate.image_fragment_count = aggregate
-                            .image_fragment_count
-                            .saturating_add(stats.blended_fragment_count);
-                        aggregate.image_simd_packet_count = aggregate
-                            .image_simd_packet_count
-                            .saturating_add(stats.simd_packet_count);
-                        aggregate.general_base_hit_count = aggregate
-                            .general_base_hit_count
-                            .saturating_add(stats.general_base_hit_count);
-                        aggregate.general_base_miss_count = aggregate
-                            .general_base_miss_count
-                            .saturating_add(stats.general_base_miss_count);
-                        aggregate.general_base_baked_command_count = aggregate
-                            .general_base_baked_command_count
-                            .saturating_add(stats.general_base_baked_command_count);
-                        aggregate.general_base_overlay_command_count = aggregate
-                            .general_base_overlay_command_count
-                            .saturating_add(stats.general_base_overlay_command_count);
-                        aggregate.general_base_bytes = aggregate
-                            .general_base_bytes
-                            .saturating_add(stats.general_base_bytes);
-                        aggregate.general_base_avoided_source_bytes = aggregate
-                            .general_base_avoided_source_bytes
-                            .saturating_add(stats.general_base_avoided_source_bytes);
-                        aggregate.deck_art_variant_hit_count = aggregate
-                            .deck_art_variant_hit_count
-                            .saturating_add(stats.deck_art_variant_hit_count);
-                        aggregate.deck_art_variant_miss_count = aggregate
-                            .deck_art_variant_miss_count
-                            .saturating_add(stats.deck_art_variant_miss_count);
-                        aggregate.deck_art_variant_bytes = aggregate
-                            .deck_art_variant_bytes
-                            .saturating_add(stats.deck_art_variant_bytes);
-                        aggregate.deck_art_variant_avoided_source_bytes = aggregate
-                            .deck_art_variant_avoided_source_bytes
-                            .saturating_add(stats.deck_art_variant_avoided_source_bytes);
-                        aggregate.timings.general_base_composite_ns = aggregate
-                            .timings
-                            .general_base_composite_ns
-                            .saturating_add(stats.general_base_composite_ns);
-                        aggregate.timings.image_composite_ns = aggregate
-                            .timings
-                            .image_composite_ns
-                            .saturating_add(elapsed_ns(draw_started));
-                    } else {
-                        if spec.forbid_legacy_elements {
-                            return Err(format!(
-                                "native surface requires the software image path; {:?} element has no authored identity",
+                    let (kind, index) = render_element_authored_identity(card, &element)
+                        .ok_or_else(|| {
+                            format!(
+                                "the {:?} element is not part of the card",
                                 profile_command_kind(&element)
-                            ));
-                        }
-                        let _ = (&fallback_assets, last_element_was_legacy);
-                        return Err(format!(
-                            "the legacy element renderer was retired; {:?} element has no authored identity",
-                            profile_command_kind(&element)
-                        ));
-                    }
+                            )
+                        })?;
+                    let draw_started = std::time::Instant::now();
+                    let stats = render_authored_image_into_pixels(
+                        rgba.as_mut_slice(),
+                        semantic_scene,
+                        render_object_store,
+                        Some(text_atlases),
+                        md,
+                        assets,
+                        kind,
+                        index,
+                        spec.surface_width,
+                        spec.surface_height,
+                        spec.canvas_origin_x,
+                        spec.canvas_origin_y,
+                        // The image compositor follows the page's executor
+                        // choice so a scalar host runs a scalar pipeline.
+                        pass.executor,
+                    )?;
+                    aggregate.software_image_count =
+                        aggregate.software_image_count.saturating_add(1);
+                    aggregate.software_text_command_count = aggregate
+                        .software_text_command_count
+                        .saturating_add(stats.text_command_count);
+                    aggregate.software_shape_command_count = aggregate
+                        .software_shape_command_count
+                        .saturating_add(stats.shape_command_count);
+                    aggregate.software_skipped_text_command_count = aggregate
+                        .software_skipped_text_command_count
+                        .saturating_add(stats.skipped_text_command_count);
+                    aggregate.software_skipped_shape_command_count = aggregate
+                        .software_skipped_shape_command_count
+                        .saturating_add(stats.skipped_shape_command_count);
+                    aggregate.image_fragment_count = aggregate
+                        .image_fragment_count
+                        .saturating_add(stats.blended_fragment_count);
+                    aggregate.image_simd_packet_count = aggregate
+                        .image_simd_packet_count
+                        .saturating_add(stats.simd_packet_count);
+                    aggregate.general_base_hit_count = aggregate
+                        .general_base_hit_count
+                        .saturating_add(stats.general_base_hit_count);
+                    aggregate.general_base_miss_count = aggregate
+                        .general_base_miss_count
+                        .saturating_add(stats.general_base_miss_count);
+                    aggregate.general_base_baked_command_count = aggregate
+                        .general_base_baked_command_count
+                        .saturating_add(stats.general_base_baked_command_count);
+                    aggregate.general_base_overlay_command_count = aggregate
+                        .general_base_overlay_command_count
+                        .saturating_add(stats.general_base_overlay_command_count);
+                    aggregate.general_base_bytes = aggregate
+                        .general_base_bytes
+                        .saturating_add(stats.general_base_bytes);
+                    aggregate.general_base_avoided_source_bytes = aggregate
+                        .general_base_avoided_source_bytes
+                        .saturating_add(stats.general_base_avoided_source_bytes);
+                    aggregate.deck_art_variant_hit_count = aggregate
+                        .deck_art_variant_hit_count
+                        .saturating_add(stats.deck_art_variant_hit_count);
+                    aggregate.deck_art_variant_miss_count = aggregate
+                        .deck_art_variant_miss_count
+                        .saturating_add(stats.deck_art_variant_miss_count);
+                    aggregate.deck_art_variant_bytes = aggregate
+                        .deck_art_variant_bytes
+                        .saturating_add(stats.deck_art_variant_bytes);
+                    aggregate.deck_art_variant_avoided_source_bytes = aggregate
+                        .deck_art_variant_avoided_source_bytes
+                        .saturating_add(stats.deck_art_variant_avoided_source_bytes);
+                    aggregate.timings.general_base_composite_ns = aggregate
+                        .timings
+                        .general_base_composite_ns
+                        .saturating_add(stats.general_base_composite_ns);
+                    aggregate.timings.image_composite_ns = aggregate
+                        .timings
+                        .image_composite_ns
+                        .saturating_add(elapsed_ns(draw_started));
                 }
             }
         }
@@ -1555,17 +1209,11 @@ impl CustomProfileRenderer {
         }
         aggregate.timings.rgba_snapshot_ns = elapsed_ns(snapshot_started);
         aggregate.timings.total_ns = elapsed_ns(total_started);
-        Ok(FullCardSdfExecutionOutput {
+        Ok(SurfaceOutput {
             rgba,
             width,
             height,
-            clear_rgba: spec.clear_rgba,
             sdf_run_count: aggregate.sdf_run_count,
-            legacy_run_count: aggregate.legacy_run_count,
-            legacy_element_count: aggregate.legacy_element_count,
-            legacy_text_count: aggregate.legacy_text_count,
-            legacy_shape_count: aggregate.legacy_shape_count,
-            legacy_image_count: aggregate.legacy_image_count,
             software_image_count: aggregate.software_image_count,
             software_text_command_count: aggregate.software_text_command_count,
             software_shape_command_count: aggregate.software_shape_command_count,
@@ -1608,154 +1256,51 @@ impl CustomProfileRenderer {
         })
     }
 
-    fn render_shape_sdf_candidate(
+    /// Renders one page against the render objects the renderer currently
+    /// publishes.
+    ///
+    /// Images the render-object store lacks, or every image when no store is
+    /// installed, are decoded from the asset store.
+    pub fn render(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        executor: ShapeSdfCandidateExecutor,
-    ) -> Result<ShapeSdfExecutionOutput, String> {
-        let atlas = self
-            .shape_sdf_atlas
-            .as_deref()
-            .ok_or_else(|| "Shape RG8 atlas is not installed".to_string())?;
-        let width = crate::transform::CANVAS_WIDTH as u32;
-        let height = crate::transform::CANVAS_HEIGHT as u32;
-        let md = self.snapshot();
-        let captured = capture_sdf_primitives(
-            card,
-            &md,
-            self.assets.as_deref(),
-            None,
-            profile,
-            width,
-            height,
-            SdfCaptureKinds::SHAPE,
-        )?;
-
-        let empty_text = crate::sdf::atlas::MappedSdfAtlasSet::new();
-        let source = crate::sdf::tile::MixedSdfAtlasSource::new(&empty_text, Some(atlas))
-            .map_err(|error| error.to_string())?;
-        let commands = map_captured_sdf_commands(
-            &captured.primitives,
-            &empty_text,
-            Some(atlas),
-            &source,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        let grid = crate::sdf::tile::TileGrid::new(width, height);
-        let plan = crate::sdf::tile::SdfTilePlan::build(grid, &commands, &source)
-            .map_err(|error| error.to_string())?;
-        let mut rgba = vec![0u8; width as usize * height as usize * 4];
-        let execution_stats = match executor {
-            ShapeSdfCandidateExecutor::ScalarRgba8 => plan
-                .execute_scalar(&source, [0, 0, 0, 0], &mut rgba)
-                .map_err(|error| error.to_string())?,
-            ShapeSdfCandidateExecutor::SimdF32 => plan
-                .execute_simd(
-                    &source,
-                    [0, 0, 0, 0],
-                    &mut rgba,
-                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
-                )
-                .map_err(|error| error.to_string())?,
-        };
-        Ok(ShapeSdfExecutionOutput {
-            rgba,
-            width,
-            height,
-            plan_stats: plan.stats(),
-            execution_stats,
-            atlas_mapped_bytes: atlas.mapped_bytes(),
-            plan_bytes: plan.resident_bytes(),
-            span_bytes: plan.span_bytes(),
-        })
-    }
-
-    /// Explicit custom-profile backend entry point. The existing `render_page`
-    /// API remains pinned to the production legacy path. Candidate requests are
-    /// resolved against resources that are actually installed in this process;
-    /// unavailable stages either fail closed or emit a page-fallback event.
-    pub fn render_page_with_backend(
-        &self,
-        card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
-        config: crate::profile_backend::ProfileBackendConfig,
-    ) -> Result<
-        crate::profile_backend::ProfileBackendRenderOutput,
-        crate::profile_backend::ProfileBackendRenderError,
-    > {
+        config: &RenderConfig,
+    ) -> Result<RenderedPage, RenderError> {
         let generation = self.pin_render_object_generation();
-        self.render_page_with_backend_generation(card, profile, config, &generation)
+        self.render_pinned(card, profile, config, &generation)
     }
 
-    pub fn render_page_with_backend_generation(
+    /// [`Self::render`] against the render objects `generation` pins.
+    pub fn render_pinned(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        config: crate::profile_backend::ProfileBackendConfig,
+        config: &RenderConfig,
         generation: &RenderObjectGenerationPin,
-    ) -> Result<
-        crate::profile_backend::ProfileBackendRenderOutput,
-        crate::profile_backend::ProfileBackendRenderError,
-    > {
-        self.render_page_with_backend_scene(card, profile, config, None, true, generation.store())
+    ) -> Result<RenderedPage, RenderError> {
+        self.render_page_scene(card, profile, config, None, true, generation.store())
     }
 
-    fn render_page_with_backend_scene(
+    fn render_page_scene(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        config: crate::profile_backend::ProfileBackendConfig,
+        config: &RenderConfig,
         pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
         prepare_fallback_glyphs: bool,
         render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
-    ) -> Result<
-        crate::profile_backend::ProfileBackendRenderOutput,
-        crate::profile_backend::ProfileBackendRenderError,
-    > {
-        use crate::profile_backend::{
-            ProfileBackendRenderError, ProfileRenderTelemetry, ShapeSdfExecutor, TextSdfExecutor,
-            PROFILE_RENDER_CONTRACT_LEGACY_SKIA, PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS,
-        };
-
+    ) -> Result<RenderedPage, RenderError> {
         let total_started = std::time::Instant::now();
-        let selection = config.resolve(self.profile_backend_capabilities())?;
-        let _collect_telemetry = config.collect_telemetry;
-        let actual_text = selection.text_sdf;
-        let actual_shape = selection.shape_sdf;
-        let mut telemetry = ProfileRenderTelemetry::new(
-            config.clone(),
-            if actual_text == TextSdfExecutor::LegacySkia && actual_shape == ShapeSdfExecutor::Skia
-            {
-                PROFILE_RENDER_CONTRACT_LEGACY_SKIA
-            } else {
-                PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS
-            },
-        );
-        let native_surface =
-            selection.surface == crate::profile_backend::ProfileSurfaceBackend::NativeRasterCpu;
-        telemetry.apply_selection(selection);
+        let executor = config.resolve(sdf_simd_available())?;
+        let store = render_object_store
+            .unwrap_or_else(|| crate::render_object::MappedRenderObjectStore::empty());
+        let mut telemetry = RenderTelemetry::new(config.clone(), executor.public());
 
-        let text_executor = match actual_text {
-            TextSdfExecutor::LegacySkia => None,
-            TextSdfExecutor::Simd => Some(FullCardSdfCandidateExecutor::SimdF32),
-            TextSdfExecutor::ScalarOracle => Some(FullCardSdfCandidateExecutor::ScalarF32),
-        };
-        let shape_executor = match actual_shape {
-            ShapeSdfExecutor::Skia => None,
-            ShapeSdfExecutor::Simd => Some(FullCardSdfCandidateExecutor::SimdF32),
-            ShapeSdfExecutor::ScalarOracle => Some(FullCardSdfCandidateExecutor::ScalarF32),
-            ShapeSdfExecutor::Auto => unreachable!("Auto is resolved to a concrete executor"),
-        };
-
-        // A direct single-page request does not arrive with a compiled scene.
-        // Resolve it once here when sparse fallback preparation is enabled, so
-        // the demand scan and the renderer consume the same semantic payload.
+        // A single-page request arrives without a resolved scene. Resolve it
+        // once here when fallback glyphs are prepared, so the glyph demand
+        // and the drawing read the same scene.
         let owned_scene = if prepare_fallback_glyphs
-            && text_executor.is_some()
             && self.profile_fallback_sdf_cache.is_some()
             && pre_resolved_scene.is_none()
         {
@@ -1766,314 +1311,265 @@ impl CustomProfileRenderer {
                     &md,
                     profile,
                     self.assets.as_deref(),
-                    render_object_store,
+                    Some(store),
                 )
-                .map_err(|error| ProfileBackendRenderError::Render(error.to_string()))?,
+                .map_err(|error| RenderError::Render(error.to_string()))?,
             )
         } else {
             None
         };
-        let effective_scene = pre_resolved_scene.or(owned_scene.as_ref());
-        let fallback_glyph_cache = if prepare_fallback_glyphs && text_executor.is_some() {
-            if let Some(scene) = effective_scene {
+        let scene = pre_resolved_scene.or(owned_scene.as_ref());
+        let fallback_glyph_cache = match scene {
+            Some(scene) if prepare_fallback_glyphs => {
                 let md = self.snapshot();
-                self.ensure_profile_fallback_for_scenes(std::iter::once(scene), &md)
-                    .map_err(ProfileBackendRenderError::Render)?
-            } else {
-                None
+                self.ensure_profile_fallback_for_scenes(std::iter::once(scene), &md)?
             }
-        } else {
-            None
+            _ => None,
         };
 
-        let encoded = if text_executor.is_some() || shape_executor.is_some() {
-            match self.render_full_card_sdf_candidate_with_scene(
-                card,
-                profile,
-                text_executor,
-                shape_executor,
-                config.tile_width,
-                config.tile_height,
-                config.pixel_occlusion_dry_run,
-                config.pixel_occlusion_execute,
-                [255, 255, 255, 255],
-                native_surface,
-                effective_scene,
-                render_object_store,
-            ) {
-                Ok(mut output) => {
-                    telemetry.surface_identity = crate::profile_backend::ProfileSurfaceIdentity {
-                        pixel_format: "rgba8888".into(),
-                        alpha_type: "premultiplied".into(),
-                        color_space: "none".into(),
-                    };
-                    let sdf_atlases = self.sdf_atlases.load_full();
-                    record_profile_atlas_identities(
-                        &mut telemetry,
-                        text_executor.is_some().then_some(sdf_atlases.as_ref()),
-                        shape_executor
-                            .is_some()
-                            .then_some(self.shape_sdf_atlas.as_deref())
-                            .flatten(),
-                        "executed",
-                    );
-                    telemetry.atlas_contract = Some(
-                        match (text_executor.is_some(), shape_executor.is_some()) {
-                            (true, true) => crate::sdf::tile::MIXED_SDF_ATLAS_CONTRACT,
-                            (true, false) => crate::sdf::atlas::ATLAS_SET_CONTRACT,
-                            (false, true) => crate::sdf::shape_atlas::SHAPE_ATLAS_MANIFEST_SCHEMA,
-                            (false, false) => unreachable!("candidate branch requires SDF work"),
-                        }
-                        .into(),
-                    );
-                    telemetry.work.page_count = 1;
-                    telemetry.work.element_run_count =
-                        output.sdf_run_count.saturating_add(output.legacy_run_count);
-                    telemetry.bytes.atlas_mapped_bytes = output.atlas_mapped_bytes;
-                    telemetry.bytes.render_object_mapped_bytes = output.render_object_mapped_bytes;
-                    telemetry.bytes.readback_bytes = output.rgba.len() as u64;
-                    telemetry.bytes.encoder_input_bytes = output.rgba.len() as u64;
-                    telemetry.timings.sdf_capture_ns = output.timings.capture_ns;
-                    telemetry.timings.semantic_resolve_ns = output.timings.semantic_resolve_ns;
-                    telemetry.timings.sdf_capture_rich_parse_ns =
-                        output.timings.capture_rich_parse_ns;
-                    telemetry.timings.sdf_capture_font_resolve_ns =
-                        output.timings.capture_font_resolve_ns;
-                    telemetry.timings.sdf_capture_layout_setup_ns =
-                        output.timings.capture_layout_setup_ns;
-                    telemetry.timings.sdf_capture_measure_ns = output.timings.capture_measure_ns;
-                    telemetry.timings.sdf_capture_command_build_ns =
-                        output.timings.capture_command_build_ns;
-                    telemetry.timings.sdf_capture_emit_ns = output.timings.capture_emit_ns;
-                    telemetry.timings.surface_create_ns = output.timings.surface_create_ns;
-                    telemetry.timings.surface_clear_ns = output.timings.surface_clear_ns;
-                    telemetry.timings.sdf_command_mapping_ns = output.timings.command_mapping_ns;
-                    telemetry.work.realtime_edt_glyph_count = output
-                        .realtime_edt_glyphs
-                        .iter()
-                        .map(|glyph| glyph.substitution_count)
-                        .sum();
-                    telemetry.bytes.realtime_edt_page_bytes = output
-                        .realtime_edt_glyphs
-                        .iter()
-                        .map(|glyph| glyph.page_bytes)
-                        .sum();
-                    telemetry.timings.realtime_edt_generation_ns = output
-                        .realtime_edt_glyphs
-                        .iter()
-                        .map(|glyph| glyph.generation_ns)
-                        .sum();
-                    telemetry.realtime_edt_glyphs = output.realtime_edt_glyphs.clone();
-                    telemetry.realtime_edt_batch = output.realtime_edt_batch.clone();
-                    telemetry.timings.sdf_plan_build_ns = output.timings.plan_build_ns;
-                    telemetry.timings.sdf_execute_ns = output.timings.execute_ns;
-                    telemetry.timings.legacy_element_draw_ns = output.timings.legacy_draw_ns;
-                    telemetry.timings.image_composite_ns = output.timings.image_composite_ns;
-                    telemetry.timings.general_base_composite_ns =
-                        output.timings.general_base_composite_ns;
-                    telemetry.timings.occlusion_mask_build_ns =
-                        output.timings.occlusion_mask_build_ns;
-                    telemetry.timings.occlusion_intersection_ns =
-                        output.timings.occlusion_intersection_ns;
-                    telemetry.timings.image_draw_ns = output.timings.image_composite_ns;
-                    telemetry.timings.rgba_snapshot_ns = output.timings.rgba_snapshot_ns;
-                    telemetry.timings.readback_ns = output.timings.rgba_snapshot_ns;
-                    telemetry.record_executed_sdf_commands(
-                        output.sdf_text_element_count,
-                        output.sdf_shape_element_count,
-                        output.captured_text_count,
-                    );
-                    telemetry.record_sdf_plan(
-                        output.plan_stats,
-                        output.plan_bytes,
-                        output.span_bytes,
-                    );
-                    telemetry.record_sdf_execution(output.execution_stats);
-                    telemetry.work.occlusion_eligible_image_count =
-                        output.occlusion_eligible_image_count;
-                    telemetry.work.software_skipped_text_command_count =
-                        output.software_skipped_text_command_count;
-                    telemetry.work.software_skipped_shape_command_count =
-                        output.software_skipped_shape_command_count;
-                    telemetry.work.general_base_hit_count = output.general_base_hit_count;
-                    telemetry.work.general_base_miss_count = output.general_base_miss_count;
-                    telemetry.work.general_base_baked_command_count =
-                        output.general_base_baked_command_count;
-                    telemetry.work.general_base_overlay_command_count =
-                        output.general_base_overlay_command_count;
-                    telemetry.bytes.general_base_bytes = output.general_base_bytes;
-                    telemetry.bytes.general_base_avoided_source_bytes =
-                        output.general_base_avoided_source_bytes;
-                    telemetry.work.deck_art_variant_hit_count = output.deck_art_variant_hit_count;
-                    telemetry.work.deck_art_variant_miss_count = output.deck_art_variant_miss_count;
-                    telemetry.bytes.deck_art_variant_bytes = output.deck_art_variant_bytes;
-                    telemetry.bytes.deck_art_variant_avoided_source_bytes =
-                        output.deck_art_variant_avoided_source_bytes;
-                    telemetry.work.text_command_count = telemetry
-                        .work
-                        .text_command_count
-                        .saturating_add(output.software_text_command_count);
-                    telemetry.work.shape_command_count = telemetry
-                        .work
-                        .shape_command_count
-                        .saturating_add(output.software_shape_command_count);
-                    telemetry.work.command_count = telemetry.work.command_count.saturating_add(
-                        output
-                            .software_text_command_count
-                            .saturating_add(output.software_shape_command_count),
-                    );
-                    telemetry.work.occlusion_mask_snapshot_count =
-                        output.occlusion_mask_snapshot_count;
-                    telemetry.work.occluded_fragment_count =
-                        output.occlusion.occluded_fragment_count;
-                    telemetry.work.visible_fragment_count = output.occlusion.visible_fragment_count;
-                    telemetry.work.occluded_text_fragment_count =
-                        output.occlusion.occluded_text_fragment_count;
-                    telemetry.work.occluded_shape_fragment_count =
-                        output.occlusion.occluded_shape_fragment_count;
-                    telemetry.work.fully_occluded_sdf_command_count =
-                        output.occlusion.fully_occluded_command_count;
-                    telemetry.bytes.occlusion_mask_bytes = output.occlusion_mask_bytes;
-                    telemetry.record_legacy_commands(
-                        crate::profile_backend::ProfileCommandKind::Text,
-                        output.legacy_text_count,
-                        0,
-                    );
-                    telemetry.record_legacy_commands(
-                        crate::profile_backend::ProfileCommandKind::Shape,
-                        output.legacy_shape_count,
-                        0,
-                    );
-                    telemetry.record_legacy_commands(
-                        crate::profile_backend::ProfileCommandKind::Image,
-                        output.legacy_image_count,
-                        output.timings.legacy_draw_ns,
-                    );
-                    telemetry.record_legacy_commands(
-                        crate::profile_backend::ProfileCommandKind::Image,
-                        output.software_image_count,
-                        output.timings.image_composite_ns,
-                    );
-                    telemetry.work.blended_fragments = telemetry
-                        .work
-                        .blended_fragments
-                        .saturating_add(output.image_fragment_count);
-                    telemetry.work.sampled_texel_count = telemetry
-                        .work
-                        .sampled_texel_count
-                        .saturating_add(output.image_fragment_count);
-                    telemetry.work.simd_packet_count = telemetry
-                        .work
-                        .simd_packet_count
-                        .saturating_add(output.image_simd_packet_count);
-                    if let Some(image) = telemetry.commands.iter_mut().find(|command| {
-                        command.kind == crate::profile_backend::ProfileCommandKind::Image
-                    }) {
-                        image.covered_fragments = image
-                            .covered_fragments
-                            .saturating_add(output.image_fragment_count);
-                        image.blended_fragments = image
-                            .blended_fragments
-                            .saturating_add(output.image_fragment_count);
-                    }
-
-                    let encode_started = std::time::Instant::now();
-                    let encoded: Result<Vec<u8>, String> = match config.jpeg_encoder {
-                        crate::profile_backend::ProfileJpegEncoder::Skia => {
-                            Err("the Skia JPEG encoder was retired; use libjpeg-turbo".to_string())
-                        }
-                        #[cfg(feature = "jpeg-turbo")]
-                        crate::profile_backend::ProfileJpegEncoder::LibJpegTurbo => {
-                            crate::jpeg_turbo::encode_rgba(
-                                &output.rgba,
-                                output.width,
-                                output.height,
-                                90,
-                            )
-                        }
-                        #[cfg(feature = "jpeg-turbo")]
-                        crate::profile_backend::ProfileJpegEncoder::LibJpegTurboAvx512Yuv420 => {
-                            let mut scratch = self.take_jpeg_yuv420_scratch();
-                            let encoded = crate::jpeg_turbo::encode_rgba_avx512_yuv420_with_scratch(
-                                &output.rgba,
-                                output.width,
-                                output.height,
-                                90,
-                                &mut scratch,
-                            );
-                            self.recycle_jpeg_yuv420_scratch(scratch);
-                            encoded
-                        }
-                        #[cfg(not(feature = "jpeg-turbo"))]
-                        crate::profile_backend::ProfileJpegEncoder::LibJpegTurbo
-                        | crate::profile_backend::ProfileJpegEncoder::LibJpegTurboAvx512Yuv420 => {
-                            Err("libjpeg-turbo support is not compiled in".to_string())
-                        }
-                    };
-                    telemetry.timings.encode_ns = elapsed_ns(encode_started);
-                    let rgba_len = output.rgba.len();
-                    self.recycle_profile_rgba_scratch(std::mem::take(&mut output.rgba));
-                    match encoded {
-                        Ok(encoded) => {
-                            telemetry.bytes.encoded_output_bytes = encoded.len() as u64;
-                            telemetry.bytes.scratch_peak_bytes =
-                                (rgba_len as u64).saturating_add(encoded.len() as u64);
-                            encoded
-                        }
-
-                        Err(error) => return Err(ProfileBackendRenderError::Render(error)),
-                    }
-                }
-                Err(error) if error.contains("profile compositor is missing render object") => {
-                    return Err(ProfileBackendRenderError::Render(error));
-                }
-
-                Err(error) => return Err(ProfileBackendRenderError::Render(error)),
-            }
-        } else {
-            return Err(ProfileBackendRenderError::Render(
-                "the legacy page renderer was retired; select SDF executors".into(),
-            ));
-        };
+        let mut output = self.render_full_card(
+            card,
+            profile,
+            SdfPass::new(config, executor),
+            config.background.clear_rgba(),
+            scene,
+            store,
+        )?;
+        self.record_atlas_identities(&mut telemetry, "executed");
+        telemetry.atlas_contract = Some(crate::sdf::tile::MIXED_SDF_ATLAS_CONTRACT.into());
+        Self::record_surface(&mut telemetry, &output);
         telemetry.timings.total_ns = elapsed_ns(total_started);
         telemetry.fallback_glyph_cache = fallback_glyph_cache;
-        Ok(crate::profile_backend::ProfileBackendRenderOutput { encoded, telemetry })
+        Ok(RenderedPage {
+            width: output.width,
+            height: output.height,
+            rgba: std::mem::take(&mut output.rgba),
+            background: config.background,
+            telemetry,
+        })
     }
 
-    pub fn render_profile_batch_with_backend<'a>(
+    /// Folds what drawing one page took into its telemetry.
+    fn record_surface(telemetry: &mut RenderTelemetry, output: &SurfaceOutput) {
+        telemetry.surface_identity = SurfaceIdentity {
+            pixel_format: "rgba8888".into(),
+            alpha_type: "premultiplied".into(),
+            color_space: "none".into(),
+        };
+        telemetry.work.page_count = 1;
+        telemetry.work.element_run_count = output.sdf_run_count;
+        telemetry.bytes.atlas_mapped_bytes = output.atlas_mapped_bytes;
+        telemetry.bytes.render_object_mapped_bytes = output.render_object_mapped_bytes;
+        telemetry.bytes.encoder_input_bytes = output.rgba.len() as u64;
+        telemetry.timings.sdf_capture_ns = output.timings.capture_ns;
+        telemetry.timings.semantic_resolve_ns = output.timings.semantic_resolve_ns;
+        telemetry.timings.sdf_capture_rich_parse_ns = output.timings.capture_rich_parse_ns;
+        telemetry.timings.sdf_capture_font_resolve_ns = output.timings.capture_font_resolve_ns;
+        telemetry.timings.sdf_capture_layout_setup_ns = output.timings.capture_layout_setup_ns;
+        telemetry.timings.sdf_capture_measure_ns = output.timings.capture_measure_ns;
+        telemetry.timings.sdf_capture_command_build_ns = output.timings.capture_command_build_ns;
+        telemetry.timings.sdf_capture_emit_ns = output.timings.capture_emit_ns;
+        telemetry.timings.surface_create_ns = output.timings.surface_create_ns;
+        telemetry.timings.surface_clear_ns = output.timings.surface_clear_ns;
+        telemetry.timings.sdf_command_mapping_ns = output.timings.command_mapping_ns;
+        telemetry.work.realtime_edt_glyph_count = output
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.substitution_count)
+            .sum();
+        telemetry.bytes.realtime_edt_page_bytes = output
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.page_bytes)
+            .sum();
+        telemetry.timings.realtime_edt_generation_ns = output
+            .realtime_edt_glyphs
+            .iter()
+            .map(|glyph| glyph.generation_ns)
+            .sum();
+        telemetry.realtime_edt_glyphs = output.realtime_edt_glyphs.clone();
+        telemetry.realtime_edt_batch = output.realtime_edt_batch.clone();
+        telemetry.timings.sdf_plan_build_ns = output.timings.plan_build_ns;
+        telemetry.timings.sdf_execute_ns = output.timings.execute_ns;
+        telemetry.timings.image_composite_ns = output.timings.image_composite_ns;
+        telemetry.timings.general_base_composite_ns = output.timings.general_base_composite_ns;
+        telemetry.timings.occlusion_mask_build_ns = output.timings.occlusion_mask_build_ns;
+        telemetry.timings.occlusion_intersection_ns = output.timings.occlusion_intersection_ns;
+        telemetry.timings.rgba_snapshot_ns = output.timings.rgba_snapshot_ns;
+        telemetry.record_executed_sdf_commands(
+            output.sdf_text_element_count,
+            output.sdf_shape_element_count,
+            output.captured_text_count,
+        );
+        telemetry.record_sdf_plan(output.plan_stats, output.plan_bytes, output.span_bytes);
+        telemetry.record_sdf_execution(output.execution_stats);
+        telemetry.work.occlusion_eligible_image_count = output.occlusion_eligible_image_count;
+        telemetry.work.software_skipped_text_command_count =
+            output.software_skipped_text_command_count;
+        telemetry.work.software_skipped_shape_command_count =
+            output.software_skipped_shape_command_count;
+        telemetry.work.general_base_hit_count = output.general_base_hit_count;
+        telemetry.work.general_base_miss_count = output.general_base_miss_count;
+        telemetry.work.general_base_baked_command_count = output.general_base_baked_command_count;
+        telemetry.work.general_base_overlay_command_count =
+            output.general_base_overlay_command_count;
+        telemetry.bytes.general_base_bytes = output.general_base_bytes;
+        telemetry.bytes.general_base_avoided_source_bytes =
+            output.general_base_avoided_source_bytes;
+        telemetry.work.deck_art_variant_hit_count = output.deck_art_variant_hit_count;
+        telemetry.work.deck_art_variant_miss_count = output.deck_art_variant_miss_count;
+        telemetry.bytes.deck_art_variant_bytes = output.deck_art_variant_bytes;
+        telemetry.bytes.deck_art_variant_avoided_source_bytes =
+            output.deck_art_variant_avoided_source_bytes;
+        telemetry.work.text_command_count = telemetry
+            .work
+            .text_command_count
+            .saturating_add(output.software_text_command_count);
+        telemetry.work.shape_command_count = telemetry
+            .work
+            .shape_command_count
+            .saturating_add(output.software_shape_command_count);
+        telemetry.work.command_count = telemetry.work.command_count.saturating_add(
+            output
+                .software_text_command_count
+                .saturating_add(output.software_shape_command_count),
+        );
+        telemetry.work.occlusion_mask_snapshot_count = output.occlusion_mask_snapshot_count;
+        telemetry.work.occluded_fragment_count = output.occlusion.occluded_fragment_count;
+        telemetry.work.visible_fragment_count = output.occlusion.visible_fragment_count;
+        telemetry.work.occluded_text_fragment_count = output.occlusion.occluded_text_fragment_count;
+        telemetry.work.occluded_shape_fragment_count =
+            output.occlusion.occluded_shape_fragment_count;
+        telemetry.work.fully_occluded_sdf_command_count =
+            output.occlusion.fully_occluded_command_count;
+        telemetry.bytes.occlusion_mask_bytes = output.occlusion_mask_bytes;
+        telemetry.record_commands(
+            CommandKind::Image,
+            output.software_image_count,
+            output.timings.image_composite_ns,
+        );
+        telemetry.work.blended_fragments = telemetry
+            .work
+            .blended_fragments
+            .saturating_add(output.image_fragment_count);
+        telemetry.work.sampled_texel_count = telemetry
+            .work
+            .sampled_texel_count
+            .saturating_add(output.image_fragment_count);
+        telemetry.work.simd_packet_count = telemetry
+            .work
+            .simd_packet_count
+            .saturating_add(output.image_simd_packet_count);
+        if let Some(image) = telemetry
+            .commands
+            .iter_mut()
+            .find(|command| command.kind == CommandKind::Image)
+        {
+            image.covered_fragments = image
+                .covered_fragments
+                .saturating_add(output.image_fragment_count);
+            image.blended_fragments = image
+                .blended_fragments
+                .saturating_add(output.image_fragment_count);
+        }
+    }
+
+    /// Encodes `page` as PNG, keeping its pixel buffer for the next render.
+    pub fn encode_png(&self, page: RenderedPage) -> Result<EncodedPage, RenderError> {
+        let started = std::time::Instant::now();
+        let bytes = page.to_png()?;
+        Ok(self.finish_encoding(page, bytes, started, None))
+    }
+
+    /// Encodes `page` as JPEG, keeping its pixel buffer and the encoder's
+    /// scratch for the next render.
+    #[cfg(feature = "jpeg-turbo")]
+    pub fn encode_jpeg(
+        &self,
+        page: RenderedPage,
+        options: JpegOptions,
+    ) -> Result<EncodedPage, RenderError> {
+        let started = std::time::Instant::now();
+        options.validate()?;
+        page.jpeg_input()?;
+        let quality = u32::from(options.quality);
+        let bytes = match options.encoder {
+            JpegEncoder::Standard => {
+                crate::jpeg_turbo::encode_rgba(&page.rgba, page.width, page.height, quality)
+            }
+            JpegEncoder::Avx512Yuv420 => {
+                let mut scratch = self.take_jpeg_yuv420_scratch();
+                let encoded = crate::jpeg_turbo::encode_rgba_avx512_yuv420_with_scratch(
+                    &page.rgba,
+                    page.width,
+                    page.height,
+                    quality,
+                    &mut scratch,
+                );
+                self.recycle_jpeg_yuv420_scratch(scratch);
+                encoded
+            }
+        }?;
+        Ok(self.finish_encoding(page, bytes, started, Some(options)))
+    }
+
+    fn finish_encoding(
+        &self,
+        page: RenderedPage,
+        bytes: Vec<u8>,
+        started: std::time::Instant,
+        jpeg: Option<JpegOptions>,
+    ) -> EncodedPage {
+        let RenderedPage {
+            width,
+            height,
+            rgba,
+            mut telemetry,
+            ..
+        } = page;
+        let encode_ns = elapsed_ns(started);
+        telemetry.timings.encode_ns = encode_ns;
+        telemetry.timings.total_ns = telemetry.timings.total_ns.saturating_add(encode_ns);
+        telemetry.bytes.encoded_output_bytes = bytes.len() as u64;
+        telemetry.bytes.scratch_peak_bytes = (rgba.len() as u64).saturating_add(bytes.len() as u64);
+        telemetry.jpeg = jpeg;
+        self.recycle_profile_rgba_scratch(rgba);
+        EncodedPage {
+            width,
+            height,
+            bytes,
+            telemetry,
+        }
+    }
+
+    /// Renders the pages of one profile together: their scenes are resolved
+    /// in one pass and missing fallback glyphs are generated once for all of
+    /// them.
+    ///
+    /// `batch_key` and `locale` identify the batch in its compiled form.
+    pub fn render_batch<'a>(
         &self,
         batch_key: &str,
         locale: &str,
         pages: impl IntoIterator<Item = (i32, &'a CustomProfileCard)>,
         profile: Option<&crate::profile::ProfileData>,
-        config: crate::profile_backend::ProfileBackendConfig,
-    ) -> Result<
-        crate::profile_backend::ProfileBackendBatchRenderOutput,
-        crate::profile_backend::ProfileBackendRenderError,
-    > {
+        config: &RenderConfig,
+    ) -> Result<RenderedBatch, RenderError> {
         let generation = self.pin_render_object_generation();
-        self.render_profile_batch_with_backend_generation(
-            batch_key,
-            locale,
-            pages,
-            profile,
-            config,
-            &generation,
-        )
+        self.render_batch_pinned(batch_key, locale, pages, profile, config, &generation)
     }
 
-    pub fn render_profile_batch_with_backend_generation<'a>(
+    /// [`Self::render_batch`] against the render objects `generation` pins.
+    pub fn render_batch_pinned<'a>(
         &self,
         batch_key: &str,
         locale: &str,
         pages: impl IntoIterator<Item = (i32, &'a CustomProfileCard)>,
         profile: Option<&crate::profile::ProfileData>,
-        config: crate::profile_backend::ProfileBackendConfig,
+        config: &RenderConfig,
         generation: &RenderObjectGenerationPin,
-    ) -> Result<
-        crate::profile_backend::ProfileBackendBatchRenderOutput,
-        crate::profile_backend::ProfileBackendRenderError,
-    > {
+    ) -> Result<RenderedBatch, RenderError> {
+        config.resolve(sdf_simd_available())?;
         let inputs = pages.into_iter().collect::<Vec<_>>();
         let cards_by_seq = inputs
             .iter()
@@ -2089,73 +1585,50 @@ impl CustomProfileRenderer {
             self.assets.as_deref(),
             generation.store(),
         )
-        .map_err(|error| {
-            crate::profile_backend::ProfileBackendRenderError::Render(error.to_string())
-        })?;
-        let selection = config.resolve(self.profile_backend_capabilities())?;
-        let prepared_render_objects = if selection.text_sdf
-            != crate::profile_backend::TextSdfExecutor::LegacySkia
-            || selection.shape_sdf != crate::profile_backend::ShapeSdfExecutor::Skia
-        {
-            let store = generation.store().ok_or_else(|| {
-                crate::profile_backend::ProfileBackendRenderError::Render(
-                    "compiled profile backend requires a render-object store".into(),
-                )
-            })?;
+        .map_err(|error| RenderError::Render(error.to_string()))?;
+        let prepared_render_objects = generation.store().map(|store| {
             let prepared = compiled.prepare_render_objects(store);
             if !prepared.missing_object_keys.is_empty() {
                 tracing::warn!(
-                    stage = "render_object_miss",
                     generation = generation.source_identity().unwrap_or("none"),
                     missing_count = prepared.missing_object_keys.len(),
                     missing_keys = ?prepared.missing_object_keys.iter().take(16).collect::<Vec<_>>(),
-                    "render-object generation is incomplete; resource pipeline must publish a complete replacement"
+                    "the render-object store lacks objects these pages use; they are decoded from the asset store"
                 );
             }
-            Some(prepared)
-        } else {
-            None
-        };
+            prepared
+        });
         let missing_page_object_keys = prepared_render_objects
             .as_ref()
             .map(|prepared| prepared.missing_page_object_keys.clone())
             .unwrap_or_default();
-        let fallback_glyph_cache =
-            if selection.text_sdf != crate::profile_backend::TextSdfExecutor::LegacySkia {
-                self.ensure_profile_fallback_for_scenes(
-                    compiled.pages.iter().map(|page| &page.scene),
-                    &md,
-                )
-                .map_err(crate::profile_backend::ProfileBackendRenderError::Render)?
-            } else {
-                None
-            };
+        let fallback_glyph_cache = self.ensure_profile_fallback_for_scenes(
+            compiled.pages.iter().map(|page| &page.scene),
+            &md,
+        )?;
         let mut rendered = Vec::with_capacity(compiled.pages.len());
         for page in &compiled.pages {
             let card = cards_by_seq.get(&page.seq).copied().ok_or_else(|| {
-                crate::profile_backend::ProfileBackendRenderError::Render(format!(
-                    "compiled batch lost page seq={}",
-                    page.seq
-                ))
+                RenderError::Render(format!("compiled batch lost page seq={}", page.seq))
             })?;
-            let missing_for_page = missing_page_object_keys
-                .get(&page.seq)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let mut output = self.render_page_with_backend_scene(
+            let mut output = self.render_page_scene(
                 card,
                 profile,
-                config.clone(),
+                config,
                 Some(&page.scene),
                 false,
                 generation.store(),
             )?;
+            let missing_for_page = missing_page_object_keys
+                .get(&page.seq)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if !missing_for_page.is_empty() {
                 output.telemetry.record_fallback(
-                    crate::profile_backend::BackendFallbackCode::RenderObjectMissing,
-                    "render-object-source-cos",
+                    FallbackCode::RenderObjectMissing,
+                    "render-objects",
                     format!(
-                        "page seq={} loaded {} source object(s) from AssetStore/COS: {}",
+                        "page seq={} decoded {} object(s) from the asset store: {}",
                         page.seq,
                         missing_for_page.len(),
                         missing_for_page
@@ -2171,7 +1644,7 @@ impl CustomProfileRenderer {
             }
             rendered.push((page.seq, output));
         }
-        Ok(crate::profile_backend::ProfileBackendBatchRenderOutput {
+        Ok(RenderedBatch {
             compiled,
             prepared_render_objects,
             pages: rendered,
@@ -2179,7 +1652,19 @@ impl CustomProfileRenderer {
         })
     }
 
-    /// Builds the v0.2 text scene dump without changing or replacing the production pixel path.
+    /// Records the identity of every installed atlas a render may sample, so
+    /// a telemetry consumer can tell which atlas build produced the pixels.
+    pub(crate) fn record_atlas_identities(&self, telemetry: &mut RenderTelemetry, usage: &str) {
+        let sdf_atlases = self.sdf_atlases.load_full();
+        record_profile_atlas_identities(
+            telemetry,
+            &sdf_atlases,
+            self.shape_sdf_atlas.as_deref(),
+            usage,
+        );
+    }
+
+    /// Builds the text-only scene of `card` at `tick` and dumps it.
     pub fn dump_text_scene(
         &self,
         card: &CustomProfileCard,
@@ -2208,7 +1693,8 @@ impl CustomProfileRenderer {
         Ok(dump)
     }
 
-    /// Builds the v0.2 full authored-layer semantic scene without changing the pixel path.
+    /// Builds the scene of every authored layer of `card` at `tick` and dumps
+    /// it.
     pub fn dump_semantic_scene(
         &self,
         card: &CustomProfileCard,
@@ -2219,6 +1705,7 @@ impl CustomProfileRenderer {
         self.dump_semantic_scene_with_profile(card, None, document_key, region, region, tick)
     }
 
+    /// [`Self::dump_semantic_scene`] with player data.
     pub fn dump_semantic_scene_with_profile(
         &self,
         card: &CustomProfileCard,
@@ -2272,7 +1759,7 @@ impl CustomProfileRenderer {
         let mut pages = Vec::new();
         let mut entries = std::collections::BTreeMap::new();
         let mut glyphs = Vec::new();
-        let mut telemetry = crate::profile_backend::RealtimeEdtBatchTelemetry::default();
+        let mut telemetry = crate::telemetry::RealtimeEdtBatchTelemetry::default();
         let runtime_pages = self
             .realtime_oversized_glyph_generation
             .then_some(&mut pages);
@@ -2313,7 +1800,7 @@ impl CustomProfileRenderer {
     }
 }
 
-/// 扫描像素缓冲区，找到所有 alpha > 0 像素的最小包围矩形。
+/// The smallest rectangle holding every pixel with non-zero alpha.
 fn find_opaque_bounds(
     pixels: &[u8],
     width: u32,
@@ -2334,88 +1821,13 @@ fn find_opaque_bounds(
     find_opaque_bounds_scalar(pixels, width, height, row_bytes)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// 批量分层裁剪渲染：把名片拆成「每个可见元素一张裁剪 WebP」的统一原语。
-//
-// 当前实现循环调 `render_element_layer_cropped`，每层输出与单方法逐字节一致。
-// 后续可在不破坏逐字节一致性的前提下做内部优化（单画布复用等）。
-// ─────────────────────────────────────────────────────────────────────────
-
-/// Runtime probe for the Turin AVX-512 SDF tile executor.
-fn turin_sdf_simd_available() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("avx512bw")
-            && std::arch::is_x86_feature_detected!("avx512vbmi")
-            && std::arch::is_x86_feature_detected!("fma")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
-}
-
-pub struct ShapeSdfExecutionOutput {
-    /// Premultiplied row-major RGBA8.
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub plan_stats: crate::sdf::tile::SdfPlanStats,
-    pub execution_stats: crate::sdf::tile::SdfExecutionStats,
-    pub atlas_mapped_bytes: u64,
-    pub plan_bytes: u64,
-    pub span_bytes: u64,
-}
-
-pub type ShapeSdfScalarOracleOutput = ShapeSdfExecutionOutput;
-
-/// Timings for the SDF-only layer candidate. Capture runs through the same
-/// ordered element draw path as the legacy renderer; mapping, binning and
-/// execution are reported separately so a server benchmark can distinguish
-/// layout/capture cost from the Turin executor itself.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SdfLayerExecutionTimings {
-    pub capture_ns: u64,
-    pub command_mapping_ns: u64,
-    pub plan_build_ns: u64,
-    pub execute_ns: u64,
-    pub total_ns: u64,
-}
-
-/// Ordered Text+Shape SDF layer output. This deliberately excludes images and
-/// other Skia-only elements; it is a numerical/performance comparison surface
-/// for the shared SDF backend, not a complete card renderer.
-pub struct SdfLayerExecutionOutput {
-    /// Premultiplied row-major RGBA8, quantized once after FP32 tile blending.
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub captured_text_count: u64,
-    pub captured_shape_count: u64,
-    pub plan_stats: crate::sdf::tile::SdfPlanStats,
-    pub execution_stats: crate::sdf::tile::SdfExecutionStats,
-    pub atlas_mapped_bytes: u64,
-    pub plan_bytes: u64,
-    pub span_bytes: u64,
-    pub timings: SdfLayerExecutionTimings,
-}
-
-/// Full-card candidate output with ordered SDF runs interleaved with the
-/// existing Skia-only element path. The pixels remain premultiplied RGBA8 so
-/// callers can compare the compositor result before any image encoding.
+/// One drawn surface: premultiplied RGBA8 pixels and what drawing them took.
 #[derive(Default)]
-pub struct FullCardSdfExecutionOutput {
+pub(crate) struct SurfaceOutput {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub clear_rgba: [u8; 4],
     pub sdf_run_count: u64,
-    pub legacy_run_count: u64,
-    pub legacy_element_count: u64,
-    pub legacy_text_count: u64,
-    pub legacy_shape_count: u64,
-    pub legacy_image_count: u64,
     pub software_image_count: u64,
     pub software_text_command_count: u64,
     pub software_shape_command_count: u64,
@@ -2438,8 +1850,8 @@ pub struct FullCardSdfExecutionOutput {
     pub sdf_shape_element_count: u64,
     pub captured_text_count: u64,
     pub captured_shape_count: u64,
-    pub realtime_edt_glyphs: Vec<crate::profile_backend::RealtimeEdtGlyphTelemetry>,
-    pub realtime_edt_batch: crate::profile_backend::RealtimeEdtBatchTelemetry,
+    pub realtime_edt_glyphs: Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>,
+    pub realtime_edt_batch: crate::telemetry::RealtimeEdtBatchTelemetry,
     pub plan_stats: crate::sdf::tile::SdfPlanStats,
     pub execution_stats: crate::sdf::tile::SdfExecutionStats,
     pub atlas_mapped_bytes: u64,
@@ -2449,11 +1861,12 @@ pub struct FullCardSdfExecutionOutput {
     pub occlusion_eligible_image_count: u64,
     pub occlusion_mask_snapshot_count: u64,
     pub occlusion_mask_bytes: u64,
-    pub timings: FullCardSdfExecutionTimings,
+    pub timings: SurfaceTimings,
 }
 
+/// What [`CustomProfileRenderer::prewarm`] touched.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
-pub struct ProfileBackendPrewarmReport {
+pub struct PrewarmReport {
     pub shape_source_count: u64,
     pub shape_decoded_bytes: u64,
     pub render_object_count: u64,
@@ -2486,6 +1899,26 @@ pub struct ProfileBackendPrewarmReport {
     pub elapsed_ns: u64,
 }
 
+/// The executor and tiling an ordered SDF surface is drawn with.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SdfPass {
+    pub(crate) executor: Executor,
+    pub(crate) tile_width: u16,
+    pub(crate) tile_height: u16,
+    pub(crate) pixel_occlusion: PixelOcclusion,
+}
+
+impl SdfPass {
+    pub(crate) fn new(config: &RenderConfig, executor: Executor) -> Self {
+        Self {
+            executor,
+            tile_width: config.tile_width,
+            tile_height: config.tile_height,
+            pixel_occlusion: config.pixel_occlusion,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct OrderedSdfSurfaceSpec {
     surface_width: u32,
@@ -2496,10 +1929,6 @@ struct OrderedSdfSurfaceSpec {
     canvas_origin_y: f32,
     clear_rgba: [u8; 4],
     prepare_direct_axis_shape: bool,
-    /// Native-surface discipline: an element that cannot take the software
-    /// image path fails the request instead of drawing through the legacy
-    /// element renderer.
-    forbid_legacy_elements: bool,
 }
 
 impl OrderedSdfSurfaceSpec {
@@ -2513,18 +1942,12 @@ impl OrderedSdfSurfaceSpec {
             canvas_origin_y: 0.0,
             clear_rgba,
             prepare_direct_axis_shape: true,
-            forbid_legacy_elements: false,
         }
-    }
-
-    fn with_forbid_legacy_elements(mut self, forbid: bool) -> Self {
-        self.forbid_legacy_elements = forbid;
-        self
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FullCardSdfExecutionTimings {
+pub(crate) struct SurfaceTimings {
     #[serde(default)]
     pub semantic_resolve_ns: u64,
     pub surface_create_ns: u64,
@@ -2539,14 +1962,13 @@ pub struct FullCardSdfExecutionTimings {
     pub command_mapping_ns: u64,
     pub plan_build_ns: u64,
     pub execute_ns: u64,
-    pub legacy_draw_ns: u64,
     pub image_composite_ns: u64,
     pub general_base_composite_ns: u64,
     pub occlusion_mask_build_ns: u64,
     pub occlusion_intersection_ns: u64,
     pub rgba_snapshot_ns: u64,
     /// Dynamic-layer post-processing: scan the executor-owned RGBA buffer for
-    /// its non-transparent bounds without a Skia readback.
+    /// its non-transparent bounds.
     #[serde(default)]
     pub postprocess_bounds_ns: u64,
     /// Dynamic-layer post-processing: copy the tight RGBA rows and construct
@@ -2556,37 +1978,19 @@ pub struct FullCardSdfExecutionTimings {
     pub total_ns: u64,
 }
 
-#[derive(Clone, Copy)]
-enum ShapeSdfCandidateExecutor {
-    ScalarRgba8,
-    SimdF32,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum SdfLayerCandidateExecutor {
-    ScalarF32,
-    SimdF32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FullCardSdfCandidateExecutor {
-    ScalarF32,
-    SimdF32,
-}
-
 fn record_profile_atlas_identities(
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    telemetry: &mut RenderTelemetry,
+    text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
     shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
     usage: &str,
 ) {
     telemetry.atlas_identities.clear();
-    if let Some(text_atlases) = text_atlases {
+    {
         telemetry
             .atlas_identities
             .extend(text_atlases.iter().map(|atlas| {
                 let manifest = atlas.manifest();
-                crate::profile_backend::ProfileAtlasIdentity {
+                crate::telemetry::AtlasIdentity {
                     family: "text".into(),
                     usage: usage.into(),
                     schema: manifest.schema.clone(),
@@ -2609,7 +2013,7 @@ fn record_profile_atlas_identities(
         let manifest = atlas.manifest();
         telemetry
             .atlas_identities
-            .push(crate::profile_backend::ProfileAtlasIdentity {
+            .push(crate::telemetry::AtlasIdentity {
                 family: "shape".into(),
                 usage: usage.into(),
                 schema: manifest.schema.clone(),
@@ -2623,15 +2027,6 @@ fn record_profile_atlas_identities(
                 mapped_bytes: atlas.mapped_bytes(),
             });
     }
-}
-
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-struct SdfShadowPlanConfig<'a> {
-    text_atlases: &'a crate::sdf::atlas::MappedSdfAtlasSet,
-    shape_atlas: Option<&'a crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
-    tile_width: u16,
-    tile_height: u16,
 }
 
 enum CapturedSdfPrimitive {
@@ -2649,11 +2044,6 @@ impl SdfCaptureKinds {
     const TEXT: Self = Self {
         text: true,
         shape: false,
-    };
-
-    const SHAPE: Self = Self {
-        text: false,
-        shape: true,
     };
 
     const TEXT_AND_SHAPE: Self = Self {
@@ -2776,8 +2166,8 @@ struct RealtimeEdtPreparedEntry {
 pub(crate) struct RealtimeEdtPreparedBatch {
     pages: Vec<crate::sdf::tile::RuntimeTextSdfPage>,
     entries: std::collections::BTreeMap<RealtimeEdtRequestKey, RealtimeEdtPreparedEntry>,
-    pub(crate) glyphs: Vec<crate::profile_backend::RealtimeEdtGlyphTelemetry>,
-    pub(crate) telemetry: crate::profile_backend::RealtimeEdtBatchTelemetry,
+    pub(crate) glyphs: Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>,
+    pub(crate) telemetry: crate::telemetry::RealtimeEdtBatchTelemetry,
 }
 
 thread_local! {
@@ -2897,10 +2287,8 @@ fn map_captured_sdf_commands(
     shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
     source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
     mut runtime_text_pages: Option<&mut Vec<crate::sdf::tile::RuntimeTextSdfPage>>,
-    mut realtime_edt_telemetry: Option<&mut Vec<crate::profile_backend::RealtimeEdtGlyphTelemetry>>,
-    mut realtime_edt_batch_telemetry: Option<
-        &mut crate::profile_backend::RealtimeEdtBatchTelemetry,
-    >,
+    mut realtime_edt_telemetry: Option<&mut Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>>,
+    mut realtime_edt_batch_telemetry: Option<&mut crate::telemetry::RealtimeEdtBatchTelemetry>,
     mut prepared_entries_out: Option<
         &mut std::collections::BTreeMap<RealtimeEdtRequestKey, RealtimeEdtPreparedEntry>,
     >,
@@ -2938,7 +2326,7 @@ fn map_captured_sdf_commands(
         page_bytes: u64,
     }
 
-    let mut batch = crate::profile_backend::RealtimeEdtBatchTelemetry::default();
+    let mut batch = crate::telemetry::RealtimeEdtBatchTelemetry::default();
     let active_batch = active_realtime_edt_batch();
     let mut prepared = Vec::with_capacity(captured.len());
     let mut request_indices = BTreeMap::<RealtimeEdtRequestKey, usize>::new();
@@ -3315,7 +2703,7 @@ fn map_captured_sdf_commands(
                 continue;
             };
             let request = &requests[request_index];
-            records.push(crate::profile_backend::RealtimeEdtGlyphTelemetry {
+            records.push(crate::telemetry::RealtimeEdtGlyphTelemetry {
                 character: request.character.to_string(),
                 codepoint: request.key.codepoint,
                 font_family: request.key.font_family.clone(),
@@ -3377,7 +2765,7 @@ fn point_size_milli(point_size: f32) -> u32 {
 }
 
 fn record_precomputed_tier_substitution(
-    telemetry: &mut crate::profile_backend::RealtimeEdtBatchTelemetry,
+    telemetry: &mut crate::telemetry::RealtimeEdtBatchTelemetry,
     selected_point_size: f32,
     primary_point_size: f32,
 ) {
@@ -3428,8 +2816,6 @@ fn build_pixel_occlusion_dry_run(
     elements: &[crate::elements::RenderElement<'_>],
     scene: &sekai_profile_core::profile_scene::ResolvedProfileScene,
     store: &crate::render_object::MappedRenderObjectStore,
-    text_sdf: bool,
-    shape_sdf: bool,
     width: u32,
     height: u32,
 ) -> Result<PixelOcclusionDryRun, String> {
@@ -3450,8 +2836,10 @@ fn build_pixel_occlusion_dry_run(
         if !element.visible() {
             continue;
         }
-        let is_sdf = matches!(element, crate::elements::RenderElement::Text(_)) && text_sdf
-            || matches!(element, crate::elements::RenderElement::Shape(_)) && shape_sdf;
+        let is_sdf = matches!(
+            element,
+            crate::elements::RenderElement::Text(_) | crate::elements::RenderElement::Shape(_)
+        );
         if is_sdf {
             masks_by_element[element_index] = Some(Arc::clone(&opaque_above));
             continue;
@@ -3509,15 +2897,10 @@ fn build_pixel_occlusion_dry_run(
 }
 
 #[derive(Default)]
-struct FullCardSdfRunAggregate {
+struct SurfaceAggregate {
     prepare_direct_axis_shape: bool,
     realtime_oversized_glyph_generation: bool,
     sdf_run_count: u64,
-    legacy_run_count: u64,
-    legacy_element_count: u64,
-    legacy_text_count: u64,
-    legacy_shape_count: u64,
-    legacy_image_count: u64,
     software_image_count: u64,
     software_text_command_count: u64,
     software_shape_command_count: u64,
@@ -3540,8 +2923,8 @@ struct FullCardSdfRunAggregate {
     sdf_shape_element_count: u64,
     captured_text_count: u64,
     captured_shape_count: u64,
-    realtime_edt_glyphs: Vec<crate::profile_backend::RealtimeEdtGlyphTelemetry>,
-    realtime_edt_batch: crate::profile_backend::RealtimeEdtBatchTelemetry,
+    realtime_edt_glyphs: Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>,
+    realtime_edt_batch: crate::telemetry::RealtimeEdtBatchTelemetry,
     plan_stats: crate::sdf::tile::SdfPlanStats,
     execution_stats: crate::sdf::tile::SdfExecutionStats,
     plan_bytes: u64,
@@ -3550,7 +2933,7 @@ struct FullCardSdfRunAggregate {
     occlusion_eligible_image_count: u64,
     occlusion_mask_snapshot_count: u64,
     occlusion_mask_bytes: u64,
-    timings: FullCardSdfExecutionTimings,
+    timings: SurfaceTimings,
 }
 
 /// Fills a premultiplied RGBA8 buffer with a clear colour, matching the
@@ -3573,9 +2956,9 @@ fn fill_premultiplied_clear(pixels: &mut [u8], clear: [u8; 4]) {
 fn select_full_card_sdf_executor(
     pixels: &mut [u8],
     pending: &mut Vec<CapturedSdfPrimitive>,
-    active_executor: &mut Option<FullCardSdfCandidateExecutor>,
+    active_executor: &mut Option<Executor>,
     active_occlusion_mask: &mut Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
-    next_executor: FullCardSdfCandidateExecutor,
+    next_executor: Executor,
     next_occlusion_mask: Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
     execute_occlusion: bool,
     text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
@@ -3583,7 +2966,7 @@ fn select_full_card_sdf_executor(
     source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
     grid: crate::sdf::tile::TileGrid,
     shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
-    aggregate: &mut FullCardSdfRunAggregate,
+    aggregate: &mut SurfaceAggregate,
 ) -> Result<(), String> {
     if active_executor.is_some_and(|active| active != next_executor) {
         flush_active_full_card_sdf_run(
@@ -3611,7 +2994,7 @@ fn select_full_card_sdf_executor(
 fn flush_active_full_card_sdf_run(
     pixels: &mut [u8],
     pending: &mut Vec<CapturedSdfPrimitive>,
-    active_executor: &mut Option<FullCardSdfCandidateExecutor>,
+    active_executor: &mut Option<Executor>,
     active_occlusion_mask: &mut Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
     execute_occlusion: bool,
     text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
@@ -3619,7 +3002,7 @@ fn flush_active_full_card_sdf_run(
     source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
     grid: crate::sdf::tile::TileGrid,
     shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
-    aggregate: &mut FullCardSdfRunAggregate,
+    aggregate: &mut SurfaceAggregate,
 ) -> Result<(), String> {
     let Some(executor) = active_executor.take() else {
         debug_assert!(pending.is_empty());
@@ -3654,10 +3037,10 @@ fn flush_full_card_sdf_run(
     source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
     grid: crate::sdf::tile::TileGrid,
     shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
-    executor: FullCardSdfCandidateExecutor,
+    executor: Executor,
     occlusion_mask: Option<&crate::sdf::tile::PixelOcclusionMask>,
     execute_occlusion: bool,
-    aggregate: &mut FullCardSdfRunAggregate,
+    aggregate: &mut SurfaceAggregate,
 ) -> Result<(), String> {
     if pending.is_empty() {
         return Ok(());
@@ -3746,10 +3129,10 @@ fn flush_full_card_sdf_run(
     let execution_plan = visible_plan.as_ref().unwrap_or(&plan);
     let execute_started = std::time::Instant::now();
     let execution = match executor {
-        FullCardSdfCandidateExecutor::ScalarF32 => execution_plan
+        Executor::Scalar => execution_plan
             .execute_scalar_f32_over(&execution_source, pixels)
             .map_err(|error| format!("full-card scalar SDF execute: {error}"))?,
-        FullCardSdfCandidateExecutor::SimdF32 => execution_plan
+        Executor::Simd => execution_plan
             .execute_simd_f32_over(&execution_source, pixels)
             .map_err(|error| format!("full-card SIMD SDF execute: {error}"))?,
     };
@@ -3914,7 +3297,7 @@ fn render_authored_image_into_pixels(
     height: u32,
     canvas_origin_x: f32,
     canvas_origin_y: f32,
-    image_executor: FullCardSdfCandidateExecutor,
+    image_executor: Executor,
 ) -> Result<crate::profile_compositor::ProfileCompositorStats, String> {
     let expected_len = width as usize * height as usize * 4;
     if pixels.len() != expected_len {
@@ -3940,34 +3323,30 @@ fn render_authored_image_into_pixels(
         scene
     };
     match image_executor {
-        FullCardSdfCandidateExecutor::SimdF32 => {
-            crate::profile_compositor::render_authored_profile_into_simd(
-                scene,
-                store,
-                text_atlases,
-                md,
-                assets,
-                authored_kind,
-                authored_index,
-                pixels,
-                width,
-                height,
-            )
-        }
-        FullCardSdfCandidateExecutor::ScalarF32 => {
-            crate::profile_compositor::render_authored_profile_into_scalar(
-                scene,
-                store,
-                text_atlases,
-                md,
-                assets,
-                authored_kind,
-                authored_index,
-                pixels,
-                width,
-                height,
-            )
-        }
+        Executor::Simd => crate::profile_compositor::render_authored_profile_into_simd(
+            scene,
+            store,
+            text_atlases,
+            md,
+            assets,
+            authored_kind,
+            authored_index,
+            pixels,
+            width,
+            height,
+        ),
+        Executor::Scalar => crate::profile_compositor::render_authored_profile_into_scalar(
+            scene,
+            store,
+            text_atlases,
+            md,
+            assets,
+            authored_kind,
+            authored_index,
+            pixels,
+            width,
+            height,
+        ),
     }
     .map_err(|error| error.to_string())
 }
@@ -4035,41 +3414,11 @@ fn render_element_authored_identity(
     }
 }
 
-fn profile_command_kind(
-    element: &crate::elements::RenderElement<'_>,
-) -> crate::profile_backend::ProfileCommandKind {
+fn profile_command_kind(element: &crate::elements::RenderElement<'_>) -> CommandKind {
     match element {
-        crate::elements::RenderElement::Text(_) => crate::profile_backend::ProfileCommandKind::Text,
-        crate::elements::RenderElement::Shape(_) => {
-            crate::profile_backend::ProfileCommandKind::Shape
-        }
-        _ => crate::profile_backend::ProfileCommandKind::Image,
-    }
-}
-
-#[allow(dead_code)]
-fn record_command_telemetry(
-    telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-    kind: crate::profile_backend::ProfileCommandKind,
-    cpu_ns: u64,
-) {
-    if let Some(command) = telemetry
-        .commands
-        .iter_mut()
-        .find(|command| command.kind == kind)
-    {
-        command.command_count = command.command_count.saturating_add(1);
-        command.cpu_ns = command.cpu_ns.saturating_add(cpu_ns);
-    } else {
-        telemetry
-            .commands
-            .push(crate::profile_backend::CommandTelemetry {
-                kind,
-                command_count: 1,
-                covered_fragments: 0,
-                blended_fragments: 0,
-                cpu_ns,
-            });
+        crate::elements::RenderElement::Text(_) => CommandKind::Text,
+        crate::elements::RenderElement::Shape(_) => CommandKind::Shape,
+        _ => CommandKind::Image,
     }
 }
 
@@ -4091,11 +3440,9 @@ pub struct LayerDynamicFrame {
     pub dy: f32,
 }
 
-/// Premultiplied RGBA8 layer raster produced by the ordered SDF path,
-/// cropped to the tight non-transparent bounds.
 /// What a rasterized animation layer carries: either the pixels themselves,
 /// or the commands needed to produce them on demand.
-pub enum AnimationLayerRaster {
+pub(crate) enum AnimationLayerRaster {
     /// Pixels held for the whole export.
     Ordered(OrderedLayerRaster),
     /// Commands held instead of pixels, for a layer whose surface exceeds the
@@ -4108,21 +3455,21 @@ pub enum AnimationLayerRaster {
 ///
 /// `execution` is `None` when no run took place: the layer covered no pixels,
 /// or its commands were retained in place of its pixels.
-pub struct CroppedLayerBackendRaster {
+pub(crate) struct CroppedLayerRaster {
     pub raster: AnimationLayerRaster,
-    pub execution: Option<FullCardSdfExecutionOutput>,
+    pub execution: Option<SurfaceOutput>,
 }
 
 /// An animation layer kept as commands rather than pixels.
 ///
 /// The commands are in canvas coordinates — un-shifted — so a window of any
 /// size can be rasterized from them by translating into that window's origin.
-pub struct DeferredAnimationSdfLayer {
+pub(crate) struct DeferredAnimationSdfLayer {
     pub(crate) commands: Vec<crate::sdf::tile::SdfDrawCommand>,
     pub(crate) text_atlases: std::sync::Arc<crate::sdf::atlas::MappedSdfAtlasSet>,
     pub(crate) shape_atlas: Option<std::sync::Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>>,
     pub(crate) runtime_text: Vec<crate::sdf::tile::RuntimeTextSdfPage>,
-    pub(crate) executor: SdfLayerCandidateExecutor,
+    pub(crate) executor: Executor,
     pub(crate) tile_width: u16,
     pub(crate) tile_height: u16,
     /// Layer bounds in canvas coordinates.
@@ -4130,8 +3477,6 @@ pub struct DeferredAnimationSdfLayer {
     pub(crate) y: i32,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    /// Dynamic timeline metadata for the layer, when requested and present.
-    pub dynamic: Option<LayerDynamic>,
 }
 
 /// One rasterized window of a deferred SDF animation layer: the pixels of a
@@ -4146,11 +3491,11 @@ pub(crate) struct RenderedDeferredAnimationWindow {
     pub(crate) height: u32,
     /// Peak transient bytes: the window surface plus the cropped copy.
     pub(crate) scratch_peak_bytes: usize,
-    /// Execution telemetry for the window's SDF run.
-    pub(crate) execution: FullCardSdfExecutionOutput,
 }
 
-pub struct OrderedLayerRaster {
+/// Premultiplied RGBA8 layer raster produced by the ordered SDF path,
+/// cropped to the tight non-transparent bounds.
+pub(crate) struct OrderedLayerRaster {
     /// Tight premultiplied RGBA8, `width * 4` bytes per row.
     pub pixels: Vec<u8>,
     /// Crop offset in canvas coordinates (any dynamic expansion removed).
@@ -4158,11 +3503,6 @@ pub struct OrderedLayerRaster {
     pub y: i32,
     pub width: u32,
     pub height: u32,
-    /// Dynamic timeline metadata for the layer, when requested and present.
-    pub dynamic: Option<LayerDynamic>,
-    /// Elements the run drew through the legacy renderer; zero when the
-    /// SDF executors and the software image path covered everything.
-    pub legacy_element_count: u64,
     /// Peak transient bytes: the full surface plus the cropped copy.
     pub scratch_peak_bytes: usize,
 }
@@ -4172,7 +3512,7 @@ impl CustomProfileRenderer {
     /// scene the export would render and preflights its compiled programs up
     /// to `maximum_tick`.
     #[cfg(feature = "animation-export")]
-    pub fn animation_preflight_with_profile(
+    pub fn animation_preflight(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
@@ -4196,44 +3536,46 @@ impl CustomProfileRenderer {
     }
 
     /// Renders a card's animation export: preflights the compiled scene,
-    /// rasterizes each element layer through the ordered SDF path with the
-    /// executors the backend selection grants, composites the frames, and
-    /// encodes them with the preset's format. Static cards return
-    /// `animated: false` without an artifact.
+    /// rasterizes each element layer through the ordered SDF path, composites
+    /// the frames, and encodes them with the preset's format. Static cards
+    /// return `animated: false` without an artifact.
+    ///
+    /// Images the render-object store lacks, or every image when no store is
+    /// installed, are decoded from the asset store.
     #[cfg(feature = "animation-export")]
-    pub fn render_animation_with_profile_backend(
+    pub fn render_animation(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
         document_key: &str,
         region: &str,
         preset: &crate::animation::ResolvedAnimationPreset,
-        backend: Option<crate::profile_backend::ProfileBackendConfig>,
+        config: &RenderConfig,
     ) -> Result<crate::animation::ProfileAnimationExport, String> {
         let generation = self.pin_render_object_generation();
-        self.render_animation_with_profile_backend_generation(
+        self.render_animation_pinned(
             card,
             profile,
             document_key,
             region,
             preset,
-            backend,
+            config,
             &generation,
         )
     }
 
-    /// [`Self::render_animation_with_profile_backend`] against the render
-    /// objects `generation` pins instead of the renderer's current generation.
+    /// [`Self::render_animation`] against the render objects `generation`
+    /// pins.
     #[cfg(feature = "animation-export")]
     #[allow(clippy::too_many_arguments)]
-    pub fn render_animation_with_profile_backend_generation(
+    pub fn render_animation_pinned(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
         document_key: &str,
         region: &str,
         preset: &crate::animation::ResolvedAnimationPreset,
-        backend: Option<crate::profile_backend::ProfileBackendConfig>,
+        config: &RenderConfig,
         generation: &RenderObjectGenerationPin,
     ) -> Result<crate::animation::ProfileAnimationExport, String> {
         let md = self.snapshot();
@@ -4246,66 +3588,38 @@ impl CustomProfileRenderer {
             &md,
             self.assets.as_deref(),
             preset,
-            backend,
-            generation.store(),
+            config,
+            generation
+                .store()
+                .unwrap_or_else(|| crate::render_object::MappedRenderObjectStore::empty()),
         )
     }
 
-    /// Resolves a backend config against this renderer's capabilities for the
-    /// animation layer raster.
+    /// Resolves the executor an animation export runs on.
     #[cfg(feature = "animation-export")]
-    pub(crate) fn resolve_animation_profile_backend(
-        &self,
-        config: &crate::profile_backend::ProfileBackendConfig,
-    ) -> Result<crate::profile_backend::ResolvedProfileBackend, String> {
+    pub(crate) fn resolve_executor(&self, config: &RenderConfig) -> Result<Executor, String> {
         config
-            .resolve(self.profile_backend_capabilities())
+            .resolve(sdf_simd_available())
             .map_err(|error| error.to_string())
     }
 
-    /// Records the identity of every atlas the animation layer raster may
-    /// sample, so a telemetry consumer can tell which atlas build produced the
-    /// pixels. Atlases the selection did not enable are left out.
-    #[cfg(feature = "animation-export")]
-    pub(crate) fn record_animation_profile_atlas_identities(
-        &self,
-        telemetry: &mut crate::profile_backend::ProfileRenderTelemetry,
-        text_enabled: bool,
-        shape_enabled: bool,
-        usage: &str,
-    ) {
-        let sdf_atlases = self.sdf_atlases.load_full();
-        record_profile_atlas_identities(
-            telemetry,
-            text_enabled.then_some(sdf_atlases.as_ref()),
-            shape_enabled
-                .then_some(self.shape_sdf_atlas.as_deref())
-                .flatten(),
-            usage,
-        );
-    }
-
     /// Renders one element layer through the ordered SDF path — the same
-    /// pipeline the profile backend uses for full pages — onto a transparent
-    /// surface expanded for the layer's dynamic travel, then crops to the
-    /// tight non-transparent bounds. Executor choices follow the backend
-    /// vocabulary; `ShapeSdfExecutor::Auto` must be resolved by the caller.
+    /// pipeline full pages use — onto a transparent surface expanded for the
+    /// layer's dynamic travel, then crops to the tight non-transparent bounds.
     #[allow(clippy::too_many_arguments)]
-    pub fn render_ordered_element_layer_cropped(
+    pub(crate) fn render_ordered_element_layer_cropped(
         &self,
         card: &CustomProfileCard,
         md: &MasterData,
         assets: Option<&AssetStore>,
         profile: Option<&crate::profile::ProfileData>,
-        text_sdf: crate::profile_backend::TextSdfExecutor,
-        shape_sdf: crate::profile_backend::ShapeSdfExecutor,
+        executor: Executor,
         include_dynamic_bounds: bool,
-        forbid_legacy_elements: bool,
         tile_width: u16,
         tile_height: u16,
-        render_object_store: Option<&crate::render_object::MappedRenderObjectStore>,
+        render_object_store: &crate::render_object::MappedRenderObjectStore,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<CroppedLayerBackendRaster, String> {
+    ) -> Result<CroppedLayerRaster, String> {
         let w = crate::transform::CANVAS_WIDTH as i32;
         let h = crate::transform::CANVAS_HEIGHT as i32;
         let elements = crate::elements::flatten_and_sort(card);
@@ -4314,33 +3628,11 @@ impl CustomProfileRenderer {
         } else {
             None
         };
-        let text_executor = match text_sdf {
-            crate::profile_backend::TextSdfExecutor::LegacySkia => None,
-            crate::profile_backend::TextSdfExecutor::Simd => {
-                Some(FullCardSdfCandidateExecutor::SimdF32)
-            }
-            crate::profile_backend::TextSdfExecutor::ScalarOracle => {
-                Some(FullCardSdfCandidateExecutor::ScalarF32)
-            }
-        };
-        let shape_executor = match shape_sdf {
-            crate::profile_backend::ShapeSdfExecutor::Skia => None,
-            crate::profile_backend::ShapeSdfExecutor::Simd => {
-                Some(FullCardSdfCandidateExecutor::SimdF32)
-            }
-            crate::profile_backend::ShapeSdfExecutor::ScalarOracle => {
-                Some(FullCardSdfCandidateExecutor::ScalarF32)
-            }
-            crate::profile_backend::ShapeSdfExecutor::Auto => {
-                return Err("shape executor Auto must be resolved by the caller".into());
-            }
-        };
         let expansion = dynamic
             .as_ref()
             .map(dynamic_canvas_expansion)
             .unwrap_or_default();
-        let tight_executor = tight_animation_sdf_executor(&elements, text_executor, shape_executor);
-        if let Some(executor) = tight_executor {
+        if layer_draws_only_sdf(&elements) {
             return self.render_animation_sdf_layer_tight(
                 card,
                 md,
@@ -4349,7 +3641,6 @@ impl CustomProfileRenderer {
                 executor,
                 tile_width,
                 tile_height,
-                dynamic,
                 expansion,
                 maximum_retained_layer_bytes,
             );
@@ -4367,17 +3658,17 @@ impl CustomProfileRenderer {
             canvas_origin_y: expansion.top as f32,
             clear_rgba: [0, 0, 0, 0],
             prepare_direct_axis_shape: false,
-            forbid_legacy_elements,
         };
-        let mut output = self.render_ordered_sdf_surface_candidate(
-            card,
-            profile,
-            text_executor,
-            shape_executor,
+        let pass = SdfPass {
+            executor,
             tile_width,
             tile_height,
-            false,
-            false,
+            pixel_occlusion: PixelOcclusion::Off,
+        };
+        let mut output = self.render_ordered_sdf_surface(
+            card,
+            profile,
+            pass,
             spec,
             md,
             assets,
@@ -4398,8 +3689,6 @@ impl CustomProfileRenderer {
                 y: 0,
                 width: 0,
                 height: 0,
-                dynamic,
-                legacy_element_count: output.legacy_element_count,
                 scratch_peak_bytes: surface_bytes,
             }
         } else {
@@ -4418,8 +3707,6 @@ impl CustomProfileRenderer {
                 y: by as i32 - expansion.top,
                 width: bw,
                 height: bh,
-                dynamic,
-                legacy_element_count: output.legacy_element_count,
                 scratch_peak_bytes: surface_bytes.saturating_add(bw as usize * bh as usize * 4),
             }
         };
@@ -4431,7 +3718,7 @@ impl CustomProfileRenderer {
             .saturating_add(output.timings.postprocess_crop_ns);
         let raster = AnimationLayerRaster::Ordered(raster);
         self.recycle_profile_rgba_scratch(rgba);
-        Ok(CroppedLayerBackendRaster {
+        Ok(CroppedLayerRaster {
             raster,
             execution: Some(output),
         })
@@ -4444,13 +3731,12 @@ impl CustomProfileRenderer {
         md: &MasterData,
         assets: Option<&AssetStore>,
         profile: Option<&crate::profile::ProfileData>,
-        executor: SdfLayerCandidateExecutor,
+        executor: Executor,
         tile_width: u16,
         tile_height: u16,
-        dynamic: Option<LayerDynamic>,
         reachable: CanvasExpansion,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<CroppedLayerBackendRaster, String> {
+    ) -> Result<CroppedLayerRaster, String> {
         let total_started = std::time::Instant::now();
         let sdf_atlases = self.sdf_atlases.load_full();
         let capture_started = std::time::Instant::now();
@@ -4474,7 +3760,7 @@ impl CustomProfileRenderer {
 
         let mut runtime_text_pages = Vec::new();
         let mut realtime_edt_glyphs = Vec::new();
-        let mut realtime_edt_batch = crate::profile_backend::RealtimeEdtBatchTelemetry::default();
+        let mut realtime_edt_batch = crate::telemetry::RealtimeEdtBatchTelemetry::default();
         let prepared_batch = active_realtime_edt_batch();
         let runtime_pages = self
             .realtime_oversized_glyph_generation
@@ -4492,15 +3778,13 @@ impl CustomProfileRenderer {
         )?;
         let command_mapping_ns = elapsed_ns(mapping_started);
 
-        let empty = CroppedLayerBackendRaster {
+        let empty = CroppedLayerRaster {
             raster: AnimationLayerRaster::Ordered(OrderedLayerRaster {
                 pixels: Vec::new(),
                 x: 0,
                 y: 0,
                 width: 0,
                 height: 0,
-                dynamic: dynamic.clone(),
-                legacy_element_count: 0,
                 scratch_peak_bytes: 0,
             }),
             execution: None,
@@ -4541,7 +3825,7 @@ impl CustomProfileRenderer {
         // rasterized per frame. The commands stay in canvas coordinates here,
         // so any window origin can be applied later.
         if retained_peak_bytes > maximum_retained_layer_bytes {
-            return Ok(CroppedLayerBackendRaster {
+            return Ok(CroppedLayerRaster {
                 raster: AnimationLayerRaster::DeferredSdf(DeferredAnimationSdfLayer {
                     commands,
                     text_atlases: sdf_atlases,
@@ -4557,7 +3841,6 @@ impl CustomProfileRenderer {
                     y: origin_y,
                     width,
                     height,
-                    dynamic,
                 }),
                 execution: None,
             });
@@ -4592,10 +3875,10 @@ impl CustomProfileRenderer {
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
         let execute_started = std::time::Instant::now();
         let execution_stats = match executor {
-            SdfLayerCandidateExecutor::ScalarF32 => plan
+            Executor::Scalar => plan
                 .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
                 .map_err(|error| error.to_string())?,
-            SdfLayerCandidateExecutor::SimdF32 => plan
+            Executor::Simd => plan
                 .execute_simd(
                     &source,
                     [0, 0, 0, 0],
@@ -4620,15 +3903,14 @@ impl CustomProfileRenderer {
         let crop_ns = elapsed_ns(crop_started);
         // The surface is already the intersection of the content bounds and
         // the reachable canvas, so the full surface is the layer raster; the
-        // accounting matches the production backend (surface plus the full
-        // surface copy taken during the crop).
+        // accounting matches the page path (surface plus the full surface
+        // copy taken during the crop).
         let scratch_peak_bytes = surface_bytes.saturating_mul(2);
         self.recycle_profile_rgba_scratch(rgba);
-        let mut execution = FullCardSdfExecutionOutput {
+        let mut execution = SurfaceOutput {
             width,
             height,
-            clear_rgba: [0, 0, 0, 0],
-            ..FullCardSdfExecutionOutput::default()
+            ..SurfaceOutput::default()
         };
         execution.sdf_run_count = 1;
         execution.sdf_text_element_count = captured.text_count;
@@ -4654,15 +3936,13 @@ impl CustomProfileRenderer {
         execution.timings.execute_ns = execute_ns;
         execution.timings.postprocess_crop_ns = crop_ns;
         execution.timings.total_ns = elapsed_ns(total_started);
-        Ok(CroppedLayerBackendRaster {
+        Ok(CroppedLayerRaster {
             raster: AnimationLayerRaster::Ordered(OrderedLayerRaster {
                 pixels,
                 x: origin_x,
                 y: origin_y,
                 width,
                 height,
-                dynamic,
-                legacy_element_count: 0,
                 scratch_peak_bytes,
             }),
             execution: Some(execution),
@@ -4730,11 +4010,11 @@ impl CustomProfileRenderer {
             .and_then(|pixels| pixels.checked_mul(4))
             .ok_or_else(|| "deferred animation SDF surface byte length overflow".to_string())?;
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
-        let execution_stats = match layer.executor {
-            SdfLayerCandidateExecutor::ScalarF32 => plan
+        match layer.executor {
+            Executor::Scalar => plan
                 .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
                 .map_err(|error| error.to_string())?,
-            SdfLayerCandidateExecutor::SimdF32 => plan
+            Executor::Simd => plan
                 .execute_simd(
                     &source,
                     [0, 0, 0, 0],
@@ -4754,30 +4034,6 @@ impl CustomProfileRenderer {
             height,
         )?;
         self.recycle_profile_rgba_scratch(rgba);
-        let stats = plan.stats();
-        let mut execution = FullCardSdfExecutionOutput {
-            width,
-            height,
-            clear_rgba: [0, 0, 0, 0],
-            ..FullCardSdfExecutionOutput::default()
-        };
-        execution.sdf_run_count = 1;
-        execution.sdf_text_element_count = stats.text_command_count;
-        execution.sdf_shape_element_count = stats.shape_command_count;
-        execution.captured_text_count = stats.text_command_count;
-        execution.captured_shape_count = stats.shape_command_count;
-        execution.plan_stats = stats;
-        execution.execution_stats = execution_stats;
-        execution.atlas_mapped_bytes =
-            layer
-                .text_atlases
-                .mapped_bytes()
-                .saturating_add(layer.shape_atlas.as_deref().map_or(
-                    0,
-                    crate::sdf::shape_atlas::MappedShapeSdfAtlas::mapped_bytes,
-                ));
-        execution.plan_bytes = plan.resident_bytes();
-        execution.span_bytes = plan.span_bytes();
         Ok(RenderedDeferredAnimationWindow {
             pixels,
             x,
@@ -4785,32 +4041,24 @@ impl CustomProfileRenderer {
             width,
             height,
             scratch_peak_bytes: surface_bytes.saturating_mul(2),
-            execution,
         })
     }
 }
 
-fn tight_animation_sdf_executor(
-    elements: &[crate::elements::RenderElement<'_>],
-    text_executor: Option<FullCardSdfCandidateExecutor>,
-    shape_executor: Option<FullCardSdfCandidateExecutor>,
-) -> Option<SdfLayerCandidateExecutor> {
-    let mut selected = None;
-    for element in elements.iter().filter(|element| element.visible()) {
-        let candidate = match element {
-            crate::elements::RenderElement::Text(_) => text_executor?,
-            crate::elements::RenderElement::Shape(_) => shape_executor?,
-            _ => return None,
-        };
-        if selected.is_some_and(|value| value != candidate) {
-            return None;
-        }
-        selected = Some(candidate);
-    }
-    selected.map(|value| match value {
-        FullCardSdfCandidateExecutor::ScalarF32 => SdfLayerCandidateExecutor::ScalarF32,
-        FullCardSdfCandidateExecutor::SimdF32 => SdfLayerCandidateExecutor::SimdF32,
-    })
+/// Whether every visible element of a layer is text or a shape, so the layer
+/// can be drawn from its SDF commands alone onto a surface sized to them.
+fn layer_draws_only_sdf(elements: &[crate::elements::RenderElement<'_>]) -> bool {
+    let mut visible = elements
+        .iter()
+        .filter(|element| element.visible())
+        .peekable();
+    visible.peek().is_some()
+        && visible.all(|element| {
+            matches!(
+                element,
+                crate::elements::RenderElement::Text(_) | crate::elements::RenderElement::Shape(_)
+            )
+        })
 }
 
 fn tight_sdf_command_bounds(
@@ -5479,27 +4727,25 @@ mod tests {
     }
 
     #[test]
-    fn backend_cache_identity_is_stable_and_config_sensitive() {
+    fn cache_identity_is_stable_and_config_sensitive() {
         use std::sync::Arc;
 
         let renderer = CustomProfileRenderer::new(Arc::new(NullProvider));
-        let default = crate::profile_backend::ProfileBackendConfig::default();
-        let first = renderer
-            .profile_backend_cache_identity(&default)
-            .expect("default backend identity");
+        let default = RenderConfig::default();
+        let first = renderer.cache_identity(&default).expect("default identity");
         let repeated = renderer
-            .profile_backend_cache_identity(&default)
-            .expect("repeated backend identity");
+            .cache_identity(&default)
+            .expect("repeated identity");
         let changed = renderer
-            .profile_backend_cache_identity(&crate::profile_backend::ProfileBackendConfig {
+            .cache_identity(&RenderConfig {
                 tile_width: 64,
                 ..default
             })
-            .expect("changed backend identity");
+            .expect("changed identity");
 
         assert_eq!(first, repeated);
         assert_ne!(first, changed);
-        assert!(first.starts_with("profile-backend-"));
+        assert!(first.starts_with("profile-render-"));
     }
 
     #[cfg(feature = "animation-export")]
@@ -5595,14 +4841,13 @@ mod tests {
             text_atlases: std::sync::Arc::new(atlases),
             shape_atlas: None,
             runtime_text: Vec::new(),
-            executor: SdfLayerCandidateExecutor::ScalarF32,
+            executor: Executor::Scalar,
             tile_width: 32,
             tile_height: 32,
             x: 0,
             y: 0,
             width: 10_000,
             height: 10_000,
-            dynamic: None,
         };
         let renderer = CustomProfileRenderer::new(std::sync::Arc::new(NullProvider));
         let first = renderer
@@ -5620,7 +4865,6 @@ mod tests {
         assert_eq!(shifted.pixels, first_rgba);
         assert_eq!(restored.pixels, first_rgba);
         assert_eq!(first.scratch_peak_bytes, 64 * 64 * 8);
-        assert!(first.execution.plan_stats.tile_count <= 4);
     }
 
     /// A provider with no optional master-data entries keeps renderer setup independent of assets.
@@ -5947,13 +5191,31 @@ mod tests {
         (temp, renderer)
     }
 
-    /// Premultiplied pixel at a Unity position of a full-card surface.
-    fn pixel_at(output: &FullCardSdfExecutionOutput, x: f32, y: f32) -> [u8; 4] {
-        let (x, y) = sekai_profile_core::profile_transform::unity_to_skia(x, y);
-        let offset = (y as usize * output.width as usize + x as usize) * 4;
-        output.rgba[offset..offset + 4]
+    /// Premultiplied pixel at a Unity position of a full page.
+    fn pixel_at(page: &RenderedPage, x: f32, y: f32) -> [u8; 4] {
+        let (x, y) = sekai_profile_core::profile_transform::unity_to_canvas(x, y);
+        let offset = (y as usize * page.width() as usize + x as usize) * 4;
+        page.premultiplied_rgba()[offset..offset + 4]
             .try_into()
             .expect("pixel inside the surface")
+    }
+
+    /// Renders `card` over a transparent background on the scalar executor.
+    fn render_transparent(
+        renderer: &CustomProfileRenderer,
+        card: &CustomProfileCard,
+    ) -> Result<RenderedPage, String> {
+        renderer
+            .render(
+                card,
+                None,
+                &RenderConfig {
+                    executor: crate::SdfExecutor::Scalar,
+                    background: crate::Background::Transparent,
+                    ..RenderConfig::default()
+                },
+            )
+            .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -5972,9 +5234,7 @@ mod tests {
                 USER_INTERFACE_ICON_KEY
             ]
         );
-        let output = renderer
-            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
-            .expect("rendered page");
+        let output = render_transparent(&renderer, &card).expect("rendered page");
         assert_eq!(pixel_at(&output, -600.0, 0.0), [255, 0, 0, 255]);
         assert_eq!(pixel_at(&output, 0.0, 0.0), [0, 255, 0, 255]);
         // A white icon tinted #ff8000 at alpha 128/255, premultiplied.
@@ -6023,9 +5283,7 @@ mod tests {
         keys.sort();
         // The omikuji has no `omikujis` row to show: it requests nothing.
         assert_eq!(keys, [STAND_KEY, BADGE_KEY, BADGE_NORMAL_MAP_KEY]);
-        let output = renderer
-            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
-            .expect("rendered page");
+        let output = render_transparent(&renderer, &card).expect("rendered page");
         // The badge image lit through the normal map, from a double-precision
         // evaluation of the badge material.
         assert_eq!(pixel_at(&output, -600.0, 0.0), [203, 49, 97, 255]);
@@ -6067,7 +5325,7 @@ mod tests {
         let mut keys = crate::asset_keys::collect_card_asset_keys(&card, &md);
         keys.sort();
         assert_eq!(keys, [OMIKUJI_COVER_KEY, OMIKUJI_FORTUNE_KEY]);
-        let rendered = renderer.render_full_card_sdf_scalar_f32_transparent_candidate(&card, None);
+        let rendered = render_transparent(&renderer, &card);
         // The slip's texts need the font asset's file and both fallback
         // faces; without one of them the page fails rather than drawing the
         // slip without its texts.
@@ -6092,7 +5350,7 @@ mod tests {
             }
             (missing, rendered) => panic!(
                 "missing font {missing:?}: {:?}",
-                rendered.map(|output| output.width)
+                rendered.map(|output| output.width())
             ),
         }
     }
@@ -6107,7 +5365,7 @@ mod tests {
             crate::asset_keys::missing_card_asset_keys(&card, &md, |key| assets.contains(key)),
             [BADGE_NORMAL_MAP_KEY]
         );
-        match renderer.render_full_card_sdf_scalar_f32_transparent_candidate(&card, None) {
+        match render_transparent(&renderer, &card) {
             Err(error) => assert!(
                 error.contains("missing render object texture:assets/ui/sekai_badge_normal"),
                 "{error}"
@@ -6125,9 +5383,7 @@ mod tests {
             crate::asset_keys::collect_card_asset_keys(&card, &md),
             [ETC_KEY]
         );
-        let output = renderer
-            .render_full_card_sdf_scalar_f32_transparent_candidate(&card, None)
-            .expect("rendered page");
+        let output = render_transparent(&renderer, &card).expect("rendered page");
         assert_eq!(pixel_at(&output, 0.0, 200.0), [0, 0, 255, 255]);
         for (x, y) in [(-600.0, 0.0), (0.0, 0.0), (600.0, 0.0)] {
             assert_eq!(pixel_at(&output, x, y), [0; 4], "({x}, {y})");

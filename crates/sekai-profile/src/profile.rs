@@ -4,7 +4,7 @@
 //! 被 Path A（基础名片）和 Path B（自定义名片 generals 面板）共同使用。
 //!
 //! ## 设计原则
-//! - 纯数据结构，不依赖 skia 或任何渲染逻辑
+//! - 纯数据结构，不依赖任何渲染逻辑
 //! - JSON 解析规则只有 core 的
 //!   [`sekai_profile_core::profile_data::ProfileData::from_json`] 一份，
 //!   `ProfileData::from_json` 只做类型转换
@@ -129,7 +129,7 @@ pub struct StoryFavoriteInfo {
 // ProfileData 主结构体
 // ============================================================
 
-/// 玩家 Profile 数据（不依赖 skia，跨管线共享）
+/// 玩家 Profile 数据（不依赖渲染逻辑，跨管线共享）
 #[derive(Debug, Clone, Default)]
 pub struct ProfileData {
     /// 玩家名称

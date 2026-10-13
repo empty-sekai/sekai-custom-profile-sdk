@@ -1,8 +1,8 @@
 //! Embedded manifest of static asset keys (engine-shipped frames, icons,
 //! masks, badges). A key is static iff it appears here; everything else is a
-//! dynamic, per-version game asset. This replaces first-path-segment routing,
-//! which mis-classified mixed prefixes such as `honor/` (flat frame files are
-//! static, but `honor/{abn}/degree_*` artwork is dynamic).
+//! dynamic, per-version game asset. Routing by the first path segment would
+//! not work: `honor/` holds both static frames (`honor/frame_degree_*`) and
+//! dynamic artwork (`honor/{abn}/degree_*`).
 //!
 //! Generated from the engine's `assets/static/` tree (key = path minus extension).
 //! Regenerate when the static asset set changes. Byte-sorted for binary search.

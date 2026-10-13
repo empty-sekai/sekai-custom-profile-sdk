@@ -51,9 +51,8 @@ Rust/WASM 负责：
 | Crate | 职责 |
 | --- | --- |
 | `sekai-profile-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
-| `sekai-profile-renderer` | native CPU adapter 与可复用 native renderer 组件 |
-| `sekai-profile-renderer-host` | native host 工具和 JSON masterdata provider |
-| `sekai-profile-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
+| `sekai-profile` | native CPU 渲染器、JSON masterdata provider 与 SDF 图集构建 |
+| `sekai-profile-cli` | `sekai-profile` 命令行：`render`、`prepare` 与 NDJSON 常驻服务 `serve` |
 | `sekai-profile-wasm` | minimal FreeType WASM、stateful worker protocol、WebGL2 runtime、缓存与 Scene Workbench |
 
 ## 浏览器快速开始
@@ -149,24 +148,112 @@ layer 显隐复用当前动态 timeline、layout cache、glyph atlas 与图片�
 
 ## Native renderer
 
-native adapter 用于服务端静态图片、CLI 和应用自定义 scene。资源字节与 masterdata 始终由 host 提供。渲染不依赖 Skia：页面经 profile backend 与 ordered SDF 管线产出，文本/图形元素需要安装对应的 SDF atlas 与 render-object store（由自带的 `build-sdf-atlas` / `build-shape-sdf-atlas` / `build-render-object-store` 工具生成）。shape 图集由 `build-shape-sdf-atlas` 从 `customProfileShapeResources` 与各 shape 的 PNG 生成，按原样拷贝距离（红）与 alpha 通道，使用自带的 PNG 解码，不需要 Skia。`skia-oracle` feature 只提供参考合成器与对拍测试。
+native adapter 用 Rust 自有的 CPU 光栅绘制名片，用于服务端静态图片、命令行和应用自定义 scene。
+资源字节与 masterdata 始终由调用方提供。文字与图形按 SDF 绘制，需要对应字体族的文字图集和
+shape 图集；`prepare` 从字体文件、masterdata 与 shape 素材生成它们。
+
+### 命令行
+
+GitHub Release 提供 Linux（x86_64、aarch64）、Windows x86_64 与 macOS aarch64 的
+`sekai-profile` 可执行文件。
 
 ```sh
-cargo test --workspace --all-features
-cargo run --release --bin render-card -- \
-  --masterdata ./masterdata \
-  --card ./card.json \
-  --profile ./profile.json \
-  --assets-dir ./assets \
-  --font-dir ./fonts \
-  --format png \
-  -o output.png
+sekai-profile render   --profile ./profile.json   --masterdata ./masterdata   --assets-dir ./assets   --font-dir ./fonts   --atlas-dir ./atlases   -o card.png
 ```
 
+`render` 默认渲染 profile 的 `userCustomProfileCards` 中按游戏顺序的第一页；`--page N`
+（从 1 起）或 `--seq S` 选择其他页，`--card` 改用单独的名片 JSON。输出格式跟随 `-o` 的扩展名
+（`.png`、`.jpg`），也可用 `--format` 指定；`--transparent` 输出透明背景 PNG，`--quality`
+设置 JPEG 质量。渲染前会把这一页需要的字形和图形补进图集目录（`--atlas-dir`，默认 `./atlases`）：
+已有图集保留并按需扩充，之后的渲染直接复用；`--no-prepare` 直接用现有图集渲染。
+
+`prepare` 为 masterdata 引用的全部字体族和 shape 生成完整图集，适合在常驻服务启动前一次性准备；
+`--for <profile.json>`（可重复）只覆盖这些 profile 的文字。没有字体文件的字体族会被列出。
+
+```sh
+sekai-profile prepare --masterdata ./masterdata --font-dir ./fonts   --assets-dir ./assets --atlas-dir ./atlases
+```
+
+`serve` 逐行读取 stdin 上的 NDJSON 请求并逐行回应，字体、masterdata、图集与素材缓存跨请求常驻；
+协议见 `crates/sekai-profile-cli/src/serve.rs`。
+
+masterdata 来自目录（`--masterdata`）或 URL 前缀（`--masterdata-url`）。素材来自目录
+（`--assets-dir`，key 为相对路径去掉 `.png`）或 URL 前缀（`--assets-url`、`--static-url`），
+本地缺失的素材才走网络。`--region` 选择区服（默认 `cn`），`--executor` 选择 SDF 执行器
+（默认 `auto`：CPU 支持 AVX-512 时用 SIMD，否则用标量）。
+
+### 在 Rust 中使用
+
+```toml
+[dependencies]
+sekai-profile = { git = "https://github.com/empty-sekai/sekai-custom-profile-sdk", tag = "v<version>" }
+```
+
+```rust
+use std::path::Path;
+use std::sync::Arc;
+
+use sekai_profile::profile::ProfileData;
+use sekai_profile::region::Region;
+use sekai_profile::types::UserCustomProfileCard;
+use sekai_profile::{AssetStore, CustomProfileRenderer, JsonMasterDataProvider, RenderConfig};
+
+sekai_profile::set_font_dirs(["fonts"]);
+let masterdata = JsonMasterDataProvider::from_dir(Path::new("masterdata"))?.with_region(Region::Jp);
+let assets = AssetStore::new(256);
+assets.load_png_dir(Path::new("assets"))?;
+let renderer = CustomProfileRenderer::new(Arc::new(masterdata))
+    .with_assets(Arc::new(assets))
+    .with_atlas_dir("atlases")?;
+
+let response: serde_json::Value = serde_json::from_slice(&std::fs::read("profile.json")?)?;
+let pages: Vec<UserCustomProfileCard> =
+    serde_json::from_value(response["userCustomProfileCards"].clone())?;
+let first = sekai_profile::core::profile_source::profile_page(&pages, 0).expect("a page");
+let profile = ProfileData::from_json(&response);
+
+let page = renderer.render(&first.custom_profile_card, Some(&profile), &RenderConfig::default())?;
+std::fs::write("card.png", page.to_png()?)?;
+```
+
+`render` 返回预乘 RGBA 的 `RenderedPage`；`to_png` 输出直通 alpha 的 PNG，启用 `jpeg-turbo`
+feature 时 `to_jpeg` 输出 JPEG，常驻服务可用 `CustomProfileRenderer::encode_jpeg` 复用编码缓冲。
+`RenderConfig::default()` 按 CPU 自动选择 SDF 执行器、白色背景；`Background::Transparent`
+保留透明背景。
+
+### 图集目录
+
+`with_atlas_dir` 安装的目录结构如下，由 `sekai_profile::prepare::prepare_atlas_dir`
+（即 `sekai-profile prepare`）生成：
+
+```text
+atlases/text/<字体族>/manifest.json   每个字体族一个文字图集
+atlases/tiers/<名称>/manifest.json    可选，同一字体更大字号的图集
+atlases/shape/manifest.json           shape 图集
+atlases/fallback/<字体 SHA-256>/      后备字体的字形缓存，渲染时按需生成
+```
+
+文字图集记录生成它的字体文件 SHA-256，安装时字体目录中的同名字体必须与之一致，因为超出图集字号的
+字形在渲染时从该字体生成。安装了 `Source Han Sans SC` 字体时，游戏字体缺失的字符从它生成并缓存在
+`fallback/` 下。`CustomProfileRenderer::text_codepoints` 给出一张名片各字体族需要的码位，
+`PrepareOptions::codepoints` 据此只生成这些字形。`build-sdf-atlas`、`build-shape-sdf-atlas`
+可单独构建一个图集；`build-render-object-store` 生成可选的预解码纹理库（`--render-objects`）。
+
+字体目录（`--font-dir` / `SEKAI_PROFILE_FONT_DIR`）按文件名查找字体族：
+
+| 字体族（国服名） | 文件 |
+|---|---|
+| `FOT-RodinNTLGPro-DB`（`FZLanTingHei-DB-GBK`） | `FOT-RodinNTLGPro-DB.ttf` 或 `.otf` |
+| `FOT-SkipProN-B`（`FZZhengHei-EB-GBK`） | `FOT-SkipProN-B.otf` |
+| `FOT-PopHappinessStd-EB`（`FZShaoEr-M11-JF`） | `FOT-PopHappinessStd-EB.otf` |
+| `FOT-YurukaStd-UB` | `FOT-YurukaStd-UB.otf` |
+| `Source Han Sans SC`（后备字体） | `SourceHanSansSC-Medium.otf` 或 `SourceHanSansSC-Regular.otf` |
+
+国服 masterdata 的字体名按上表括号中的名字解析，文件相同。御神签所用字体见下文。
 
 `customProfileCharacterIconResources`、`customProfileMaterialResources`、
 `customProfileUserInterfaceIconResources` 只有部分区服提供，`omikujis` 只有御神签收藏品读取；
-四张表即 host crate 的 `OPTIONAL_TABLES`。`--masterdata` 与 `--masterdata-url` 存在时加载；
+四张表即 `sekai_profile::masterdata::OPTIONAL_TABLES`。`--masterdata` 与 `--masterdata-url` 存在时加载；
 缺失时 `characterIcons`、`materials`、`userInterfaceIcons` 与御神签收藏品不绘制，也不计入缺表告警。
 
 收藏品按 `customProfileCollectionResources` 行的 `customProfileResourceCollectionType` 绘制：
@@ -205,8 +292,8 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 称号的资源语义由 `sekai-profile-core` 单一维护，native 与 WASM 不得各自猜测：国服
 `limitevent` 的 `honor_top_*` 在未显式指定背景时使用共享
 `honor_bg_event_cheerteam` degree 层；`bondsHonorViewType` 是可组合标志，字符串中可同时
-包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免服务端
-性能实现、离线目录生成器和浏览器 resolver 产生不同资源键。
+包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免 native
+渲染、离线目录生成器和浏览器 resolver 产生不同资源键。
 
 ### CPU 画布
 
@@ -215,7 +302,7 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 矩形、圆角矩形、椭圆、二次曲线描边和 FreeType 纯文本标签。`Font` 借用字体 bytes，调用方可以
 共享同一份内存。TMP 富文本仍走 profile 管线。
 
-画布不依赖 `skia-oracle`。像素缓冲为预乘 RGBA，`encode_png` 输出直通 alpha 的 PNG，`crop`
+像素缓冲为预乘 RGBA，`encode_png` 输出直通 alpha 的 PNG，`crop`
 把区域复制成新画布而不重新编码。画布与解码后的图片缓冲上限 128 MiB，PNG 输入上限 32 MiB；
 总的缓存与并发预算由调用方负责。
 
@@ -226,7 +313,8 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 
 | 变量 | 作用 |
 |---|---|
-| `SEKAI_PROFILE_FONT_DIR` | native 字体目录，`render-card --font-dir` 会设置它；也读取 `FONT_DIR`，之后依次查找 `/usr/share/fonts/custom` 与 `assets/fonts` |
+| `SEKAI_PROFILE_FONT_DIR` | native 字体目录，排在 `sekai_profile::set_font_dirs` 给出的目录（命令行的 `--font-dir`）之后查找；之后读取 `FONT_DIR`，最后查找 `assets/fonts` |
+| `SEKAI_PROFILE_ATLAS_DIR` | 命令行 `--atlas-dir` 的默认值（`atlases`） |
 | `SEKAI_PROFILE_SDF_EDT` | 设为 `1`–`4` 时字形 SDF 改用距离变换生成，值为超采样倍数；未设置或其他值使用解析法 |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | `parallel` feature 下为图集缺失的字形即时生成 SDF 的线程数，`1`–`4`，默认 `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`、`SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | 设为 `1`、`true` 或 `yes` 时输出 TMP 排版探针与文本码位的 `tracing` debug 日志 |
@@ -248,7 +336,7 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 
 ## 构建与验证
 
-项目使用固定的 container toolchain 构建 FreeType 与 Emscripten 目标；`skia-oracle` 对拍构建额外需要 Skia。
+项目使用固定的 container toolchain 构建 FreeType 与 Emscripten 目标；native 构建需要 FreeType（pkg-config 可找到，或启用 `bundled-freetype`），`animation-export` 另需 libx264。
 
 ```sh
 cargo test --workspace --all-features

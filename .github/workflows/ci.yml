@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfontconfig1-dev libfreetype6-dev libssl-dev libx264-dev pkg-config
+            libfreetype6-dev libx264-dev pkg-config
 
       - run: cargo fmt --all -- --check
       # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
@@ -34,8 +34,8 @@ jobs:
       - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
       - run: cargo test --workspace --all-features
 
-  test-no-skia:
-    name: test (no skia)
+  test-minimal:
+    name: test (no default features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

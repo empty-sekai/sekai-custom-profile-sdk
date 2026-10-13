@@ -1,22 +1,21 @@
-//! Renders each card of a corpus through the ordered scalar path and prints
-//! the RGBA digest per page — a regression anchor for the ordered pipeline
-//! that needs no raster backend.
+//! Renders each card of a corpus on the scalar executor and prints the
+//! premultiplied RGBA digest per page — a regression anchor for the ordered
+//! pipeline.
 //!
 //! ```sh
 //! ordered_pages --masterdata <dir> --card <cards.json> --profile <profile.json> \
-//!   --assets-dir <dir> --font-dir <dir> \
-//!   --text-atlas <manifest.json>... --shape-atlas <manifest.json> \
+//!   --assets-dir <dir> --font-dir <dir> --atlas-dir <dir> \
 //!   --render-objects <manifest.json>
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use sekai_profile::assets::AssetStore;
-use sekai_profile::masterdata::JsonMasterDataProvider;
 use sekai_profile::profile::ProfileData;
-use sekai_profile::renderer::CustomProfileRenderer;
 use sekai_profile::types::UserCustomProfileCard;
+use sekai_profile::{
+    AssetStore, CustomProfileRenderer, JsonMasterDataProvider, RenderConfig, SdfExecutor,
+};
 use sha2::{Digest, Sha256};
 
 struct Args {
@@ -25,8 +24,7 @@ struct Args {
     profile: Option<PathBuf>,
     assets_dir: Option<PathBuf>,
     font_dir: Option<PathBuf>,
-    text_atlases: Vec<PathBuf>,
-    shape_atlas: Option<PathBuf>,
+    atlas_dir: PathBuf,
     render_objects: Option<PathBuf>,
 }
 
@@ -37,8 +35,7 @@ fn parse_args() -> Result<Args, String> {
         profile: None,
         assets_dir: None,
         font_dir: None,
-        text_atlases: Vec::new(),
-        shape_atlas: None,
+        atlas_dir: PathBuf::from("atlases"),
         render_objects: None,
     };
     let mut raw = std::env::args().skip(1);
@@ -50,8 +47,7 @@ fn parse_args() -> Result<Args, String> {
             "--profile" => args.profile = Some(PathBuf::from(value()?)),
             "--assets-dir" => args.assets_dir = Some(PathBuf::from(value()?)),
             "--font-dir" => args.font_dir = Some(PathBuf::from(value()?)),
-            "--text-atlas" => args.text_atlases.push(PathBuf::from(value()?)),
-            "--shape-atlas" => args.shape_atlas = Some(PathBuf::from(value()?)),
+            "--atlas-dir" => args.atlas_dir = PathBuf::from(value()?),
             "--render-objects" => args.render_objects = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}")),
         }
@@ -62,63 +58,22 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
-fn load_assets(dir: &Path, store: &AssetStore) -> Result<usize, String> {
-    let mut count = 0usize;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in std::fs::read_dir(&current)
-            .map_err(|error| format!("read {} failed: {error}", current.display()))?
-        {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("png") {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(dir)
-                .map_err(|error| error.to_string())?
-                .with_extension("");
-            let key = relative.to_string_lossy().replace('\\', "/");
-            let bytes =
-                std::fs::read(&path).map_err(|error| format!("read {key} failed: {error}"))?;
-            store.put(key, bytes);
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
 fn main() -> Result<(), String> {
     let args = parse_args()?;
     if let Some(font_dir) = &args.font_dir {
-        std::env::set_var("FONT_DIR", font_dir);
+        sekai_profile::set_font_dirs([font_dir]);
     }
 
     let provider = JsonMasterDataProvider::from_dir(&args.masterdata)
         .map_err(|error| format!("load masterdata: {error}"))?;
     let asset_store = AssetStore::new(1024);
     if let Some(dir) = &args.assets_dir {
-        let injected = load_assets(dir, &asset_store)?;
-        eprintln!("assets injected: {injected}");
+        let loaded = asset_store.load_png_dir(dir)?;
+        eprintln!("assets loaded: {loaded}");
     }
-    let mut renderer =
-        CustomProfileRenderer::new(Arc::new(provider)).with_assets(Arc::new(asset_store));
-    for manifest in &args.text_atlases {
-        let atlas = sekai_profile::sdf::atlas::MappedSdfAtlas::open(manifest)
-            .map_err(|error| format!("open text atlas {}: {error}", manifest.display()))?;
-        renderer = renderer
-            .with_sdf_atlas(Arc::new(atlas))
-            .map_err(|error| format!("install text atlas: {error}"))?;
-    }
-    if let Some(manifest) = &args.shape_atlas {
-        let atlas = sekai_profile::sdf::shape_atlas::MappedShapeSdfAtlas::open(manifest)
-            .map_err(|error| format!("open shape atlas: {error}"))?;
-        renderer = renderer.with_shape_sdf_atlas(Arc::new(atlas));
-    }
+    let mut renderer = CustomProfileRenderer::new(Arc::new(provider))
+        .with_assets(Arc::new(asset_store))
+        .with_atlas_dir(&args.atlas_dir)?;
     if let Some(manifest) = &args.render_objects {
         let store = sekai_profile::render_object::MappedRenderObjectStore::open(manifest)
             .map_err(|error| format!("open render objects: {error}"))?;
@@ -140,15 +95,21 @@ fn main() -> Result<(), String> {
         None => None,
     };
     let profile = profile_body.as_ref().map(ProfileData::from_json);
+    let config = RenderConfig {
+        executor: SdfExecutor::Scalar,
+        ..RenderConfig::default()
+    };
 
     for user_card in &cards {
-        let card = user_card.custom_profile_card.clone();
-        match renderer.render_full_card_sdf_scalar_f32_candidate(&card, profile.as_ref()) {
-            Ok(output) => {
-                let digest = hex::encode(Sha256::digest(&output.rgba));
+        let card = &user_card.custom_profile_card;
+        match renderer.render(card, profile.as_ref(), &config) {
+            Ok(page) => {
+                let digest = hex::encode(Sha256::digest(page.premultiplied_rgba()));
                 println!(
-                    "seq{} {}x{} rgba-sha256 {digest} legacy-draws {}",
-                    user_card.seq, output.width, output.height, output.legacy_element_count
+                    "seq{} {}x{} rgba-sha256 {digest}",
+                    user_card.seq,
+                    page.width(),
+                    page.height()
                 );
             }
             Err(error) => println!("seq{} ERROR {error}", user_card.seq),

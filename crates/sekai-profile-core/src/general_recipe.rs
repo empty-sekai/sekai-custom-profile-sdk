@@ -396,8 +396,8 @@ pub fn build_general_recipe(
             } = &mut content_node.payload
             {
                 // The measured General rectangle is a draw-anchor contract.
-                // Preserve the legacy first-line baseline: textbox top + 18px
-                // padding + 26px font size, expressed in TMP-local units.
+                // The first-line baseline is the textbox top + 18px padding +
+                // 26px font size, expressed in TMP-local units.
                 let textbox_top = layout_rect(textbox).y;
                 let first_baseline = textbox_top + 18.0 + 26.0;
                 let content_center = content_node.bounds.y + content_node.bounds.height / 2.0;

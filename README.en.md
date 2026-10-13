@@ -51,9 +51,8 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 | Crate | Responsibility |
 | --- | --- |
 | `sekai-profile-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
-| `sekai-profile-renderer` | Native CPU adapter and reusable native renderer components |
-| `sekai-profile-renderer-host` | Native host utilities and JSON masterdata provider |
-| `sekai-profile-cli` | `render-card` CLI and long-running NDJSON service mode |
+| `sekai-profile` | Native CPU renderer, JSON masterdata provider, and SDF atlas building |
+| `sekai-profile-cli` | The `sekai-profile` command line: `render`, `prepare`, and the NDJSON service `serve` |
 | `sekai-profile-wasm` | Minimal FreeType WASM, stateful worker protocol, WebGL2 runtime, caches, and Scene Workbench |
 
 ## Browser quick start
@@ -148,23 +147,123 @@ Layer visibility reuses the active dynamic timeline, layout cache, glyph atlas, 
 
 ## Native renderer
 
-The native adapter serves still-image, CLI, and application-specific scene workloads. Resource bytes and masterdata are always host-provided. Rendering does not require Skia: pages come out of the profile backend and the ordered SDF pipeline, and text and shape elements need their SDF atlases and a render-object store installed, built with the bundled `build-sdf-atlas`, `build-shape-sdf-atlas`, and `build-render-object-store` tools. `build-shape-sdf-atlas` builds the shape atlas from `customProfileShapeResources` and the shape PNGs, copying the distance (red) and alpha channels unchanged through the bundled PNG decoder, so it needs no Skia. The `skia-oracle` feature only supplies the reference compositor and the parity tests.
+The native adapter draws cards with Rust's own CPU rasterizer for still images, the command
+line, and application-specific scenes. Resource bytes and masterdata are always provided by the
+caller. Text and shapes are drawn as signed distance fields and need a text atlas for each font
+family and a shape atlas; `prepare` builds them from the font files, the masterdata, and the
+shape sprites.
+
+### Command line
+
+GitHub Releases provide `sekai-profile` executables for Linux (x86_64, aarch64), Windows x86_64,
+and macOS aarch64.
 
 ```sh
-cargo test --workspace --all-features
-cargo run --release --bin render-card -- \
-  --masterdata ./masterdata \
-  --card ./card.json \
-  --profile ./profile.json \
-  --assets-dir ./assets \
-  --font-dir ./fonts \
-  --format png \
-  -o output.png
+sekai-profile render   --profile ./profile.json   --masterdata ./masterdata   --assets-dir ./assets   --font-dir ./fonts   --atlas-dir ./atlases   -o card.png
 ```
+
+`render` draws the first page of the profile's `userCustomProfileCards` in the order the game
+shows them; `--page N` (counted from 1) or `--seq S` selects another page, and `--card` takes a
+separate card JSON instead. The output format follows the extension of `-o` (`.png`, `.jpg`) or
+`--format`; `--transparent` writes a PNG with a transparent background and `--quality` sets the
+JPEG quality. Before rendering, the glyphs and shapes the page needs are added to the atlas
+directory (`--atlas-dir`, default `./atlases`): existing atlases are kept and extended as needed,
+and later renders reuse them. `--no-prepare` renders with the atlases as they are.
+
+`prepare` builds complete atlases for every font family and shape the masterdata names, which
+suits preparing once before starting a long-running service; `--for <profile.json>` (repeatable)
+covers only the text of those profiles. Font families without a font file are listed.
+
+```sh
+sekai-profile prepare --masterdata ./masterdata --font-dir ./fonts   --assets-dir ./assets --atlas-dir ./atlases
+```
+
+`serve` reads NDJSON requests from stdin and answers each on its own line, keeping fonts,
+masterdata, atlases, and the asset cache across requests; the protocol is described in
+`crates/sekai-profile-cli/src/serve.rs`.
+
+Masterdata comes from a directory (`--masterdata`) or a URL prefix (`--masterdata-url`). Assets
+come from a directory (`--assets-dir`, keyed by relative path without `.png`) or URL prefixes
+(`--assets-url`, `--static-url`); only assets missing locally are fetched. `--region` selects the
+game server (default `cn`) and `--executor` the SDF executor (default `auto`: SIMD when the CPU
+supports AVX-512, scalar otherwise).
+
+### Using the library
+
+```toml
+[dependencies]
+sekai-profile = { git = "https://github.com/empty-sekai/sekai-custom-profile-sdk", tag = "v<version>" }
+```
+
+```rust
+use std::path::Path;
+use std::sync::Arc;
+
+use sekai_profile::profile::ProfileData;
+use sekai_profile::region::Region;
+use sekai_profile::types::UserCustomProfileCard;
+use sekai_profile::{AssetStore, CustomProfileRenderer, JsonMasterDataProvider, RenderConfig};
+
+sekai_profile::set_font_dirs(["fonts"]);
+let masterdata = JsonMasterDataProvider::from_dir(Path::new("masterdata"))?.with_region(Region::Jp);
+let assets = AssetStore::new(256);
+assets.load_png_dir(Path::new("assets"))?;
+let renderer = CustomProfileRenderer::new(Arc::new(masterdata))
+    .with_assets(Arc::new(assets))
+    .with_atlas_dir("atlases")?;
+
+let response: serde_json::Value = serde_json::from_slice(&std::fs::read("profile.json")?)?;
+let pages: Vec<UserCustomProfileCard> =
+    serde_json::from_value(response["userCustomProfileCards"].clone())?;
+let first = sekai_profile::core::profile_source::profile_page(&pages, 0).expect("a page");
+let profile = ProfileData::from_json(&response);
+
+let page = renderer.render(&first.custom_profile_card, Some(&profile), &RenderConfig::default())?;
+std::fs::write("card.png", page.to_png()?)?;
+```
+
+`render` returns a `RenderedPage` of premultiplied RGBA; `to_png` writes a straight-alpha PNG,
+`to_jpeg` writes a JPEG when the `jpeg-turbo` feature is enabled, and long-running services can
+use `CustomProfileRenderer::encode_jpeg` to reuse the encoder buffers. `RenderConfig::default()`
+picks the SDF executor for the CPU and a white background; `Background::Transparent` keeps the
+background transparent.
+
+### Atlas directory
+
+`with_atlas_dir` installs a directory laid out as follows, which
+`sekai_profile::prepare::prepare_atlas_dir` (that is, `sekai-profile prepare`) writes:
+
+```text
+atlases/text/<family>/manifest.json    one text atlas per font family
+atlases/tiers/<name>/manifest.json     optional atlases of the same faces at larger sizes
+atlases/shape/manifest.json            the shape atlas
+atlases/fallback/<font SHA-256>/       glyphs of the fallback face, generated while rendering
+```
+
+A text atlas records the SHA-256 of the font file it was built from, and the font installed
+under the same name must match it, because glyphs larger than the atlas size are generated from
+that font while rendering. When `Source Han Sans SC` is installed, characters the game fonts lack
+are generated from it and cached under `fallback/`. `CustomProfileRenderer::text_codepoints`
+gives the codepoints a card needs per font family, and `PrepareOptions::codepoints` builds only
+those glyphs. `build-sdf-atlas` and `build-shape-sdf-atlas` build a single atlas;
+`build-render-object-store` builds an optional store of pre-decoded textures (`--render-objects`).
+
+The font directory (`--font-dir` / `SEKAI_PROFILE_FONT_DIR`) is searched by file name:
+
+| Font family (CN server name) | File |
+|---|---|
+| `FOT-RodinNTLGPro-DB` (`FZLanTingHei-DB-GBK`) | `FOT-RodinNTLGPro-DB.ttf` or `.otf` |
+| `FOT-SkipProN-B` (`FZZhengHei-EB-GBK`) | `FOT-SkipProN-B.otf` |
+| `FOT-PopHappinessStd-EB` (`FZShaoEr-M11-JF`) | `FOT-PopHappinessStd-EB.otf` |
+| `FOT-YurukaStd-UB` | `FOT-YurukaStd-UB.otf` |
+| `Source Han Sans SC` (fallback face) | `SourceHanSansSC-Medium.otf` or `SourceHanSansSC-Regular.otf` |
+
+CN masterdata resolves its font names to the names in parentheses, which use the same files. The
+omikuji fonts are listed below.
 
 `customProfileCharacterIconResources`, `customProfileMaterialResources`, and
 `customProfileUserInterfaceIconResources` are shipped by some regions only, and `omikujis` is
-read only by omikuji collections; the four tables are `OPTIONAL_TABLES` in the host crate.
+read only by omikuji collections; the four tables are `sekai_profile::masterdata::OPTIONAL_TABLES`.
 `--masterdata` and `--masterdata-url` load them when present; without them the
 `characterIcons`, `materials`, and `userInterfaceIcons` elements and omikuji collections are
 not drawn and no missing-table warning is reported.
@@ -212,8 +311,8 @@ Honor asset semantics have one source of truth in `sekai-profile-core`; native a
 backends must not infer them independently. CN `limitevent` `honor_top_*` entries without
 an explicit background use the shared `honor_bg_event_cheerteam` degree layer.
 `bondsHonorViewType` is composable and may contain both `reverse` and
-`unit_virtual_singer`. Native adapters call the core rule functions so production native
-optimization, offline catalog generation, and browser resolution retain identical keys.
+`unit_virtual_singer`. Native adapters call the core rule functions so native rendering,
+offline catalog generation, and browser resolution use identical keys.
 
 ### Plain CPU canvas
 
@@ -223,7 +322,7 @@ rasterizer. It supports cropped/scaled PNG images, rectangular clipping, rectang
 rectangles, ellipses, quadratic strokes, and FreeType plain labels. `Font` borrows font bytes, so
 callers can keep one shared allocation. Rich TMP text still uses the profile pipeline.
 
-The canvas is available without `skia-oracle`. Pixel buffers are premultiplied RGBA; `encode_png`
+Pixel buffers are premultiplied RGBA; `encode_png`
 converts them to a straight-alpha PNG, and `crop` copies a region into a new canvas without
 re-encoding. Canvas and decoded image buffers are limited to 128 MiB; encoded PNG inputs are
 limited to 32 MiB. Callers remain responsible for aggregate cache and concurrency budgets.
@@ -235,7 +334,8 @@ demonstration, not a profile-parity or visual acceptance baseline.
 
 | Variable | Effect |
 |---|---|
-| `SEKAI_PROFILE_FONT_DIR` | Native font directory; `render-card --font-dir` sets it. `FONT_DIR` is also read, then `/usr/share/fonts/custom` and `assets/fonts` are searched |
+| `SEKAI_PROFILE_FONT_DIR` | Native font directory, searched after the directories given to `sekai_profile::set_font_dirs` (`--font-dir` on the command line). `FONT_DIR` is read next, then `assets/fonts` |
+| `SEKAI_PROFILE_ATLAS_DIR` | Default of the command line's `--atlas-dir` (`atlases`) |
 | `SEKAI_PROFILE_SDF_EDT` | `1`–`4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas, `1`–`4`, default `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true`, or `yes` emits `tracing` debug logs for TMP layout probes and text code points |
@@ -257,7 +357,7 @@ demonstration, not a profile-parity or visual acceptance baseline.
 
 ## Building and verification
 
-The project uses a pinned container toolchain for FreeType and Emscripten targets; the `skia-oracle` parity build additionally requires Skia.
+The project uses a pinned container toolchain for FreeType and Emscripten targets; native builds need FreeType (found through pkg-config, or the `bundled-freetype` feature), and `animation-export` also needs libx264.
 
 ```sh
 cargo test --workspace --all-features

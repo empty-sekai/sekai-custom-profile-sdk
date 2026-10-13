@@ -241,7 +241,7 @@ impl DistanceBvh {
 
 /// Immutable exact-profile SDF query structure shared by native and WASM.
 /// Cubic subdivision and winding edges are prepared once per glyph; bounds
-/// pruning cannot change the legacy distance result.
+/// pruning does not change the distance result.
 pub struct AnalyticDistanceField {
     distance_bvh: Option<DistanceBvh>,
     winding_edges: Vec<LineSeg>,

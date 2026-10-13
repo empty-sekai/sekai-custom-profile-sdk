@@ -2743,7 +2743,8 @@ fn load_source_fallback_object(
     let Some(assets) = assets else {
         return Ok(None);
     };
-    if resource.namespace != "assets" {
+    // Static and dynamic assets share one key space in the asset store.
+    if resource.namespace != "assets" && resource.namespace != "static" {
         return Ok(None);
     }
     let Some((width, height, pixels)) = assets.get_premultiplied_rgba(&resource.key) else {

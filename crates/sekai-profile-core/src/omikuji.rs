@@ -377,7 +377,7 @@ const BODY_LINE_SPACING: f32 = 0.62;
 
 /// Maps a text node's space (origin at its pivot, +y up) to the layer (+y
 /// down) for a node pivoted at `position` in slip space: the rotation matrix
-/// of [`TEXT_ROTATION`], then the translation.
+/// of `TEXT_ROTATION`, then the translation.
 pub fn text_node_matrix(position: [f32; 2]) -> Matrix2d {
     let [z, w] = TEXT_ROTATION;
     let z2 = z + z;

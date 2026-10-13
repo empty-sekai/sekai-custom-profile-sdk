@@ -31,6 +31,8 @@ pub struct PrepareOptions {
     pub codepoints: Option<BTreeMap<String, BTreeSet<u32>>>,
     /// Rebuild atlases that already cover the request.
     pub force: bool,
+    /// Leave the shape atlas alone, for callers without the shape sprites.
+    pub skip_shapes: bool,
 }
 
 /// What [`prepare_atlas_dir`] did.
@@ -61,8 +63,9 @@ pub enum Prepared {
 /// holds the requested codepoints; otherwise it is rebuilt to cover both its
 /// previous glyphs and the request. The shape atlas is built from
 /// `customProfileShapeResources`, reading each sprite through `shape_source`,
-/// unless one already exists. Every atlas is written to a temporary directory
-/// first and moved into place once complete.
+/// unless one already exists or [`PrepareOptions::skip_shapes`] is set. Every
+/// atlas is written to a temporary directory first and moved into place once
+/// complete.
 pub fn prepare_atlas_dir(
     dir: &AtlasDir,
     masterdata: &JsonMasterDataProvider,
@@ -87,6 +90,9 @@ pub fn prepare_atlas_dir(
         report.text.insert(family, prepared);
     }
 
+    if options.skip_shapes {
+        return Ok(report);
+    }
     let shape_manifest = dir.shape_dir().join(MANIFEST_FILE);
     let keep_shape = !options.force && MappedShapeSdfAtlas::open(&shape_manifest).is_ok();
     if keep_shape {
@@ -265,7 +271,7 @@ mod tests {
         let masterdata = shape_masterdata();
         let options = PrepareOptions {
             codepoints: Some(BTreeMap::new()),
-            force: false,
+            ..PrepareOptions::default()
         };
         let mut reads = 0;
         let first = prepare_atlas_dir(
@@ -295,7 +301,7 @@ mod tests {
         let masterdata = shape_masterdata();
         let keep = PrepareOptions {
             codepoints: Some(BTreeMap::new()),
-            force: false,
+            ..PrepareOptions::default()
         };
         prepare_atlas_dir(&dir, &masterdata, |_| Ok(square_png()), &keep).expect("prepare");
         let force = PrepareOptions {
@@ -320,7 +326,7 @@ mod tests {
             |_| Err("unused".into()),
             &PrepareOptions {
                 codepoints: Some(demand),
-                force: false,
+                ..PrepareOptions::default()
             },
         )
         .expect("prepare");
@@ -342,7 +348,7 @@ mod tests {
                 "DejaVu Sans".to_string(),
                 text.chars().map(u32::from).collect(),
             )])),
-            force: false,
+            ..PrepareOptions::default()
         };
         let empty = JsonMasterDataProvider::empty();
         let unused = |_: &ShapeResource| Err("unused".to_string());

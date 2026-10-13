@@ -277,57 +277,32 @@ impl AssetStore {
         crate::codec::png::dimensions(&encoded).ok()
     }
 
-    /// 从静态素材目录加载打包资源并放入常驻池。
+    /// Puts every PNG under `dir` into the cache, keyed by its path relative
+    /// to `dir` without the extension: `honor/frame_degree_m_1.png` becomes
+    /// `honor/frame_degree_m_1`. Returns the number of files read.
     ///
-    /// 返回读取的文件数。只有 PNG 进入常驻池（与解码路径接受的格式一致），
-    /// 常驻素材不受 LRU 预算约束，并由 [`AssetStore::is_pinned_static`] 报告。
-    pub fn load_static_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
-        let mut count = 0usize;
-        let mut keys_and_data: Vec<(String, Vec<u8>)> = Vec::new();
-
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| format!("读取目录 {} 失败: {e}", dir.display()))?;
-        Self::walk_static_dir_recursive(dir, entries, &mut count, &mut keys_and_data)?;
-
-        let pinned = self.pin_static(keys_and_data);
-        tracing::info!(loaded = count, pinned, "静态素材载入常驻池完成");
+    /// Only PNG files are read, the one format the renderer decodes. Images
+    /// beyond the byte budget evict earlier ones as any other put does, so
+    /// size the store to hold the directory.
+    pub fn load_png_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
+        let files = read_png_dir(dir)?;
+        let count = files.len();
+        for (key, data) in files {
+            self.put(key, data);
+        }
         Ok(count)
     }
 
-    fn walk_static_dir_recursive(
-        base: &std::path::Path,
-        entries: std::fs::ReadDir,
-        count: &mut usize,
-        keys_and_data: &mut Vec<(String, Vec<u8>)>,
-    ) -> Result<(), String> {
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("遍历目录失败: {e}"))?;
-            let path = entry.path();
-            if path.is_dir() {
-                let sub_entries = std::fs::read_dir(&path)
-                    .map_err(|e| format!("读取目录 {} 失败: {e}", path.display()))?;
-                Self::walk_static_dir_recursive(base, sub_entries, count, keys_and_data)?;
-            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg") {
-                    let rel = path
-                        .strip_prefix(base)
-                        .map_err(|e| format!("路径前缀错误: {e}"))?;
-                    let rel_lossy = rel.to_string_lossy().replace('\\', "/");
-                    // strip_suffix strips exactly once and matches the original
-                    // casing: `.PNG` is stripped too, and `foo.png.png` keeps
-                    // one `.png` (trim_end_matches would strip both).
-                    let key = rel_lossy
-                        .strip_suffix(&format!(".{ext}"))
-                        .unwrap_or(&rel_lossy)
-                        .to_string();
-                    let data = std::fs::read(&path)
-                        .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
-                    keys_and_data.push((key, data));
-                    *count += 1;
-                }
-            }
-        }
-        Ok(())
+    /// Loads every PNG under `dir` into the static pool, keyed as
+    /// [`AssetStore::load_png_dir`] keys them. Static assets take no part in
+    /// the byte budget, are never evicted, and are reported by
+    /// [`AssetStore::is_pinned_static`]. Returns the number of files read.
+    pub fn load_static_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
+        let files = read_png_dir(dir)?;
+        let count = files.len();
+        let pinned = self.pin_static(files);
+        tracing::info!(loaded = count, pinned, "static assets loaded");
+        Ok(count)
     }
 
     /// Resolves the source identity for a shape asset key: the size and hash
@@ -386,6 +361,56 @@ impl AssetStore {
         }
         count
     }
+}
+
+/// Reads every PNG under `base`, keyed by its relative path without the
+/// extension, with `/` separators.
+fn read_png_dir(base: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    fn walk(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        files: &mut Vec<(String, Vec<u8>)>,
+    ) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| format!("read directory {} failed: {error}", dir.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("read directory {} failed: {error}", dir.display()))?
+                .path();
+            if path.is_dir() {
+                walk(base, &path, files)?;
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                continue;
+            };
+            if !ext.eq_ignore_ascii_case("png") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(base)
+                .map_err(|error| {
+                    format!("{} is outside {}: {error}", path.display(), base.display())
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            // strip_suffix strips exactly once and matches the original
+            // casing: `.PNG` is stripped too, and `foo.png.png` keeps one
+            // `.png`.
+            let key = relative
+                .strip_suffix(&format!(".{ext}"))
+                .unwrap_or(&relative)
+                .to_string();
+            let data = std::fs::read(&path)
+                .map_err(|error| format!("read {} failed: {error}", path.display()))?;
+            files.push((key, data));
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    walk(base, base, &mut files)?;
+    Ok(files)
 }
 
 #[cfg(test)]
@@ -469,5 +494,19 @@ mod tests {
         let mut reopened = AssetStore::new(4);
         reopened.set_disk_cache_dir(dir.path().to_path_buf());
         assert_eq!(reopened.image_size("probe"), None);
+    }
+
+    #[test]
+    fn a_png_directory_loads_by_relative_key() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("honor")).expect("subdirectory");
+        let encoded = crate::codec::png::encode_rgba(1, 1, &[1, 2, 3, 255]).expect("encode");
+        std::fs::write(dir.path().join("honor/a.png"), &encoded).expect("write png");
+        std::fs::write(dir.path().join("b.jpg"), b"not read").expect("write jpg");
+        let store = AssetStore::new(4);
+        assert_eq!(store.load_png_dir(dir.path()), Ok(1));
+        assert_eq!(store.image_size("honor/a"), Some((1, 1)));
+        assert!(!store.contains("b"));
+        assert!(!store.is_pinned_static("honor/a"));
     }
 }

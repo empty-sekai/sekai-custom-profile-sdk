@@ -20,24 +20,17 @@ use sekai_profile::masterdata::{OPTIONAL_TABLES, REQUIRED_TABLES};
 
 use crate::static_manifest::is_static_key;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Path of an asset under an asset URL prefix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum AssetUrlLayout {
+    /// `<key>.png`
     #[default]
     Flat,
+    /// The directories of the game's asset bundles.
     GameAssets,
 }
 
 impl AssetUrlLayout {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "flat" => Ok(Self::Flat),
-            "game-assets" => Ok(Self::GameAssets),
-            other => Err(format!(
-                "unknown --asset-url-layout {other}; expected flat or game-assets"
-            )),
-        }
-    }
-
     fn relative_path(self, key: &str) -> String {
         match self {
             Self::Flat => format!("{key}.png"),
@@ -89,7 +82,7 @@ fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
                 let mut buf = Vec::new();
                 match resp.into_reader().read_to_end(&mut buf) {
                     Ok(_) => return Ok(buf),
-                    Err(e) => last_err = format!("读取响应体失败: {e}"),
+                    Err(e) => last_err = format!("reading the response body failed: {e}"),
                 }
             }
             Err(ureq::Error::Status(code, _)) if is_final_status(code) => {
@@ -126,22 +119,26 @@ pub fn load_masterdata_url(
         let bytes = match get_bytes(&agent, &url) {
             Ok(bytes) => bytes,
             Err(FetchError::Status(code)) if OPTIONAL_TABLES.contains(name) => {
-                tracing::debug!(table = name, %url, "可选 masterdata 表不存在（HTTP {code}），跳过");
+                tracing::debug!(table = name, %url, "optional master data table is absent (HTTP {code})");
                 continue;
             }
             Err(FetchError::Status(code)) => {
-                tracing::warn!(table = name, %url, "masterdata 表缺失（HTTP {code}），跳过");
+                tracing::warn!(table = name, %url, "master data table is missing (HTTP {code})");
                 continue;
             }
-            Err(e) => return Err(format!("拉取 masterdata 表 {name}（{url}）失败: {e}")),
+            Err(e) => {
+                return Err(format!(
+                    "fetching master data table {name} ({url}) failed: {e}"
+                ))
+            }
         };
         let json = String::from_utf8(bytes)
-            .map_err(|e| format!("masterdata 表 {name}（{url}）不是 UTF-8: {e}"))?;
+            .map_err(|e| format!("master data table {name} ({url}) is not UTF-8: {e}"))?;
         provider.insert_table(name, &json)?;
         loaded += 1;
     }
     if loaded == 0 {
-        return Err(format!("从 {base} 未能拉取任何 masterdata 表"));
+        return Err(format!("no master data table could be fetched from {base}"));
     }
     Ok(loaded)
 }
@@ -189,11 +186,11 @@ pub fn load_assets_url(
                 ok.fetch_add(1, Ordering::Relaxed);
             }
             Ok(bytes) => {
-                tracing::debug!(%key, %url, bytes = bytes.len(), "素材响应不是 PNG，丢弃");
+                tracing::debug!(%key, %url, bytes = bytes.len(), "asset response is not a PNG");
                 fail.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
-                tracing::debug!(%key, %url, "素材拉取失败: {e}");
+                tracing::debug!(%key, %url, "fetching the asset failed: {e}");
                 fail.fetch_add(1, Ordering::Relaxed);
             }
         }

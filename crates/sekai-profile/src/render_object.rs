@@ -1,6 +1,6 @@
 //! Versioned mmap-backed premultiplied RGBA render objects.
 //!
-//! The store is deliberately independent from Skia. Offline builders decode
+//! The store is independent of any raster backend. Offline builders decode
 //! source images or compose stable component recipes once; the hot renderer
 //! maps immutable pages and consumes row-major RGBA bytes directly.
 
@@ -443,6 +443,24 @@ impl MappedRenderObjectStore {
         let store = Self::from_manifest(manifest_path.to_path_buf(), bytes, manifest, pages);
         store.verify_pixels()?;
         Ok(store)
+    }
+
+    /// A store with no objects. Rendering against it decodes every image from
+    /// the asset store.
+    pub fn empty() -> &'static Self {
+        static EMPTY: std::sync::OnceLock<MappedRenderObjectStore> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(|| {
+            let manifest = RenderObjectManifest {
+                schema: RENDER_OBJECT_MANIFEST_SCHEMA.into(),
+                generator_contract: RENDER_OBJECT_GENERATOR_CONTRACT.into(),
+                pixel_format: RENDER_OBJECT_PIXEL_FORMAT.into(),
+                source_identity: "empty".into(),
+                pages: Vec::new(),
+                objects: Vec::new(),
+            };
+            let bytes = serde_json::to_vec(&manifest).unwrap_or_default();
+            Self::from_manifest(PathBuf::new(), bytes, manifest, Vec::new())
+        })
     }
 
     /// Opens only the immutable manifest catalog. This validates the complete

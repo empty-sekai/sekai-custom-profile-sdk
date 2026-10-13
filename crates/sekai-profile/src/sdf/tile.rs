@@ -39,8 +39,8 @@ pub enum SdfPrimitiveKind {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SdfAccumulationMode {
-    /// Quantize the premultiplied tile after every ordered draw, matching the
-    /// current Skia RGBA8 raster surface as closely as possible.
+    /// Quantize the premultiplied tile after every ordered draw, as an RGBA8
+    /// surface stores it.
     #[default]
     Rgba8Writeback,
     /// Keep the ordered tile in FP32 until final output. This is the retained
@@ -156,8 +156,8 @@ pub struct SdfDrawCommand {
 }
 
 impl SdfDrawCommand {
-    /// Builds the same padded glyph plane used by the existing Skia SDF path,
-    /// then maps it to device space through the already-resolved layout matrix.
+    /// Builds the padded plane of an atlas glyph, then maps it to device space
+    /// through the already-resolved layout matrix.
     pub fn from_atlas_glyph(
         kind: SdfPrimitiveKind,
         atlas_set: u16,
@@ -559,15 +559,6 @@ impl SdfTilePlan {
         atlas: &impl SdfAtlasSource,
     ) -> Result<Self, SdfTileError> {
         Self::build_impl(grid, commands, atlas, None, true, true)
-    }
-
-    pub(crate) fn build_with_shape_program_cache(
-        grid: TileGrid,
-        commands: &[SdfDrawCommand],
-        atlas: &impl SdfAtlasSource,
-        cache: &ShapeRowProgramCache,
-    ) -> Result<Self, SdfTileError> {
-        Self::build_impl(grid, commands, atlas, Some(cache), true, true)
     }
 
     /// A static profile page also executes each run once. Reuse cached Shape
@@ -1258,9 +1249,9 @@ impl SdfTilePlan {
                 }
                 SdfDestination::LoadExisting => {
                     // A run may touch only a few pixels in an otherwise large tile.
-                    // Re-quantizing the whole tile needlessly perturbs Skia-owned
-                    // destination bytes and makes interleaved legacy/SDF composition
-                    // depend on tile dimensions. Duplicate span writes are harmless:
+                    // Re-quantizing the whole tile needlessly perturbs destination
+                    // bytes other elements drew and makes interleaved image/SDF
+                    // composition depend on tile dimensions. Duplicate span writes are harmless:
                     // all commands have already accumulated into the final tile.
                     for span in spans {
                         write_span(
@@ -2496,8 +2487,8 @@ fn shade_text(material: SdfMaterial, sdf: f32) -> [f32; 4] {
 }
 
 fn source_over_rgba8(destination: &mut [f32; 4], source: [f32; 4]) {
-    // Preserve the floating source-over math used by Skia's raster pipeline,
-    // then model the RGBA8 surface writeback between ordered draws.
+    // Floating-point source-over, then the RGBA8 surface writeback between
+    // ordered draws.
     let inverse_alpha = 1.0 - source[3];
     for channel in 0..4 {
         let blended = source[channel] + destination[channel] * inverse_alpha;

@@ -4858,7 +4858,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_dynamic_matches_pre_core_production_formula() {
+    fn materialized_dynamic_matches_reference_formula() {
         for percent in [0.0, 25.0, 50.0, 99.0, 100.0] {
             let source = LineIndentSource {
                 percent,
@@ -4873,7 +4873,7 @@ mod tests {
                 1_800
             };
             let actual = materialize_line_indent(source.clone(), max_frames).unwrap();
-            let expected = legacy_materialize(&source, max_frames);
+            let expected = reference_materialize(&source, max_frames);
             assert_eq!(actual.looped, expected.0, "percent={percent}");
             assert_eq!(actual.frames.len(), expected.1.len(), "percent={percent}");
             for (actual, expected) in actual.frames.iter().zip(expected.1) {
@@ -5025,7 +5025,7 @@ mod tests {
         assert_eq!(multiline, widest_line);
     }
 
-    fn legacy_materialize(source: &LineIndentSource, max_frames: usize) -> (bool, Vec<f32>) {
+    fn reference_materialize(source: &LineIndentSource, max_frames: usize) -> (bool, Vec<f32>) {
         let pct = source.percent / 100.0;
         let natural = source.line_advances_tmp[0].iter().sum::<f32>();
         let last = *source.line_advances_tmp[0].last().unwrap();

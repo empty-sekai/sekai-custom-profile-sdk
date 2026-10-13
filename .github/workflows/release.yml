@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfontconfig1-dev libfreetype6-dev libssl-dev libx264-dev pkg-config
+            libfreetype6-dev libx264-dev pkg-config
 
       - run: cargo fmt --all -- --check
       # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
@@ -42,12 +42,11 @@ jobs:
       - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
       - run: cargo test --workspace --all-features
 
-  # -- 1b. The default build carries no Skia. -------------------------
-  # Only FreeType (and pkg-config) is required: the engine, the profile
-  # backend and the render-card binary all build and test without the Skia
-  # toolchain.
-  test-no-skia:
-    name: test (no skia)
+  # -- 1b. Minimal feature set. -----------------------------------
+  # The library and the CLI build and test with only FreeType (and
+  # pkg-config) installed.
+  test-minimal:
+    name: test (no default features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,14 +56,13 @@ jobs:
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             libfreetype6-dev pkg-config
+          sudo apt-get install -y --no-install-recommends \
+            libfreetype6-dev pkg-config
 
       - run: cargo test -p sekai-profile --no-default-features
       - run: cargo build -p sekai-profile-cli
 
-  # -- 2. Native render-card binaries. -------------------------------
-  # The binaries render through the profile backend and the ordered SDF
-  # pipeline; no Skia toolchain is involved.
+  # -- 2. Native CLI binaries. -------------------------------------
   build-native:
     name: build ${{ matrix.platform }}
     needs: test
@@ -112,7 +110,7 @@ jobs:
           "PKG_CONFIG_PATH=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib\pkgconfig" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build render-card
+      - name: Build sekai-profile
         run: cargo build --release -p sekai-profile-cli --target ${{ matrix.target }}
 
       - name: Archive Unix binary
@@ -120,7 +118,7 @@ jobs:
         env:
           ARCHIVE: ${{ matrix.archive }}
           TARGET: ${{ matrix.target }}
-        run: tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" render-card
+        run: tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" sekai-profile
 
       - name: Archive Windows binary
         if: runner.os == 'Windows'
@@ -128,7 +126,7 @@ jobs:
         env:
           ARCHIVE: ${{ matrix.archive }}
           TARGET: ${{ matrix.target }}
-        run: Compress-Archive -Path "target/$env:TARGET/release/render-card.exe" -DestinationPath $env:ARCHIVE
+        run: Compress-Archive -Path "target/$env:TARGET/release/sekai-profile.exe" -DestinationPath $env:ARCHIVE
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -157,10 +155,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libfreetype6-dev nasm pkg-config
 
-      - name: Build and archive render-card
+      - name: Build and archive sekai-profile
         run: |
           cargo build --release -p sekai-profile-cli --target "${TARGET}"
-          tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" render-card
+          tar -cJf "${ARCHIVE}" -C "target/${TARGET}/release" sekai-profile
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

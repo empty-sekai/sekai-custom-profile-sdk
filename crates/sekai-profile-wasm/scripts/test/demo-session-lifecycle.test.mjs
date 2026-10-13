@@ -29,7 +29,7 @@ test("profile input is the only accepted source of card pages", () => {
   assert.throws(() => normalizePages({ texts: [] }), /Profile JSON must contain userCustomProfileCards/);
 });
 
-test("production font files automatically register their logical aliases", () => {
+test("game font files automatically register their logical aliases", () => {
   assert.deepEqual(defaultFontFamilies("FOT-RodinNTLGPro-DB.ttf"), [
     "FOT-RodinNTLGPro-DB",
     "FZLanTingHei-DB-GBK",

@@ -4,7 +4,7 @@
 //! <root>/text/<family>/manifest.json    one text atlas per font family
 //! <root>/tiers/<name>/manifest.json     optional larger point-size atlases of those faces
 //! <root>/shape/manifest.json            the shape atlas
-//! <root>/fallback/                      generated fallback glyphs (see [`Self::fallback_dir`])
+//! <root>/fallback/<font SHA-256>/       fallback glyphs generated while rendering
 //! ```
 //!
 //! [`crate::prepare::prepare_atlas_dir`] writes this layout and
@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use crate::sdf::atlas::MappedSdfAtlas;
+use crate::sdf::atlas::{MappedSdfAtlas, PROFILE_TEXT_FALLBACK_FONT_FAMILY};
+use crate::sdf::fallback_cache::PersistentFallbackSdfCache;
 use crate::sdf::shape_atlas::MappedShapeSdfAtlas;
 
 const TEXT_DIR: &str = "text";
@@ -38,6 +39,9 @@ pub struct InstalledAtlases {
     /// Atlases of the same faces at larger point sizes.
     pub tiers: Vec<Arc<MappedSdfAtlas>>,
     pub shape: Option<Arc<MappedShapeSdfAtlas>>,
+    /// Cache of glyphs generated from the fallback face for characters the
+    /// game fonts lack; see [`AtlasDir::open_fallback_cache`].
+    pub fallback: Option<Arc<PersistentFallbackSdfCache>>,
 }
 
 impl AtlasDir {
@@ -49,20 +53,24 @@ impl AtlasDir {
         &self.root
     }
 
-    /// Directory of the text atlas of `family`. Characters other than ASCII
-    /// letters, digits, `.`, `_` and `-` become `_` in the directory name;
-    /// the family itself is recorded in the atlas manifest.
+    /// Directory of the text atlas of `family`, named after the family so
+    /// that `<root>/text` can be served as a prebuilt atlas package to the
+    /// browser renderer. Path separators, `:` and control characters in the
+    /// family become `_`, and a family of `.` or `..` is prefixed with `_`.
     pub fn text_dir(&self, family: &str) -> PathBuf {
-        let name: String = family
+        let mut name: String = family
             .chars()
             .map(|ch| {
-                if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                    ch
-                } else {
+                if matches!(ch, '/' | '\\' | ':') || ch.is_control() {
                     '_'
+                } else {
+                    ch
                 }
             })
             .collect();
+        if name.is_empty() || name == "." || name == ".." {
+            name.insert(0, '_');
+        }
         self.root.join(TEXT_DIR).join(name)
     }
 
@@ -70,10 +78,27 @@ impl AtlasDir {
         self.root.join(SHAPE_DIR)
     }
 
-    /// Directory for a [`crate::sdf::fallback_cache::PersistentFallbackSdfCache`]
-    /// that keeps glyphs generated from a fallback face across runs.
+    /// Directory of the fallback glyph caches, one per fallback font file.
     pub fn fallback_dir(&self) -> PathBuf {
         self.root.join(FALLBACK_DIR)
+    }
+
+    /// Opens the cache of glyphs generated from the profile text fallback
+    /// face (`Source Han Sans SC`) under [`Self::fallback_dir`], creating it
+    /// when absent. Each font file gets its own directory, named by its
+    /// SHA-256. `None` when no font file of that family is installed.
+    pub fn open_fallback_cache(&self) -> Result<Option<PersistentFallbackSdfCache>, String> {
+        let Some(font) = crate::sdf::outline::resolve_font_path(PROFILE_TEXT_FALLBACK_FONT_FAMILY)
+        else {
+            return Ok(None);
+        };
+        let bytes = std::fs::read(&font)
+            .map_err(|error| format!("read {} failed: {error}", font.display()))?;
+        let directory = self
+            .fallback_dir()
+            .join(hex::encode(Sha256::digest(&bytes)));
+        PersistentFallbackSdfCache::new(directory, font, PROFILE_TEXT_FALLBACK_FONT_FAMILY)
+            .map(Some)
     }
 
     /// Manifests of the text atlases, in path order.
@@ -94,7 +119,8 @@ impl AtlasDir {
     /// font file of every text atlas's family must be installed and identical
     /// to the one the atlas was built from, because glyphs too large for any
     /// atlas are generated from that font while rendering. A tier must extend
-    /// a base atlas of the same face at a smaller point size.
+    /// a base atlas of the same face at a smaller point size. The fallback
+    /// glyph cache is opened as [`Self::open_fallback_cache`] describes.
     pub fn open(&self) -> Result<InstalledAtlases, String> {
         let mut installed = InstalledAtlases::default();
         for manifest in self.text_manifests()? {
@@ -127,6 +153,7 @@ impl AtlasDir {
                 .map_err(|error| format!("{}: {error}", shape.display()))?;
             installed.shape = Some(Arc::new(atlas));
         }
+        installed.fallback = self.open_fallback_cache()?.map(Arc::new);
         Ok(installed)
     }
 }
@@ -173,7 +200,15 @@ mod tests {
         let dir = AtlasDir::new("atlases");
         assert_eq!(
             dir.text_dir("FOT-Yuruka Std UB"),
-            Path::new("atlases").join("text").join("FOT-Yuruka_Std_UB")
+            Path::new("atlases").join("text").join("FOT-Yuruka Std UB")
+        );
+        assert_eq!(
+            dir.text_dir("../a/b:c"),
+            Path::new("atlases").join("text").join(".._a_b_c")
+        );
+        assert_eq!(
+            dir.text_dir(".."),
+            Path::new("atlases").join("text").join("_..")
         );
         assert_eq!(
             dir.text_dir("FOT-RodinNTLGPro-DB"),

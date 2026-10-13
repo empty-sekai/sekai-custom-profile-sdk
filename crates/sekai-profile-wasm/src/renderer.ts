@@ -97,7 +97,7 @@ export type ProfileSceneCreateOptions = {
    * otherwise), so the card and the profile data can never drift apart.
    */
   profile?: unknown;
-  /** @deprecated legacy input: a standalone card document without profile data. */
+  /** @deprecated A standalone card document without profile data; pass `profile` instead. */
   card?: unknown;
   /**
    * Zero-based page number in the order the game shows the pages: ascending
