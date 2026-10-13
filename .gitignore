@@ -4,11 +4,11 @@
 *.pdb
 
 # WASM package build output and dependencies
-crates/allium-renderer-wasm/dist/
-crates/allium-renderer-wasm/node_modules/
-crates/allium-renderer-wasm/target/
-crates/allium-renderer-wasm/build.log
-crates/allium-renderer-wasm/serve-demo.cjs
+crates/sekai-profile-wasm/dist/
+crates/sekai-profile-wasm/node_modules/
+crates/sekai-profile-wasm/target/
+crates/sekai-profile-wasm/build.log
+crates/sekai-profile-wasm/serve-demo.cjs
 *.log
 node_modules/
 /tmp/

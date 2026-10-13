@@ -18,13 +18,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "allium-renderer-wasm"
+name = "sekai-profile-wasm"
 version = "0.6.0"
 dependencies = [
  "base64",
  "freetype-rs",
  "libc",
- "sekai-profile-renderer-core",
+ "sekai-profile-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1096,7 +1096,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "sekai-profile-card-cli"
+name = "sekai-profile-cli"
 version = "0.6.0"
 dependencies = [
  "base64",
@@ -1125,7 +1125,7 @@ dependencies = [
  "lru",
  "memmap2",
  "rayon",
- "sekai-profile-renderer-core",
+ "sekai-profile-core",
  "sekai-profile-renderer-host",
  "serde",
  "serde_json",
@@ -1141,7 +1141,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sekai-profile-renderer-core"
+name = "sekai-profile-core"
 version = "0.6.0"
 dependencies = [
  "bincode",

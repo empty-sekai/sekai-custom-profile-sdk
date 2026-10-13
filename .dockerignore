@@ -4,5 +4,5 @@
 **/*.rs.bk
 *.pdb
 .git
-crates/allium-renderer-wasm/dist
-crates/allium-renderer-wasm/node_modules
+crates/sekai-profile-wasm/dist
+crates/sekai-profile-wasm/node_modules

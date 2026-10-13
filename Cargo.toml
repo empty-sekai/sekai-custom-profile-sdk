@@ -1,11 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/sekai-profile-renderer",
-    "crates/sekai-profile-renderer-core",
-    "crates/sekai-profile-renderer-host",
-    "crates/sekai-profile-card-cli",
-    "crates/allium-renderer-wasm",
+    "crates/sekai-profile-core",
+    "crates/sekai-profile",
+    "crates/sekai-profile-cli",
+    "crates/sekai-profile-wasm",
 ]
 
 [workspace.package]

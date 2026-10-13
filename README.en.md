@@ -50,11 +50,11 @@ Host-provided font bytes with fixed source hashes, FreeType metrics, TMP layout,
 
 | Crate | Responsibility |
 | --- | --- |
-| `sekai-profile-renderer-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
+| `sekai-profile-core` | Backend-independent scene schema, profile resolution, dynamics, stable IDs, masks, controls, and interaction geometry |
 | `sekai-profile-renderer` | Native CPU adapter and reusable native renderer components |
 | `sekai-profile-renderer-host` | Native host utilities and JSON masterdata provider |
-| `sekai-profile-card-cli` | `render-card` CLI and long-running NDJSON service mode |
-| `allium-renderer-wasm` | Minimal FreeType WASM, stateful worker protocol, WebGL2 runtime, caches, and Scene Workbench |
+| `sekai-profile-cli` | `render-card` CLI and long-running NDJSON service mode |
+| `sekai-profile-wasm` | Minimal FreeType WASM, stateful worker protocol, WebGL2 runtime, caches, and Scene Workbench |
 
 ## Browser quick start
 
@@ -114,7 +114,7 @@ const scene = await renderer.createProfileScene({
 scene.draw();
 ```
 
-See the [browser package README](crates/allium-renderer-wasm/README.en.md) for the complete integration flow, provider contract, caching model, and interaction API.
+See the [browser package README](crates/sekai-profile-wasm/README.en.md) for the complete integration flow, provider contract, caching model, and interaction API.
 
 ## What happens when a scene is created
 
@@ -208,7 +208,7 @@ request nothing. Every other type, and a missing one, draws as a plain image.
 layout. That explicit mode reuses the shared core canonical mapping for
 `bonds_honor/character` and `bonds_honor/word` without changing renderer asset keys.
 
-Honor asset semantics have one source of truth in `sekai-profile-renderer-core`; native and WASM
+Honor asset semantics have one source of truth in `sekai-profile-core`; native and WASM
 backends must not infer them independently. CN `limitevent` `honor_top_*` entries without
 an explicit background use the shared `honor_bg_event_cheerteam` degree layer.
 `bondsHonorViewType` is composable and may contain both `reverse` and
@@ -217,7 +217,7 @@ optimization, offline catalog generation, and browser resolution retain identica
 
 ### Plain CPU canvas
 
-`sekai_profile_renderer::profile_compositor::canvas` exposes a bounded plain-label canvas.
+`sekai_profile::profile_compositor::canvas` exposes a bounded plain-label canvas.
 `Canvas` reuses the profile compositor's image sampling, source-over blending, and semantic shape
 rasterizer. It supports cropped/scaled PNG images, rectangular clipping, rectangles, rounded
 rectangles, ellipses, quadratic strokes, and FreeType plain labels. `Font` borrows font bytes, so
@@ -262,7 +262,7 @@ The project uses a pinned container toolchain for FreeType and Emscripten target
 ```sh
 cargo test --workspace --all-features
 
-cd crates/allium-renderer-wasm
+cd crates/sekai-profile-wasm
 npm run build
 npm run typecheck
 npm run test:gates
@@ -274,4 +274,4 @@ Release gates cover ABI/schema compatibility, shared-core source consistency, TM
 
 ## License
 
-The repository is AGPL-3.0-only. The browser npm package also includes the limited browser linking exception in `crates/allium-renderer-wasm/LICENSE-EXCEPTION`. Modified SDK builds, server use, and non-browser use remain subject to the full AGPL, including its network-use source requirement.
+The repository is AGPL-3.0-only. The browser npm package also includes the limited browser linking exception in `crates/sekai-profile-wasm/LICENSE-EXCEPTION`. Modified SDK builds, server use, and non-browser use remain subject to the full AGPL, including its network-use source requirement.

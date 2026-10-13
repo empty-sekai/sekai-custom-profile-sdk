@@ -17,12 +17,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sekai_profile_renderer::assets::AssetStore;
-use sekai_profile_renderer::elements::honor::{render_bonds_honor, render_honor};
-use sekai_profile_renderer::masterdata::{
+use sekai_profile::assets::AssetStore;
+use sekai_profile::elements::honor::{render_bonds_honor, render_honor};
+use sekai_profile::masterdata::{
     MasterData, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
 };
-use sekai_profile_renderer::types::{
+use sekai_profile::types::{
     BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry,
 };
 use skia_safe::{surfaces, Color, EncodedImageFormat, Point};

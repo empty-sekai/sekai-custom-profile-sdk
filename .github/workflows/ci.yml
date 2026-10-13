@@ -48,8 +48,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libfreetype6-dev pkg-config
 
-      - run: cargo test -p sekai-profile-renderer --no-default-features
-      - run: cargo build -p sekai-profile-card-cli
+      - run: cargo test -p sekai-profile --no-default-features
+      - run: cargo build -p sekai-profile-cli
 
   browser:
     name: browser gates
@@ -60,28 +60,28 @@ jobs:
       # test:gates covers the demo server, which loads the real wasm artifacts,
       # so the package has to be built before the gates run.
       - name: Build wasm in container
-        run: bash crates/allium-renderer-wasm/build.sh
+        run: bash crates/sekai-profile-wasm/build.sh
 
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
 
       - name: Build TypeScript wrapper
-        working-directory: crates/allium-renderer-wasm
+        working-directory: crates/sekai-profile-wasm
         run: |
           npm ci --no-audit --no-fund
           npm run typecheck
           npm run build:ts
 
       - name: Browser gates
-        working-directory: crates/allium-renderer-wasm
+        working-directory: crates/sekai-profile-wasm
         run: |
           npm run test:gates
           npm run verify:wasm:runtime
           npm run audit:public
 
       - name: WebGL2 GPU contract gate
-        working-directory: crates/allium-renderer-wasm
+        working-directory: crates/sekai-profile-wasm
         run: |
           node --test \
             scripts/test/m3-browser-semantic-resources.test.mjs \

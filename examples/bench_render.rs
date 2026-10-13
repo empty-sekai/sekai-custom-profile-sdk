@@ -16,14 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use sekai_profile_renderer::assets::AssetStore;
-use sekai_profile_renderer::init::install_fonts;
-use sekai_profile_renderer::masterdata::{
+use sekai_profile::assets::AssetStore;
+use sekai_profile::init::install_fonts;
+use sekai_profile::masterdata::{
     CollectionResourceType, MasterDataProvider, ResolvedColor, ResolvedHonor, ResourceInfo,
 };
-use sekai_profile_renderer::profile::ProfileData;
-use sekai_profile_renderer::renderer::CustomProfileRenderer;
-use sekai_profile_renderer::types::{
+use sekai_profile::profile::ProfileData;
+use sekai_profile::renderer::CustomProfileRenderer;
+use sekai_profile::types::{
     BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, HonorGroupEntry, StampEntry,
     UserCustomProfileCard,
 };
@@ -232,7 +232,7 @@ fn main() -> Result<(), String> {
     // SEKAI_PROFILE_DISABLE_DOWNSAMPLE=1 时关闭巨型字降采样（精确光栅化），
     // 与默认降采样在同一二进制内对比墙钟，消除 build-to-build 方差。
     if std::env::var("SEKAI_PROFILE_DISABLE_DOWNSAMPLE").as_deref() == Ok("1") {
-        sekai_profile_renderer::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE
+        sekai_profile::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE
             .store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("[bench] DISABLE_DOWNSAMPLE=1 → 巨型字精确光栅化（不降采样）");
     }
@@ -245,7 +245,7 @@ fn main() -> Result<(), String> {
     // 用无损 PNG 输出避免 JPEG 压缩噪声干扰对比。
     if std::env::var("SEKAI_PROFILE_AB_COMPARE").as_deref() == Ok("1") {
         use std::sync::atomic::Ordering;
-        let flag = &sekai_profile_renderer::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE;
+        let flag = &sekai_profile::sdf::rasterize::bench_counters::DISABLE_DOWNSAMPLE;
         let (name_a, name_b) = ("精确光栅化(不降采样)", "巨型字降采样");
         eprintln!("[A/B] A={name_a}  B={name_b}");
 
@@ -363,12 +363,12 @@ fn main() -> Result<(), String> {
     println!("总耗时/次: mean={mean:.3}ms  p50={p50:.3}ms  p99={p99:.3}ms  min={min:.3}ms  max={max:.3}ms");
 
     // 光栅化计数器：单次渲染的字形数/总像素/shade 调用数，拆出 per-glyph 真实成本。
-    sekai_profile_renderer::sdf::rasterize::bench_counters::reset();
+    sekai_profile::sdf::rasterize::bench_counters::reset();
     let single = Instant::now();
     let _ = renderer.render_page_with_profile(&card.custom_profile_card, Some(&profile))?;
     let single_ms = single.elapsed().as_secs_f64() * 1e3;
     let (glyphs, px, shade, prepad, pad_sum, max_win) =
-        sekai_profile_renderer::sdf::rasterize::bench_counters::snapshot();
+        sekai_profile::sdf::rasterize::bench_counters::snapshot();
     println!("\n=== 光栅化计数（单次渲染）===");
     println!("字形数={glyphs}  总像素={px}  shade调用={shade}  单次={single_ms:.2}ms");
     if glyphs > 0 {
@@ -390,15 +390,15 @@ fn main() -> Result<(), String> {
     // 单独测 draw_element 循环段占比（#29 影响的部分）。
     // 复刻 render_card 的循环，隔离测「flatten + draw_element 全部元素」这一段。
     use skia_safe::surfaces;
-    let w = sekai_profile_renderer::transform::CANVAS_WIDTH as i32;
-    let h = sekai_profile_renderer::transform::CANVAS_HEIGHT as i32;
+    let w = sekai_profile::transform::CANVAS_WIDTH as i32;
+    let h = sekai_profile::transform::CANVAS_HEIGHT as i32;
     let md = renderer.masterdata();
     let assets = renderer.assets().cloned();
 
     let mut loop_times = Vec::with_capacity(iters);
     let mut flat_times = Vec::with_capacity(iters);
     // 按元素类型累加耗时（定位 1315ms 的去向）
-    use sekai_profile_renderer::elements::RenderElement;
+    use sekai_profile::elements::RenderElement;
     let mut by_type: HashMap<&'static str, (f64, usize)> = HashMap::new();
     for _ in 0..iters {
         let mut surface = surfaces::raster_n32_premul((w, h)).ok_or("surface")?;
@@ -406,11 +406,11 @@ fn main() -> Result<(), String> {
         canvas.clear(skia_safe::Color::TRANSPARENT);
 
         let tf = Instant::now();
-        let elements = sekai_profile_renderer::elements::flatten_and_sort(&card.custom_profile_card);
+        let elements = sekai_profile::elements::flatten_and_sort(&card.custom_profile_card);
         flat_times.push(tf.elapsed().as_secs_f64() * 1e3);
 
         let fallback = AssetStore::new(1);
-        let theme = sekai_profile_renderer::widgets::theme::Theme::default();
+        let theme = sekai_profile::widgets::theme::Theme::default();
         let tl = Instant::now();
         for elem in &elements {
             if !elem.visible() {
@@ -431,7 +431,7 @@ fn main() -> Result<(), String> {
                 RenderElement::StoryBackground(_) => "StoryBackground",
             };
             let te = Instant::now();
-            sekai_profile_renderer::elements::draw_element_on_canvas(
+            sekai_profile::elements::draw_element_on_canvas(
                 canvas, elem, &md, assets.as_deref(), Some(&profile),
                 &fallback, &theme, w as f32, h as f32,
             );

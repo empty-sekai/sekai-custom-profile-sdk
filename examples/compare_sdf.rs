@@ -10,7 +10,7 @@
 //!
 //! 解析法是当前生产用的、视觉正确的输出，作为真值。EDT 法误差越小越好。
 
-use sekai_profile_renderer::sdf::outline::benchmark_methods;
+use sekai_profile::sdf::outline::benchmark_methods;
 
 /// 把 0-255 gray 映射成 ASCII 浓淡，便于在终端目视 SDF 结构。
 fn gray_ch(g: u8) -> char {
@@ -18,7 +18,7 @@ fn gray_ch(g: u8) -> char {
     ramp[(g as usize * (ramp.len() - 1)) / 255]
 }
 
-fn dump_ascii(label: &str, glyph: &sekai_profile_renderer::sdf::outline::OutlineSdfGlyph) {
+fn dump_ascii(label: &str, glyph: &sekai_profile::sdf::outline::OutlineSdfGlyph) {
     println!("--- {label} {}x{} ---", glyph.width(), glyph.height());
     let px = glyph.pixels();
     let (w, h) = (glyph.width(), glyph.height());

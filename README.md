@@ -50,11 +50,11 @@ Rust/WASM 负责：
 
 | Crate | 职责 |
 | --- | --- |
-| `sekai-profile-renderer-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
+| `sekai-profile-core` | 后端无关的场景 schema、profile resolution、动态、稳定 ID、mask、control 与 interaction geometry |
 | `sekai-profile-renderer` | native CPU adapter 与可复用 native renderer 组件 |
 | `sekai-profile-renderer-host` | native host 工具和 JSON masterdata provider |
-| `sekai-profile-card-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
-| `allium-renderer-wasm` | minimal FreeType WASM、stateful worker protocol、WebGL2 runtime、缓存与 Scene Workbench |
+| `sekai-profile-cli` | `render-card` CLI 与 NDJSON 常驻服务模式 |
+| `sekai-profile-wasm` | minimal FreeType WASM、stateful worker protocol、WebGL2 runtime、缓存与 Scene Workbench |
 
 ## 浏览器快速开始
 
@@ -113,7 +113,7 @@ const scene = await renderer.createProfileScene({
 scene.draw();
 ```
 
-完整的接入流程、provider contract、缓存与交互说明见 [browser package README](crates/allium-renderer-wasm/README.md)。
+完整的接入流程、provider contract、缓存与交互说明见 [browser package README](crates/sekai-profile-wasm/README.md)。
 
 ## 浏览器中实际发生什么
 
@@ -202,7 +202,7 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 调用方才应显式传 `--asset-url-layout game-assets`；该模式通过 shared core 的 canonical
 映射解析 `bonds_honor/character` 与 `bonds_honor/word`，不改变 renderer asset key。
 
-称号的资源语义由 `sekai-profile-renderer-core` 单一维护，native 与 WASM 不得各自猜测：国服
+称号的资源语义由 `sekai-profile-core` 单一维护，native 与 WASM 不得各自猜测：国服
 `limitevent` 的 `honor_top_*` 在未显式指定背景时使用共享
 `honor_bg_event_cheerteam` degree 层；`bondsHonorViewType` 是可组合标志，字符串中可同时
 包含 `reverse` 与 `unit_virtual_singer`。native adapter 只调用 core 规则函数，避免服务端
@@ -210,7 +210,7 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 
 ### CPU 画布
 
-`sekai_profile_renderer::profile_compositor::canvas` 提供有界的纯标签画布。`Canvas` 与 profile
+`sekai_profile::profile_compositor::canvas` 提供有界的纯标签画布。`Canvas` 与 profile
 合成器共用图片采样、source-over 混合和语义 shape 光栅器，支持裁切/缩放的 PNG 图片、矩形裁剪、
 矩形、圆角矩形、椭圆、二次曲线描边和 FreeType 纯文本标签。`Font` 借用字体 bytes，调用方可以
 共享同一份内存。TMP 富文本仍走 profile 管线。
@@ -253,7 +253,7 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 ```sh
 cargo test --workspace --all-features
 
-cd crates/allium-renderer-wasm
+cd crates/sekai-profile-wasm
 npm run build
 npm run typecheck
 npm run test:gates
@@ -265,4 +265,4 @@ release gates 覆盖 ABI/schema、shared-core source consistency、TMP debug par
 
 ## License
 
-仓库采用 AGPL-3.0-only。browser npm package 另含 `crates/allium-renderer-wasm/LICENSE-EXCEPTION` 中的有限 browser linking exception。修改 SDK、服务端使用和非浏览器使用仍受完整 AGPL 约束，包括网络交互场景下的源代码提供义务。
+仓库采用 AGPL-3.0-only。browser npm package 另含 `crates/sekai-profile-wasm/LICENSE-EXCEPTION` 中的有限 browser linking exception。修改 SDK、服务端使用和非浏览器使用仍受完整 AGPL 约束，包括网络交互场景下的源代码提供义务。

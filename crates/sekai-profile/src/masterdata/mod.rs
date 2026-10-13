@@ -1,0 +1,459 @@
+//! MasterData 查询抽象，以及从 JSON 表构建的 [`JsonMasterDataProvider`]。
+
+use std::sync::Arc;
+
+use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry};
+
+mod json;
+mod table;
+
+pub use json::{JsonMasterDataProvider, OPTIONAL_TABLES, REQUIRED_TABLES};
+pub use sekai_profile_core::masterdata::{CollectionResourceType, OmikujiRow};
+pub use table::Table;
+
+/// 解析后的颜色值（RGBA）。
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl ResolvedColor {
+    /// 从 `#RRGGBB` 或 `#RRGGBBAA` 格式解析颜色。
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.trim_start_matches('#');
+        // 字节级解析：长度按字节计，字符串切片遇到非字符边界会 panic；
+        // 非法输入返回 None。
+        let bytes = hex.as_bytes();
+        let len = bytes.len();
+        if len != 6 && len != 8 {
+            return None;
+        }
+        let pair = |range: std::ops::Range<usize>| -> Option<u8> {
+            std::str::from_utf8(&bytes[range])
+                .ok()
+                .and_then(|value| u8::from_str_radix(value, 16).ok())
+        };
+        let r = pair(0..2)?;
+        let g = pair(2..4)?;
+        let b = pair(4..6)?;
+        let a = if len == 8 { pair(6..8)? } else { 255 };
+        Some(Self { r, g, b, a })
+    }
+}
+
+/// 资源信息。
+#[derive(Debug, Clone)]
+pub struct ResourceInfo {
+    pub file_name: String,
+    pub load_val: String,
+    pub resource_type: String,
+    /// `customProfileResourceCollectionType` of a collection row; other rows
+    /// carry [`CollectionResourceType::None`].
+    pub collection_type: CollectionResourceType,
+}
+
+impl ResourceInfo {
+    /// Asset key the resource loads from: `{resourceLoadVal}/{fileName}`.
+    pub fn asset_key(&self) -> String {
+        format!("{}/{}", self.load_val, self.file_name)
+    }
+}
+
+/// 解析后的 Honor 渲染信息。
+#[derive(Debug, Clone)]
+pub struct ResolvedHonor {
+    pub asset_bundle_name: String,
+    pub honor_rarity: String,
+    pub honor_type: String,
+    pub background_asset_bundle_name: Option<String>,
+    pub frame_name: Option<String>,
+    pub is_live_master: bool,
+    pub has_star: bool,
+    pub honor_level: i32,
+    pub honor_mission_type: Option<String>,
+}
+
+impl ResolvedHonor {
+    pub(crate) fn asset_plan(
+        &self,
+        full_size: bool,
+    ) -> sekai_profile_core::masterdata::StandardHonorAssetPlan {
+        self.clone()
+            .into_core()
+            .asset_plan(self.honor_level, full_size)
+    }
+
+    /// Wraps a core resolution with the level it was resolved for.
+    pub fn from_core(
+        value: sekai_profile_core::masterdata::ResolvedHonor,
+        honor_level: i32,
+    ) -> Self {
+        Self {
+            asset_bundle_name: value.asset_bundle_name,
+            honor_rarity: value.honor_rarity,
+            honor_type: value.honor_type,
+            background_asset_bundle_name: value.background_asset_bundle_name,
+            frame_name: value.frame_name,
+            is_live_master: value.is_live_master,
+            has_star: value.has_star,
+            honor_level,
+            honor_mission_type: value.honor_mission_type,
+        }
+    }
+
+    /// See [`sekai_profile_core::masterdata::ResolvedHonor::draws_level_stars`].
+    pub fn draws_level_stars(&self) -> bool {
+        self.clone().into_core().draws_level_stars()
+    }
+
+    fn into_core(self) -> sekai_profile_core::masterdata::ResolvedHonor {
+        sekai_profile_core::masterdata::ResolvedHonor {
+            asset_bundle_name: self.asset_bundle_name,
+            honor_rarity: self.honor_rarity,
+            honor_type: self.honor_type,
+            background_asset_bundle_name: self.background_asset_bundle_name,
+            frame_name: self.frame_name,
+            is_live_master: self.is_live_master,
+            has_star: self.has_star,
+            honor_mission_type: self.honor_mission_type,
+        }
+    }
+
+    /// Returns the bundle that owns the degree layer. CN limited-event fan
+    /// honors ship `honor_top_*` as rank overlays only and share the cheer-team
+    /// degree layer; their honorGroups rows omit backgroundAssetbundleName.
+    pub fn effective_background_asset_bundle_name(&self) -> &str {
+        sekai_profile_core::masterdata::effective_honor_background_asset_bundle_name(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.background_asset_bundle_name.as_deref(),
+        )
+    }
+
+    pub fn has_rank_overlay(&self) -> bool {
+        sekai_profile_core::masterdata::honor_has_rank_overlay(
+            &self.honor_type,
+            &self.asset_bundle_name,
+            self.is_live_master,
+        )
+    }
+}
+
+#[cfg(test)]
+mod resolved_honor_tests {
+    use super::ResolvedHonor;
+
+    fn honor(asset: &str, honor_type: &str, background: Option<&str>) -> ResolvedHonor {
+        ResolvedHonor {
+            asset_bundle_name: asset.into(),
+            honor_rarity: "high".into(),
+            honor_type: honor_type.into(),
+            background_asset_bundle_name: background.map(str::to_owned),
+            frame_name: None,
+            is_live_master: false,
+            has_star: false,
+            honor_level: 1,
+            honor_mission_type: None,
+        }
+    }
+
+    #[test]
+    fn cn_limited_event_top_honor_uses_shared_cheer_team_degree_layer() {
+        let resolved = honor("honor_top_000020", "limitevent", None);
+        assert_eq!(
+            resolved.effective_background_asset_bundle_name(),
+            "honor_bg_event_cheerteam"
+        );
+        assert!(!resolved.has_rank_overlay());
+    }
+
+    #[test]
+    fn explicit_background_remains_authoritative() {
+        let resolved = honor("honor_top_000020", "limitevent", Some("honor_bg_explicit"));
+        assert_eq!(
+            resolved.effective_background_asset_bundle_name(),
+            "honor_bg_explicit"
+        );
+    }
+}
+
+/// 渲染引擎所需的最小 MasterData 查询契约。
+pub trait MasterDataProvider: Send + Sync {
+    fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String>;
+    fn get_card(&self, card_id: i32) -> Option<CardEntry>;
+    fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor>;
+    /// `customProfileTextColors` 首行颜色；表为空或未加载时返回 `None`（默认实现）。
+    fn default_color(&self) -> Option<ResolvedColor> {
+        None
+    }
+    fn resolve_font(&self, font_id: i32) -> Option<String>;
+    fn resolve_stamp(&self, stamp_id: i32) -> Option<String>;
+    fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo>;
+    fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor>;
+    fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry>;
+    fn get_bonds_honor_word(&self, word_id: i64) -> Option<BondsHonorWordEntry>;
+    fn get_honor(&self, honor_id: i32) -> Option<HonorEntry>;
+    fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32;
+    fn font_count(&self) -> usize;
+    fn color_count(&self) -> usize;
+
+    /// 当前 region（默认国服，保留内网历史行为）。
+    fn region(&self) -> crate::region::Region {
+        crate::region::Region::Cn
+    }
+
+    /// 查 `customProfilePlayerInfoResources[id].name` 取面板标题本地化文本。
+    ///
+    /// 用于 general 面板标题（综合力 / 个性签名 / 挑战演出 / 多人演出 /
+    /// 最喜欢的剧情 / 玩家名称）。默认实现返回 `None`，由 host 侧
+    /// provider 覆盖（直接查原始 JSON 表的 `name` 字段）。
+    fn resolve_player_info_label(&self, _id: i32) -> Option<String> {
+        None
+    }
+
+    fn resolve_localized_text(&self, _key: &str) -> Option<String> {
+        None
+    }
+
+    /// 查 `omikujis[id]`：御神签收藏品显示的签文。表或行缺失时返回
+    /// `None`（默认实现），该收藏品不绘制。
+    fn resolve_omikuji(&self, _id: i32) -> Option<OmikujiRow> {
+        None
+    }
+
+    fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
+        match element_type {
+            "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
+                if let Some(info) = self.resolve_resource(element_type, id) {
+                    return format!("{}.png", info.asset_key());
+                }
+                format!("{}/{}.png", element_type, id)
+            }
+            "card_member" => format!("card_member/{}.png", id),
+            "stamp" => format!("stamp/{}.png", id),
+            "honor" => format!("honor/{}.png", id),
+            "bonds_honor" => format!("bonds_honor/{}.png", id),
+            _ => format!("{}/{}.png", element_type, id),
+        }
+    }
+}
+
+/// 渲染时使用的 MasterData 快照包装。
+#[derive(Clone)]
+pub struct MasterData {
+    provider: Arc<dyn MasterDataProvider>,
+}
+
+impl MasterData {
+    /// 从 provider 构建快照。
+    pub fn new(provider: Arc<dyn MasterDataProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+        self.provider.resolve_story_banner(story_type, story_id)
+    }
+
+    pub fn get_card(&self, card_id: i32) -> Option<CardEntry> {
+        self.provider.get_card(card_id)
+    }
+
+    pub fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor> {
+        self.provider.resolve_color(color_id)
+    }
+
+    /// 元素实际绘制的颜色：未知 colorId 回退颜色表首行，规则见
+    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_color_or_default`]。
+    pub fn resolve_color_or_default(&self, color_id: i32) -> Option<ResolvedColor> {
+        sekai_profile_core::masterdata::ProfileMasterData::resolve_color_or_default(self, color_id)
+            .map(|value| ResolvedColor {
+                r: value.r,
+                g: value.g,
+                b: value.b,
+                a: value.a,
+            })
+    }
+
+    pub fn resolve_font(&self, font_id: i32) -> Option<String> {
+        self.provider.resolve_font(font_id)
+    }
+
+    /// 文本元素实际使用的字体：未知 fontId 保持默认字体，规则见
+    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_font_or_default`]。
+    pub fn resolve_font_or_default(&self, font_id: i32) -> Option<String> {
+        sekai_profile_core::masterdata::ProfileMasterData::resolve_font_or_default(self, font_id)
+    }
+
+    pub fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
+        self.provider.resolve_stamp(stamp_id)
+    }
+
+    pub fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
+        self.provider.resolve_resource(res_type, id)
+    }
+
+    pub fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
+        self.provider.resolve_honor(honor_id, honor_level)
+    }
+
+    pub fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+        self.provider.get_bonds_honor(id)
+    }
+
+    pub fn get_bonds_honor_word(&self, word_id: i64) -> Option<BondsHonorWordEntry> {
+        self.provider.get_bonds_honor_word(word_id)
+    }
+
+    pub fn get_honor(&self, honor_id: i32) -> Option<HonorEntry> {
+        self.provider.get_honor(honor_id)
+    }
+
+    pub fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
+        self.provider.resolve_unit_vs_sd(self_id, partner_id)
+    }
+
+    pub fn font_count(&self) -> usize {
+        self.provider.font_count()
+    }
+
+    pub fn color_count(&self) -> usize {
+        self.provider.color_count()
+    }
+
+    pub fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
+        self.provider.resolve_asset_path(element_type, id)
+    }
+
+    /// 当前 region。见 [`MasterDataProvider::region`]。
+    pub fn region(&self) -> crate::region::Region {
+        self.provider.region()
+    }
+
+    /// 面板标题本地化文本。见 [`MasterDataProvider::resolve_player_info_label`]。
+    pub fn resolve_player_info_label(&self, id: i32) -> Option<String> {
+        self.provider.resolve_player_info_label(id)
+    }
+
+    pub fn resolve_localized_text(&self, key: &str) -> Option<String> {
+        self.provider.resolve_localized_text(key)
+    }
+
+    /// 签文行。见 [`MasterDataProvider::resolve_omikuji`]。
+    pub fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        self.provider.resolve_omikuji(id)
+    }
+}
+
+impl sekai_profile_core::masterdata::ProfileMasterData for MasterData {
+    fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+        MasterData::resolve_story_banner(self, story_type, story_id)
+    }
+
+    fn get_card(&self, card_id: i32) -> Option<sekai_profile_core::masterdata::CardEntry> {
+        MasterData::get_card(self, card_id).map(|value| sekai_profile_core::masterdata::CardEntry {
+            id: value.id,
+            asset_bundle_name: value.asset_bundle_name,
+            card_rarity_type: value.card_rarity_type,
+            attr: value.attr,
+            character_id: value.character_id,
+        })
+    }
+
+    fn resolve_color(
+        &self,
+        color_id: i32,
+    ) -> Option<sekai_profile_core::masterdata::ResolvedColor> {
+        MasterData::resolve_color(self, color_id).map(|value| {
+            sekai_profile_core::masterdata::ResolvedColor {
+                r: value.r,
+                g: value.g,
+                b: value.b,
+                a: value.a,
+            }
+        })
+    }
+
+    fn default_color(&self) -> Option<sekai_profile_core::masterdata::ResolvedColor> {
+        self.provider
+            .default_color()
+            .map(|value| sekai_profile_core::masterdata::ResolvedColor {
+                r: value.r,
+                g: value.g,
+                b: value.b,
+                a: value.a,
+            })
+    }
+
+    fn resolve_font(&self, font_id: i32) -> Option<String> {
+        MasterData::resolve_font(self, font_id)
+    }
+
+    fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
+        MasterData::resolve_stamp(self, stamp_id)
+    }
+
+    fn resolve_resource(
+        &self,
+        resource_type: &str,
+        id: i32,
+    ) -> Option<sekai_profile_core::masterdata::ResourceInfo> {
+        MasterData::resolve_resource(self, resource_type, id).map(|value| {
+            sekai_profile_core::masterdata::ResourceInfo {
+                file_name: value.file_name,
+                load_value: value.load_val,
+                resource_type: value.resource_type,
+                collection_type: value.collection_type,
+            }
+        })
+    }
+
+    fn resolve_honor(
+        &self,
+        honor_id: i32,
+        honor_level: i32,
+    ) -> Option<sekai_profile_core::masterdata::ResolvedHonor> {
+        MasterData::resolve_honor(self, honor_id, honor_level).map(ResolvedHonor::into_core)
+    }
+
+    fn get_bonds_honor(&self, id: i32) -> Option<sekai_profile_core::masterdata::BondsHonorEntry> {
+        MasterData::get_bonds_honor(self, id).map(|value| {
+            sekai_profile_core::masterdata::BondsHonorEntry {
+                id: value.id,
+                game_character_unit_id1: value.game_character_unit_id1,
+                game_character_unit_id2: value.game_character_unit_id2,
+                honor_rarity: value.honor_rarity,
+            }
+        })
+    }
+
+    fn get_bonds_honor_word(
+        &self,
+        id: i64,
+    ) -> Option<sekai_profile_core::masterdata::BondsHonorWordEntry> {
+        MasterData::get_bonds_honor_word(self, id).map(|value| {
+            sekai_profile_core::masterdata::BondsHonorWordEntry {
+                id: i64::from(value.id),
+                assetbundle_name: value.assetbundle_name,
+            }
+        })
+    }
+
+    fn resolve_unit_virtual_singer(&self, self_id: i32, partner_id: i32) -> i32 {
+        MasterData::resolve_unit_vs_sd(self, self_id, partner_id)
+    }
+
+    fn resolve_localized_text(&self, key: &str) -> Option<String> {
+        MasterData::resolve_localized_text(self, key)
+    }
+
+    fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
+        MasterData::resolve_omikuji(self, id)
+    }
+
+    fn region_code(&self) -> Option<&str> {
+        Some(MasterData::region(self).as_str())
+    }
+}
