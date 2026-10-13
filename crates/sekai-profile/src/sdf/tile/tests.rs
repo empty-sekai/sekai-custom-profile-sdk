@@ -1,4 +1,6 @@
 use super::*;
+use crate::sdf::atlas::SdfAtlasGlyphManifest;
+use crate::sdf::shape::ShapeSdfMaterial;
 
 struct TestAtlas {
     width: u32,
