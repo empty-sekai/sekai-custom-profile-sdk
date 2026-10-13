@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use super::*;
+use crate::line_indent::LineIndentRuntime;
 
 fn layer(id: u64, dynamic: bool) -> LayerSource {
     LayerSource {

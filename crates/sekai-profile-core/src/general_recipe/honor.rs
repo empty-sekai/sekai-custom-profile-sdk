@@ -1,0 +1,545 @@
+//! The honor panel (type 6): standard and bonds honors and their stars.
+
+use super::nodes::{group_node, item_region, shape_node, text_node};
+use super::{
+    recipe_node_id, GeneralGeometry, GeneralGroupPhase, GeneralImageSampling, GeneralImageSource,
+    GeneralImageSourceConstraint, GeneralRecipeNode, GeneralRecipePayload, GeneralTextAlign,
+};
+use crate::profile_scene::ProfileComponentSnapshot;
+use crate::{BlendMode, InteractionRegionSource, ParameterValue, Rect, StableId, TextSource};
+
+pub(super) fn build_honors_recipe(
+    layer_id: StableId,
+    source_key: &str,
+    snapshot: &ProfileComponentSnapshot,
+    nodes: &mut Vec<GeneralRecipeNode>,
+    interaction_regions: &mut Vec<InteractionRegionSource>,
+) {
+    nodes.push(shape_node(
+        layer_id,
+        source_key,
+        "honors-background",
+        0,
+        Rect {
+            x: -392.0,
+            y: -90.5,
+            width: 788.0,
+            height: 179.0,
+        },
+        GeneralGeometry::RoundedRect {
+            radius: [12.0, 12.0],
+        },
+        [0.53, 0.53, 0.53, 0.25],
+    ));
+    let centers = [(-188.0, 0.0), (101.0, 0.0), (288.0, -1.0)];
+    for (slot, honor) in snapshot.honor_slots.iter().take(3).enumerate() {
+        let (cx, cy) = centers[slot];
+        let width = if slot == 0 { 380.0 } else { 180.0 };
+        let bounds = Rect {
+            x: cx - width / 2.0,
+            y: cy - 40.0,
+            width,
+            height: 80.0,
+        };
+        let base = 1 + slot as u32 * 64;
+        match &honor.visual {
+            crate::profile_scene::HonorVisualKind::Standard {
+                honor_type,
+                has_star,
+                is_live_master,
+                progress,
+                background,
+                frame_candidates,
+                overlay,
+                star,
+                star_high,
+                ..
+            } => build_standard_honor_recipe(
+                layer_id,
+                source_key,
+                honor,
+                honor_type,
+                *has_star,
+                *is_live_master,
+                *progress,
+                background.as_ref(),
+                frame_candidates,
+                overlay.as_ref(),
+                star.as_ref(),
+                star_high.as_ref(),
+                cx,
+                cy,
+                bounds,
+                base,
+                nodes,
+            ),
+            crate::profile_scene::HonorVisualKind::Bonds {
+                character_ids,
+                backgrounds,
+                characters,
+                mask,
+                frame,
+                word,
+                star,
+                star_high,
+            } => build_bonds_honor_recipe(
+                layer_id,
+                source_key,
+                honor,
+                *character_ids,
+                backgrounds,
+                characters,
+                mask.as_ref(),
+                frame.as_ref(),
+                word.as_ref(),
+                star.as_ref(),
+                star_high.as_ref(),
+                cx,
+                cy,
+                bounds,
+                base,
+                nodes,
+            ),
+        }
+        let mut data = std::collections::BTreeMap::from([
+            (
+                "field".into(),
+                ParameterValue::Text(honor.source_field.clone()),
+            ),
+            (
+                "honor_id".into(),
+                ParameterValue::I64(honor.honor_id.into()),
+            ),
+            (
+                "honor_level".into(),
+                ParameterValue::I64(honor.honor_level.into()),
+            ),
+            ("full_size".into(), ParameterValue::Bool(honor.full_size)),
+        ]);
+        if let crate::profile_scene::HonorVisualKind::Bonds {
+            character_ids,
+            word,
+            ..
+        } = &honor.visual
+        {
+            data.insert(
+                "character_id_0".into(),
+                ParameterValue::I64(character_ids[0].into()),
+            );
+            data.insert(
+                "character_id_1".into(),
+                ParameterValue::I64(character_ids[1].into()),
+            );
+            if let Some(word) = word {
+                if let Some(ParameterValue::I64(id)) = word.provenance.get("id") {
+                    data.insert("word_id".into(), ParameterValue::I64(*id));
+                }
+            }
+        }
+        interaction_regions.push(item_region(
+            layer_id,
+            source_key,
+            &format!("honor-slot-{slot}"),
+            bounds,
+            data,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_standard_honor_recipe(
+    layer_id: StableId,
+    source_key: &str,
+    honor: &crate::profile_scene::HonorVisualSnapshot,
+    honor_type: &str,
+    has_star: bool,
+    is_live_master: bool,
+    progress: i32,
+    background: Option<&crate::profile_scene::ResourceDescriptor>,
+    frame_candidates: &[Option<crate::profile_scene::ResourceDescriptor>],
+    overlay: Option<&crate::profile_scene::ResourceDescriptor>,
+    star: Option<&crate::profile_scene::ResourceDescriptor>,
+    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    cx: f32,
+    cy: f32,
+    bounds: Rect,
+    base: u32,
+    nodes: &mut Vec<GeneralRecipeNode>,
+) {
+    if let Some(value) = background {
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("honor-{}-background", honor.honor_id),
+            base,
+            bounds,
+            value,
+            GeneralImageSource::WholeImageExplicit,
+            GeneralImageSourceConstraint::Fast,
+            BlendMode::SrcOver,
+        ));
+    }
+    if let Some(value) = frame_candidates.iter().flatten().next() {
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("honor-{}-frame", honor.honor_id),
+            base + 1,
+            Rect {
+                x: cx - value.natural_width / 2.0,
+                y: cy - 40.0,
+                width: value.natural_width,
+                height: value.natural_height,
+            },
+            value,
+            GeneralImageSource::WholeImageExplicit,
+            GeneralImageSourceConstraint::Fast,
+            BlendMode::SrcOver,
+        ));
+    }
+    if let Some(value) = overlay {
+        let (dx, dy) = if is_live_master {
+            if honor.full_size {
+                (218.0, 3.0)
+            } else {
+                (40.0, 3.0)
+            }
+        } else if honor_type == "rank_match" {
+            if honor.full_size {
+                (190.0, 0.0)
+            } else {
+                (17.0, 42.0)
+            }
+        } else if (honor.full_size && value.natural_width == 380.0)
+            || (!honor.full_size && value.natural_height == 80.0)
+        {
+            (0.0, 0.0)
+        } else if honor.full_size {
+            (190.0, 0.0)
+        } else {
+            (34.0, 42.0)
+        };
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("honor-{}-overlay", honor.honor_id),
+            base + 2,
+            Rect {
+                x: bounds.x + dx,
+                y: bounds.y + dy,
+                width: value.natural_width,
+                height: value.natural_height,
+            },
+            value,
+            GeneralImageSource::WholeImageExplicit,
+            GeneralImageSourceConstraint::Fast,
+            BlendMode::SrcOver,
+        ));
+    }
+    if is_live_master {
+        let font_size = 20.0;
+        let baseline = cy + 30.0;
+        nodes.push(text_node(
+            layer_id,
+            source_key,
+            &format!("honor-{}-progress", honor.honor_id),
+            base + 3,
+            Rect {
+                x: cx + if honor.full_size { 40.0 } else { -40.0 },
+                y: baseline - font_size * 0.35 - font_size / 2.0,
+                width: 80.0,
+                height: font_size,
+            },
+            TextSource::ProfileField {
+                field: format!("userHonorMissions.{}", honor.honor_id),
+                value: progress.to_string(),
+            },
+            font_size,
+            [1.0; 4],
+            GeneralTextAlign::Center,
+            0.0,
+            false,
+        ));
+    } else if has_star {
+        build_honor_star_nodes(
+            layer_id,
+            source_key,
+            honor,
+            star,
+            star_high,
+            bounds,
+            base + 16,
+            nodes,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_bonds_honor_recipe(
+    layer_id: StableId,
+    source_key: &str,
+    honor: &crate::profile_scene::HonorVisualSnapshot,
+    _character_ids: [i32; 2],
+    backgrounds: &[Option<crate::profile_scene::ResourceDescriptor>; 2],
+    characters: &[Option<crate::profile_scene::ResourceDescriptor>; 2],
+    mask: Option<&crate::profile_scene::ResourceDescriptor>,
+    frame: Option<&crate::profile_scene::ResourceDescriptor>,
+    word: Option<&crate::profile_scene::ResourceDescriptor>,
+    star: Option<&crate::profile_scene::ResourceDescriptor>,
+    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    cx: f32,
+    cy: f32,
+    bounds: Rect,
+    base: u32,
+    nodes: &mut Vec<GeneralRecipeNode>,
+) {
+    nodes.push(group_node(
+        layer_id,
+        source_key,
+        &format!("bonds-{}-isolation-begin", honor.honor_id),
+        base,
+        bounds,
+        GeneralGroupPhase::Begin,
+    ));
+    for (index, value) in backgrounds.iter().enumerate() {
+        if let Some(value) = value {
+            let source = if index == 0 {
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: value.natural_width / 2.0,
+                    height: value.natural_height,
+                }
+            } else {
+                Rect {
+                    x: value.natural_width / 2.0,
+                    y: 0.0,
+                    width: value.natural_width - value.natural_width / 2.0,
+                    height: value.natural_height,
+                }
+            };
+            nodes.push(honor_image_node(
+                layer_id,
+                source_key,
+                &format!("bonds-{}-background-{index}", honor.honor_id),
+                base + 1 + index as u32,
+                Rect {
+                    x: bounds.x + index as f32 * bounds.width / 2.0,
+                    y: bounds.y,
+                    width: bounds.width / 2.0,
+                    height: bounds.height,
+                },
+                value,
+                GeneralImageSource::Pixels(source),
+                GeneralImageSourceConstraint::Strict,
+                BlendMode::SrcOver,
+            ));
+        }
+    }
+    let offset = if honor.full_size { 120.0 } else { 30.0 };
+    for (index, value) in characters.iter().enumerate() {
+        if let Some(value) = value {
+            let sw = value.natural_width * 0.8;
+            let sh = value.natural_height * 0.8;
+            let raw_left = cx + if index == 0 { -offset } else { offset } - sw / 2.0;
+            let left = if index == 0 {
+                raw_left
+            } else {
+                raw_left.max(cx)
+            };
+            let right = if index == 0 {
+                (raw_left + sw).min(cx)
+            } else {
+                raw_left + sw
+            };
+            let draw_width = (right - left).max(0.0);
+            let src_x = (left - raw_left) / 0.8;
+            let source = Rect {
+                x: src_x,
+                y: 0.0,
+                width: draw_width / 0.8,
+                height: value.natural_height,
+            };
+            nodes.push(honor_image_node(
+                layer_id,
+                source_key,
+                &format!("bonds-{}-character-{index}", honor.honor_id),
+                base + 3 + index as u32,
+                Rect {
+                    x: left,
+                    y: cy + 40.0 - sh,
+                    width: draw_width,
+                    height: sh,
+                },
+                value,
+                GeneralImageSource::Pixels(source),
+                GeneralImageSourceConstraint::Strict,
+                BlendMode::SrcOver,
+            ));
+        }
+    }
+    if let Some(value) = mask {
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("bonds-{}-mask", honor.honor_id),
+            base + 5,
+            bounds,
+            value,
+            GeneralImageSource::WholeImageImplicit,
+            GeneralImageSourceConstraint::Implicit,
+            BlendMode::DstIn,
+        ));
+    }
+    nodes.push(group_node(
+        layer_id,
+        source_key,
+        &format!("bonds-{}-isolation-end", honor.honor_id),
+        base + 6,
+        bounds,
+        GeneralGroupPhase::End,
+    ));
+    if let Some(value) = frame {
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("bonds-{}-frame", honor.honor_id),
+            base + 7,
+            Rect {
+                x: cx - value.natural_width / 2.0,
+                y: cy - 40.0,
+                width: value.natural_width,
+                height: value.natural_height,
+            },
+            value,
+            GeneralImageSource::WholeImageExplicit,
+            GeneralImageSourceConstraint::Fast,
+            BlendMode::SrcOver,
+        ));
+    }
+    if let Some(value) = word {
+        nodes.push(honor_image_node(
+            layer_id,
+            source_key,
+            &format!("bonds-{}-word", honor.honor_id),
+            base + 8,
+            Rect {
+                x: cx - value.natural_width / 2.0,
+                y: cy - value.natural_height / 2.0,
+                width: value.natural_width,
+                height: value.natural_height,
+            },
+            value,
+            GeneralImageSource::WholeImageExplicit,
+            GeneralImageSourceConstraint::Fast,
+            BlendMode::SrcOver,
+        ));
+    }
+    build_honor_star_nodes(
+        layer_id,
+        source_key,
+        honor,
+        star,
+        star_high,
+        bounds,
+        base + 16,
+        nodes,
+    );
+}
+
+fn build_honor_star_nodes(
+    layer_id: StableId,
+    source_key: &str,
+    honor: &crate::profile_scene::HonorVisualSnapshot,
+    star: Option<&crate::profile_scene::ResourceDescriptor>,
+    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    bounds: Rect,
+    base: u32,
+    nodes: &mut Vec<GeneralRecipeNode>,
+) {
+    let level = crate::masterdata::honor_level_star_count(honor.honor_level);
+    let x = if honor.full_size {
+        bounds.x + 54.0
+    } else {
+        bounds.x + bounds.width / 2.0 - 40.0
+    };
+    let y = bounds.y + 63.0;
+    if let Some(value) = star {
+        for index in 0..level.min(5) {
+            nodes.push(honor_image_node(
+                layer_id,
+                source_key,
+                &format!("honor-{}-star-{index}", honor.honor_id),
+                base + index as u32,
+                Rect {
+                    x: x + index as f32 * 16.0,
+                    y,
+                    width: value.natural_width,
+                    height: value.natural_height,
+                },
+                value,
+                GeneralImageSource::WholeImageExplicit,
+                GeneralImageSourceConstraint::Fast,
+                BlendMode::SrcOver,
+            ));
+        }
+    }
+    if level > 5 {
+        if let Some(value) = star_high {
+            for index in 0..(level - 5) {
+                nodes.push(honor_image_node(
+                    layer_id,
+                    source_key,
+                    &format!("honor-{}-star-high-{index}", honor.honor_id),
+                    base + 8 + index as u32,
+                    Rect {
+                        x: x + index as f32 * 16.0,
+                        y,
+                        width: value.natural_width,
+                        height: value.natural_height,
+                    },
+                    value,
+                    GeneralImageSource::WholeImageExplicit,
+                    GeneralImageSourceConstraint::Fast,
+                    BlendMode::SrcOver,
+                ));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn honor_image_node(
+    layer_id: StableId,
+    source_key: &str,
+    role: &str,
+    ordinal: u32,
+    bounds: Rect,
+    descriptor: &crate::profile_scene::ResourceDescriptor,
+    source: GeneralImageSource,
+    source_constraint: GeneralImageSourceConstraint,
+    blend_mode: BlendMode,
+) -> GeneralRecipeNode {
+    GeneralRecipeNode {
+        id: recipe_node_id(source_key, role, ordinal),
+        layer_id,
+        role: role.into(),
+        parent_id: None,
+        bounds,
+        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        clips: Vec::new(),
+        control_bindings: Vec::new(),
+        payload: GeneralRecipePayload::Image {
+            resource: descriptor.resource.clone(),
+            natural_size: Some([descriptor.natural_width, descriptor.natural_height]),
+            source,
+            sampling: GeneralImageSampling::Nearest,
+            source_constraint,
+            tint: [1.0; 4],
+            source_field: None,
+            source_id: None,
+            provenance: descriptor.provenance.clone(),
+            blend_mode,
+        },
+    }
+}
