@@ -21,6 +21,7 @@ pub use sekai_profile_core as core;
 pub mod animation;
 pub mod asset_keys;
 pub mod assets;
+pub mod atlas_dir;
 pub mod codec;
 pub mod compiled_profile;
 pub mod context;
@@ -31,6 +32,7 @@ pub mod init;
 #[cfg(feature = "jpeg-turbo")]
 pub mod jpeg_turbo;
 pub mod masterdata;
+pub mod prepare;
 pub mod profile;
 pub mod profile_backend;
 pub mod profile_compositor;

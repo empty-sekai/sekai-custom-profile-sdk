@@ -200,7 +200,7 @@ pub trait MasterDataProvider: Send + Sync {
     fn font_count(&self) -> usize;
     fn color_count(&self) -> usize;
 
-    /// 当前 region（默认国服，保留内网历史行为）。
+    /// 当前 region，默认实现为国服。
     fn region(&self) -> crate::region::Region {
         crate::region::Region::Cn
     }

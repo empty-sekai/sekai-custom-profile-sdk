@@ -52,7 +52,7 @@ pub struct JsonMasterDataProvider {
 }
 
 impl JsonMasterDataProvider {
-    /// 从已解析的表集合构建（默认国服，保留历史行为）。
+    /// 从已解析的表集合构建，region 默认为国服。
     pub fn new(tables: HashMap<String, Arc<Table>>) -> Self {
         Self {
             tables,
@@ -125,8 +125,26 @@ impl JsonMasterDataProvider {
             .collect()
     }
 
-    fn table(&self, name: &str) -> Option<&Arc<Table>> {
-        self.tables.get(name)
+    /// 已加载的表。
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables.get(name).map(Arc::as_ref)
+    }
+
+    /// `customProfileTextFonts` 引用的字体族，按渲染器在当前 region 下解析出的名字，
+    /// 排序去重。
+    pub fn text_font_families(&self) -> Vec<String> {
+        let Some(table) = self.table("customProfileTextFonts") else {
+            return Vec::new();
+        };
+        let mut families: Vec<String> = table
+            .all()
+            .iter()
+            .filter_map(|row| row.get("fontName")?.as_str())
+            .map(|name| self.map_font_name(name).to_string())
+            .collect();
+        families.sort();
+        families.dedup();
+        families
     }
 
     fn typed<T: serde::de::DeserializeOwned>(&self, table: &str, id: i64) -> Option<T> {
