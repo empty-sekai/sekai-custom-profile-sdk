@@ -775,7 +775,6 @@ fn page_without_generals_matches_full_profile_base_semantics() {
     )
     .unwrap();
     let mut full_base = build_profile_resolve_base_snapshot(
-        &card,
         &md,
         Some(&profile),
         "ja-JP",
@@ -1011,4 +1010,96 @@ fn source_images_draw_at_their_pixel_size_without_a_baked_object() {
         },
     );
     assert_eq!((max_x - min_x + 1, max_y - min_y + 1), (width, height));
+}
+
+/// Bonds honor 70 pairs units 1 and 21; the unit virtual singer that stands
+/// in for unit `self_id` next to `partner_id` is `100 + self_id`.
+struct BondsProvider;
+
+impl MasterDataProvider for BondsProvider {
+    fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
+        EmptyProvider.resolve_story_banner(story_type, story_id)
+    }
+    fn get_card(&self, id: i32) -> Option<CardEntry> {
+        EmptyProvider.get_card(id)
+    }
+    fn resolve_color(&self, id: i32) -> Option<ResolvedColor> {
+        EmptyProvider.resolve_color(id)
+    }
+    fn resolve_font(&self, id: i32) -> Option<String> {
+        EmptyProvider.resolve_font(id)
+    }
+    fn resolve_stamp(&self, id: i32) -> Option<String> {
+        EmptyProvider.resolve_stamp(id)
+    }
+    fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
+        EmptyProvider.resolve_resource(res_type, id)
+    }
+    fn resolve_honor(&self, id: i32, level: i32) -> Option<ResolvedHonor> {
+        EmptyProvider.resolve_honor(id, level)
+    }
+    fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
+        (id == 70).then(|| BondsHonorEntry {
+            id,
+            game_character_unit_id1: 1,
+            game_character_unit_id2: 21,
+            honor_rarity: "middle".into(),
+            configurable_unit_virtual_singer: true,
+        })
+    }
+    fn get_bonds_honor_word(&self, id: i64) -> Option<BondsHonorWordEntry> {
+        EmptyProvider.get_bonds_honor_word(id)
+    }
+    fn get_honor(&self, id: i32) -> Option<HonorEntry> {
+        EmptyProvider.get_honor(id)
+    }
+    fn resolve_unit_vs_sd(&self, self_id: i32, _partner_id: i32) -> i32 {
+        100 + self_id
+    }
+    fn font_count(&self) -> usize {
+        0
+    }
+    fn color_count(&self) -> usize {
+        0
+    }
+}
+
+/// The profile honor slots decode a composed view type such as
+/// `reverse_unit_virtual_singer` into both of its flags.
+#[test]
+fn profile_bonds_honor_slots_apply_every_flag_of_their_view_type() {
+    let md = MasterData::new(Arc::new(BondsProvider));
+    let character_ids = |view_type: &str| {
+        let profile = ProfileData {
+            honor_slots: vec![crate::profile::HonorSlot {
+                honor_id: 70,
+                honor_level: 1,
+                full_size: true,
+                profile_honor_type: "bonds".into(),
+                bonds_honor_word_id: Some(1),
+                bonds_honor_view_type: Some(view_type.into()),
+            }],
+            ..ProfileData::default()
+        };
+        let base = build_profile_resolve_base_snapshot(
+            &md,
+            Some(&profile),
+            "cn",
+            ResolveResourceContext::default(),
+        );
+        let component = base.component().expect("a profile builds the component");
+        match &component.honor_slots[..] {
+            [honor] => match honor.visual {
+                HonorVisualKind::Bonds { character_ids, .. } => character_ids,
+                HonorVisualKind::Standard { .. } => {
+                    panic!("a bonds slot lowered to a standard honor")
+                }
+            },
+            slots => panic!("expected one honor slot, got {}", slots.len()),
+        }
+    };
+    assert_eq!(character_ids("normal"), [1, 21]);
+    assert_eq!(character_ids("reverse"), [21, 1]);
+    assert_eq!(character_ids("normal_unit_virtual_singer"), [101, 121]);
+    assert_eq!(character_ids("reverse_unit_virtual_singer"), [121, 101]);
 }

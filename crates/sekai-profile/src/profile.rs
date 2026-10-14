@@ -32,7 +32,8 @@ pub struct HonorSlot {
     pub profile_honor_type: String,
     /// bonds 称号的文字 ID（仅 bonds 类型有效）
     pub bonds_honor_word_id: Option<i64>,
-    /// bonds 称号查看类型（"normal" 或 "reverse"），决定角色左右顺序
+    /// bonds 称号查看类型。可组合 `reverse`（交换左右角色）与 `unit_virtual_singer`
+    /// （改用组合虚拟歌手），如 `reverse_unit_virtual_singer`；见 [`Self::bonds_honor_view_flags`]。
     pub bonds_honor_view_type: Option<String>,
 }
 

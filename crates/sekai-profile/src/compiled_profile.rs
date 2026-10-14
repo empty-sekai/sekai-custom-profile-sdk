@@ -161,9 +161,8 @@ pub fn compile_profile_batch_with_store<'a>(
         catalog_lookup_ns: Some(&catalog_lookup_ns),
     };
     let base_started = Instant::now();
-    let mut base = inputs.first().map(|(_, seed_card)| {
-        build_profile_resolve_base_snapshot(seed_card, md, profile, locale, resources)
-    });
+    let mut base = (!inputs.is_empty())
+        .then(|| build_profile_resolve_base_snapshot(md, profile, locale, resources));
     let profile_snapshot_base_ns = elapsed_ns(base_started);
     let mut page_snapshot_overlay_ns = 0u64;
     let mut semantic_lowering_ns = 0u64;

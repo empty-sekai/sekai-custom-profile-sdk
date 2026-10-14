@@ -31,6 +31,8 @@ pub struct ResolveResourceContext<'a> {
 /// so the potentially large component snapshot is never cloned per page.
 pub struct ProfileResolveBaseSnapshot {
     snapshot: ProfileResolveSnapshot,
+    /// Locale the base was built for; page overlays resolve with it too.
+    locale: String,
 }
 
 impl ProfileResolveBaseSnapshot {
@@ -94,15 +96,15 @@ pub fn resolve_card_commands_with_resources(
         // player-wide component graph for other pages.
         ProfileResolveBaseSnapshot {
             snapshot: ProfileResolveSnapshot::default(),
+            locale: locale.into(),
         }
     } else {
-        build_profile_resolve_base_snapshot(card, md, profile, locale, resources)
+        build_profile_resolve_base_snapshot(md, profile, locale, resources)
     };
     resolve_card_commands_with_base(&mut base, card, md, document_key, profile, resources)
 }
 
 pub fn build_profile_resolve_base_snapshot(
-    _seed_card: &CustomProfileCard,
     md: &MasterData,
     profile: Option<&ProfileData>,
     locale: &str,
@@ -122,7 +124,10 @@ pub fn build_profile_resolve_base_snapshot(
     // Keeping it in this top-level map would make page overlay replacement
     // ambiguous, so only the immutable component remains in the base.
     snapshot.fonts.clear();
-    ProfileResolveBaseSnapshot { snapshot }
+    ProfileResolveBaseSnapshot {
+        snapshot,
+        locale: locale.into(),
+    }
 }
 
 pub fn resolve_card_commands_with_base(
@@ -160,7 +165,7 @@ pub fn resolve_card_commands_with_base_timed(
         SnapshotSources {
             md,
             profile,
-            locale: "unused-page-locale",
+            locale: &base.locale,
             resources,
         },
     );
@@ -571,6 +576,7 @@ fn populate_profile_base(snapshot: &mut ProfileResolveSnapshot, sources: Snapsho
             .filter_map(|(index, slot)| {
                 let render_full = index == 0;
                 if slot.profile_honor_type == "bonds" {
+                    let (inverse, use_unit_virtual_singer) = slot.bonds_honor_view_flags();
                     build_bonds_honor_visual(
                         "userProfile.honorSlots",
                         slot.honor_id,
@@ -578,8 +584,8 @@ fn populate_profile_base(snapshot: &mut ProfileResolveSnapshot, sources: Snapsho
                         render_full,
                         BondsHonorView {
                             word_id: slot.bonds_honor_word_id.unwrap_or_default(),
-                            inverse: slot.bonds_honor_view_type.as_deref() == Some("reverse"),
-                            use_unit_virtual_singer: false,
+                            inverse,
+                            use_unit_virtual_singer,
                         },
                         md,
                         assets,
