@@ -1,118 +1,126 @@
-# Allium Scene Workbench
+# Scene Workbench
 
-Scene Workbench is the browser reference application for `@empty-sekai/sekai-custom-profile-sdk`. It draws semantic scenes directly through WebGL2 and demonstrates authoring, navigation, selection, copying, component controls, diagnostics, and accessibility overlays.
+Scene Workbench is the reference browser application of `@empty-sekai/sekai-custom-profile-sdk`. It renders a custom-profile scene with `BrowserRenderer` and shows what the renderer reports: authored layers, geometry, component controls, interaction regions, scene dumps, and telemetry. It uses the public package API from `dist/` and nothing else.
 
-The workbench accepts one profile JSON response and the referenced font files. Card pages are read from `userCustomProfileCards`, while application adapters provide masterdata and image resources.
+Each release build of the repository also publishes the workbench to GitHub Pages: <https://empty-sekai.github.io/sekai-custom-profile-sdk/>.
 
-## What it demonstrates
+## Features
 
-- the complete WebGL2-only `BrowserRenderer` lifecycle;
-- a dedicated worker that owns WASM, FreeType, glyph SDF generation, TMP parsing, layout, scene state, and dynamic evaluation;
-- an origin-persistent opaque glyph cache and a memory-only mode;
-- deterministic play, pause, stepping, scrubbing, looping, and final-state inspection;
-- multi-page profile navigation with active-page leases and bounded session resource budgets;
-- stable game-authored layer IDs, ordering, filtering, per-layer visibility, and authored-subtree masks;
-- source content, resolved parameters, bounds, quads, matrices, hit geometry, line-indent diagnostics, glyphs, and semantic commands;
-- component tabs and scrolling driven by scene control bindings;
-- caller-owned overlays for cards, honors, stories, music, characters, and other semantic regions;
-- TMP-stripped continuous numeric regions with a copy example;
-- bounded worker, cache, semantic-core, frame, GPU, and context-recovery diagnostics;
-- searchable, path-addressable, privacy-safe scene dumps;
-- stable inspector DOM while the timeline advances, so layer selection remains usable during playback.
+- the full `BrowserRenderer` lifecycle: renderer, masterdata session, one scene per page, and teardown;
+- page tabs for multi-page profiles; switching pages destroys the previous page's scene;
+- a timeline with play, pause, single-tick and one-second steps, scrubbing over ticks 0–600, looping, and a jump to the last tick;
+- a layer list with text and type filters, show or hide all, per-layer visibility, and subtree visibility through `setLayerMasks()`;
+- layer details: source content, resolved parameters, bounds, quads, matrices, hit geometry, line-indent data, and semantic commands;
+- tab and scroll components driven by the scene's control bindings;
+- an SVG overlay of interaction regions with hover cards, activation, and copying of numeric text runs;
+- an event log of the activation, copy, scroll, and control events a host application would handle;
+- renderer and scene telemetry;
+- a dump viewer with JSON-pointer navigation, search, copy, and JSON download;
+- a WebGL context-loss test.
 
-The renderer reports semantic state and geometry. The workbench implements UI policy and emits navigation events for the embedding application to connect with its own routes.
+The workbench does not navigate anywhere. It writes activation events to its event log, where an embedding application would route them.
 
-## Inputs and persistence
+## Inputs
 
-The single profile input must contain `userCustomProfileCards`. Each entry supplies `customProfileCard`, `customProfileCardId`, and `seq`; the same response may supply player fields, deck cards, honors, music results, story favorites, and character ranks.
+**Profile JSON.** One profile API response containing `userCustomProfileCards`. Each entry carries `customProfileCard`, `customProfileCardId`, and `seq`; pages are shown in ascending `seq` order. The same response supplies the player data the card draws.
 
-Profile JSON and selected font files are stored in IndexedDB for this local origin so they survive a refresh. All input persistence remains local to the selected browser origin, and resetting the session removes the stored inputs.
+**Fonts.** `.ttf` and `.otf` files. Each file is offered to the renderer under its file name without the extension. Three files are also offered under a second family name:
 
-Font source files use their packaged names. The workbench maps logical family aliases to the selected files, then exposes that map through its application-owned `FontProvider`. WASM requests only families used by the active scene. Every alias shares the selected source bytes under its own runtime family identity.
-
-## Demo resource provider
-
-The workbench supplies an application-owned `ResourceProvider` that demonstrates one CDN and path mapping strategy. Other consumers provide adapters that match their own resource systems.
-
-Its initial configuration uses:
-
-| Resource | Initial base |
+| File name | Also offered as |
 | --- | --- |
-| CN masterdata | `https://cdn.emptysekai.com/masterdata/cn/latest` |
-| CN game assets | `https://cdn.emptysekai.com/assets/cn` |
-| versioned renderer cuts | `https://cdn.emptysekai.com/renderer-static/v0.2` |
+| `FOT-RodinNTLGPro-DB` | `FZLanTingHei-DB-GBK` |
+| `FOT-SkipProN-B` | `FZZhengHei-EB-GBK` |
+| `FOT-PopHappinessStd-EB` | `FZShaoEr-M11-JF` |
 
-Changing the region updates the editable masterdata and asset bases. The demo adapter contains all mapping rules, asynchronous `fetch`, `AbortSignal` propagation, browser HTTP caching, and Cache Storage use for versioned renderer cuts.
+The workbench passes these names to the renderer through its `FontProvider`, and the renderer asks only for the families the active scene uses.
 
-Missing or undecodable images are reported as warnings and become transparent placeholders, allowing the remaining scene to continue. The selected resource origin supplies the required CORS permission.
+The profile JSON and the font files are stored in IndexedDB for the page's origin, so they survive a reload. The reset button (↻) removes them.
+
+## Providers and settings
+
+The **Providers** panel sets the region (`cn`, `jp`, `tw`, `en`, `kr`), the masterdata revision, and two base URLs. Their initial values are:
+
+| Setting | Initial value |
+| --- | --- |
+| Masterdata base | `https://cdn.emptysekai.com/masterdata/<region>/<revision>` |
+| Asset base | `https://cdn.emptysekai.com/assets/<region>` |
+
+Changing the region rewrites both bases, and changing the revision rewrites the masterdata base; either field can then be edited. The masterdata loader fetches `<masterdata base>/<table>.json` for every table and skips an optional table that fails to load. The demo `ResourceProvider` in `workbench/emptySekaiResourceProvider.js` maps `assets` descriptors to paths under the asset base and `static` descriptors to `https://cdn.emptysekai.com/renderer-static/v0.2`, keeping `static` images in Cache Storage. It shows one mapping strategy; other hosts write providers for their own resource systems. The resource origins must allow CORS requests from the workbench's origin.
+
+The settings below the panel choose the glyph SDF generator (`edt` or `analytic`), the glyph cache (`origin` or `memory-only`), and the telemetry level (`summary`, `trace`, or `off`).
+
+A missing or undecodable image becomes a transparent placeholder with a console warning, and the rest of the scene renders.
 
 ## Run locally
 
-Build the package in the repository development container:
+Build the package, then serve the package directory:
 
 ```sh
 cd crates/sekai-profile-wasm
 npm ci
 npm run build
+npm run demo:serve
 ```
 
-Serve the crate root, not only the `demo` directory, because the workbench loads package artifacts from `dist/`:
+`npm run demo:serve` serves the package directory at <http://127.0.0.1:8088/demo/>; `--host` and `--port` change the address, for example `npm run demo:serve -- --port 9000`. Any static server works as long as it serves the package directory rather than `demo/` alone, because the workbench loads `../../dist/`. `npm run build` needs Docker, or `emcc` and `cargo` on `PATH`; see the [package README](../README.md#browser-support-and-building).
 
-```sh
-python -m http.server 8088
-```
+Use a browser with WebGL2, module Web Workers, WebAssembly exception handling, Web Crypto, and IndexedDB.
 
-Open `http://127.0.0.1:8088/demo/` in a browser with WebGL2, Web Workers, ES modules, Web Crypto, and IndexedDB support.
-
-## Keyboard controls
+## Keyboard
 
 | Key | Action |
 | --- | --- |
-| `Space` | Play or pause the dynamic timeline |
-| `Left` / `Right` | Step one deterministic tick |
-| `Shift` + `Left` / `Right` | Step one second at 60 Hz |
-| `Ctrl`/`Cmd` + `S` | Export the current scene dump |
-| `Enter` / `Space` on a layer or overlay | Select or activate it |
-| Shift-click a layer eye | Apply the visibility value to its authored subtree |
+| `Space` | Play or pause the timeline. |
+| `Left` / `Right` | Step one tick. |
+| `Shift` + `Left` / `Right` | Step 60 ticks (one second). |
+| `Ctrl` / `Cmd` + `S` | Download the current scene dump. |
+| `Enter` / `Space` on a layer or region | Select or activate it. |
+| `Shift` + click on a layer's visibility button | Apply the visibility to the layer's subtree. |
 
-## Context recovery
+## Context loss
 
-**Test context loss** uses `WEBGL_lose_context` when available. The renderer reconstructs GPU textures and buffers from retained semantic resources and atlas data while reusing completed TMP parsing, layout, and SDF generation results. GPU timing and recovery diagnostics use explicit availability states.
+**Test context loss** calls `WEBGL_lose_context.loseContext()` and restores the context 900 ms later. The renderer rebuilds GPU textures and buffers from the retained scene state and atlas data, reusing completed text layout and SDF generation. The telemetry panel shows the loss and restore counts; GPU timers the browser cannot provide are reported as unavailable, not as zero.
 
-## Integration boundary
+## Integration code
 
-The workbench calls the high-level browser API and provides an application-owned resource provider:
+`workbench/session.js` holds the renderer calls:
 
 ```js
 const renderer = await BrowserRenderer.create({
   canvas,
-  region: "cn",
-  resourceProvider: createApplicationResourceProvider(config),
+  region,
+  resourceProvider: createEmptySekaiResourceProvider({ region, assetBase }),
   resourceConcurrency: 8,
   fontProvider: {
     async provide({ family }) {
-      const selected = selectedFonts.find((font) => font.families.includes(family));
-      return selected ? { bytes: selected.bytes } : null;
+      const font = fonts.find((candidate) => candidate.families.includes(family));
+      return font ? { bytes: font.bytes } : null;
     },
   },
   fontConcurrency: 3,
-  telemetry: { level: "summary", maxSamples: 240 },
+  telemetry: { level: debugLevel, maxSamples: 240 },
 });
 
 const masterData = await renderer.loadMasterData(
-  "latest",
-  ({ table }, { signal }) => loadDemoMasterData(table, { signal }),
+  revision,
+  async ({ table, optional }, { signal }) => {
+    const response = await fetch(`${masterdataBase}/${encodeURIComponent(table)}.json`, { signal });
+    if (optional && !response.ok) return null;
+    if (!response.ok) throw new Error(`Master-data fetch failed ${response.status}`);
+    return response.json();
+  },
 );
+
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey,
   profile,
   pageIndex,
   frameMode: "animate",
-  sdf: { backend: "edt", persistence: "origin" },
+  sdf: { backend: sdfBackend, persistence },
 });
 
 scene.draw();
 ```
 
-The Rust/WASM runtime performs TMP parsing, glyph enumeration, SDF generation, atlas placement, line-indentation formulas, and semantic command lowering. The workbench consumes scene dumps, controls, interaction geometry, state deltas, and telemetry to implement caller-owned UI behavior.
+The rest of the workbench (`workbench/inspector.js`, `workbench/interactions.js`, `workbench/telemetry.js`) reads scene dumps, control bindings, interaction regions, state deltas, and telemetry to build its UI.

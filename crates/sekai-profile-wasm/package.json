@@ -6,7 +6,8 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/empty-sekai/sekai-custom-profile-sdk.git"
+    "url": "git+https://github.com/empty-sekai/sekai-custom-profile-sdk.git",
+    "directory": "crates/sekai-profile-wasm"
   },
   "files": [
     "dist/",
@@ -15,7 +16,7 @@
     "LICENSE-EXCEPTION",
     "NOTICE",
     "README.md",
-    "README.en.md"
+    "README.zh-CN.md"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.js",

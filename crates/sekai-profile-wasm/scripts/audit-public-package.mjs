@@ -17,7 +17,7 @@ const rootFiles = new Set([
   "LICENSE-EXCEPTION",
   "NOTICE",
   "README.md",
-  "README.en.md",
+  "README.zh-CN.md",
   "package.json",
 ]);
 const sourceExtensions = new Set([".rs", ".ts"]);

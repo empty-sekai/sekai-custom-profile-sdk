@@ -1,33 +1,43 @@
 # @empty-sekai/sekai-custom-profile-sdk
 
-[简体中文](README.md) | [English](README.en.md)
+English | [简体中文](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/crates/sekai-profile-wasm/README.zh-CN.md)
 
-`@empty-sekai/sekai-custom-profile-sdk` 是面向 Project SEKAI（PJSK）自定义名片的非官方 browser SDK，统一提供 authoring、场景解析、WebGL2 渲染、交互、导出与字体 atlas 能力。
+An unofficial browser SDK for Project SEKAI custom profiles. It renders custom-profile cards with WebGL2 from a profile API response, edits game-compatible custom-profile documents, exports PNG snapshots, and reports layers, geometry, and interaction regions for the host to build its own UI on.
 
-TMP 富文本与排版针对 PJSK 使用的 Unity TextMesh Pro 数据和行为提供兼容模型，覆盖当前已经建模和验证的标签、排版、材质与动态语义。尚未建模的游戏行为或后续游戏更新可能与客户端不同，因此不承诺完整复刻游戏的渲染逻辑或最终像素。
+Rich text and layout follow a compatibility model of the Unity TextMesh Pro data and behavior the game uses. The model covers the tags, layout, materials, and dynamic behavior the runtime implements and tests. Behavior outside the model, and later game updates, can differ from the game client, so exact reproduction of the client's rendering or pixels is not guaranteed.
 
-Rust/WASM 负责 profile resolution、TMP 富文本、layout、动态公式、稳定语义 ID、glyph demand、FreeType 字体度量、glyph SDF 与 atlas placement；TypeScript 负责 worker、异步资源调度、缓存 I/O 和 GPU resource orchestration；WebGL2 消费 semantic command stream 和紧凑状态表完成绘制。
+A Rust/WebAssembly runtime in a dedicated worker resolves the profile, lays out text with FreeType metrics, and generates glyph SDFs into an atlas. The main thread calls the host's providers, decodes images, and drives WebGL2. The host supplies fonts, profile data, masterdata, and images; the package contains none of them. The [architecture overview](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/docs/architecture.md) describes the design, and the [repository README](https://github.com/empty-sekai/sekai-custom-profile-sdk#readme) covers the native renderer and CLI.
 
-SDK 提供 stateful scene API，执行路径由 Rust/WASM semantic runtime、dedicated worker、FreeType/SDF atlas 与 WebGL2 renderer 组成。
+## Contents
 
-## 运行要求
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Core concepts](#core-concepts)
+- [Authoring](#authoring)
+- [Interaction and state](#interaction-and-state)
+- [Caching and resource ownership](#caching-and-resource-ownership)
+- [Errors and warnings](#errors-and-warnings)
+- [Telemetry and debugging](#telemetry-and-debugging)
+- [Browser support and building](#browser-support-and-building)
+- [Exports](#exports)
+- [License](#license)
 
-- WebGL2；
-- ES modules 与 Web Workers；
-- 可选 IndexedDB，用于持久化不透明 glyph record；
-- 调用方提供的 profile API 响应 JSON（名片文档由 SDK 从中解析；不再单独传 `card`）、masterdata、字体 provider 或预注册字体，以及 `ResourceProvider`。
-
-字体、玩家数据、masterdata 和图片素材由调用方提供。字体度量、富文本 layout 与 glyph 像素由调用方提供并锁定 source hash 的字体 bytes、FreeType、TMP parser 和 SDF pipeline 共同确定。
-
-## 安装
+## Installation
 
 ```sh
 npm install @empty-sekai/sekai-custom-profile-sdk
 ```
 
-默认情况下，worker、Emscripten glue 和 WASM 文件从 package entry 相邻的 `dist/` 路径加载。若 bundler 或部署结构不同，可显式传入 `workerUrl`、`moduleUrl` 和 `wasmUrl`。
+The package is an ES module with TypeScript declarations. `BrowserRenderer.create()` and `BrowserAuthoringClient.create()` start a module worker from `dist/worker.js`, which loads `dist/sekai_profile_wasm.js` and `dist/sekai_profile_wasm.wasm`. These URLs resolve relative to the package's own modules. When a bundler or deployment moves the files, serve `dist/` as one directory (the worker imports sibling modules) and pass the locations:
 
-## 最小接入
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `workerUrl` | `dist/worker.js` | Module worker script. |
+| `moduleUrl` | `dist/sekai_profile_wasm.js` | Emscripten loader the worker imports. |
+| `wasmUrl` | `dist/sekai_profile_wasm.wasm` | WebAssembly binary. |
+| `workerFactory` | `new Worker(url, { type: "module" })` | Creates the worker from `workerUrl`, for hosts that construct workers themselves. |
+
+## Quick start
 
 ```ts
 import {
@@ -36,6 +46,8 @@ import {
   type ResourceProvider,
 } from "@empty-sekai/sekai-custom-profile-sdk";
 
+// loadApplicationFont, resolveResourceRequest and loadApplicationMasterData
+// stand for the host's own font, asset and masterdata sources.
 const fontProvider: FontProvider = {
   async provide({ region, family }, { signal }) {
     const bytes = await loadApplicationFont({ region, family, signal });
@@ -47,8 +59,7 @@ const resourceProvider: ResourceProvider = {
   async provide(descriptor, { signal }) {
     const request = await resolveResourceRequest(descriptor);
     if (!request) return null;
-
-    const response = await fetch(request, { signal, cache: "default" });
+    const response = await fetch(request, { signal });
     if (!response.ok) return null;
     return { source: await response.blob() };
   },
@@ -63,198 +74,79 @@ const renderer = await BrowserRenderer.create({
 
 const masterData = await renderer.loadMasterData(
   "latest",
-  ({ table, region, revision }, { signal }) =>
-    loadApplicationMasterData({ table, region, revision, signal }),
+  ({ table, region, revision, optional }, { signal }) =>
+    loadApplicationMasterData({ table, region, revision, optional, signal }),
 );
+
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey: "profile-preview",
-  // 完整的 profile API 响应；名片文档取自 userCustomProfileCards
-  //（按 seq 升序的页序，默认第一页，可用 pageIndex 选择），与 profile 数据同源。
-  profile,
+  profile, // the full profile API response
   frameMode: "animate",
 });
 
 scene.draw();
-
-// 始终导出游戏名片原始尺寸 1830×812；内部会先绘制并同步复制当前帧。
-const png = await scene.exportPng();
+const png = await scene.exportPng(); // 1830 × 812 PNG Blob
 ```
 
-## 自定义名片编辑文档
+`profile` is the full profile API response. The renderer orders the pages in `profile.userCustomProfileCards` by ascending `seq`, as the game shows them, and renders the first one or the one `pageIndex` selects. The rest of the response supplies the player data the card draws, such as deck cards, honors, and music results.
 
-`BrowserAuthoringClient` 在 dedicated worker 中持有游戏兼容的编辑文档。导入完整公开 Profile 时只提取 `userCustomProfileCards`；导出不包含 worker handle、稳定元素 ID、选中状态或其他浏览器元数据。
+## Core concepts
 
-```ts
-import { BrowserAuthoringClient, type AuthoringCommand } from "@empty-sekai/sekai-custom-profile-sdk";
+### BrowserRenderer
 
-const authoring = await BrowserAuthoringClient.create();
-const document = profile
-  ? await authoring.importProfile(profile)
-  : await authoring.createBlank();
+A `BrowserRenderer` owns one WebGL2 context, one worker, and the provider queues. Create one per canvas and reuse it for every scene drawn on that canvas.
 
-const command: AuthoringCommand = {
-  kind: "set_transform",
-  id: selectedElementId,
-  position: [120, -40, 0],
-};
-const delta = await document.apply(command);
+`BrowserRenderer.create()` sets the canvas to the card size, 1830 × 812, and rejects with `WEBGL2_UNAVAILABLE` when the canvas cannot provide a WebGL2 context.
 
-await document.undo();
-await document.redo();
-const gameDocument = await document.export();
+| Option | Default | Description |
+| --- | --- | --- |
+| `canvas` | required | `HTMLCanvasElement` or `OffscreenCanvas`. |
+| `region` | required | Game region: `cn`, `jp`, `tw`, `en`, or `kr`. It is the masterdata session region, the `region` of every font request, and the default scene locale. |
+| `resourceProvider` | required | Image source; see [ResourceProvider](#resourceprovider). |
+| `resourceConcurrency` | `8` | Maximum concurrent `ResourceProvider.provide()` calls. |
+| `fontProvider` | none | Font source; see [FontProvider](#fontprovider). |
+| `fontConcurrency` | `4` | Maximum concurrent `FontProvider.provide()` calls. |
+| `localizationProvider` | none | Source of renderer-owned UI text; see [LocalizationProvider](#localizationprovider). |
+| `localizationConcurrency` | `8` | Maximum concurrent `LocalizationProvider.provide()` calls. |
+| `prebuiltSdfAtlasProvider` | none | Source of prebuilt glyph atlases; see [Prebuilt atlas packages](#prebuilt-atlas-packages). |
+| `telemetry` | `{ level: "summary" }` | See [Telemetry and debugging](#telemetry-and-debugging). |
+| `workerUrl`, `moduleUrl`, `wasmUrl`, `workerFactory` | package files | See [Installation](#installation). |
 
-await document.destroy();
-authoring.destroy();
-```
+Concurrency values must be positive integers.
 
-编辑核心最多保留 150 个历史事务，并校验每页 150 个元素的上限、12 个游戏数组、有限数值、图层顺序以及 `objectData` 边界。创建、复制、删除、变换、锁定、可见性、参数和图层命令都返回增量变化；调用方应把这些变化用于现有 scene 和界面状态，而不是在 TypeScript 中维护第二套命令历史。
+| Method | Description |
+| --- | --- |
+| `loadMasterData(revision, loadTable, options?)` | Creates a masterdata session, fills it through a table loader, and seals it. |
+| `createMasterData(revision)` | Creates an empty masterdata session for table-by-table loading. |
+| `registerFont({ family, bytes })` | Registers font bytes (`ArrayBuffer`) under a family name. |
+| `createProfileScene(options)` | Resolves one profile page and returns a `BrowserScene`. |
+| `stats()` | Worker, provider, cache, and scene counters. |
+| `restoreContext()` | Recreates a lost WebGL2 context and reuploads every scene. |
+| `destroy()` | Terminates the worker and aborts work in progress. |
 
-## 完整执行流程
+### Masterdata
 
-`createProfileScene()` 会依次完成以下语义解析、资源准备与 GPU 初始化流程：
-
-1. WASM 从 `profile.userCustomProfileCards` 按 `seq` 升序取出 `pageIndex` 指定的页（默认第一页），与 profile、locale 和 masterdata session 一起解析；
-2. shared semantic core 收集本场景的 localization demand，调用方 provider 返回不可变文本快照；
-3. WASM 用该文本快照解析 authored elements 与 components，并输出实际使用的 font family demand；
-4. 主线程通过有界队列调用可选 `FontProvider`，对返回 bytes 计算 hash，并把 family→hash 锁定在 renderer 生命周期内；调用方也可以在创建 scene 前直接 `registerFont()`；
-5. WASM 输出完整 glyph demand、layout request 与稳定 resource descriptor；
-6. 主线程按 descriptor stable ID 去重，并通过有界队列调用 `ResourceProvider`；
-7. WASM 使用已注册字体执行 FreeType measurement、TMP layout、glyph SDF generation 和 atlas placement；
-8. core 编译 authored layer tree、semantic commands、control bindings、interaction regions 与初始动态状态；
-9. WebGL2 上传 atlas pages、decoded images、geometry、command state 与 layer mask buffer；
-10. scene 返回后，调用方决定何时 `draw()`、推进 timeline、切换 layer、处理交互或导出 dump。
-
-glyph atlas 按实际 glyph demand 创建。单个图片资源缺失、provider 抛错或图片解码失败会产生 warning，并使用透明占位继续构建其余 scene；schema、ABI、内存预算和 scene contract 错误会显式失败。
-
-## ResourceProvider
-
-renderer 输出并消费语义 descriptor；调用方负责把 descriptor 映射到 URL、CDN、对象存储、文件、manifest、鉴权请求或其他资源系统。
-
-```ts
-export type ResourceDescriptor = {
-  id: string;
-  namespace: string;
-  key: string;
-  role: string;
-  provenance: Record<string, unknown>;
-  expectedSize?: { width: number; height: number };
-};
-
-export interface ResourceProvider {
-  provide(
-    descriptor: ResourceDescriptor,
-    context: { signal: AbortSignal },
-  ): Promise<{
-    source: Blob | ArrayBuffer | Uint8Array | TexImageSource;
-  } | null>;
-
-  cacheIdentity?(descriptor: ResourceDescriptor): string | null;
-}
-```
-
-`namespace`、`key` 和 `role` 表达 renderer 语义；调用方可将其映射到任意资源命名和存储规则。
-
-罐徽章收藏品（`customProfileResourceCollectionType` 为 `can_badge`）除自身图片外还请求法线贴图 `namespace: "static"`、`key: "ui/sekai_badge_normal"`。`omikuji` 收藏品按元素 `targetId` 指向的 `omikujis` 行绘制签：请求签面图与运势图两张 `assets` 资源，签文以 FreeType 覆盖率（而非 SDF 图集）绘制，所需字体经 `FontProvider` 按字体资源名 `FOT-Omikuji`（2022 年签）或 `FOT-UDMinchoPro-B`（2023–2025 年签）请求字体文件。该字体没有字形的字符取自第一个有该字形的后备 face：先 `Roboto`，再按 master data 区服选取的 Noto Sans CJK face。`FontProvider` 会被请求这三个 family，返回完整文件，由渲染器打开下表所列 face。这些 family 不走预生成 SDF 图集，缺任何一个时场景创建失败，与其他已声明字体一致。
-
-| Family | 文件 | Face |
-|---|---|---|
-| `FOT-Omikuji`（2022 年签） | `FOT-Omikuji.otf` | 0 |
-| `FOT-UDMinchoPro-B`（2023–2025 年签） | `FOT-UDMinchoPro-B.otf` | 0 |
-| `Roboto` | `Roboto-Regular.ttf` | 0 |
-| `Noto Sans CJK SC`（区服 `cn`、`en` 及其他） | `NotoSansCJK-Regular.ttc` | 2 |
-| `Noto Sans CJK TC`（区服 `tw`） | `NotoSansCJK-Regular.ttc` | 3 |
-| `Noto Sans CJK JP`（区服 `jp`） | `NotoSansCJK-Regular.ttc` | 0 |
-| `Noto Sans CJK KR`（区服 `kr`） | `NotoSansCJK-Regular.ttc` | 1 |
-
-两个后备字体文件为 Android 14 原生系统字体：
-
-- `Roboto-Regular.ttf`，SHA-256 `9ca9debb09459bf4e3e7f826f5cd0f35f253902b85684921fce2ba3f28dd0f50`；
-- `NotoSansCJK-Regular.ttc`，SHA-256 `39fb47c543da50618ab99e8b9e5529e54566bdbef41719308165975f627d5c93`。
-
-### 任意异步来源
-
-一个 provider 可以独立组合任意资源规则：
-
-```ts
-const provider: ResourceProvider = {
-  cacheIdentity(descriptor) {
-    return `${assetRevision}:${descriptor.id}`;
-  },
-
-  async provide(descriptor, { signal }) {
-    const memoryHit = memoryImages.get(descriptor.id);
-    if (memoryHit) return { source: memoryHit };
-
-    const stored = await assetDatabase.get(assetRevision, descriptor.id);
-    if (stored) return { source: stored };
-
-    const request = await applicationAssetRouter.resolve(descriptor);
-    if (!request) return null;
-
-    const response = await authenticatedFetch(request, { signal });
-    if (!response.ok) return null;
-
-    const blob = await response.blob();
-    await assetDatabase.put(assetRevision, descriptor.id, blob);
-    return { source: blob };
-  },
-};
-```
-
-同一个 provider 可以从本地静态文件、HTTP cache、Cache Storage、IndexedDB、用户选择的文件、Service Worker、签名 URL、GraphQL、私有鉴权接口或已经解码的 `ImageBitmap` 返回资源。路径解释与失效策略始终由 provider 掌握。
-
-### 并发、去重与失败语义
-
-- `resourceConcurrency` 默认为 8，必须是正整数；
-- descriptor 在单次 acquire 中按 stable `id` 去重；
-- 同一 renderer 内的并发 scene 请求共享 in-flight singleflight；
-- 每个等待者独立响应自己的取消信号；仅当全部等待者都取消时才取消底层 provider 请求；
-- decoded cache hit 直接复用 session lease，provider 并发槽继续服务实际加载请求；
-- `AbortSignal` 会传给 provider；
-- provider 返回 `null`、抛错或图片解码失败时，该项变为透明占位并记录 warning；
-- pinned lease 耗尽 decoded image hard budget 时会产生显式资源错误。
-
-`cacheIdentity()` 用于声明 decoded session cache 的身份。它应包含会改变图片内容的 catalog revision、region、用户或鉴权域；若省略则使用 descriptor stable ID。encoded asset 是否持久化、保存多久以及如何失效，完全由 provider 决定。
-
-## LocalizationProvider
-
-General 标题、tab、难度名等 renderer-owned UI 文本通过稳定 localization key 请求；玩家名称、签名和其他用户内容保持 profile 原文。调用方可以用任意规则解析 `region + locale + key`：
-
-```ts
-const renderer = await BrowserRenderer.create({
-  canvas,
-  region: "tw",
-  resourceProvider,
-  localizationProvider: {
-    async provide({ region, locale, key }, { signal }) {
-      return applicationMessages.resolve({ region, locale, key, signal });
-    },
-  },
-  localizationConcurrency: 8,
-});
-```
-
-WASM 先收集当前 scene 实际使用且已去重的 key，主线程有界并发调用 provider，并把完整 `key → UTF-8 value` 作为不可变快照送回 WASM。缺少必需 key 时 scene 创建显式失败，不跨区服猜测文案。未提供 `LocalizationProvider` 时使用 masterdata/runtime 自带的本地化来源。
-
-## Masterdata
-
-`loadMasterData()` 接受调用方实现的任意异步 table loader。调用方完整定义 table 的命名、位置、传输、鉴权与缓存方式：
+A masterdata session holds the game tables one region and revision need. `loadMasterData()` asks the host's loader for every table and seals the session. The host decides table naming, location, transport, authentication, and caching:
 
 ```ts
 const masterData = await renderer.loadMasterData(
   "catalog-2026-07",
-  async ({ table, region, revision }, { signal }) => {
-    const request = await applicationMasterDataRouter.resolve({ table, region, revision });
-    return applicationMasterDataLoader.load(request, { signal });
+  async ({ table, region, revision, optional }, { signal }) => {
+    const response = await fetch(`/masterdata/${region}/${revision}/${table}.json`, { signal });
+    if (optional && response.status === 404) return null;
+    if (!response.ok) throw new Error(`${table}: HTTP ${response.status}`);
+    return response.json();
   },
   { concurrency: 4 },
 );
 ```
 
-`masterData.optionalTables` 列出表集合可以没有的表（只有部分区服提供的 `customProfileCharacterIconResources`、`customProfileMaterialResources`、`customProfileUserInterfaceIconResources`，以及御神签收藏品读取的 `omikujis`）。loader 以 `optional: true` 被调用；返回 `null` 或 `undefined` 表示该区服没有这张表，可选表加载失败同样跳过。引用缺失表的元素不绘制，名片其余部分照常渲染。
+The loader receives `{ table, region, revision, optional }` and an `AbortSignal`, and returns the parsed table. `options.concurrency` defaults to 4; `options.signal` aborts loading. A failed required table rejects the call and destroys the session.
 
-需要逐表控制生命周期时，可直接驱动 session：
+`masterData.requiredTables` lists the tables every session needs. `masterData.optionalTables` lists the tables a region may lack: `customProfileCharacterIconResources`, `customProfileMaterialResources`, and `customProfileUserInterfaceIconResources`, which only some regions ship, and `omikujis`, which only omikuji collections read. For these the loader is called with `optional: true`; returning `null` or `undefined` means the region does not ship the table, and a failed optional load is skipped. Elements that draw from a missing table are left out, and the rest of the card renders unchanged.
+
+For table-by-table control, fill a session directly:
 
 ```ts
 const masterData = await renderer.createMasterData("catalog-2026-07");
@@ -270,32 +162,87 @@ for (const table of masterData.optionalTables) {
 await masterData.seal();
 ```
 
-`seal()` 后该 session 才能创建 scene。销毁 renderer 前应销毁不再使用的 masterdata session。
+A session must be sealed before it can create scenes. One session serves any number of scenes; call `masterData.destroy()` once its scenes are done.
 
-## 字体
+### ResourceProvider
 
-字体 bytes 始终由调用方提供。`family` 是 masterdata 和文本 layer 使用的 opaque 逻辑身份，并原样传给调用方的字体解析规则。
-
-推荐在 `BrowserRenderer.create()` 中提供 `FontProvider`。WASM 只请求当前 scene 实际使用的 family，主线程按 `fontConcurrency`（默认 4）有界并发调用 provider：
+The renderer describes every image it needs with a semantic descriptor. The host maps descriptors to URLs, object storage, files, authenticated requests, or any other source.
 
 ```ts
-const renderer = await BrowserRenderer.create({
-  canvas,
-  region: "cn",
-  resourceProvider,
-  fontProvider: {
-    async provide({ region, family }, { signal }) {
-      const bytes = await applicationFonts.resolve({ region, family, signal });
-      return bytes ? { bytes } : null;
-    },
-  },
-  fontConcurrency: 4,
-});
+type ResourceDescriptor = {
+  id: string;
+  namespace: string;
+  key: string;
+  role: string;
+  provenance: Record<string, unknown>;
+  expectedSize?: { width: number; height: number };
+};
+
+interface ResourceProvider {
+  provide(
+    descriptor: ResourceDescriptor,
+    context: { signal: AbortSignal },
+  ): Promise<{ source: Blob | ArrayBuffer | Uint8Array | TexImageSource } | null>;
+
+  cacheIdentity?(descriptor: ResourceDescriptor): string | null;
+}
 ```
 
-provider 可以使用用户选择的文件、内存、IndexedDB、应用资源包、网络请求或任意其他实现。返回值会复制成该次解析的不可变 byte snapshot；缺少当前 scene 必需的 family 时 scene 创建显式失败。
+- `id` is the stable descriptor identity. `namespace` and `key` name the resource; `role` and `provenance` say which part of the card asked for it. These are renderer semantics, not filesystem paths; the host interprets them.
+- `source` may be encoded image bytes (`Blob`, `ArrayBuffer`, `Uint8Array`), which the renderer decodes with `createImageBitmap()`, or an already decoded `TexImageSource` such as an `ImageBitmap`.
+- `cacheIdentity()` sets the key of the decoded-image session cache. Include every catalog revision, region, user scope, or authentication domain that can change the bytes. Without it, the descriptor `id` is the key.
 
-需要完全手动管理时，也可以在创建 scene 前直接注册：
+A provider can combine memory, Cache Storage, IndexedDB, user-selected files, a Service Worker, signed URLs, or authenticated APIs, and keeps full control of path mapping and invalidation:
+
+```ts
+const provider: ResourceProvider = {
+  cacheIdentity(descriptor) {
+    return `${assetRevision}:${descriptor.id}`;
+  },
+
+  async provide(descriptor, { signal }) {
+    const stored = await assetDatabase.get(assetRevision, descriptor.id);
+    if (stored) return { source: stored };
+
+    const request = await applicationAssetRouter.resolve(descriptor);
+    if (!request) return null;
+    const response = await authenticatedFetch(request, { signal });
+    if (!response.ok) return null;
+
+    const blob = await response.blob();
+    await assetDatabase.put(assetRevision, descriptor.id, blob);
+    return { source: blob };
+  },
+};
+```
+
+Scheduling and failures:
+
+- Requests within one scene are deduplicated by descriptor `id`. Concurrent scenes of one renderer share requests in flight.
+- Each waiting scene observes its own cancellation. The provider's signal aborts only after every waiter has left.
+- Decoded-cache hits do not call the provider.
+- A `null` result, a thrown error, or a decode failure becomes a warning and a transparent placeholder; the rest of the scene renders. See [Errors and warnings](#errors-and-warnings).
+
+Two kinds of collection request more than their own image. A can-badge collection (`customProfileResourceCollectionType` `can_badge`) also requests its normal map, `namespace: "static"`, `key: "ui/sekai_badge_normal"`. An omikuji collection draws the fortune slip of the `omikujis` row its `targetId` names and requests the slip cover and the fortune image as two `assets` resources.
+
+### FontProvider
+
+Font bytes always come from the host. A `family` is the logical font name masterdata and text elements use; the renderer passes it unchanged to the host.
+
+```ts
+type FontRequest = { region: string; family: string };
+
+interface FontProvider {
+  provide(
+    request: FontRequest,
+    context: { signal: AbortSignal },
+  ): Promise<{ bytes: ArrayBuffer | Uint8Array } | null>;
+}
+```
+
+For each scene the worker reports the families the scene uses, and the renderer asks the provider for those not yet registered, at most `fontConcurrency` at a time. Returned bytes are copied, hashed with SHA-256, and registered. A `null` result, an empty file, or a thrown error rejects scene creation and aborts the other requests still in flight. Supply TrueType or OpenType files, including `.ttc` collections; the bundled FreeType build has no zlib or Brotli support, so it does not open WOFF or WOFF2 files.
+
+Hosts that manage fonts themselves can register them before creating scenes instead:
 
 ```ts
 const bytes = await file.arrayBuffer();
@@ -304,13 +251,239 @@ await renderer.registerFont({ family: "FOT-RodinNTLGPro-DB", bytes });
 await renderer.registerFont({ family: "Application Alias", bytes });
 ```
 
-同一字体文件可以注册多个逻辑 alias。renderer 会对 source bytes 计算 hash，并把 region、family、source hash 和字符共同纳入 glyph identity。
+One file can be registered under several family names. The first registration of a family fixes its source hash for the renderer's lifetime: registering the same bytes again does nothing, and different bytes reject with `FONT_IDENTITY_CONFLICT`. Create a new renderer to switch font versions. Glyph identity includes the region, family, source hash, and character, so cached glyphs never mix font versions.
 
-同一 renderer 生命周期内，首次成功注册会锁定一个 family 对应的 source hash。用相同 bytes 重复注册是幂等操作；用不同 bytes 覆盖同一 family 会返回 `FONT_IDENTITY_CONFLICT`。需要切换字体版本时应创建新的 renderer，使 font snapshot、glyph identity、atlas 和持久缓存边界保持明确。
+Omikuji slip texts are uGUI text drawn from FreeType coverage of the font file, not from an SDF atlas. The slip font is `FOT-Omikuji` for 2022 slips and `FOT-UDMinchoPro-B` for 2023–2025 slips. A character the slip font has no glyph for comes from the first fallback face that has one: `Roboto`, then the Noto Sans CJK face of the masterdata region. The `FontProvider` is asked for all three families and returns whole files; the renderer opens the face listed below. These families are never looked up in a prebuilt atlas, and a missing one rejects scene creation like any other font the scene uses.
 
-## 可选预生成 Atlas 包
+| Family | File | Face |
+| --- | --- | --- |
+| `FOT-Omikuji` | `FOT-Omikuji.otf` | 0 |
+| `FOT-UDMinchoPro-B` | `FOT-UDMinchoPro-B.otf` | 0 |
+| `Roboto` | `Roboto-Regular.ttf` | 0 |
+| `Noto Sans CJK SC` (region `cn`, `en`, and any other) | `NotoSansCJK-Regular.ttc` | 2 |
+| `Noto Sans CJK TC` (region `tw`) | `NotoSansCJK-Regular.ttc` | 3 |
+| `Noto Sans CJK JP` (region `jp`) | `NotoSansCJK-Regular.ttc` | 0 |
+| `Noto Sans CJK KR` (region `kr`) | `NotoSansCJK-Regular.ttc` | 1 |
 
-默认仍按 scene 的实际 glyph demand 生成 SDF，并使用同源 IndexedDB glyph cache。预生成 atlas 不会自动下载。调用方可以直接使用本地/HTTP provider，也可以通过显式用户操作把完整 atlas 安装到同源 IndexedDB，随后让多个 renderer、编辑器和查看页共享同一份安装结果。
+The two fallback files are the stock Android 14 system fonts; [Fonts and assets](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/docs/fonts-and-assets.md) lists their SHA-256 digests.
+
+### LocalizationProvider
+
+Renderer-owned UI text, such as General panel titles, tab labels, and difficulty names, is requested by stable localization key. Player names, signatures, and other user content come from the profile unchanged.
+
+```ts
+const renderer = await BrowserRenderer.create({
+  canvas,
+  region: "tw",
+  resourceProvider,
+  localizationProvider: {
+    async provide({ region, locale, key }, { signal }) {
+      return applicationMessages.resolve({ region, locale, key, signal });
+    },
+  },
+  localizationConcurrency: 8,
+});
+```
+
+The worker reports the keys the scene uses. The renderer resolves each unique key once and hands the worker one immutable `key → text` snapshot. A provider that returns `null` or throws rejects scene creation; the renderer does not fall back to another region's text. Without a `LocalizationProvider`, the runtime uses its built-in tables for the region.
+
+### Scenes
+
+`renderer.createProfileScene(options)` resolves one page into a `BrowserScene`.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `masterData` | required | A sealed session created by the same renderer. |
+| `documentKey` | required | Caller-chosen document key. Stable layer IDs derive from it and from each element's position in the card, so rebuilding a page with the same key gives the same IDs. |
+| `profile` | required | Full profile API response containing `userCustomProfileCards`. |
+| `pageIndex` | `0` | Zero-based page in ascending `seq` order. |
+| `locale` | renderer `region` | Locale of renderer-owned UI text. |
+| `frameMode` | `"animate"` | `"animate"` starts dynamic programs at tick 0; `"final"` settles them to their final state during creation. |
+| `sdf.backend` | `"edt"` | Glyph SDF generator: `"edt"` (CPU Euclidean distance transform) or `"analytic"`, a debugging and comparison path. |
+| `sdf.supersample` | `2` | Supersampling factor of the EDT generator. |
+| `sdf.persistence` | `"origin"` | Glyph cache scope: `"origin"` (IndexedDB) or `"memory-only"`. |
+| `signal` | none | Cancels creation while it runs. |
+
+A profile without `userCustomProfileCards`, a page without `customProfileCard`, or a `pageIndex` outside the pages rejects with `INVALID_PROFILE_INPUT`.
+
+Scene creation runs these steps:
+
+1. With a `LocalizationProvider`, the worker reports the localization keys the page needs, and the renderer resolves them into one text snapshot.
+2. With a `FontProvider` or a prebuilt atlas provider, the worker reports the font families the page uses. The renderer reads prebuilt atlas manifests for them and requests unregistered families from the `FontProvider`.
+3. The worker resolves the page against masterdata and reports its glyph demand, layout request, and resource descriptors. Glyphs come from a prebuilt atlas when it covers every glyph of the scene; otherwise the worker generates the atlas from the registered fonts and reuses cached glyphs.
+4. The renderer requests the images from the `ResourceProvider`.
+5. The worker lays out text and compiles the layer tree, semantic commands, control bindings, interaction regions, and initial dynamic state. The renderer uploads atlas pages, images, geometry, and state buffers to WebGL2.
+
+After that, the host decides when to draw, advance the timeline, change state, or read a dump.
+
+| Member | Description |
+| --- | --- |
+| `draw()` | Draws the current state and returns the frame's GPU counters. Call it after every state change. |
+| `exportPng()` | Draws, then encodes the canvas as a 1830 × 812 PNG `Blob`. Needs Canvas 2D in a document, or `OffscreenCanvas` elsewhere. |
+| `advance(tick)` | Moves the dynamic timeline to the absolute `tick`, at 60 ticks per second. A tick before the current one replays the programs from the start. |
+| `animated` | `true` when the scene has dynamic programs that need `advance()`. |
+| `dynamicProgramCount` | Number of dynamic programs in the scene. |
+| `dump()` | Layer table, geometry, and interaction data; see [Interaction and state](#interaction-and-state). |
+| `stats()` | Runtime snapshot; see [Telemetry and debugging](#telemetry-and-debugging). |
+| `destroy()` | Releases image leases, atlas leases, GPU resources, and the worker-side scene. |
+
+Cancellation and teardown:
+
+```ts
+const controller = new AbortController();
+const pending = renderer.createProfileScene({
+  masterData,
+  documentKey: "preview",
+  profile,
+  signal: controller.signal,
+});
+controller.abort(); // `pending` rejects if creation was still running
+
+const scene = await renderer.createProfileScene({ masterData, documentKey: "preview", profile });
+await scene.destroy();
+await masterData.destroy();
+renderer.destroy();
+```
+
+The signal cancels only a creation in progress; release a created scene with `destroy()`. `renderer.destroy()` terminates the worker and aborts every provider request still running.
+
+## Authoring
+
+`BrowserAuthoringClient` edits custom-profile documents in the game's format inside its own worker. A document holds the `userCustomProfileCards` pages; importing a full profile response keeps only that array, and exports carry no worker handles, element IDs, selection, or other editor state.
+
+```ts
+import {
+  BrowserAuthoringClient,
+  type AuthoringCommand,
+} from "@empty-sekai/sekai-custom-profile-sdk";
+
+const authoring = await BrowserAuthoringClient.create();
+const doc = profile
+  ? await authoring.importProfile(profile)
+  : await authoring.createBlank();
+
+const command: AuthoringCommand = {
+  kind: "set_transform",
+  id: selectedElementId,
+  position: [120, -40, 0],
+};
+const delta = await doc.apply(command);
+
+await doc.undo();
+await doc.redo();
+const exported = await doc.export(); // { userCustomProfileCards: [...] }
+
+await doc.destroy();
+authoring.destroy();
+```
+
+`BrowserAuthoringClient.create()` accepts the same `workerUrl`, `moduleUrl`, `wasmUrl`, and `workerFactory` options as the renderer. `createBlank()`, `importProfile(profile)`, and `restoreCheckpoint(checkpoint)` each return a `RendererAuthoringDocument`:
+
+| Member | Description |
+| --- | --- |
+| `apply(command)` | Applies one `AuthoringCommand` as one history entry. |
+| `undo()`, `redo()` | Steps through history; resolve to `null` when there is nothing to undo or redo. |
+| `select(id)` | Selects an element, or clears the selection with `null`. |
+| `elements()` | Lists every element with its `id`, `page`, `category`, `index`, and element object. |
+| `beginGesture(id)`, `previewGesture(command)`, `commitGesture()`, `cancelGesture()` | Continuous edits of one element; see below. |
+| `appendPage()`, `duplicatePage(page)`, `deletePage(page)`, `movePage(fromPage, page)` | Page operations. |
+| `export()` | Returns the document as a `GameProfileDocument`. |
+| `checkpoint()` | Returns an `AuthoringCheckpoint` that `restoreCheckpoint()` reopens with its history and selection. |
+| `id`, `initialDocument`, `initialRevision` | Session handle, and the document and revision it opened with. |
+| `destroy()` | Releases the worker-side session. |
+
+`AuthoringCommand` kinds:
+
+| `kind` | Fields | Effect |
+| --- | --- | --- |
+| `create` | `page`, `category`, `element` | Adds an element in the game's format, including `objectData`. |
+| `duplicate` | `id` | Copies an element. |
+| `delete` | `id` | Removes an element. |
+| `set_transform` | `id`, `position?`, `scale?`, `rotation?` | Sets `[x, y, z]` position and scale or `[x, y, z, w]` rotation. |
+| `set_lock` | `id`, `lock` | Locks or unlocks an element. |
+| `set_visible` | `id`, `visible` | Shows or hides an element. |
+| `set_parameters` | `id`, `values` | Sets element fields other than `objectData`. |
+| `change_layer` | `id`, `layer` | Moves an element within its page's layer order. |
+
+Every operation resolves to an `AuthoringDelta`: the new `revision`, the element `changes` (`inserted`, `updated`, `removed`), `pageChanges` (`inserted`, `removed`, `moved`), `canUndo`, `canRedo`, and the current selection. Apply these changes to the host's scene and UI; the history lives in the worker, so the host keeps no second command history.
+
+A gesture covers a continuous edit such as a drag. `beginGesture(id)` starts it, `previewGesture()` applies `set_transform` or `set_parameters` commands for that element without recording history, `commitGesture()` records one history entry, and `cancelGesture()` restores the element. Other document commands are rejected while a gesture is active, and a checkpoint cannot be taken during one. To move a rendered layer during a gesture without rebuilding the scene, call `scene.setLayerPreviewTransform(layerId, matrix)` with an affine matrix `[a, b, c, d, e, f]` in canvas pixels (origin at the top left, y down), applied as `x' = a·x + c·y + e` and `y' = b·x + d·y + f`; `null` clears it. The call updates one GPU matrix and draws.
+
+The authoring core validates what the game's editor allows: at most 150 elements per page and 10 pages, the 12 element arrays every page carries, finite transform values, layer order, and the `objectData` shape. History keeps the latest 150 entries. Page indices are positions in ascending `seq` order, the same order as the renderer's `pageIndex`, and page operations renumber `seq` from 1. To render an edited document, pass the exported `userCustomProfileCards` as part of the `profile` given to `createProfileScene()`.
+
+## Interaction and state
+
+Scene state changes run in the worker and update compact GPU buffers. They reuse the layer table, timeline, layout, and glyph atlas, and keep the current playback position.
+
+```ts
+await scene.advance(tick);
+await scene.setLayerVisible(layerId, false);
+await scene.setLayerMasks(dump.revisions.layer_table, [
+  { layerId, visible: true },
+  { layerId: otherLayerId, visible: null },
+]);
+await scene.setTab(controlId, value);
+await scene.setScrollOffset(controlId, offset);
+await scene.scrollBy(controlId, delta);
+scene.draw();
+```
+
+| Method | Description |
+| --- | --- |
+| `setLayerVisible(layerId, visible)` | Sets the render mask of one layer. |
+| `setLayerMasks(layerTableRevision, overrides)` | Sets several masks in one update; `visible: null` clears an override. The revision must equal `dump.revisions.layer_table`, or the update is rejected. |
+| `setTab(controlId, value)` | Selects a tab of a tab control. |
+| `setScrollOffset(controlId, offset)` | Sets a scroll offset; the renderer clamps it to the content range. |
+| `scrollBy(controlId, delta)` | Scrolls by `delta`. |
+| `setLayerPreviewTransform(layerId, matrix)` | Applies a GPU-only preview transform and draws. |
+
+Each asynchronous method resolves to `{ delta, gpu }`: `delta` is the worker's `CoreSceneDelta` (revision, tick, dirty flags, layer and command patches) and `gpu` reports the bytes uploaded. They do not draw; call `scene.draw()` afterwards.
+
+Public layers correspond to game-authored elements. Shapes, glyphs, masks, and other draw primitives are commands owned by those layers.
+
+### Scene dumps
+
+`await scene.dump()` returns a `CoreSceneDump` in card device coordinates (`coordinate_space: "card-device-v1"`, 1830 × 812). It contains:
+
+- `layer_table` and `layer_tree`: stable layer IDs, slots, parents, and subtree ranges;
+- `layers`: source content, resolved parameters, authored visibility, render masks, and dynamic state;
+- `interaction_regions`: hit regions with `role`, `bounds`, `quad`, `matrix`, `hit_geometry`, `clip`, `control_bindings`, `resolved_data`, `capabilities`, and `render_mask`;
+- `component_controls` and `command_states`;
+- `revisions`, `tick`, and runtime counters;
+- `numeric_text_regions`: runs of digits detected in text after TMP markup is removed, with the plain text and its range in `resolved_data`.
+
+A region's `capabilities` lists what the host may do with it, such as `activate`, `scroll`, or `drag`, and `resolved_data` carries the resolved target, such as an honor, card, character, music, or story. Control bindings tie regions to component controls: `tab_option` (with the tab `value`), `scroll_viewport`, `scroll_content`, and `scroll_thumb`. A scroll component exposes a fixed viewport, content that moves with the offset, and a thumb that moves proportionally. The host handles wheel and drag input over these regions and calls `setScrollOffset()` or `scrollBy()`; the renderer clamps the offset, patches state, and updates the hit geometry.
+
+Product interaction stays with the host: navigation to honors, characters, cards, events, music, or stories; tab and scroll input; copying numbers; hover cards, selection, and editing; and accessible DOM or SVG overlays. Keep overlay and layer-list DOM stable across animation ticks and update only what moves.
+
+## Caching and resource ownership
+
+| Layer | Lifetime | Owner | Contents |
+| --- | --- | --- | --- |
+| Provider storage | host-defined | host | Encoded images and other host records. |
+| Decoded image cache | renderer | main thread | Decoded images held by scene leases. |
+| Glyph persistent cache | browser origin | renderer | Version-checked SDF glyph records in IndexedDB. |
+| Glyph session atlas | worker | WebAssembly runtime | Atlas pages, placements, leases, and revisions. |
+| GPU textures and buffers | WebGL context | main thread | Atlas pages, images, geometry, and state buffers. |
+
+The decoded image cache keeps released images up to 64 MiB and allows at most 96 MiB in total. When images pinned by live scenes fill the 96 MiB, scene creation rejects instead of evicting them. Persistent encoded-image policy belongs entirely to the `ResourceProvider`.
+
+With `sdf.persistence: "origin"`, the default, glyph records are stored in the IndexedDB database `sekai-custom-profile-sdk-glyph-cache-v1` and shared by every renderer of the origin. Records hold opaque glyph identities, version data, metrics, and R8 SDF pixels; the least recently used records are dropped beyond 64 MiB. Without IndexedDB the cache stays in memory, and a storage error counts as a cache miss, so the glyphs are generated again. `"memory-only"` keeps glyphs for the session only:
+
+```ts
+const scene = await renderer.createProfileScene({
+  masterData,
+  documentKey: "preview",
+  profile,
+  sdf: { persistence: "memory-only" },
+});
+```
+
+When the WebGL context is lost, the renderer marks every scene `context-lost` and state calls reject with `WEBGL_CONTEXT_LOST`. On `webglcontextrestored` it recreates the context and reuploads the retained atlas, image, and buffer state, reusing the completed text layout and SDF generation. Call `renderer.restoreContext()` to retry and receive the failure as a rejection.
+
+### Prebuilt atlas packages
+
+By default, scenes generate SDF glyphs on demand and reuse the glyph cache. A prebuilt atlas package supplies a family's glyphs in advance. Packages are never downloaded on their own: the host either serves them through a provider or installs them into IndexedDB from an explicit user action.
 
 ```ts
 import {
@@ -321,16 +494,12 @@ import {
 
 const source = createHttpPrebuiltSdfAtlasProvider("/font-atlases");
 const atlasPackage = createOriginPrebuiltSdfAtlasPackage({
-  namespace: "cn-6.0.0-font-atlas-v1",
+  namespace: "font-atlases-v1",
   source,
 });
 
-// 只应从明确的用户操作调用。manifest 在全部页写入成功后才可见。
-await atlasPackage.install([
-  "FZLanTingHei-DB-GBK",
-  "FZZhengHei-EB-GBK",
-  "FZShaoEr-M11-JF",
-], {
+// Call from an explicit user action. A family becomes visible after all its pages are stored.
+await atlasPackage.install(["FZLanTingHei-DB-GBK", "FZZhengHei-EB-GBK"], {
   concurrency: 4,
   requestPersistence: true,
   onProgress(progress) {
@@ -347,11 +516,14 @@ const renderer = await BrowserRenderer.create({
 });
 ```
 
-`atlasPackage.provider` 只读取已经完整安装的 family；未安装、安装中、IndexedDB 不可用或已移除时，manifest 返回 `null`，scene 自动回到按需 glyph 生成。安装前会检查浏览器报告的剩余 quota，每个页校验 SHA-256，失败时清理本次未完成 family。`requestPersistence` 默认关闭；renderer 不会在没有用户操作时请求持久存储权限。atlas package 不保存 profile、文本、用户 ID、layout 或 scene dump。
+- `createHttpPrebuiltSdfAtlasProvider(baseUrl)` reads `<baseUrl>/<family>/manifest.json` and the page files next to it. A 404 manifest means the family has no package; other HTTP errors reject scene creation.
+- `createOriginPrebuiltSdfAtlasPackage({ namespace, source })` installs packages from `source` into the IndexedDB database `sekai-custom-profile-sdk-prebuilt-atlas-v1` under `namespace`. Its `provider` returns only fully installed families and answers `null` for missing, partial, or unavailable storage, so those scenes generate glyphs on demand.
+- `install(families, options)` skips installed families, checks the browser-reported quota, verifies each page's SHA-256, and removes the families of a failed install. Options: `concurrency` (default 4, at most 8), `onProgress`, `requestPersistence` (default `false`; calls `navigator.storage.persist()`), and `signal`. It resolves to a `PrebuiltSdfAtlasPackageStatus`.
+- `status(families)`, `remove(families?)` (all families of the namespace without an argument), and `close()` complete the package API.
 
-不需要浏览器持久化时，可以把 `createHttpPrebuiltSdfAtlasProvider()` 的结果直接传给 `BrowserRenderer.create()`，由应用自己的本地文件、Service Worker 或 HTTP cache 管理生命周期。
+Without browser persistence, pass `createHttpPrebuiltSdfAtlasProvider()` directly as `prebuiltSdfAtlasProvider` and let local files, a Service Worker, or the HTTP cache own the lifecycle. Packages store glyph pages and manifests only, no profile, text, user ID, layout, or scene dump. A package does not replace font files: the `FontProvider` is still asked for the scene's unregistered families. Providers are asked for manifests on every scene, so an install or removal takes effect with the next scene.
 
-atlas 包即 native crate 自带 `build-sdf-atlas` 工具的输出目录，原样发布为 `<baseUrl>/<family>/manifest.json` 及其页文件：
+Packages are the output of the `build-sdf-atlas` tool of the `sekai-profile` crate, served unchanged:
 
 ```sh
 SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --release \
@@ -359,78 +531,40 @@ SEKAI_PROFILE_FONT_DIR=/path/to/fonts cargo run -p sekai-profile --release \
   --output font-atlases/FZLanTingHei-DB-GBK
 ```
 
-目录名与 manifest 的 `font_family` 必须等于 scene 请求的 family 名。每页的 `file_sha256` 针对解压后的页内容，因此页文件可以预压缩为 `page-NNN.r8swz.br`（manifest 中的文件名同步改名），前提是服务端以 `Content-Encoding: br` 返回。页尺寸最大 2048×2048。同一 scene 用到的各 family 必须使用相同的 `--point-size`、`--spread` 与 `--page-size`，否则该 scene 改为按需生成 glyph。每个 scene 都会重新向 provider 查询 manifest，安装或移除从下一个 scene 起生效。
+The directory name and the manifest's `font_family` must equal the family name scenes request. Each page's `file_sha256` covers the decoded page, so a page may be stored pre-compressed as `page-NNN.r8swz.br`, with the manifest entry renamed to match, when the server sends it with `Content-Encoding: br`. Pages are at most 2048 × 2048. All families one scene uses must share `--point-size`, `--spread`, and `--page-size`; otherwise that scene generates its glyphs on demand. [Fonts and assets](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/docs/fonts-and-assets.md) describes how the tool finds font files.
 
-## Scene 状态
+## Errors and warnings
 
-```ts
-await scene.advance(tick);
-await scene.setLayerVisible(layerId, false);
-await scene.setLayerMasks(layerTableRevision, [
-  { layerId, visible: true },
-]);
-await scene.setTab(controlId, value);
-await scene.setScrollOffset(controlId, offset);
-await scene.scrollBy(controlId, delta);
-scene.draw();
-```
+Failures that would make a scene wrong reject explicitly. `BrowserRendererError` carries a string `code`:
 
-这些 mutation 复用 authored layer table、timeline、layout、glyph atlas 与 persistent glyph cache，只更新 WASM scene state 和紧凑 GPU buffer。layer 显隐作用于 render mask，并保持当前动态播放位置。
+| Code | Cause |
+| --- | --- |
+| `WEBGL2_UNAVAILABLE` | The canvas cannot provide a WebGL2 context. |
+| `WEBGL_CONTEXT_LOST` | A call while the WebGL context is lost. |
+| `WEBGL2_RESTORE_FAILED` | `restoreContext()` could not create a new context. |
+| `RENDERER_DESTROYED`, `SCENE_DESTROYED` | A call after `destroy()`. |
+| `INVALID_PROFILE_INPUT` | The profile has no usable page, or `pageIndex` is out of range. |
+| `MASTERDATA_LOADER_REQUIRED`, `INVALID_MASTERDATA_CONCURRENCY` | Invalid `loadMasterData()` arguments. |
+| `INVALID_FONT_FAMILY`, `INVALID_FONT_BYTES` | An empty family name or empty font bytes. |
+| `FONT_IDENTITY_CONFLICT` | A family registered again with different bytes. |
+| `FONT_NOT_REGISTERED` | The scene needs a family that is not registered. |
+| `PNG_EXPORT_UNAVAILABLE`, `PNG_EXPORT_FAILED` | No Canvas 2D or `OffscreenCanvas`, or PNG encoding returned no data. |
 
-公开 layer 对应游戏名片 authored element。shape、glyph、mask 和其他 draw primitive 作为 command 归属于各自 authored layer。
+Errors raised inside the worker reject with a `RendererWorkerError`, whose `code` names the failure. `WASM_CALL_FAILED` means the runtime refused the input, for example an unsealed masterdata session, invalid masterdata, or an authoring command outside the limits; the message gives the reason. `WORKER_CRASHED` and `WORKER_TERMINATED` reject every pending call. An atlas package's `install()` rejects with `PrebuiltSdfAtlasStorageError` and the codes `PREBUILT_ATLAS_STORAGE_UNAVAILABLE`, `PREBUILT_ATLAS_INVALID_MANIFEST`, `PREBUILT_ATLAS_QUOTA`, and `PREBUILT_ATLAS_PAGE_HASH`.
 
-## Dump、分层与交互
+Provider outcomes:
 
-```ts
-const dump = await scene.dump();
-```
+| Provider | `null`, error, or bad data | Abort |
+| --- | --- | --- |
+| `ResourceProvider` | Warning and transparent placeholder; the scene renders. | Rejects scene creation. |
+| `FontProvider` | Rejects scene creation. | Rejects scene creation. |
+| `LocalizationProvider` | Rejects scene creation. | Rejects scene creation. |
+| Masterdata loader, required table | Rejects `loadMasterData()`. | Rejects `loadMasterData()`. |
+| Masterdata loader, optional table | Table skipped; its elements are left out. | Rejects `loadMasterData()`. |
 
-dump 包含：
+A resource warning is written to the console with the prefix `[sekai-custom-profile-sdk]`, the descriptor's `namespace`, `key`, and `role`, and the reason. It is also counted in `renderer.stats().resources.provider.failures`.
 
-- stable layer/glyph/command/control/region ID；
-- layer table 与 parent tree；
-- source content 和 resolved parameters；
-- authored visibility、render mask 与动态状态；
-- bounds、quad、matrix、clip 与 hit geometry；
-- semantic commands 与 component controls；
-- interaction regions 和剥离 TMP 后识别的连续数字区域。
-
-滚动组件分别暴露固定 viewport、随 offset 移动的 content 和随比例移动的 thumb region。调用方可在 viewport/content/thumb 上处理滚轮，并根据 thumb 拖动结果调用 `setScrollOffset()`；renderer 负责 clamp、状态 patch 与命中几何更新，不接管指针行为。
-
-产品交互由调用方实现；renderer 提供 `capabilities`、`resolved_data`、control binding 和 geometry，用于构建：
-
-- 称号、角色、卡面、活动、歌曲或剧情资料跳转；
-- tab 切换与滚动；
-- 数字复制；
-- hover card、selection、editing；
-- DOM/SVG accessibility overlay。
-
-动画过程中保持稳定的 layer tree DOM 与 layer row，并按 tick 更新画布、overlay 和必要的动态详情。
-
-## 缓存模型
-
-| 层级 | 生命周期 | 所有者 | 内容 |
-| --- | --- | --- | --- |
-| provider persistent cache | 由应用决定 | 调用方 | encoded image 或应用自定义记录 |
-| decoded image cache | renderer session | TypeScript runtime | 有界 decoded `TexImageSource` lease |
-| glyph persistent cache | browser origin | renderer | 不透明、版本校验的 glyph record |
-| glyph session atlas | worker session | WASM | atlas pages、placement、lease 与 revision |
-| GPU texture/buffer | WebGL context | WebGL2 runtime | atlas、image、geometry 与状态 buffer |
-
-`sdf.persistence` 默认为 `"origin"`，使用 IndexedDB；`"memory-only"` 保留 session cache。IndexedDB record 由 opaque glyph identity、版本信息、metrics 与 R8 SDF payload 组成。
-
-```ts
-const scene = await renderer.createProfileScene({
-  masterData,
-  documentKey: "preview",
-  profile,
-  sdf: { persistence: "memory-only" },
-});
-```
-
-WebGL context restore 会重传保留的 atlas/image/buffer state，并复用已完成的 TMP parsing、layout 与 SDF generation 结果。
-
-## Debug 与 telemetry
+## Telemetry and debugging
 
 ```ts
 const renderer = await BrowserRenderer.create({
@@ -444,49 +578,68 @@ const sceneStats = scene.stats();
 const rendererStats = await renderer.stats();
 ```
 
-telemetry 覆盖 worker request；字体 provider 的请求、并发峰值、bytes、失败和耗时；本地化 provider 的请求、解析数、并发峰值、失败和耗时；resource provider 的实际调用数、并发峰值、已知 encoded bytes、失败、取消与累计解析耗时，并同时报告 decoded session cache 的 entries、bytes、pin、hit、load 和 eviction。它还覆盖 glyph generation、persistent cache hit/miss、atlas pages、texture uploads、GPU buffers、frame timing 与 context recovery。`summary` 保留聚合值；`trace` 在固定上限内保留 raw samples；`off` 仅提供即时运行状态。
+`telemetry.level` is `"summary"` by default: each scene keeps p50, p95, and max of its frame timings over the latest `maxSamples` frames (1–240, default 240). `"trace"` also keeps the raw frame samples, and `"off"` records no frame samples while the runtime counters stay available.
 
-telemetry 采用 privacy-safe schema，仅记录运行时计数、耗时、容量与恢复状态。GPU timing 在 unavailable 或 disjoint 状态下使用 `null` 表达测量状态。
+`scene.stats()` returns a `schemaVersion: 1` snapshot: scene state (`ready`, `context-lost`, or `destroyed`), frame count, bootstrap uploads, atlas pages, glyph counts and generation time, glyph cache hits and misses, the last frame's GPU counters, state upload bytes, context-loss and restore counts, and the telemetry samples. GPU timings that are unavailable or disjoint are `null`, never zero.
 
-## 生命周期与取消
+`renderer.stats()` resolves to:
 
-```ts
-const controller = new AbortController();
+- `worker`: worker requests, failures, WebAssembly time, bridge bytes, and open sessions;
+- `resources`: decoded-cache entries, bytes, pins, hits, loads, and evictions, plus `provider` calls, peak concurrency, known encoded bytes, failures, cancellations, and resolution time;
+- `fonts`: registered families and `FontProvider` requests, bytes, failures, peak concurrency, and time;
+- `localizations`: `LocalizationProvider` requests, resolved values, failures, peak concurrency, and time;
+- `scenes`: active scenes and scenes waiting for context restoration.
 
-const pendingScene = renderer.createProfileScene({
-  masterData,
-  documentKey: "preview",
-  profile,
-  signal: controller.signal,
-});
+Telemetry records counts, timings, capacities, and recovery state only. It holds no source text, stable IDs, resource URLs, font names, or player data.
 
-controller.abort();
+## Browser support and building
 
-await pendingScene; // rejects if creation was still in progress
+The runtime needs:
 
-const scene = await renderer.createProfileScene({ masterData, documentKey: "preview", profile });
-await scene.destroy();
-await masterData.destroy();
-renderer.destroy();
-```
+- WebGL2;
+- ES modules and module Web Workers;
+- WebAssembly with exception handling (the runtime is compiled with `-fwasm-exceptions`);
+- a secure context, because font and atlas page hashes use `crypto.subtle`;
+- `createImageBitmap()` for encoded images;
+- IndexedDB, optionally, for the glyph cache and prebuilt atlas packages.
 
-`signal` 只取消仍在进行的 scene creation；已创建 scene 通过 `destroy()` 释放。销毁 scene 会释放图片 lease、atlas lease、GPU texture 与 core scene。`renderer.destroy()` 会终止 worker，并取消仍在进行的资源获取。
+The FreeType build in the runtime contains only the TrueType, CFF, SFNT, PSaux, PSNames, and smooth rasterizer modules. CPU EDT is the default glyph SDF generator; the analytic generator exists for debugging and comparison.
 
-## 从源码构建
-
-使用仓库提供的 container toolchain；它固定 FreeType、Emscripten 与 Rust target 环境。
+To build the package from a repository checkout:
 
 ```sh
-npm run build
+cd crates/sekai-profile-wasm
+npm ci
+npm run build        # WebAssembly runtime (build.sh) and TypeScript
 npm run typecheck
 npm run test:gates
-npm run verify:wasm:runtime
-npm run measure:wasm:size
-npm run audit:public
+npm run demo:serve   # workbench at http://127.0.0.1:8088/demo/
 ```
 
-FreeType 只启用 runtime 所需的 TrueType、CFF、SFNT、PS auxiliary/name 和 smooth raster modules。CPU EDT 是默认 glyph SDF backend；analytic backend 仅用于显式 debug 与 parity 分析。
+`npm run build:wasm` runs `build.sh`, which builds the runtime in the Docker image defined by `Dockerfile` (Emscripten and a pinned Rust toolchain), or directly when Docker is absent and `emcc` and `cargo` are on `PATH`. [Development](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/docs/development.md) lists every script and CI check, and the [demo README](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/crates/sekai-profile-wasm/demo/README.md) describes the workbench.
+
+## Exports
+
+| Export | Kind | Purpose |
+| --- | --- | --- |
+| `BrowserRenderer`, `BrowserScene` | class | Rendering and scene state. |
+| `BrowserRendererError` | class | Error with a `code`. |
+| `RendererWorkerError` | class | Error with a `code`, raised by the worker. |
+| `BrowserAuthoringClient`, `RendererAuthoringDocument` | class | Document editing. |
+| `AUTHORING_CHECKPOINT_SCHEMA` | constant | Schema tag of `AuthoringCheckpoint`. |
+| `createHttpPrebuiltSdfAtlasProvider`, `createOriginPrebuiltSdfAtlasPackage` | function | Prebuilt atlas sources. |
+| `isValidPrebuiltSdfAtlasManifest` | function | Checks a manifest against a family name. |
+| `PrebuiltSdfAtlasStorageError` | class | Atlas installation error with a `code`. |
+| `FontProviderManager`, `LocalizationProviderManager` | class | The bounded provider queues the renderer uses. |
+| `BrowserRendererOptions`, `ProfileSceneCreateOptions`, `MasterDataTableLoader`, `MasterDataTableRequest`, `RendererMasterData` | type | Renderer and masterdata API. |
+| `ResourceProvider`, `ResourceDescriptor`, `ResourceContext`, `ResourceSource`, `ProvidedResource` | type | Resource provider contract. |
+| `FontProvider`, `FontRequest`, `FontContext`, `ProvidedFont`, `FontProviderStats` | type | Font provider contract. |
+| `LocalizationProvider`, `LocalizationRequest`, `LocalizationContext`, `LocalizationProviderStats` | type | Localization provider contract. |
+| `PrebuiltSdfAtlasProvider`, `PrebuiltSdfAtlasManifest`, `PrebuiltSdfAtlasPage`, `PrebuiltSdfAtlasGlyph`, `OriginPrebuiltSdfAtlasPackage`, `PrebuiltSdfAtlasInstallOptions`, `PrebuiltSdfAtlasInstallProgress`, `PrebuiltSdfAtlasPackageStatus`, `PrebuiltSdfAtlasStorageErrorCode` | type | Prebuilt atlas API. |
+| `CoreSceneDump`, `CoreSceneDelta`, `CoreInteractionRegion`, `CoreControlBinding`, `StableId` | type | Dump and delta shapes. |
+| `AuthoringCommand`, `AuthoringDelta`, `AuthoringCategory`, `AuthoringChangeKind`, `AuthoringElementChange`, `AuthoringElementId`, `AuthoringSelection`, `AuthoringPageChange`, `AuthoringPageChangeKind`, `AuthoringCheckpoint`, `GameProfileDocument` | type | Authoring API. |
+| `RendererFontContract`, `RendererWorkerStats` | type | Worker font-engine contract and counters. |
 
 ## License
 
-AGPL-3.0-only，并附带 `LICENSE-EXCEPTION` 中的 browser linking exception。exception 适用于未修改 package 的浏览器使用；修改 renderer、服务端使用和非浏览器使用仍受完整 AGPL 约束，包括网络交互场景下的源代码提供义务。
+AGPL-3.0-only ([LICENSE](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/crates/sekai-profile-wasm/LICENSE)) with the additional permission in [LICENSE-EXCEPTION](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/crates/sekai-profile-wasm/LICENSE-EXCEPTION). The permission lets a web page load an unmodified copy of the published package in an end user's browser and link it with its own front-end code without that code becoming subject to the AGPL. Modified builds of the package or the renderer, and use on a server or in any non-browser environment such as Node.js, fall under the full AGPL, including its network-use source requirement. [NOTICE](https://github.com/empty-sekai/sekai-custom-profile-sdk/blob/main/crates/sekai-profile-wasm/NOTICE) describes the bundled FreeType and its license.
