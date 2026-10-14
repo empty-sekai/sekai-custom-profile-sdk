@@ -67,7 +67,7 @@ export type {
 export type {
   RendererMasterData,
 } from "./worker-client.js";
-export { RendererAuthoringDocument } from "./worker-client.js";
+export { RendererAuthoringDocument, RendererWorkerError } from "./worker-client.js";
 export { AUTHORING_CHECKPOINT_SCHEMA } from "./types/authoring.js";
 export type {
   AuthoringCheckpoint,
