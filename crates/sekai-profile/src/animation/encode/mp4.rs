@@ -109,6 +109,40 @@ struct NativeX264Encoder {
     _private: [u8; 0],
 }
 
+// The libx264 encoder entry points implemented in `native/x264_encoder.c`.
+//
+// # Safety
+//
+// `allium_x264_create` returns either null or a heap-allocated handle that
+// owns one open libx264 encoder, configured for `width` x `height` I420 input
+// at `fps`, with `crf` applied as a fixed quantizer (`X264_RC_CQP`), no
+// B-frames, no lookahead and one thread. It returns null for non-positive
+// dimensions or `fps`, a `crf` outside `0..=51`, or an encoder that fails to
+// open. A non-null handle must be released by exactly one
+// `allium_x264_destroy` call; no function here may receive it after that
+// call, and two calls on it must never overlap.
+//
+// `allium_x264_encode` reads one complete frame from `yuv420p`: the
+// `width * height` byte luma plane followed by two chroma planes of
+// `width / 2 * height / 2` bytes, rows tightly packed. `mb_info` must hold
+// one flag byte per 16x16 macroblock, `width.div_ceil(16) *
+// height.div_ceil(16)` bytes in raster order. libx264 copies the frame
+// during the call but keeps `mb_info` until it encodes the picture; with the
+// configuration above every picture is encoded by the call that submits it,
+// so both buffers need to stay valid only for that call. `pts` values must
+// increase from call to call.
+//
+// `allium_x264_encode` and `allium_x264_flush` write through `output` and
+// `output_size`, which must be valid for writes. On a non-negative return,
+// `*output` addresses `*output_size` bytes of Annex B NAL units in a buffer
+// the handle owns; `*output` may be null when `*output_size` is 0. The
+// buffer is reused, and may be reallocated, by the next
+// `allium_x264_encode` or `allium_x264_flush` call on the same handle and is
+// freed by `allium_x264_destroy`, so the bytes must be copied out before
+// either. The caller never frees it. A negative return carries no output.
+//
+// `allium_x264_delayed_frames` reads the number of pictures the encoder
+// still holds; it accepts a null handle and returns 0 for it.
 unsafe extern "C" {
     fn allium_x264_create(
         width: std::ffi::c_int,
@@ -133,10 +167,25 @@ unsafe extern "C" {
     fn allium_x264_destroy(encoder: *mut NativeX264Encoder);
 }
 
-struct DirectX264Encoder(*mut NativeX264Encoder);
+/// Owns one native libx264 handle for its whole lifetime.
+///
+/// The handle is created in `new` and destroyed once in `Drop`. Every call
+/// takes `&mut self`, and the raw pointer makes the type neither `Send` nor
+/// `Sync`, so calls on the handle never overlap.
+struct DirectX264Encoder {
+    handle: *mut NativeX264Encoder,
+    /// Bytes of one I420 frame at the handle's dimensions.
+    frame_bytes: usize,
+    /// Bytes of one macroblock flag map at the handle's dimensions.
+    mb_info_bytes: usize,
+}
 
 impl DirectX264Encoder {
     fn new(spec: &AnimationEncodeSpec, config: &H264EncoderConfig) -> Result<Self, String> {
+        // SAFETY: `allium_x264_create` takes only integers and validates them,
+        // returning null on invalid input or failure. A null result becomes an
+        // error below; a non-null one moves straight into `Self`, whose `Drop`
+        // is then the only place that destroys it.
         let encoder = unsafe {
             allium_x264_create(
                 spec.width as std::ffi::c_int,
@@ -146,10 +195,18 @@ impl DirectX264Encoder {
             )
         };
         if encoder.is_null() {
-            Err("initialize direct libx264 encoder failed".into())
-        } else {
-            Ok(Self(encoder))
+            return Err("initialize direct libx264 encoder failed".into());
         }
+        // The native side places the second chroma plane a quarter of the
+        // luma size after the first and reads `width / 2` by `height / 2`
+        // bytes from each.
+        let (width, height) = (spec.width as usize, spec.height as usize);
+        let luma = width * height;
+        Ok(Self {
+            handle: encoder,
+            frame_bytes: luma + luma / 4 + (width / 2) * (height / 2),
+            mb_info_bytes: width.div_ceil(16) * height.div_ceil(16),
+        })
     }
 
     fn encode(
@@ -159,11 +216,28 @@ impl DirectX264Encoder {
         pts: i64,
         output: &mut Vec<u8>,
     ) -> Result<(), String> {
+        if yuv.len() < self.frame_bytes || mb_info.len() < self.mb_info_bytes {
+            return Err(format!(
+                "direct libx264 frame {pts} needs {} I420 and {} macroblock bytes, got {} and {}",
+                self.frame_bytes,
+                self.mb_info_bytes,
+                yuv.len(),
+                mb_info.len()
+            ));
+        }
         let mut data = std::ptr::null();
         let mut size = 0usize;
+        // SAFETY: `self.handle` is the non-null handle this wrapper owns and
+        // has not destroyed, and `&mut self` excludes any concurrent call on
+        // it. The check above ensures `yuv` holds at least one I420 frame and
+        // `mb_info` one flag per macroblock at the dimensions the handle was
+        // created for, which is all the C side reads. Both slices outlive the
+        // call, which is all the configured encoder needs. `data` and `size`
+        // are local, writable output slots. `encode_mp4_into` passes the frame
+        // index as `pts`, so frames arrive in increasing order.
         let encoded = unsafe {
             allium_x264_encode(
-                self.0,
+                self.handle,
                 yuv.as_ptr(),
                 mb_info.as_ptr(),
                 pts,
@@ -175,20 +249,35 @@ impl DirectX264Encoder {
             return Err(format!("direct libx264 frame {pts} failed"));
         }
         if size != 0 {
+            // SAFETY: the call above succeeded with `size != 0` and a non-null
+            // `data`, so `data` addresses `size` initialized bytes in the
+            // handle's output buffer. That buffer is not touched again until
+            // the next call on the handle, which `&mut self` orders after this
+            // copy.
             output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, size) });
         }
         Ok(())
     }
 
     fn flush(&mut self, output: &mut Vec<u8>) -> Result<(), String> {
-        while unsafe { allium_x264_delayed_frames(self.0) } > 0 {
+        // SAFETY: `self.handle` is the non-null handle this wrapper owns and has
+        // not destroyed; the call only reads the encoder's delayed-picture
+        // count.
+        while unsafe { allium_x264_delayed_frames(self.handle) } > 0 {
             let mut data = std::ptr::null();
             let mut size = 0usize;
-            let encoded = unsafe { allium_x264_flush(self.0, &mut data, &mut size) };
+            // SAFETY: `self.handle` is the non-null handle this wrapper owns and
+            // has not destroyed, `&mut self` excludes any concurrent call on
+            // it, and `data` and `size` are local, writable output slots.
+            let encoded = unsafe { allium_x264_flush(self.handle, &mut data, &mut size) };
             if encoded < 0 || (size != 0 && data.is_null()) {
                 return Err("flush direct libx264 encoder failed".into());
             }
             if size != 0 {
+                // SAFETY: the flush above succeeded with `size != 0` and a
+                // non-null `data`, so `data` addresses `size` initialized bytes
+                // in the handle's output buffer, which stays untouched until
+                // the next call on the handle in the following iteration.
                 output.extend_from_slice(unsafe { std::slice::from_raw_parts(data, size) });
             }
         }
@@ -198,7 +287,11 @@ impl DirectX264Encoder {
 
 impl Drop for DirectX264Encoder {
     fn drop(&mut self) {
-        unsafe { allium_x264_destroy(self.0) };
+        // SAFETY: `self.handle` is the non-null handle `new` stored, it is never
+        // copied out of this wrapper, and `drop` runs once, so this is the
+        // single `allium_x264_destroy` call for the handle and nothing uses
+        // the handle or its output buffer afterwards.
+        unsafe { allium_x264_destroy(self.handle) };
     }
 }
 

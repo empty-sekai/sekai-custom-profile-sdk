@@ -6,6 +6,41 @@
 
 use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
 
+// The libjpeg-turbo encoder entry points implemented in
+// `native/jpeg_turbo_encoder.c`.
+//
+// # Safety
+//
+// `allium_jpeg_encode_rgba` reads `height` rows of `width * 4` bytes from
+// `rgba`, so `rgba` must be valid for `width * height * 4` bytes of RGBA8.
+//
+// `allium_jpeg_encode_yuv420` reads `height` luma rows `y_stride` bytes apart
+// from `y_plane` and `height / 2` chroma rows `chroma_stride` bytes apart
+// from each of `cb_plane` and `cr_plane`. Raw-data compression reads every
+// row in whole 8-sample DCT blocks, so each luma row must be readable for
+// `width.div_ceil(8) * 8` bytes and each chroma row for
+// `(width / 2).div_ceil(8) * 8` bytes; `y_stride` and `chroma_stride` must
+// be at least those widths.
+//
+// Both encoders return 0 on success; 2 for a rejected argument, meaning a
+// null pointer, a zero dimension, a `quality` outside `1..=100` or, for the
+// YUV entry point, an odd dimension or a stride below the image width; and 1
+// or 3 for a failed encode. `output` and `output_length` must be valid for
+// writes. On success the encoder has allocated the output buffer itself and
+// stored its address in `*output` and its byte count in `*output_length`;
+// the caller then owns that buffer and must release it with exactly one
+// `allium_jpeg_free` call, and with no other deallocator. On a failed encode
+// the library frees any partial buffer and stores null and 0. On a rejected
+// argument it writes neither, so the caller's initial values remain.
+// `allium_jpeg_free` calls `free`, so a null pointer is a no-op.
+//
+// `error_message` is either null or writable for `error_capacity` bytes. When
+// libjpeg reports an error, its `format_message` writes the diagnostic into
+// a non-null buffer with a non-zero `error_capacity`; that write may take up
+// to `JMSG_LENGTH_MAX` (200) bytes regardless of `error_capacity`, so such a
+// buffer must be at least that large, and the library then forces a NUL at
+// `error_capacity - 1`. Every other status leaves the buffer untouched, so a
+// caller that reads it back as a C string must NUL-initialize it first.
 unsafe extern "C" {
     fn allium_jpeg_encode_rgba(
         rgba: *const u8,
@@ -52,6 +87,13 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
     let mut output = std::ptr::null_mut();
     let mut output_length: c_ulong = 0;
     let mut error = [0 as c_char; 256];
+    // SAFETY: `rgba.len()` was checked to equal `width * height * 4` above, so
+    // the encoder's `height` reads of `width * 4` bytes stay inside the slice.
+    // `output` and `output_length` are local, writable slots, and `error` is a
+    // zeroed 256-byte buffer, larger than `JMSG_LENGTH_MAX`, passed with its
+    // own length. `output` starts null, so on any non-zero status it is still
+    // null (the library stores null after a failed encode and leaves it alone
+    // for a rejected argument) and the early return below has nothing to free.
     let status = unsafe {
         allium_jpeg_encode_rgba(
             rgba.as_ptr(),
@@ -65,6 +107,10 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
         )
     };
     if status != 0 {
+        // SAFETY: `error` was zeroed before the call and the library only ever
+        // writes a NUL-terminated message into it, so it holds a C string
+        // within its 256 bytes (empty when nothing was written), and it
+        // outlives the borrowed `CStr`.
         let detail = unsafe { CStr::from_ptr(error.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -80,11 +126,21 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
     let length = match usize::try_from(output_length) {
         Ok(length) => length,
         Err(_) => {
+            // SAFETY: `output` is the non-null buffer the successful encode
+            // allocated and handed to the caller, and this early return is the
+            // only `allium_jpeg_free` it receives.
             unsafe { allium_jpeg_free(output.cast()) };
             return Err("libjpeg-turbo output length overflow".into());
         }
     };
+    // SAFETY: the successful encode stored a non-null `output` addressing
+    // `output_length` initialized bytes, and `length` is that count converted
+    // to `usize`. The buffer stays allocated until the `allium_jpeg_free`
+    // below, after `to_vec` has copied it.
     let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
+    // SAFETY: `output` is the non-null buffer the successful encode allocated,
+    // nothing borrows it any more, and this is the only `allium_jpeg_free` it
+    // receives on this path.
     unsafe { allium_jpeg_free(output.cast()) };
     Ok(encoded)
 }
@@ -132,12 +188,27 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
         {
             return Err("AVX-512 JPEG YUV420 is unavailable".into());
         }
+        // SAFETY: `avx512f` and `avx512bw` were detected immediately above.
+        // `rgba.len()` equals `width * height * 4` and both dimensions are
+        // non-zero and even, which is what the kernel's two-row, two-column
+        // traversal reads. The kernel resizes `scratch` to the strided layout
+        // it writes, so its previous length and contents do not matter.
         let yuv = unsafe {
             rgba_to_full_range_yuv420_avx512(rgba, width as usize, height as usize, scratch)
         };
         let mut output = std::ptr::null_mut();
         let mut output_length: c_ulong = 0;
         let mut error = [0 as c_char; 256];
+        // SAFETY: the plane pointers come from `yuv`, which holds `height`
+        // luma rows of `y_stride = width.div_ceil(16) * 16` bytes and
+        // `height / 2` rows of `chroma_stride = (width / 2).div_ceil(8) * 8`
+        // bytes per chroma plane, with the padding columns filled; both
+        // strides cover the whole 8-sample DCT blocks raw-data compression
+        // reads, and `yuv` stays borrowed until after the call. `output` and
+        // `output_length` are local, writable slots, and `error` is a zeroed
+        // 256-byte buffer, larger than `JMSG_LENGTH_MAX`, passed with its own
+        // length. `output` starts null, so on any non-zero status it is still
+        // null and the early return below has nothing to free.
         let status = unsafe {
             allium_jpeg_encode_yuv420(
                 yuv.y_plane().as_ptr(),
@@ -155,6 +226,10 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
             )
         };
         if status != 0 {
+            // SAFETY: `error` was zeroed before the call and the library only
+            // ever writes a NUL-terminated message into it, so it holds a C
+            // string within its 256 bytes, and it outlives the borrowed
+            // `CStr`.
             let detail = unsafe { CStr::from_ptr(error.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
@@ -170,11 +245,21 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
         let length = match usize::try_from(output_length) {
             Ok(length) => length,
             Err(_) => {
+                // SAFETY: `output` is the non-null buffer the successful
+                // encode allocated and handed to the caller, and this early
+                // return is the only `allium_jpeg_free` it receives.
                 unsafe { allium_jpeg_free(output.cast()) };
                 return Err("libjpeg-turbo raw YUV output length overflow".into());
             }
         };
+        // SAFETY: the successful encode stored a non-null `output` addressing
+        // `output_length` initialized bytes, and `length` is that count
+        // converted to `usize`. The buffer stays allocated until the
+        // `allium_jpeg_free` below, after `to_vec` has copied it.
         let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
+        // SAFETY: `output` is the non-null buffer the successful encode
+        // allocated, nothing borrows it any more, and this is the only
+        // `allium_jpeg_free` it receives on this path.
         unsafe { allium_jpeg_free(output.cast()) };
         Ok(encoded)
     }
@@ -250,6 +335,27 @@ fn full_range_cr(red: i32, green: i32, blue: i32) -> u8 {
     (((128 * red - 107 * green - 21 * blue + 128) >> 8) + 128).clamp(0, 255) as u8
 }
 
+/// Converts one RGBA frame into full-range yuv420p inside `storage`, and
+/// returns a view of the three planes.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, since the body
+/// executes AVX-512 instructions unconditionally.
+///
+/// `width` and `height` must be non-zero and even, with `width * height * 4`
+/// free of overflow: rows are processed in pairs, the scalar tail reads pixel
+/// pairs, and the edge padding reads the sample at `width - 1` and the chroma
+/// sample at `width / 2 - 1`. `rgba` must be valid for `width * height * 4`
+/// bytes; the vector path loads 32 pixels from `top.add(x * 4)` while
+/// `x < width & !31`, and the scalar tail reads the remaining columns.
+///
+/// The writes go through raw pointers into `storage`, which the body first
+/// resizes to `y_stride * height + 2 * chroma_stride * (height / 2)` with
+/// `y_stride = width.div_ceil(16) * 16` and
+/// `chroma_stride = (width / 2).div_ceil(8) * 8`. Every byte of that layout is
+/// written, including the padding columns, which repeat the last sample of
+/// their row, so the previous contents of `storage` are never read.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn rgba_to_full_range_yuv420_avx512<'a>(
@@ -368,6 +474,14 @@ unsafe fn rgba_to_full_range_yuv420_avx512<'a>(
     output
 }
 
+/// Splits sixteen packed RGBA8 pixels, one per 32-bit lane, into red, green
+/// and blue lanes holding `0..=255`.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, the feature this function is
+/// compiled with; it uses `_mm512_and_si512` and `_mm512_srli_epi32` and
+/// touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn avx512_rgb_channels(
@@ -386,6 +500,15 @@ unsafe fn avx512_rgb_channels(
     )
 }
 
+/// Averages horizontally adjacent lane pairs of `top` and `bottom`, selected
+/// by the lane indices in `even` and `odd`, into eight 2x2 chroma samples in
+/// the low eight lanes, rounding with `+2` before the shift by two.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, the feature this function is
+/// compiled with; it uses `_mm512_permutexvar_epi32`, which reads only the low
+/// four bits of each index lane, and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn avx512_pair_average(
@@ -410,6 +533,14 @@ unsafe fn avx512_pair_average(
     ))
 }
 
+/// Full-range luma for the sixteen lanes of `red`, `green` and `blue`, each
+/// holding `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32` and
+/// `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_full_range_y(
@@ -431,6 +562,14 @@ unsafe fn avx512_full_range_y(
     _mm512_cvtusepi32_epi8(value)
 }
 
+/// Full-range Cb for the sixteen lanes of `red`, `green` and `blue`, each
+/// holding `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32`,
+/// `_mm512_srai_epi32` and `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_full_range_cb(
@@ -455,6 +594,14 @@ unsafe fn avx512_full_range_cb(
     _mm512_cvtusepi32_epi8(value)
 }
 
+/// Full-range Cr for the sixteen lanes of `red`, `green` and `blue`, each
+/// holding `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32`,
+/// `_mm512_srai_epi32` and `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_full_range_cr(
