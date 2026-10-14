@@ -35,6 +35,7 @@ cc = "1"
 
 [dev-dependencies]
 axum = "0.8"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
 
 [package.metadata.docs.rs]
@@ -54,6 +55,10 @@ parallel = ["dep:rayon"]
 animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
 # Diagnostics for the SDF generators (`compare_sdf`).
 dev = ["dep:tracing-subscriber"]
+
+[[bench]]
+name = "render"
+harness = false
 
 [[example]]
 name = "compare_sdf"
