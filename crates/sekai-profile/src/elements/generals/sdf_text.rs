@@ -23,17 +23,48 @@ pub(crate) struct GeneralSdfTextSpec {
     pub(super) render_placement: TextRenderPlacement,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A lowered General Text command: its string, layout widths and TMP style
+/// in the units of the lowered scene.
+#[derive(Clone, Copy)]
+pub(crate) struct LoweredGeneralText<'a> {
+    pub text: &'a str,
+    /// Width of the command bounds.
+    pub bounds_width: f32,
+    /// Wrapping width. When set, the text is laid out and wrapped to it
+    /// instead of `bounds_width`.
+    pub max_width: Option<f32>,
+    pub color: [f32; 4],
+    /// TMP horizontal alignment: `1` left, `2` center, `4` right.
+    pub alignment: u8,
+    pub font_size: f32,
+    pub line_spacing: f32,
+    pub font_id: i32,
+    pub render_placement: TextRenderPlacement,
+    /// Glyph outline, overriding the element's own.
+    pub outline: Option<crate::text::TextOutlineOverride>,
+}
+
+impl LoweredGeneralText<'_> {
+    /// The width the text is laid out in.
+    fn layout_width(&self) -> f32 {
+        self.max_width.unwrap_or(self.bounds_width)
+    }
+}
+
 pub(crate) fn build_general_sdf_text_from_lowered(
-    text: &str,
-    width: f32,
-    color: [f32; 4],
-    alignment: u8,
-    lowered_font_size: f32,
-    line_spacing: f32,
-    font_id: i32,
-    render_placement: TextRenderPlacement,
+    lowered: &LoweredGeneralText<'_>,
 ) -> Result<GeneralSdfTextSpec, String> {
+    let LoweredGeneralText {
+        text,
+        color,
+        alignment,
+        font_size: lowered_font_size,
+        line_spacing,
+        font_id,
+        render_placement,
+        ..
+    } = *lowered;
+    let width = lowered.layout_width();
     let align = match alignment {
         1 => SdfTextAlign::Left,
         2 => SdfTextAlign::Center,
@@ -71,35 +102,16 @@ pub(crate) fn build_general_sdf_text_from_lowered(
 /// General `TextElement`, then captures the shared TMP glyph stream. The
 /// semantic compositor supplies only the command transform and clip; it does
 /// not own advances, wrapping, baselines, or font fallback.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn capture_general_sdf_text_from_lowered(
     base_affine: [f32; 6],
-    text: &str,
-    bounds_width: f32,
-    color: [f32; 4],
-    alignment: u8,
-    lowered_font_size: f32,
-    line_spacing: f32,
-    font_id: i32,
-    max_width: Option<f32>,
-    render_placement: TextRenderPlacement,
-    outline: Option<crate::text::TextOutlineOverride>,
+    lowered: &LoweredGeneralText<'_>,
     md: &MasterData,
     atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
     observer: &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, TextSdfCaptureError>),
 ) -> Result<TextSdfCaptureTimings, String> {
-    let layout_width = max_width.unwrap_or(bounds_width);
-    let mut spec = build_general_sdf_text_from_lowered(
-        text,
-        layout_width,
-        color,
-        alignment,
-        lowered_font_size,
-        line_spacing,
-        font_id,
-        render_placement,
-    )?;
-    if max_width.is_some() {
+    let layout_width = lowered.layout_width();
+    let mut spec = build_general_sdf_text_from_lowered(lowered)?;
+    if lowered.max_width.is_some() {
         if let Some(wrapped) =
             wrap_rich_text_to_width_with_atlases(&spec.element, md, layout_width, atlases)
         {
@@ -121,7 +133,7 @@ pub(crate) fn capture_general_sdf_text_from_lowered(
         md,
         Some(atlases),
         spec.render_placement,
-        outline,
+        lowered.outline,
         observer,
     );
     Ok(timings)

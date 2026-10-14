@@ -386,6 +386,18 @@ must match it, so `set_font_dirs` runs before `with_atlas_dir`.
 renderer that draws nothing but cannot fail at startup. Build the atlases first, or check
 `capabilities().text_atlases` after installing them.
 
+## Migrating from 0.7
+
+| 0.7 | Now |
+| --- | --- |
+| `render_animation(card, profile, document_key, region, preset, config)` | `render_animation(card, profile, AnimationDocument { key, region }, preset, config)`; `render_animation_pinned` and `animation_preflight` take the same `AnimationDocument` |
+| Animation APIs return `Result<_, String>` | They return `Result<_, AnimationError>`; frame-source closures given to `encode_rgba_frames` return `AnimationError` too, `AnimationError::FrameSource` wrapping an error of their own |
+| `profile_compositor::render_authored_profile_into_{simd,scalar}(scene, store, text_atlases, md, assets, kind, index, pixels, width, height)` | `(scene, CompositorSources { store, text, assets }, kind, index, RgbaSurface::new(pixels, width, height)?)`; `text` is `Some(SemanticSdfContext { text_atlases, md })` when SDF text is drawn |
+| `profile_compositor::render_authored_image_into_simd(scene, store, kind, index, pixels, width, height)` | `(scene, store, kind, index, RgbaSurface::new(pixels, width, height)?)` |
+| A destination buffer of the wrong length | Rejected by `RgbaSurface::new` with `ProfileCompositorError::SurfaceLength` |
+| `SdfDrawCommand::from_atlas_glyph(kind, atlas_set, glyph, atlas_point_size, atlas_spread, baseline_origin, font_size, local_to_device, material)` | `from_atlas_glyph(kind, SdfGlyphAtlas { atlas_set, point_size, spread }, glyph, SdfGlyphPlacement { baseline_origin, font_size, local_to_device }, material)` |
+| `core::profile_resolve::compile_profile_scene_with_localizations(…, locale, resource_metadata, line_indent, localized_text)` | `(…, ProfileLocalization { locale, localized_text }, resource_metadata, line_indent)` |
+
 ## Migrating from 0.6
 
 0.6 named the crates `sekai-profile-renderer`, `sekai-profile-renderer-host` and

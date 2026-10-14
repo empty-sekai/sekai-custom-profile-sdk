@@ -21,6 +21,8 @@
 use freetype::face::LoadFlag;
 use freetype::{Face, Library, Matrix, Vector};
 
+use crate::profile_compositor::RgbaSurface;
+
 /// A 2×3 affine transform `[a, b, c, d, e, f]` sending `(x, y)` to
 /// `(a·x + c·y + e, b·x + d·y + f)`.
 pub(crate) type Affine = [f32; 6];
@@ -47,19 +49,22 @@ const WHITE_TEXT_COVERAGE: [u8; 256] = [
     255, 255,
 ];
 
-/// Draws `text` in opaque white over premultiplied RGBA through `matrix`,
-/// horizontally centered on the local origin with its baseline at local
-/// `baseline`. Returns `false` when the family's font file is not available.
+/// Draws `text` in opaque white over `surface` through `matrix`, horizontally
+/// centered on the local origin with its baseline at local `baseline`.
+/// Returns `false` when the family's font file is not available.
 pub(crate) fn draw_centered_white_text(
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
     family: &str,
     text: &str,
     font_size: f32,
     matrix: Affine,
     baseline: f32,
 ) -> Result<bool, String> {
+    let RgbaSurface {
+        pixels: destination,
+        width,
+        height,
+    } = surface;
     let Some(bytes) = crate::sdf::outline::load_font_bytes_for_family(family) else {
         return Ok(false);
     };

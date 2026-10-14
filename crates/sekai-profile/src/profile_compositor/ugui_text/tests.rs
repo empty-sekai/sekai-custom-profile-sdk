@@ -199,9 +199,7 @@ fn render(source: UguiTextSource) -> Option<(Vec<u8>, RasterImageStats)> {
     );
     let mut pixels = canvas(SIZE, SIZE);
     let stats = raster_ugui_text_command(
-        &mut pixels,
-        SIZE,
-        SIZE,
+        RgbaSurface::new(&mut pixels, SIZE, SIZE).expect("tight surface"),
         &command,
         &layer([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
         &source,
@@ -227,9 +225,7 @@ fn a_fallback_family_without_an_installed_file_fails_the_command() {
         source.clone(),
     );
     let result = raster_ugui_text_command(
-        &mut canvas(SIZE, SIZE),
-        SIZE,
-        SIZE,
+        RgbaSurface::new(&mut canvas(SIZE, SIZE), SIZE, SIZE).expect("tight surface"),
         &command,
         &layer([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
         &source,

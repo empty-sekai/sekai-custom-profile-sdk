@@ -6,9 +6,19 @@
 use std::arch::x86_64::*;
 
 use sekai_profile_core::pixel_sampling::{PIXEL_CENTRE, SHAPE_SAMPLES, SHAPE_SAMPLE_WEIGHT};
-use sekai_profile_core::{BlendMode, LinearGradient, Matrix2d, Rect, ShapePrimitive};
+use sekai_profile_core::{BlendMode, Matrix2d, Rect, ShapePrimitive};
 
-use super::ImageClipGeometry;
+use super::{ImageClipGeometry, ImageDraw, SemanticShape};
+
+/// Up to 16 adjacent canvas pixels of row `y`, starting at column `x`: the
+/// unit a packet kernel computes.
+#[derive(Clone, Copy)]
+pub(super) struct PixelPacket {
+    pub(super) x: u32,
+    pub(super) y: u32,
+    /// Number of pixels in the packet, at most 16.
+    pub(super) lane_count: u32,
+}
 
 /// # Safety
 ///
@@ -81,36 +91,44 @@ pub(super) unsafe fn axis_aligned_image_clip_mask(
     image_clip_mask(local_x, local_y, bounds, clip, active) as u16
 }
 
+/// Samples `draw` at the pixels of `packet` through `inverse`, the inverse of
+/// the draw's matrix, and blends the samples into `destination`. Only the
+/// source, bounds, UV, blend mode and image clip of `draw` are read. Returns
+/// the mask of lanes written.
+///
 /// # Safety
 ///
 /// The caller must have established that the CPU supports `avx512f` and
 /// `avx512bw`; the compositor does so with `is_x86_feature_detected!` before
-/// it selects `ImageExecutor::Simd`. `lane_count` must be at most 16, and the
-/// `lane_count * 4` bytes at `destination` must be readable and writable.
-/// `source` must address a row-strided RGBA8 image of `source_height` rows of
-/// `source_row_bytes` bytes, with `source_row_bytes >= source_width * 4`, and
-/// `source_row_bytes * source_height` must not exceed `i32::MAX`: the gather
-/// offsets are `i32` and texel coordinates are clamped to
-/// `0..source_width` and `0..source_height`, so every gathered pixel then lies
-/// inside the image. Only lanes that pass the bounds and clip tests are
-/// gathered or written.
+/// it selects `ImageExecutor::Simd`. `packet.lane_count` must be at most 16,
+/// and the `packet.lane_count * 4` bytes at `destination` must be readable and
+/// writable. `draw.source` must be a row-strided RGBA8 image whose `pixels`
+/// hold `entry.height` rows of `entry.row_bytes` bytes, with
+/// `row_bytes >= entry.width * 4`, and `row_bytes * entry.height` must not
+/// exceed `i32::MAX`: the gather offsets are `i32` and texel coordinates are
+/// clamped to `0..entry.width` and `0..entry.height`, so every gathered pixel
+/// then lies inside the image. Only lanes that pass the bounds and clip tests
+/// are gathered or written.
 #[target_feature(enable = "avx512f,avx512bw")]
-#[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn sample_affine_and_blend_rgba8_packet(
     destination: *mut u8,
-    source: *const u8,
-    source_row_bytes: i32,
-    source_width: u32,
-    source_height: u32,
+    packet: PixelPacket,
+    draw: &ImageDraw<'_>,
     inverse: &Matrix2d,
-    bounds: Rect,
-    uv: Rect,
-    x: u32,
-    y: u32,
-    lane_count: u32,
-    blend_mode: BlendMode,
-    image_clip: Option<ImageClipGeometry>,
 ) -> u16 {
+    let PixelPacket { x, y, lane_count } = packet;
+    let ImageDraw {
+        source,
+        bounds,
+        uv,
+        blend_mode,
+        image_clip,
+        ..
+    } = *draw;
+    let source_row_bytes = source.entry.row_bytes as i32;
+    let source_width = source.entry.width;
+    let source_height = source.entry.height;
+    let source = source.pixels.as_ptr();
     let packet_mask = if lane_count == 16 {
         u16::MAX
     } else {
@@ -199,30 +217,36 @@ pub(super) unsafe fn sample_affine_and_blend_rgba8_packet(
     active as u16
 }
 
+/// Covers the pixels of `packet` with `shape` laid over the local rectangle
+/// `bounds`, reached through `inverse`, and blends the coverage-weighted paint
+/// into `destination`. Returns the mask of lanes the shape covers.
+///
 /// # Safety
 ///
 /// The caller must have established that the CPU supports `avx512f`,
 /// `avx512bw` and `fma`; the compositor detects the first two with
 /// `is_x86_feature_detected!` before it selects `ImageExecutor::Simd`, and
-/// `fma` at the call site. `lane_count` must be at most 16, and the
-/// `lane_count * 4` bytes at `destination` must be readable and writable;
-/// only lanes below `lane_count` that the shape covers are accessed.
+/// `fma` at the call site. `packet.lane_count` must be at most 16, and the
+/// `packet.lane_count * 4` bytes at `destination` must be readable and
+/// writable; only lanes below `packet.lane_count` that the shape covers are
+/// accessed.
 #[target_feature(enable = "avx512f,avx512bw,fma")]
-#[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn raster_semantic_shape_packet(
     destination: *mut u8,
-    x: u32,
-    y: u32,
-    lane_count: u32,
+    packet: PixelPacket,
     inverse: &Matrix2d,
     bounds: Rect,
-    primitive: &ShapePrimitive,
-    fill: [f32; 4],
-    gradient: Option<&LinearGradient>,
-    stroke: [f32; 4],
-    stroke_width: f32,
+    shape: &SemanticShape<'_>,
     blend_mode: BlendMode,
 ) -> u16 {
+    let PixelPacket { x, y, lane_count } = packet;
+    let SemanticShape {
+        primitive,
+        fill,
+        gradient,
+        stroke,
+        stroke_width,
+    } = *shape;
     let packet_mask = if lane_count == 16 {
         u16::MAX
     } else {

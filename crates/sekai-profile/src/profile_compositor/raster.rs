@@ -1,16 +1,16 @@
 //! Shape and image command rasterizers on the scalar and packet executors, with
 //! texel sampling, alpha masks and the lit badge material.
 
-use sekai_profile_core::{
-    pixel_sampling, BlendMode, LayerSource, Matrix2d, Rect, SemanticCommandSource, ShapePrimitive,
-};
+use sekai_profile_core::{pixel_sampling, LayerSource, Matrix2d, Rect, SemanticCommandSource};
 
 #[cfg(target_arch = "x86_64")]
-use super::simd_x86;
+use super::simd_x86::{self, PixelPacket};
+#[cfg(target_arch = "x86_64")]
+use super::CompositionBounds;
 use super::{
     axis_aligned_command_clip, blend_pixel, compose_matrix, invert_matrix, mul_div_255_round,
-    quantize, transform_point, AxisAlignedClip, BadgeShading, ImageClipGeometry, ImageExecutor,
-    ProfileCompositorError, RasterImageStats,
+    quantize, transform_point, BadgeShading, ImageClipGeometry, ImageDraw, ImageExecutor,
+    ProfileCompositorError, RasterImageStats, RgbaSurface, SemanticShape,
 };
 use crate::render_object::MappedRenderObject;
 
@@ -47,21 +47,28 @@ fn image_clip_contains(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Draws `shape` over the bounds of `command`, with the command offset by
+/// `translate_y` along the layer's y axis.
 pub(super) fn raster_semantic_shape_command(
-    destination: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
+    surface: RgbaSurface<'_>,
     command: &SemanticCommandSource,
     layer: &LayerSource,
-    primitive: &ShapePrimitive,
-    fill: [f32; 4],
-    gradient: Option<&sekai_profile_core::LinearGradient>,
-    stroke: [f32; 4],
-    stroke_width: f32,
+    shape: SemanticShape<'_>,
     translate_y: f32,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
+    let RgbaSurface {
+        pixels: destination,
+        width: canvas_width,
+        height: canvas_height,
+    } = surface;
+    let SemanticShape {
+        primitive,
+        fill,
+        gradient,
+        stroke,
+        stroke_width,
+    } = shape;
     let bounds = command.bounds;
     if !bounds.x.is_finite()
         || !bounds.y.is_finite()
@@ -141,16 +148,14 @@ pub(super) fn raster_semantic_shape_command(
                 let active = unsafe {
                     simd_x86::raster_semantic_shape_packet(
                         destination.as_mut_ptr().add(destination_offset),
-                        x,
-                        y,
-                        packet,
+                        PixelPacket {
+                            x,
+                            y,
+                            lane_count: packet,
+                        },
                         &inverse,
                         bounds,
-                        primitive,
-                        fill,
-                        gradient,
-                        stroke,
-                        stroke_width,
+                        &shape,
                         command.blend_mode,
                     )
                 };
@@ -213,24 +218,29 @@ pub(super) fn raster_semantic_shape_command(
     Ok(stats)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn raster_image_command(
-    destination: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    source: MappedRenderObject<'_>,
-    bounds: Rect,
-    uv: Rect,
-    tint: [f32; 4],
-    matrix: Matrix2d,
-    blend_mode: BlendMode,
-    role: &str,
-    command_clip: Option<AxisAlignedClip>,
-    image_clip: Option<ImageClipGeometry>,
-    alpha_mask: Option<MappedRenderObject<'_>>,
-    badge: Option<BadgeShading<'_>>,
+    surface: RgbaSurface<'_>,
+    draw: &ImageDraw<'_>,
     executor: ImageExecutor,
 ) -> Result<RasterImageStats, ProfileCompositorError> {
+    let RgbaSurface {
+        pixels: destination,
+        width: canvas_width,
+        height: canvas_height,
+    } = surface;
+    let ImageDraw {
+        role,
+        source,
+        bounds,
+        uv,
+        tint,
+        matrix,
+        blend_mode,
+        command_clip,
+        image_clip,
+        alpha_mask,
+        badge,
+    } = *draw;
     validate_geometry(bounds, uv, tint, matrix, role)?;
     validate_object(source, role)?;
     if let Some(mask) = alpha_mask {
@@ -321,18 +331,14 @@ pub(super) fn raster_image_command(
         // spans clamped to that canvas.
         unsafe {
             return Ok(raster_axis_aligned_image_command(
-                destination,
-                canvas_width,
-                source,
-                bounds,
-                uv,
+                RgbaSurface {
+                    pixels: destination,
+                    width: canvas_width,
+                    height: canvas_height,
+                },
+                draw,
                 inverse,
-                blend_mode,
-                image_clip,
-                x0,
-                y0,
-                x1,
-                y1,
+                CompositionBounds { x0, y0, x1, y1 },
             ));
         }
     }
@@ -363,18 +369,13 @@ pub(super) fn raster_image_command(
                 let active_mask = unsafe {
                     simd_x86::sample_affine_and_blend_rgba8_packet(
                         destination_packet.as_mut_ptr(),
-                        source.pixels.as_ptr(),
-                        source.entry.row_bytes as i32,
-                        source.entry.width,
-                        source.entry.height,
+                        PixelPacket {
+                            x,
+                            y,
+                            lane_count: packet_end - x,
+                        },
+                        draw,
                         &inverse,
-                        bounds,
-                        uv,
-                        x,
-                        y,
-                        packet_end - x,
-                        blend_mode,
-                        image_clip,
                     )
                 };
                 let active_fragments = u64::from(active_mask.count_ones());
@@ -479,6 +480,11 @@ pub(super) fn raster_image_command(
     Ok(stats)
 }
 
+/// Blends `draw` over the device pixels of `span`. Only the source, bounds,
+/// UV, blend mode and image clip of `draw` are read: the caller folds the
+/// command clip into `span` and takes this path only for untinted draws
+/// without a mask or material.
+///
 /// # Safety
 ///
 /// The caller must have established that the CPU supports `avx512f` and
@@ -488,32 +494,39 @@ pub(super) fn raster_image_command(
 /// of an axis-aligned, positively scaled matrix, so every device column maps
 /// to one source column for the whole span.
 ///
-/// `destination` must be a canvas of `canvas_width * 4`-byte rows holding at
-/// least `y1` rows, and `x0 <= x1 <= canvas_width` and `y0 <= y1` must hold.
-/// `source.pixels` must be exactly `source.entry.row_bytes *
-/// source.entry.height` bytes with `row_bytes >= width * 4`, as
-/// `validate_object` checks, so that every row base `source_y * row_bytes`
-/// and every texel column below `width` addresses a pixel inside it. The
-/// kernels are called with raw pointers derived from these buffers and only
-/// touch the lanes each packet's mask selects.
+/// `surface.pixels` must hold at least `span.y1` rows of `surface.width * 4`
+/// bytes, and `span.x0 <= span.x1 <= surface.width` and `span.y0 <= span.y1`
+/// must hold. `draw.source.pixels` must be exactly
+/// `draw.source.entry.row_bytes * draw.source.entry.height` bytes with
+/// `row_bytes >= width * 4`, as `validate_object` checks, so that every row
+/// base `source_y * row_bytes` and every texel column below `width`
+/// addresses a pixel inside it. The kernels are called with raw pointers
+/// derived from these buffers and only touch the lanes each packet's mask
+/// selects.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
-#[allow(clippy::too_many_arguments)]
 unsafe fn raster_axis_aligned_image_command(
-    destination: &mut [u8],
-    canvas_width: u32,
-    source: MappedRenderObject<'_>,
-    bounds: Rect,
-    uv: Rect,
+    surface: RgbaSurface<'_>,
+    draw: &ImageDraw<'_>,
     inverse: Matrix2d,
-    blend_mode: BlendMode,
-    image_clip: Option<ImageClipGeometry>,
-    x0: u32,
-    y0: u32,
-    x1: u32,
-    y1: u32,
+    span: CompositionBounds,
 ) -> RasterImageStats {
     const INACTIVE_SOURCE_COLUMN: u32 = u32::MAX;
+
+    let RgbaSurface {
+        pixels: destination,
+        width: canvas_width,
+        ..
+    } = surface;
+    let ImageDraw {
+        source,
+        bounds,
+        uv,
+        blend_mode,
+        image_clip,
+        ..
+    } = *draw;
+    let CompositionBounds { x0, y0, x1, y1 } = span;
 
     let source_row_bytes = source.entry.row_bytes as usize;
     let canvas_row_bytes = canvas_width as usize * 4;

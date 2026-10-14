@@ -983,15 +983,14 @@ fn source_images_draw_at_their_pixel_size_without_a_baked_object() {
     let mut pixels = vec![0u8; canvas_width as usize * canvas_height as usize * 4];
     let stats = crate::profile_compositor::render_authored_profile_into_scalar(
         &resolved,
-        &store,
-        None,
-        &md,
-        Some(&assets),
+        crate::profile_compositor::CompositorSources {
+            assets: Some(&assets),
+            ..crate::profile_compositor::CompositorSources::new(&store)
+        },
         sekai_profile_core::AuthoredElementKind::Other,
         0,
-        &mut pixels,
-        canvas_width,
-        canvas_height,
+        crate::profile_compositor::RgbaSurface::new(&mut pixels, canvas_width, canvas_height)
+            .expect("tight surface"),
     )
     .expect("composited element");
     assert_eq!(stats.source_fallback_object_count, 1);

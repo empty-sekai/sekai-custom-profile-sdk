@@ -3,6 +3,7 @@
 
 use crate::assets::AssetStore;
 use crate::masterdata::MasterData;
+use crate::profile_compositor::{CompositorSources, RgbaSurface};
 use crate::render_config::Executor;
 use crate::telemetry::CommandKind;
 use crate::types::CustomProfileCard;
@@ -30,28 +31,18 @@ pub(super) fn resolve_native_profile_scene(
     )
 }
 
+/// Composites one authored element into `surface`, whose origin sits at
+/// `canvas_origin` on the profile canvas.
 pub(super) fn render_authored_image_into_pixels(
-    pixels: &mut [u8],
     scene: &sekai_profile_core::profile_scene::ResolvedProfileScene,
-    store: &crate::render_object::MappedRenderObjectStore,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
+    sources: CompositorSources<'_>,
     authored_kind: sekai_profile_core::AuthoredElementKind,
     authored_index: u32,
-    width: u32,
-    height: u32,
-    canvas_origin_x: f32,
-    canvas_origin_y: f32,
+    surface: RgbaSurface<'_>,
+    canvas_origin: [f32; 2],
     image_executor: Executor,
 ) -> Result<crate::profile_compositor::ProfileCompositorStats, String> {
-    let expected_len = width as usize * height as usize * 4;
-    if pixels.len() != expected_len {
-        return Err(format!(
-            "ordered Image compositor requires a tight RGBA8888 premul buffer of {expected_len} bytes, got {}",
-            pixels.len()
-        ));
-    }
+    let [canvas_origin_x, canvas_origin_y] = canvas_origin;
     let translated_scene;
     let scene = if canvas_origin_x != 0.0 || canvas_origin_y != 0.0 {
         translated_scene = {
@@ -71,27 +62,17 @@ pub(super) fn render_authored_image_into_pixels(
     match image_executor {
         Executor::Simd => crate::profile_compositor::render_authored_profile_into_simd(
             scene,
-            store,
-            text_atlases,
-            md,
-            assets,
+            sources,
             authored_kind,
             authored_index,
-            pixels,
-            width,
-            height,
+            surface,
         ),
         Executor::Scalar => crate::profile_compositor::render_authored_profile_into_scalar(
             scene,
-            store,
-            text_atlases,
-            md,
-            assets,
+            sources,
             authored_kind,
             authored_index,
-            pixels,
-            width,
-            height,
+            surface,
         ),
     }
     .map_err(|error| error.to_string())

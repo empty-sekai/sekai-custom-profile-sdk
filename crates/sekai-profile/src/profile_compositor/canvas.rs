@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     blend_pixel, canvas_bytes, raster_image_command, raster_semantic_shape_command,
-    AxisAlignedClip, ImageExecutor,
+    AxisAlignedClip, ImageDraw, ImageExecutor, RgbaSurface, SemanticShape,
 };
 use crate::codec;
 use crate::render_object::{MappedRenderObject, RenderObjectEntry, RenderObjectKind};
@@ -136,20 +136,22 @@ impl Canvas {
             max_y: r.y + r.height,
         });
         raster_image_command(
-            &mut self.pixels,
-            self.width,
-            self.height,
-            image.mapped(),
-            bounds,
-            uv,
-            [1.0, 1.0, 1.0, opacity],
-            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-            BlendMode::SrcOver,
-            "canvas-image",
-            clip,
-            None,
-            None,
-            None,
+            RgbaSurface {
+                pixels: &mut self.pixels,
+                width: self.width,
+                height: self.height,
+            },
+            &ImageDraw {
+                tint: [1.0, 1.0, 1.0, opacity],
+                command_clip: clip,
+                ..ImageDraw::new(
+                    "canvas-image",
+                    image.mapped(),
+                    bounds,
+                    uv,
+                    [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                )
+            },
             ImageExecutor::Scalar,
         )
         .map(|_| ())
@@ -202,16 +204,20 @@ impl Canvas {
             line_indent: None,
         };
         raster_semantic_shape_command(
-            &mut self.pixels,
-            self.width,
-            self.height,
+            RgbaSurface {
+                pixels: &mut self.pixels,
+                width: self.width,
+                height: self.height,
+            },
             &command,
             &layer,
-            &primitive,
-            fill.map(|v| f32::from(v) / 255.0),
-            None,
-            stroke.map(|v| f32::from(v) / 255.0),
-            stroke_width,
+            SemanticShape {
+                primitive: &primitive,
+                fill: fill.map(|v| f32::from(v) / 255.0),
+                gradient: None,
+                stroke: stroke.map(|v| f32::from(v) / 255.0),
+                stroke_width,
+            },
             0.0,
             ImageExecutor::Scalar,
         )

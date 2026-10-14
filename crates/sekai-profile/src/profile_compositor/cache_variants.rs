@@ -13,13 +13,13 @@ use sha2::{Digest, Sha256};
 
 use super::{
     canvas_bytes, elapsed_ns, evaluate_command_control_state, raster_image_command,
-    render_image_commands_into, semantic_text_glyph, unsupported, DeckArtVariantBuildOutput,
-    GeneralBaseAttempt, GeneralBaseBuildOutput, GeneralBasePlan, GeneralBaseTilePlan,
-    ImageClipGeometry, ImageExecutor, ProfileCompositorError, ProfileCompositorStats,
-    SemanticSdfContext, DECK_ART_SLOT_HEIGHT, DECK_ART_SLOT_WIDTH, DECK_ART_VARIANT_CONTRACT,
-    DECK_ART_VARIANT_HEIGHT, DECK_ART_VARIANT_WIDTH, GENERAL_BASE_CONTRACT,
+    render_image_commands_into, semantic_text_glyph, unsupported, CommandFilter, CompositorSources,
+    DeckArtVariantBuildOutput, GeneralBaseAttempt, GeneralBaseBuildOutput, GeneralBasePlan,
+    GeneralBaseTilePlan, ImageClipGeometry, ImageDraw, ImageExecutor, ProfileCompositorError,
+    ProfileCompositorStats, RgbaSurface, SemanticSdfContext, DECK_ART_SLOT_HEIGHT,
+    DECK_ART_SLOT_WIDTH, DECK_ART_VARIANT_CONTRACT, DECK_ART_VARIANT_HEIGHT,
+    DECK_ART_VARIANT_WIDTH, GENERAL_BASE_CONTRACT,
 };
-use crate::assets::AssetStore;
 use crate::masterdata::MasterData;
 use crate::render_object::{
     render_object_key_for_resource, MappedRenderObject, MappedRenderObjectStore, RenderObjectKind,
@@ -66,15 +66,16 @@ pub fn build_general_base_objects_simd(
         let layer_ids = BTreeSet::from([plan.layer_id]);
         let stats = render_image_commands_into(
             &canonical,
-            store,
-            width,
-            height,
+            CompositorSources {
+                text: Some(semantic),
+                ..CompositorSources::new(store)
+            },
+            CommandFilter {
+                layers: Some(&layer_ids),
+                commands: Some(&tile.command_ids),
+            },
+            RgbaSurface::new(&mut pixels, width, height)?,
             ImageExecutor::Simd,
-            &mut pixels,
-            Some(&layer_ids),
-            Some(semantic),
-            Some(&tile.command_ids),
-            None,
         )?;
         output.push(GeneralBaseBuildOutput {
             object_key: tile.object_key.clone(),
@@ -95,18 +96,20 @@ pub fn build_general_base_objects_simd(
     Ok(output)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Draws General element `authored_index` from its baked base tiles, then its
+/// overlay commands over them. Without text resources in `sources` the element
+/// is not eligible: a base's identity covers the atlases of the text it bakes.
 pub(super) fn try_render_general_base_into(
     scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    semantic: SemanticSdfContext<'_>,
-    assets: Option<&AssetStore>,
+    sources: CompositorSources<'_>,
     authored_index: u32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    mut surface: RgbaSurface<'_>,
     executor: ImageExecutor,
 ) -> Result<GeneralBaseAttempt, ProfileCompositorError> {
+    let store = sources.store;
+    let Some(semantic) = sources.text else {
+        return Ok(GeneralBaseAttempt::NotEligible);
+    };
     let Some(plan) = general_base_plan(scene, store, semantic, authored_index)? else {
         return Ok(GeneralBaseAttempt::NotEligible);
     };
@@ -138,25 +141,19 @@ pub(super) fn try_render_general_base_into(
     let mut baked_command_count = 0u64;
     for (tile, base) in bases {
         let raster = raster_image_command(
-            destination,
-            width,
-            height,
-            base,
-            tile.bounds,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: 1.0,
-            },
-            [1.0; 4],
-            layer.matrix,
-            BlendMode::SrcOver,
-            "general-base-tile",
-            None,
-            None,
-            None,
-            None,
+            surface.reborrow(),
+            &ImageDraw::new(
+                "general-base-tile",
+                base,
+                tile.bounds,
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                layer.matrix,
+            ),
             executor,
         )?;
         base_fragments = base_fragments.saturating_add(raster.fragments);
@@ -170,15 +167,13 @@ pub(super) fn try_render_general_base_into(
     let layer_ids = BTreeSet::from([plan.layer_id]);
     let mut stats = render_image_commands_into(
         scene,
-        store,
-        width,
-        height,
+        sources,
+        CommandFilter {
+            layers: Some(&layer_ids),
+            commands: Some(&plan.overlay_command_ids),
+        },
+        surface,
         executor,
-        destination,
-        Some(&layer_ids),
-        Some(semantic),
-        Some(&plan.overlay_command_ids),
-        assets,
     )?;
     stats.image_command_count = stats
         .image_command_count
@@ -484,25 +479,19 @@ pub fn build_deck_art_variant_simd(
     let uv = deck_art_source_uv(source.entry.width, source.entry.height);
     let started = Instant::now();
     let raster = raster_image_command(
-        &mut pixels,
-        WIDTH,
-        HEIGHT,
-        source,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: DECK_ART_SLOT_WIDTH,
-            height: DECK_ART_SLOT_HEIGHT,
-        },
-        uv,
-        [1.0; 4],
-        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        BlendMode::SrcOver,
-        "deck-art-variant-builder",
-        None,
-        None,
-        None,
-        None,
+        RgbaSurface::new(&mut pixels, WIDTH, HEIGHT)?,
+        &ImageDraw::new(
+            "deck-art-variant-builder",
+            source,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: DECK_ART_SLOT_WIDTH,
+                height: DECK_ART_SLOT_HEIGHT,
+            },
+            uv,
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        ),
         ImageExecutor::Simd,
     )?;
     let (object_key, source_sha256) = deck_art_variant_identity(source);

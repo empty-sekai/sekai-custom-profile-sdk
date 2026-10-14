@@ -96,37 +96,24 @@ fn composite_command(
     command
 }
 
+/// A command drawing `shape`, a [`SemanticCommandPayload::Shape`], over
+/// `bounds`.
 fn shape_command(
     id: &str,
     layer_id: StableId,
     bounds: Rect,
-    primitive: ShapePrimitive,
-    fill: [f32; 4],
-    gradient: Option<LinearGradient>,
-    stroke: [f32; 4],
-    stroke_width: f32,
+    shape: SemanticCommandPayload,
 ) -> SemanticCommandSource {
-    let mut command = SemanticCommandSource::shape(
-        StableId::derive("command", id.as_bytes()),
-        layer_id,
-        id,
-        bounds,
-        primitive,
-    );
-    if let SemanticCommandPayload::Shape {
-        fill: target_fill,
-        gradient: target_gradient,
-        stroke: target_stroke,
-        stroke_width: target_stroke_width,
-        ..
-    } = &mut command.payload
-    {
-        *target_fill = fill;
-        *target_gradient = gradient;
-        *target_stroke = stroke;
-        *target_stroke_width = stroke_width;
+    SemanticCommandSource {
+        payload: shape,
+        ..SemanticCommandSource::shape(
+            StableId::derive("command", id.as_bytes()),
+            layer_id,
+            id,
+            bounds,
+            ShapePrimitive::Rect,
+        )
     }
-    command
 }
 
 fn scene(layer: LayerSource, commands: Vec<SemanticCommandSource>) -> ResolvedProfileScene {
@@ -275,15 +262,13 @@ fn missing_mmap_texture_uses_asset_store_without_leaving_software_compositor() {
     let mut pixels = vec![0; 16];
     let stats = render_image_commands_into(
         &scene,
-        &store,
-        2,
-        2,
+        CompositorSources {
+            assets: Some(&assets),
+            ..CompositorSources::new(&store)
+        },
+        CommandFilter::default(),
+        RgbaSurface::new(&mut pixels, 2, 2).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut pixels,
-        None,
-        None,
-        None,
-        Some(&assets),
     )
     .unwrap();
 
@@ -336,15 +321,10 @@ fn live_master_progress_draws_simple_text_pixels_without_sdf() {
     let mut actual = vec![0; 200 * 80 * 4];
     let stats = render_image_commands_into(
         &scene,
-        &store,
-        200,
-        80,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut actual, 200, 80).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut actual,
-        None,
-        None,
-        None,
-        None,
     )
     .unwrap();
 
@@ -426,15 +406,10 @@ fn live_master_progress_blends_exactly_over_existing_content() {
     let mut actual = background.clone();
     render_image_commands_into(
         &scene,
-        &store,
-        200,
-        80,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut actual, 200, 80).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut actual,
-        None,
-        None,
-        None,
-        None,
     )
     .unwrap();
 
@@ -517,15 +492,10 @@ fn live_master_progress_follows_scaled_and_rotated_honors() {
         let mut actual = vec![0; 300 * 120 * 4];
         render_image_commands_into(
             &scene,
-            &store,
-            300,
-            120,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut actual, 300, 120).expect("tight surface"),
             ImageExecutor::Scalar,
-            &mut actual,
-            None,
-            None,
-            None,
-            None,
         )
         .unwrap();
 
@@ -612,16 +582,18 @@ fn semantic_shape_simd_matches_scalar_for_gradient_stroke_and_affine_geometry() 
         "rounded-gradient",
         layer_id,
         bounds,
-        ShapePrimitive::RoundedRect { radius: [6.5, 4.0] },
-        [0.2, 0.7, 0.3, 0.8],
-        Some(LinearGradient {
-            start: [0.1, 0.2],
-            end: [0.9, 0.8],
-            start_color: [0.9, 0.1, 0.4, 0.7],
-            end_color: [0.1, 0.8, 0.6, 0.9],
-        }),
-        [0.8, 0.2, 0.1, 0.65],
-        2.25,
+        SemanticCommandPayload::Shape {
+            primitive: ShapePrimitive::RoundedRect { radius: [6.5, 4.0] },
+            fill: [0.2, 0.7, 0.3, 0.8],
+            gradient: Some(LinearGradient {
+                start: [0.1, 0.2],
+                end: [0.9, 0.8],
+                start_color: [0.9, 0.1, 0.4, 0.7],
+                end_color: [0.1, 0.8, 0.6, 0.9],
+            }),
+            stroke: [0.8, 0.2, 0.1, 0.65],
+            stroke_width: 2.25,
+        },
     );
     rounded.matrix = [0.97, 0.13, -0.09, 1.02, 4.0, 3.0];
     let mut ellipse = shape_command(
@@ -633,11 +605,13 @@ fn semantic_shape_simd_matches_scalar_for_gradient_stroke_and_affine_geometry() 
             width: 27.0,
             height: 21.0,
         },
-        ShapePrimitive::Ellipse,
-        [0.15, 0.35, 0.95, 0.72],
-        None,
-        [0.9, 0.8, 0.1, 0.55],
-        1.5,
+        SemanticCommandPayload::Shape {
+            primitive: ShapePrimitive::Ellipse,
+            fill: [0.15, 0.35, 0.95, 0.72],
+            gradient: None,
+            stroke: [0.9, 0.8, 0.1, 0.55],
+            stroke_width: 1.5,
+        },
     );
     ellipse.matrix = [1.0, -0.07, 0.11, 0.96, -1.0, 2.0];
     let scene = scene(
@@ -649,15 +623,10 @@ fn semantic_shape_simd_matches_scalar_for_gradient_stroke_and_affine_geometry() 
     let mut scalar = background.clone();
     render_image_commands_into(
         &scene,
-        &store,
-        73,
-        47,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut scalar, 73, 47).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut scalar,
-        None,
-        None,
-        None,
-        None,
     )
     .expect("scalar semantic Shape oracle");
     let mut simd = background;
@@ -665,15 +634,10 @@ fn semantic_shape_simd_matches_scalar_for_gradient_stroke_and_affine_geometry() 
     if packet_simd_available() && std::arch::is_x86_feature_detected!("fma") {
         let stats = render_image_commands_into(
             &scene,
-            &store,
-            73,
-            47,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut simd, 73, 47).expect("tight surface"),
             ImageExecutor::Simd,
-            &mut simd,
-            None,
-            None,
-            None,
-            None,
         )
         .expect("SIMD semantic Shape candidate");
         assert_eq!(simd, scalar);
@@ -813,15 +777,10 @@ fn tight_translated_scene_matches_full_surface_crop_exactly() {
     let mut full = vec![0; 16 * 12 * 4];
     render_image_commands_into(
         &scene,
-        &store,
-        16,
-        12,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut full, 16, 12).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut full,
-        None,
-        None,
-        None,
-        None,
     )
     .unwrap();
 
@@ -831,15 +790,10 @@ fn tight_translated_scene_matches_full_surface_crop_exactly() {
     let mut tight = vec![0; width as usize * height as usize * 4];
     render_image_commands_into(
         &translated,
-        &store,
-        width,
-        height,
+        CompositorSources::new(&store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut tight, width, height).expect("tight surface"),
         ImageExecutor::Scalar,
-        &mut tight,
-        None,
-        None,
-        None,
-        None,
     )
     .unwrap();
 
@@ -1013,15 +967,10 @@ fn an_alpha_mask_scales_source_coverage_over_the_command_bounds() {
         let mut pixels = vec![0u8; 2 * 4];
         render_image_commands_into(
             &scene(layer.clone(), vec![command.clone()]),
-            &store,
-            2,
-            1,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut pixels, 2, 1).expect("tight surface"),
             executor,
-            &mut pixels,
-            None,
-            None,
-            None,
-            None,
         )
         .unwrap_or_else(|error| panic!("{executor:?}: {error}"));
         assert_eq!(pixels, vec![255, 255, 255, 255, 0, 0, 0, 0], "{executor:?}");
@@ -1074,11 +1023,13 @@ fn shape_blend_mode_is_honoured_and_simd_matches_scalar() {
             "shape",
             layer_id,
             bounds,
-            ShapePrimitive::Rect,
-            [0.75, 0.5, 0.25, 1.0],
-            None,
-            [0.0; 4],
-            0.0,
+            SemanticCommandPayload::Shape {
+                primitive: ShapePrimitive::Rect,
+                fill: [0.75, 0.5, 0.25, 1.0],
+                gradient: None,
+                stroke: [0.0; 4],
+                stroke_width: 0.0,
+            },
         );
         command.blend_mode = blend_mode;
         let commands = vec![command];
@@ -1087,15 +1038,10 @@ fn shape_blend_mode_is_honoured_and_simd_matches_scalar() {
         let mut scalar = vec![64u8; 6 * 2 * 4];
         render_image_commands_into(
             &scene(layer.clone(), commands.clone()),
-            &store,
-            6,
-            2,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut scalar, 6, 2).expect("tight surface"),
             ImageExecutor::Scalar,
-            &mut scalar,
-            None,
-            None,
-            None,
-            None,
         )
         .unwrap_or_else(|error| panic!("{blend_mode:?} scalar: {error}"));
         assert_ne!(scalar, vec![64u8; 6 * 2 * 4], "{blend_mode:?} drew nothing");
@@ -1103,15 +1049,10 @@ fn shape_blend_mode_is_honoured_and_simd_matches_scalar() {
             let mut simd = vec![64u8; 6 * 2 * 4];
             render_image_commands_into(
                 &scene(layer, commands),
-                &store,
-                6,
-                2,
+                CompositorSources::new(&store),
+                CommandFilter::default(),
+                RgbaSurface::new(&mut simd, 6, 2).expect("tight surface"),
                 ImageExecutor::Simd,
-                &mut simd,
-                None,
-                None,
-                None,
-                None,
             )
             .unwrap_or_else(|error| panic!("{blend_mode:?} SIMD: {error}"));
             assert_eq!(simd, scalar, "{blend_mode:?}");
@@ -1743,4 +1684,34 @@ fn unsupported_non_axis_aligned_clip_fails_closed_without_pixels() {
         error,
         ProfileCompositorError::UnsupportedFeature { .. }
     ));
+}
+
+#[test]
+fn a_surface_holds_exactly_its_pixels() {
+    let mut short = vec![0; 15];
+    assert!(matches!(
+        RgbaSurface::new(&mut short, 2, 2),
+        Err(ProfileCompositorError::SurfaceLength {
+            width: 2,
+            height: 2,
+            expected: 16,
+            actual: 15,
+        })
+    ));
+    let mut long = vec![0; 17];
+    assert!(matches!(
+        RgbaSurface::new(&mut long, 2, 2),
+        Err(ProfileCompositorError::SurfaceLength { actual: 17, .. })
+    ));
+    let mut empty = Vec::new();
+    assert!(matches!(
+        RgbaSurface::new(&mut empty, 0, 2),
+        Err(ProfileCompositorError::InvalidCanvas {
+            width: 0,
+            height: 2,
+        })
+    ));
+    let mut tight = vec![0; 16];
+    let surface = RgbaSurface::new(&mut tight, 2, 2).expect("tight surface");
+    assert_eq!((surface.width(), surface.height()), (2, 2));
 }

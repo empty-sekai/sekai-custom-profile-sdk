@@ -17,15 +17,12 @@ use sekai_profile_core::{BlendMode, LayerSource, Matrix2d, SemanticCommandSource
 use super::{
     axis_aligned_command_clip, blend_pixel, compose_matrix, invert_matrix, quantize,
     raster_semantic_shape_command, transform_point, AxisAlignedClip, ImageExecutor,
-    ProfileCompositorError, RasterImageStats,
+    ProfileCompositorError, RasterImageStats, RgbaSurface, SemanticShape,
 };
 use crate::text::ugui_glyphs::UguiGlyphs;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn raster_ugui_text_command(
-    destination: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
+    mut surface: RgbaSurface<'_>,
     command: &SemanticCommandSource,
     layer: &LayerSource,
     source: &UguiTextSource,
@@ -51,16 +48,16 @@ pub(super) fn raster_ugui_text_command(
         let mut backdrop_command = command.clone();
         backdrop_command.bounds = backdrop.resolved_rect(mesh.preferred_width);
         let raster = raster_semantic_shape_command(
-            destination,
-            canvas_width,
-            canvas_height,
+            surface.reborrow(),
             &backdrop_command,
             layer,
-            &ShapePrimitive::Rect,
-            backdrop.color,
-            None,
-            [0.0; 4],
-            0.0,
+            SemanticShape {
+                primitive: &ShapePrimitive::Rect,
+                fill: backdrop.color,
+                gradient: None,
+                stroke: [0.0; 4],
+                stroke_width: 0.0,
+            },
             translate_y,
             executor,
         )?;
@@ -94,9 +91,9 @@ pub(super) fn raster_ugui_text_command(
         alpha,
     ];
     let mut target = GlyphTarget {
-        pixels: destination,
-        width: canvas_width,
-        height: canvas_height,
+        pixels: surface.pixels,
+        width: surface.width,
+        height: surface.height,
         clip,
         blend_mode: command.blend_mode,
     };

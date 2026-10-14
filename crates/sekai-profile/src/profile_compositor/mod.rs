@@ -7,12 +7,15 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use sekai_profile_core::{pixel_sampling, Matrix2d, Rect, StableId};
+use sekai_profile_core::{
+    pixel_sampling, BlendMode, LinearGradient, Matrix2d, Rect, ShapePrimitive, StableId,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::assets::AssetStore;
 use crate::masterdata::MasterData;
-use crate::render_object::{MappedRenderObject, RenderObjectEntry};
+use crate::render_object::{MappedRenderObject, MappedRenderObjectStore, RenderObjectEntry};
 
 mod blend;
 mod cache_variants;
@@ -131,6 +134,13 @@ pub struct ProfileCompositorOutput {
 pub enum ProfileCompositorError {
     #[error("profile compositor canvas dimensions are invalid: {width}x{height}")]
     InvalidCanvas { width: u32, height: u32 },
+    #[error("profile compositor surface of {width}x{height} needs {expected} bytes, got {actual}")]
+    SurfaceLength {
+        width: u32,
+        height: u32,
+        expected: usize,
+        actual: usize,
+    },
     #[error("profile compositor scene contains duplicate layer {0}")]
     DuplicateLayer(String),
     #[error("profile compositor command references missing layer {0}")]
@@ -155,11 +165,95 @@ pub enum ProfileCompositorError {
     GlyphRaster { role: String, reason: String },
 }
 
+/// A tight, row-major premultiplied RGBA8 surface the compositor draws into.
+///
+/// It holds `width * height` pixels of four bytes each, with rows `width * 4`
+/// bytes apart. [`RgbaSurface::new`] checks that length, so a surface always
+/// covers its full extent.
+pub struct RgbaSurface<'a> {
+    pub(crate) pixels: &'a mut [u8],
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl<'a> RgbaSurface<'a> {
+    /// Views `pixels` as a `width` by `height` surface.
+    ///
+    /// Fails when either dimension is zero or `pixels` is not exactly
+    /// `width * height * 4` bytes long.
+    pub fn new(
+        pixels: &'a mut [u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Self, ProfileCompositorError> {
+        let expected = canvas_bytes(width, height)?;
+        if pixels.len() != expected {
+            return Err(ProfileCompositorError::SurfaceLength {
+                width,
+                height,
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self {
+            pixels,
+            width,
+            height,
+        })
+    }
+
+    /// Width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Borrows the surface for one draw, keeping `self` usable once that draw
+    /// is done.
+    pub(crate) fn reborrow(&mut self) -> RgbaSurface<'_> {
+        RgbaSurface {
+            pixels: self.pixels,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+/// Read-only resources that scene commands draw from.
+#[derive(Clone, Copy)]
+pub struct CompositorSources<'a> {
+    /// Baked render objects that image commands sample.
+    pub store: &'a MappedRenderObjectStore,
+    /// SDF text resources. Without them, SDF text commands are skipped and no
+    /// baked General base applies.
+    pub text: Option<SemanticSdfContext<'a>>,
+    /// Asset store that supplies the source image of an object `store` does
+    /// not hold.
+    pub assets: Option<&'a AssetStore>,
+}
+
+impl<'a> CompositorSources<'a> {
+    /// Sources with only the render-object store: no text resources and no
+    /// source images.
+    pub fn new(store: &'a MappedRenderObjectStore) -> Self {
+        Self {
+            store,
+            text: None,
+            assets: None,
+        }
+    }
+}
+
 struct CompositionTarget {
     pixels: Vec<u8>,
     bounds: CompositionBounds,
 }
 
+/// Half-open device pixel rectangle: columns `x0..x1` of rows `y0..y1`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositionBounds {
     x0: u32,
@@ -202,6 +296,70 @@ struct BadgeShading<'a> {
     tangent: [f32; 2],
 }
 
+/// One image command resolved for rasterization: the texels it samples, where
+/// they land on the canvas and how they blend.
+#[derive(Clone, Copy)]
+struct ImageDraw<'a> {
+    /// Command role, named in errors.
+    role: &'a str,
+    /// Premultiplied texels, sampled nearest-neighbour.
+    source: MappedRenderObject<'a>,
+    /// Local rectangle the image covers.
+    bounds: Rect,
+    /// Normalised region of `source` mapped onto `bounds`.
+    uv: Rect,
+    /// Vertex colour multiplied into every texel.
+    tint: [f32; 4],
+    /// Local-to-canvas transform.
+    matrix: Matrix2d,
+    blend_mode: BlendMode,
+    /// Canvas-space clip rectangle.
+    command_clip: Option<AxisAlignedClip>,
+    /// Clip shape inscribed in `bounds`.
+    image_clip: Option<ImageClipGeometry>,
+    /// Mask whose alpha scales the source across `bounds`.
+    alpha_mask: Option<MappedRenderObject<'a>>,
+    badge: Option<BadgeShading<'a>>,
+}
+
+impl<'a> ImageDraw<'a> {
+    /// An untinted source-over draw of `uv` of `source` onto `bounds`, with no
+    /// clip, mask or material.
+    fn new(
+        role: &'a str,
+        source: MappedRenderObject<'a>,
+        bounds: Rect,
+        uv: Rect,
+        matrix: Matrix2d,
+    ) -> Self {
+        Self {
+            role,
+            source,
+            bounds,
+            uv,
+            tint: [1.0; 4],
+            matrix,
+            blend_mode: BlendMode::SrcOver,
+            command_clip: None,
+            image_clip: None,
+            alpha_mask: None,
+            badge: None,
+        }
+    }
+}
+
+/// The primitive and paint of a shape command.
+#[derive(Clone, Copy)]
+struct SemanticShape<'a> {
+    primitive: &'a ShapePrimitive,
+    fill: [f32; 4],
+    /// Replaces `fill` when present.
+    gradient: Option<&'a LinearGradient>,
+    stroke: [f32; 4],
+    /// Width of the stroke band inside the outline; `0` draws no stroke.
+    stroke_width: f32,
+}
+
 struct OwnedRenderObject {
     entry: RenderObjectEntry,
     pixels: Vec<u8>,
@@ -216,10 +374,14 @@ impl OwnedRenderObject {
     }
 }
 
+/// SDF text atlases with the master data that resolves each text command's
+/// font to an atlas family.
 #[derive(Clone, Copy)]
-struct SemanticSdfContext<'a> {
-    text_atlases: &'a crate::sdf::atlas::MappedSdfAtlasSet,
-    md: &'a MasterData,
+pub struct SemanticSdfContext<'a> {
+    /// SDF atlases of the text font families.
+    pub text_atlases: &'a crate::sdf::atlas::MappedSdfAtlasSet,
+    /// Master data that maps a text command's font id to its family.
+    pub md: &'a MasterData,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

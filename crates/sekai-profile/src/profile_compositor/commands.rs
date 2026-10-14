@@ -13,18 +13,35 @@ use sha2::{Digest, Sha256};
 
 use super::ugui_text;
 use super::{
-    axis_aligned_command_clip, canvas_bytes, clear_composition_bounds, compose_matrix,
-    composite_isolation, composition_bounds, deck_art_variant_for_command, deck_art_variant_uv,
-    elapsed_ns, is_live_master_progress_command, raster_image_command,
-    raster_semantic_shape_command, render_live_master_progress_text, render_semantic_text_command,
-    render_semantic_text_commands, transform_point, unsupported, AxisAlignedClip, BadgeShading,
-    CompositionTarget, EvaluatedCommandControlState, ImageClipGeometry, ImageExecutor,
-    OwnedRenderObject, ProfileCompositorError, ProfileCompositorStats, SemanticSdfContext,
+    axis_aligned_command_clip, clear_composition_bounds, compose_matrix, composite_isolation,
+    composition_bounds, deck_art_variant_for_command, deck_art_variant_uv, elapsed_ns,
+    is_live_master_progress_command, raster_image_command, raster_semantic_shape_command,
+    render_live_master_progress_text, render_semantic_text_command, render_semantic_text_commands,
+    transform_point, unsupported, AxisAlignedClip, BadgeShading, CompositionTarget,
+    CompositorSources, EvaluatedCommandControlState, ImageClipGeometry, ImageDraw, ImageExecutor,
+    OwnedRenderObject, ProfileCompositorError, ProfileCompositorStats, RgbaSurface, SemanticShape,
 };
 use crate::assets::AssetStore;
-use crate::render_object::{
-    render_object_key_for_resource, MappedRenderObjectStore, RenderObjectEntry, RenderObjectKind,
-};
+use crate::render_object::{render_object_key_for_resource, RenderObjectEntry, RenderObjectKind};
+
+/// Selects the scene commands a render draws. The default selects them all.
+#[derive(Clone, Copy, Default)]
+pub(super) struct CommandFilter<'a> {
+    /// Only commands of these layers, when set.
+    pub(super) layers: Option<&'a BTreeSet<StableId>>,
+    /// Only these commands, when set.
+    pub(super) commands: Option<&'a BTreeSet<StableId>>,
+}
+
+impl CommandFilter<'_> {
+    fn admits(&self, command: &SemanticCommandSource) -> bool {
+        self.layers
+            .is_none_or(|layers| layers.contains(&command.layer_id))
+            && self
+                .commands
+                .is_none_or(|commands| commands.contains(&command.id))
+    }
+}
 
 pub(super) fn evaluate_command_control_state(
     scene: &ResolvedProfileScene,
@@ -93,24 +110,25 @@ pub(super) fn evaluate_command_control_state(
     Ok(evaluated)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_image_commands_into(
     scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    width: u32,
-    height: u32,
+    sources: CompositorSources<'_>,
+    filter: CommandFilter<'_>,
+    surface: RgbaSurface<'_>,
     executor: ImageExecutor,
-    destination: &mut [u8],
-    layer_filter: Option<&BTreeSet<StableId>>,
-    semantic_sdf: Option<SemanticSdfContext<'_>>,
-    command_filter: Option<&BTreeSet<StableId>>,
-    assets: Option<&AssetStore>,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     let started = Instant::now();
-    let pixel_bytes = canvas_bytes(width, height)?;
-    if destination.len() != pixel_bytes {
-        return Err(ProfileCompositorError::InvalidCanvas { width, height });
-    }
+    let CompositorSources {
+        store,
+        text: semantic_sdf,
+        assets,
+    } = sources;
+    let RgbaSurface {
+        pixels: destination,
+        width,
+        height,
+    } = surface;
+    let pixel_bytes = destination.len();
     let layers = collect_layers(scene)?;
     let mut targets = Vec::<CompositionTarget>::new();
     let mut target_scratch = Vec::<Vec<u8>>::new();
@@ -124,9 +142,7 @@ pub(super) fn render_image_commands_into(
         let mut text_batch = Vec::new();
         let mut text_only = true;
         for command in &scene.commands {
-            if layer_filter.is_some_and(|filter| !filter.contains(&command.layer_id))
-                || command_filter.is_some_and(|filter| !filter.contains(&command.id))
-            {
+            if !filter.admits(command) {
                 continue;
             }
             let layer = layers.get(&command.layer_id).copied().ok_or_else(|| {
@@ -152,9 +168,11 @@ pub(super) fn render_image_commands_into(
             let execution = render_semantic_text_commands(
                 &text_batch,
                 semantic_sdf,
-                destination,
-                width,
-                height,
+                RgbaSurface {
+                    pixels: destination,
+                    width,
+                    height,
+                },
                 executor,
             )?;
             stats.text_command_count = text_batch.len() as u64;
@@ -166,10 +184,7 @@ pub(super) fn render_image_commands_into(
     }
 
     for command in &scene.commands {
-        if layer_filter.is_some_and(|filter| !filter.contains(&command.layer_id)) {
-            continue;
-        }
-        if command_filter.is_some_and(|filter| !filter.contains(&command.id)) {
+        if !filter.admits(command) {
             continue;
         }
         let layer = layers.get(&command.layer_id).copied().ok_or_else(|| {
@@ -192,9 +207,11 @@ pub(super) fn render_image_commands_into(
                     command,
                     layer,
                     control_state.translate_y,
-                    target,
-                    width,
-                    height,
+                    RgbaSurface {
+                        pixels: target,
+                        width,
+                        height,
+                    },
                 )?;
                 stats.text_command_count = stats.text_command_count.saturating_add(1);
             }
@@ -213,9 +230,11 @@ pub(super) fn render_image_commands_into(
                     layer,
                     control_state.translate_y,
                     semantic_sdf,
-                    target,
-                    width,
-                    height,
+                    RgbaSurface {
+                        pixels: target,
+                        width,
+                        height,
+                    },
                     executor,
                 )?;
                 stats.text_command_count = stats.text_command_count.saturating_add(1);
@@ -232,9 +251,11 @@ pub(super) fn render_image_commands_into(
                     .map(|target| target.pixels.as_mut_slice())
                     .unwrap_or(destination);
                 let raster = ugui_text::raster_ugui_text_command(
-                    target,
-                    width,
-                    height,
+                    RgbaSurface {
+                        pixels: target,
+                        width,
+                        height,
+                    },
                     command,
                     layer,
                     source,
@@ -268,16 +289,20 @@ pub(super) fn render_image_commands_into(
                     .map(|target| target.pixels.as_mut_slice())
                     .unwrap_or(destination);
                 let raster = raster_semantic_shape_command(
-                    target,
-                    width,
-                    height,
+                    RgbaSurface {
+                        pixels: target,
+                        width,
+                        height,
+                    },
                     command,
                     layer,
-                    primitive,
-                    *fill,
-                    gradient.as_ref(),
-                    *stroke,
-                    *stroke_width,
+                    SemanticShape {
+                        primitive,
+                        fill: *fill,
+                        gradient: gradient.as_ref(),
+                        stroke: *stroke,
+                        stroke_width: *stroke_width,
+                    },
                     control_state.translate_y,
                     executor,
                 )?;
@@ -399,21 +424,26 @@ pub(super) fn render_image_commands_into(
                     .last_mut()
                     .map(|target| target.pixels.as_mut_slice())
                     .unwrap_or(destination);
-                let raster = raster_image_command(
-                    target,
-                    width,
-                    height,
-                    object,
-                    command.bounds,
-                    effective_uv,
-                    *tint,
+                let draw = ImageDraw {
+                    role: &command.role,
+                    source: object,
+                    bounds: command.bounds,
+                    uv: effective_uv,
+                    tint: *tint,
                     matrix,
-                    command.blend_mode,
-                    &command.role,
+                    blend_mode: command.blend_mode,
                     command_clip,
                     image_clip,
-                    mask_object,
+                    alpha_mask: mask_object,
                     badge,
+                };
+                let raster = raster_image_command(
+                    RgbaSurface {
+                        pixels: target,
+                        width,
+                        height,
+                    },
+                    &draw,
                     executor,
                 )?;
                 stats.image_command_count = stats.image_command_count.saturating_add(1);

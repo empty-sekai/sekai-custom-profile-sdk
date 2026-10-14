@@ -62,14 +62,12 @@ pub(super) fn build_pixel_occlusion_dry_run(
             continue;
         }
         scratch.fill(0);
+        let Ok(surface) = crate::profile_compositor::RgbaSurface::new(&mut scratch, width, height)
+        else {
+            continue;
+        };
         if crate::profile_compositor::render_authored_image_into_simd(
-            scene,
-            store,
-            kind,
-            index,
-            &mut scratch,
-            width,
-            height,
+            scene, store, kind, index, surface,
         )
         .is_err()
         {

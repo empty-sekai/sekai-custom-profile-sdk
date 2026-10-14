@@ -10,6 +10,7 @@ use super::occlusion::{add_sdf_occlusion_stats, build_pixel_occlusion_dry_run};
 use super::realtime_edt::active_realtime_edt_batch;
 use super::{elapsed_ns, CardSources, CustomProfileRenderer};
 use crate::elements::SdfCaptureObserver;
+use crate::profile_compositor::{CompositorSources, RgbaSurface, SemanticSdfContext};
 use crate::render_config::{Executor, PixelOcclusion, RenderConfig};
 use crate::types::CustomProfileCard;
 use serde::{Deserialize, Serialize};
@@ -284,19 +285,23 @@ impl CustomProfileRenderer {
                             )
                         })?;
                     let draw_started = std::time::Instant::now();
-                    let stats = render_authored_image_into_pixels(
+                    let surface = RgbaSurface::new(
                         rgba.as_mut_slice(),
-                        semantic_scene,
-                        render_object_store,
-                        Some(text_atlases),
-                        md,
-                        assets,
-                        kind,
-                        index,
                         spec.surface_width,
                         spec.surface_height,
-                        spec.canvas_origin_x,
-                        spec.canvas_origin_y,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let stats = render_authored_image_into_pixels(
+                        semantic_scene,
+                        CompositorSources {
+                            store: render_object_store,
+                            text: Some(SemanticSdfContext { text_atlases, md }),
+                            assets,
+                        },
+                        kind,
+                        index,
+                        surface,
+                        [spec.canvas_origin_x, spec.canvas_origin_y],
                         // The image compositor follows the page's executor
                         // choice so a scalar host runs a scalar pipeline.
                         pass.executor,

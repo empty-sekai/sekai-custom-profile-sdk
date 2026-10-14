@@ -4,16 +4,14 @@
 use std::collections::BTreeSet;
 
 use sekai_profile_core::profile_scene::ResolvedProfileScene;
-use sekai_profile_core::{AuthoredElementKind, BlendMode, SemanticCommandPayload};
+use sekai_profile_core::{AuthoredElementKind, BlendMode, SemanticCommandPayload, StableId};
 
 use super::{
     canvas_bytes, collect_layers, compose_matrix, evaluate_command_control_state,
     render_image_commands_into, transform_point, try_render_general_base_into, unsupported,
-    GeneralBaseAttempt, ImageExecutor, ProfileCompositorError, ProfileCompositorOutput,
-    ProfileCompositorStats, SemanticSdfContext, PROFILE_COMPOSITOR_SCHEMA,
+    CommandFilter, CompositorSources, GeneralBaseAttempt, ImageExecutor, ProfileCompositorError,
+    ProfileCompositorOutput, ProfileCompositorStats, RgbaSurface, PROFILE_COMPOSITOR_SCHEMA,
 };
-use crate::assets::AssetStore;
-use crate::masterdata::MasterData;
 use crate::render_object::MappedRenderObjectStore;
 
 /// Render only Image and Composite commands. Text and Shape are intentionally
@@ -56,15 +54,10 @@ fn render_image_scene(
     let mut pixels = vec![0; pixel_bytes];
     let stats = render_image_commands_into(
         scene,
-        store,
-        width,
-        height,
+        CompositorSources::new(store),
+        CommandFilter::default(),
+        RgbaSurface::new(&mut pixels, width, height)?,
         executor,
-        &mut pixels,
-        None,
-        None,
-        None,
-        None,
     )?;
     Ok(ProfileCompositorOutput {
         schema: PROFILE_COMPOSITOR_SCHEMA.into(),
@@ -75,16 +68,14 @@ fn render_image_scene(
     })
 }
 
-/// Composite one authored element from the shared semantic scene directly
-/// into an existing tight premultiplied RGBA8 surface.
+/// Composites the Image and Composite commands of one authored element into
+/// `surface` with the packet executor.
 pub fn render_authored_image_into_simd(
     scene: &ResolvedProfileScene,
     store: &MappedRenderObjectStore,
     authored_kind: AuthoredElementKind,
     authored_index: u32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     #[cfg(target_arch = "x86_64")]
     if !(std::arch::is_x86_feature_detected!("avx512f")
@@ -95,44 +86,28 @@ pub fn render_authored_image_into_simd(
     #[cfg(not(target_arch = "x86_64"))]
     return unsupported("profile-compositor", "x86_64 packet executor");
 
-    let layer_ids = scene
-        .layers
-        .iter()
-        .filter(|layer| {
-            layer.authored_kind == authored_kind && layer.authored_index == authored_index
-        })
-        .map(|layer| layer.id)
-        .collect::<BTreeSet<_>>();
-    if layer_ids.is_empty() {
-        return Err(ProfileCompositorError::MissingLayer(format!(
-            "{authored_kind:?}:{authored_index}"
-        )));
-    }
+    #[allow(unreachable_code)]
+    let layer_ids = authored_layer_ids(scene, authored_kind, authored_index)?;
     render_image_commands_into(
         scene,
-        store,
-        width,
-        height,
+        CompositorSources::new(store),
+        CommandFilter {
+            layers: Some(&layer_ids),
+            commands: None,
+        },
+        surface,
         ImageExecutor::Simd,
-        destination,
-        Some(&layer_ids),
-        None,
-        None,
-        None,
     )
 }
 
+/// Composites every command of one authored element into `surface` with the
+/// packet executor, from its baked General base when one applies.
 pub fn render_authored_profile_into_simd(
     scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
+    sources: CompositorSources<'_>,
     authored_kind: AuthoredElementKind,
     authored_index: u32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     #[cfg(target_arch = "x86_64")]
     if !(std::arch::is_x86_feature_detected!("avx512f")
@@ -146,63 +121,40 @@ pub fn render_authored_profile_into_simd(
     #[allow(unreachable_code)]
     render_authored_profile_into(
         scene,
-        store,
-        text_atlases,
-        md,
-        assets,
+        sources,
         authored_kind,
         authored_index,
-        destination,
-        width,
-        height,
+        surface,
         ImageExecutor::Simd,
     )
 }
 
 /// Scalar-executor twin of [`render_authored_profile_into_simd`], for hosts
 /// without the packet instruction set. Byte-equal output; slower.
-#[allow(clippy::too_many_arguments)]
 pub fn render_authored_profile_into_scalar(
     scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
+    sources: CompositorSources<'_>,
     authored_kind: AuthoredElementKind,
     authored_index: u32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
 ) -> Result<ProfileCompositorStats, ProfileCompositorError> {
     render_authored_profile_into(
         scene,
-        store,
-        text_atlases,
-        md,
-        assets,
+        sources,
         authored_kind,
         authored_index,
-        destination,
-        width,
-        height,
+        surface,
         ImageExecutor::Scalar,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_authored_profile_into(
+/// The layers an authored element lowered to; an element with none is an
+/// error.
+fn authored_layer_ids(
     scene: &ResolvedProfileScene,
-    store: &MappedRenderObjectStore,
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
     authored_kind: AuthoredElementKind,
     authored_index: u32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
-    executor: ImageExecutor,
-) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+) -> Result<BTreeSet<StableId>, ProfileCompositorError> {
     let layer_ids = scene
         .layers
         .iter()
@@ -216,38 +168,43 @@ fn render_authored_profile_into(
             "{authored_kind:?}:{authored_index}"
         )));
     }
-    let semantic = text_atlases.map(|text_atlases| SemanticSdfContext { text_atlases, md });
+    Ok(layer_ids)
+}
+
+/// Composites the commands of one authored element into `surface`, from its
+/// baked General base when one applies.
+fn render_authored_profile_into(
+    scene: &ResolvedProfileScene,
+    sources: CompositorSources<'_>,
+    authored_kind: AuthoredElementKind,
+    authored_index: u32,
+    mut surface: RgbaSurface<'_>,
+    executor: ImageExecutor,
+) -> Result<ProfileCompositorStats, ProfileCompositorError> {
+    let layer_ids = authored_layer_ids(scene, authored_kind, authored_index)?;
     let mut general_base_miss = false;
     if authored_kind == AuthoredElementKind::General {
-        if let Some(semantic) = semantic {
-            match try_render_general_base_into(
-                scene,
-                store,
-                semantic,
-                assets,
-                authored_index,
-                destination,
-                width,
-                height,
-                executor,
-            )? {
-                GeneralBaseAttempt::Hit(stats) => return Ok(stats),
-                GeneralBaseAttempt::Miss => general_base_miss = true,
-                GeneralBaseAttempt::NotEligible => {}
-            }
+        match try_render_general_base_into(
+            scene,
+            sources,
+            authored_index,
+            surface.reborrow(),
+            executor,
+        )? {
+            GeneralBaseAttempt::Hit(stats) => return Ok(stats),
+            GeneralBaseAttempt::Miss => general_base_miss = true,
+            GeneralBaseAttempt::NotEligible => {}
         }
     }
     let mut stats = render_image_commands_into(
         scene,
-        store,
-        width,
-        height,
+        sources,
+        CommandFilter {
+            layers: Some(&layer_ids),
+            commands: None,
+        },
+        surface,
         executor,
-        destination,
-        Some(&layer_ids),
-        semantic,
-        None,
-        assets,
     )?;
     stats.general_base_miss_count = u64::from(general_base_miss);
     Ok(stats)

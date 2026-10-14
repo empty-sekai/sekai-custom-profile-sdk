@@ -79,16 +79,18 @@ mod sdf_text_contract_tests {
             anchor_x: -100.0,
             baseline: Some(4.55),
         };
-        let spec = sdf_text::build_general_sdf_text_from_lowered(
-            "玩家名称\n个性签名",
-            400.0,
-            [0.2, 0.3, 0.4, 1.0],
-            1,
-            13.0,
-            6.0,
-            1,
-            placement,
-        )
+        let spec = sdf_text::build_general_sdf_text_from_lowered(&sdf_text::LoweredGeneralText {
+            text: "玩家名称\n个性签名",
+            bounds_width: 400.0,
+            max_width: None,
+            color: [0.2, 0.3, 0.4, 1.0],
+            alignment: 1,
+            font_size: 13.0,
+            line_spacing: 6.0,
+            font_id: 1,
+            render_placement: placement,
+            outline: None,
+        })
         .expect("lowered General text spec");
         assert_eq!(spec.element.size, 13.0);
         assert_eq!(spec.element.line_spacing, 3.0);

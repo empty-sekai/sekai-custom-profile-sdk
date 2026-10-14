@@ -6,9 +6,10 @@ use sekai_profile_core::{
 };
 
 use super::{
-    axis_aligned_command_clip, compose_matrix, ImageExecutor, ProfileCompositorError,
+    axis_aligned_command_clip, compose_matrix, ImageExecutor, ProfileCompositorError, RgbaSurface,
     SemanticSdfContext,
 };
+use crate::elements::generals::sdf_text::LoweredGeneralText;
 
 pub(super) fn semantic_text_glyph<'a>(
     context: SemanticSdfContext<'a>,
@@ -33,9 +34,7 @@ pub(super) fn render_live_master_progress_text(
     command: &SemanticCommandSource,
     layer: &LayerSource,
     translate_y: f32,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
 ) -> Result<(), ProfileCompositorError> {
     let SemanticCommandPayload::Text { source, size, .. } = &command.payload else {
         return Err(ProfileCompositorError::SemanticSdf {
@@ -63,9 +62,7 @@ pub(super) fn render_live_master_progress_text(
     // transform with the baseline in the command's local space.
     let matrix = compose_matrix(layer.matrix, local_matrix);
     let rendered = crate::text::simple_raster::draw_centered_white_text(
-        destination,
-        width,
-        height,
+        surface,
         crate::profile_compositor::theme::fonts::LIVE_MASTER_PROGRESS,
         text,
         20.0,
@@ -90,29 +87,23 @@ pub(super) fn render_semantic_text_command(
     layer: &LayerSource,
     translate_y: f32,
     context: SemanticSdfContext<'_>,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
     executor: ImageExecutor,
 ) -> Result<crate::sdf::tile::SdfExecutionStats, ProfileCompositorError> {
-    render_semantic_text_commands(
-        &[(command, layer, translate_y)],
-        context,
-        destination,
-        width,
-        height,
-        executor,
-    )
+    render_semantic_text_commands(&[(command, layer, translate_y)], context, surface, executor)
 }
 
 pub(super) fn render_semantic_text_commands(
     commands: &[(&SemanticCommandSource, &LayerSource, f32)],
     context: SemanticSdfContext<'_>,
-    destination: &mut [u8],
-    width: u32,
-    height: u32,
+    surface: RgbaSurface<'_>,
     executor: ImageExecutor,
 ) -> Result<crate::sdf::tile::SdfExecutionStats, ProfileCompositorError> {
+    let RgbaSurface {
+        pixels: destination,
+        width,
+        height,
+    } = surface;
     let mut draws = Vec::new();
     for &(command, layer, translate_y) in commands {
         append_semantic_text_draws(command, layer, translate_y, context, &mut draws)?;
@@ -249,19 +240,21 @@ fn append_semantic_text_draws(
     };
     let capture = crate::elements::generals::sdf_text::capture_general_sdf_text_from_lowered(
         content_matrix,
-        value,
-        command.bounds.width,
-        *color,
-        *alignment,
-        *size,
-        *line_spacing,
-        font_id,
-        *max_width,
-        crate::text::TextRenderPlacement {
-            anchor_x: placement.anchor_x,
-            baseline: placement.baseline,
+        &LoweredGeneralText {
+            text: value,
+            bounds_width: command.bounds.width,
+            max_width: *max_width,
+            color: *color,
+            alignment: *alignment,
+            font_size: *size,
+            line_spacing: *line_spacing,
+            font_id,
+            render_placement: crate::text::TextRenderPlacement {
+                anchor_x: placement.anchor_x,
+                baseline: placement.baseline,
+            },
+            outline: outline_override,
         },
-        outline_override,
         context.md,
         context.text_atlases,
         &mut observer,

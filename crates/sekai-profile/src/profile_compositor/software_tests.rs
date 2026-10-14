@@ -324,15 +324,16 @@ fn scalar_entry_composites_a_general_base_hit_without_the_packet_executor() {
     let mut pixels = vec![0; 16 * 12 * 4];
     let stats = render_authored_profile_into_scalar(
         &scene,
-        &store,
-        Some(&atlases),
-        &md,
-        None,
+        CompositorSources {
+            text: Some(SemanticSdfContext {
+                text_atlases: &atlases,
+                md: &md,
+            }),
+            ..CompositorSources::new(&store)
+        },
         AuthoredElementKind::General,
         0,
-        &mut pixels,
-        16,
-        12,
+        RgbaSurface::new(&mut pixels, 16, 12).expect("tight surface"),
     )
     .expect("scalar render");
 
@@ -405,15 +406,10 @@ fn deck_art_variant_hit_matches_the_source_draw() {
             let mut pixels = vec![0; 170 * 260 * 4];
             let stats = render_image_commands_into(
                 &scene,
-                store,
-                170,
-                260,
+                CompositorSources::new(store),
+                CommandFilter::default(),
+                RgbaSurface::new(&mut pixels, 170, 260).expect("tight surface"),
                 executor,
-                &mut pixels,
-                None,
-                None,
-                None,
-                None,
             )
             .expect("render deck art");
             (pixels, stats)
@@ -454,15 +450,10 @@ fn simd_shape_quantisation_matches_scalar_just_below_a_half_step() {
         let mut pixels = vec![0; 4 * 4 * 4];
         render_image_commands_into(
             &scene,
-            &store,
-            4,
-            4,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut pixels, 4, 4).expect("tight surface"),
             executor,
-            &mut pixels,
-            None,
-            None,
-            None,
-            None,
         )
         .expect("render shape");
         pixels
@@ -502,15 +493,10 @@ fn a_clip_beside_the_image_draws_nothing_on_either_executor() {
         let mut pixels = vec![0; 16 * 4 * 4];
         let stats = render_image_commands_into(
             &scene,
-            &store,
-            16,
-            4,
+            CompositorSources::new(&store),
+            CommandFilter::default(),
+            RgbaSurface::new(&mut pixels, 16, 4).expect("tight surface"),
             executor,
-            &mut pixels,
-            None,
-            None,
-            None,
-            None,
         )
         .expect("render clipped image");
         assert_eq!(stats.sampled_fragment_count, 0, "{executor:?}");
