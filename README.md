@@ -357,51 +357,6 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 `with_atlas_dir` 接受一个并不存在的目录且不会报错，这时渲染器没有装任何图集，启动不会失败但画不出东西。
 先构建图集，或在装好后检查 `capabilities().text_atlases`。
 
-## 从 0.7 迁移
-
-| 0.7 | 现在 |
-| --- | --- |
-| `render_animation(card, profile, document_key, region, preset, config)` | `render_animation(card, profile, AnimationDocument { key, region }, preset, config)`；`render_animation_pinned` 与 `animation_preflight` 接收同样的 `AnimationDocument` |
-| 动画 API 返回 `Result<_, String>` | 返回 `Result<_, AnimationError>`；传给 `encode_rgba_frames` 的取帧闭包也返回 `AnimationError`，自身的错误用 `AnimationError::FrameSource` 包装 |
-| `profile_compositor::render_authored_profile_into_{simd,scalar}(scene, store, text_atlases, md, assets, kind, index, pixels, width, height)` | `(scene, CompositorSources { store, text, assets }, kind, index, RgbaSurface::new(pixels, width, height)?)`；绘制 SDF 文字时 `text` 为 `Some(SemanticSdfContext { text_atlases, md })` |
-| `profile_compositor::render_authored_image_into_simd(scene, store, kind, index, pixels, width, height)` | `(scene, store, kind, index, RgbaSurface::new(pixels, width, height)?)` |
-| 长度不符的目标缓冲区 | 由 `RgbaSurface::new` 以 `ProfileCompositorError::SurfaceLength` 拒绝 |
-| `SdfDrawCommand::from_atlas_glyph(kind, atlas_set, glyph, atlas_point_size, atlas_spread, baseline_origin, font_size, local_to_device, material)` | `from_atlas_glyph(kind, SdfGlyphAtlas { atlas_set, point_size, spread }, glyph, SdfGlyphPlacement { baseline_origin, font_size, local_to_device }, material)` |
-| `core::profile_resolve::compile_profile_scene_with_localizations(…, locale, resource_metadata, line_indent, localized_text)` | `(…, ProfileLocalization { locale, localized_text }, resource_metadata, line_indent)` |
-
-## 从 0.6 迁移
-
-0.6 的 crate 名为 `sekai-profile-renderer`、`sekai-profile-renderer-host` 与
-`sekai-profile-renderer-core`，现在分别是 `sekai-profile`（并入了 host crate）、`sekai-profile` 与
-`sekai-profile-core`。
-
-| 0.6 | 0.7 |
-| --- | --- |
-| `ProfileBackendConfig` | `RenderConfig` |
-| `ProfileBackendConfig::surface` | 已删除；CPU 光栅路径是唯一的 surface |
-| `TextSdfExecutor` 与 `ShapeSdfExecutor` | 合并为一个 `SdfExecutor` |
-| `TextSdfExecutor::LegacySkia` | 已删除 |
-| `ShapeSdfExecutor::Auto` | `SdfExecutor::Auto` |
-| `ScalarOracle` | `SdfExecutor::Scalar` |
-| `ProfileJpegEncoder::Skia` | 已删除；改用 `JpegOptions` 配 `JpegEncoder::Standard` |
-| `ProfileJpegEncoder::LibJpegTurbo` | `JpegEncoder::Standard` |
-| `ProfileJpegEncoder::LibJpegTurboAvx512Yuv420` | `JpegEncoder::Avx512Yuv420` |
-| `BackendFallbackPolicy` | 已删除；执行器不可用即报错 |
-| `pixel_occlusion_dry_run` | `PixelOcclusion::Measure` |
-| `pixel_occlusion_execute` | `PixelOcclusion::Cull` |
-| `collect_telemetry` | 已删除；遥测始终采集 |
-| `render_page_with_backend(_generation)` | `render_pinned` |
-| `render_profile_batch_with_backend(_generation)` | `render_batch_pinned` |
-| `render_animation_with_profile_backend` | `render_animation_pinned` |
-| `animation_preflight_with_profile` | `animation_preflight` |
-| `profile_backend_capabilities()` | `capabilities()` |
-| `profile_backend_cache_identity(_for_generation)` | `cache_identity(_pinned)` |
-| `prewarm_profile_backend_resources()` | `prewarm()` |
-| `ProfileRenderTelemetry` | `RenderTelemetry`，schema `allium.profile-render.telemetry.v4` |
-
-渲染入口返回 `RenderedPage` 而不是已编码字节，由调用方用 `encode_png` 或 `encode_jpeg` 编码。
-0.6 缓存的页面不会被复用：缓存键前缀由 `profile-backend-` 改为 `profile-render-`，遥测 schema 同步变更。
-
 ## 缓存与资源所有权
 
 - 字体 bytes 与逻辑 family 由调用方直接注册或通过任意异步 `FontProvider` 提供，并作为字体解析和 glyph cache identity 的唯一来源；

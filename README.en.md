@@ -386,52 +386,6 @@ must match it, so `set_font_dirs` runs before `with_atlas_dir`.
 renderer that draws nothing but cannot fail at startup. Build the atlases first, or check
 `capabilities().text_atlases` after installing them.
 
-## Migrating from 0.7
-
-| 0.7 | Now |
-| --- | --- |
-| `render_animation(card, profile, document_key, region, preset, config)` | `render_animation(card, profile, AnimationDocument { key, region }, preset, config)`; `render_animation_pinned` and `animation_preflight` take the same `AnimationDocument` |
-| Animation APIs return `Result<_, String>` | They return `Result<_, AnimationError>`; frame-source closures given to `encode_rgba_frames` return `AnimationError` too, `AnimationError::FrameSource` wrapping an error of their own |
-| `profile_compositor::render_authored_profile_into_{simd,scalar}(scene, store, text_atlases, md, assets, kind, index, pixels, width, height)` | `(scene, CompositorSources { store, text, assets }, kind, index, RgbaSurface::new(pixels, width, height)?)`; `text` is `Some(SemanticSdfContext { text_atlases, md })` when SDF text is drawn |
-| `profile_compositor::render_authored_image_into_simd(scene, store, kind, index, pixels, width, height)` | `(scene, store, kind, index, RgbaSurface::new(pixels, width, height)?)` |
-| A destination buffer of the wrong length | Rejected by `RgbaSurface::new` with `ProfileCompositorError::SurfaceLength` |
-| `SdfDrawCommand::from_atlas_glyph(kind, atlas_set, glyph, atlas_point_size, atlas_spread, baseline_origin, font_size, local_to_device, material)` | `from_atlas_glyph(kind, SdfGlyphAtlas { atlas_set, point_size, spread }, glyph, SdfGlyphPlacement { baseline_origin, font_size, local_to_device }, material)` |
-| `core::profile_resolve::compile_profile_scene_with_localizations(…, locale, resource_metadata, line_indent, localized_text)` | `(…, ProfileLocalization { locale, localized_text }, resource_metadata, line_indent)` |
-
-## Migrating from 0.6
-
-0.6 named the crates `sekai-profile-renderer`, `sekai-profile-renderer-host` and
-`sekai-profile-renderer-core`; they are now `sekai-profile` (which absorbed the host crate),
-`sekai-profile` and `sekai-profile-core`.
-
-| 0.6 | 0.7 |
-| --- | --- |
-| `ProfileBackendConfig` | `RenderConfig` |
-| `ProfileBackendConfig::surface` | Removed; the CPU raster path is the only surface |
-| `TextSdfExecutor` and `ShapeSdfExecutor` | One `SdfExecutor` for both |
-| `TextSdfExecutor::LegacySkia` | Removed |
-| `ShapeSdfExecutor::Auto` | `SdfExecutor::Auto` |
-| `ScalarOracle` | `SdfExecutor::Scalar` |
-| `ProfileJpegEncoder::Skia` | Removed; use `JpegOptions` with `JpegEncoder::Standard` |
-| `ProfileJpegEncoder::LibJpegTurbo` | `JpegEncoder::Standard` |
-| `ProfileJpegEncoder::LibJpegTurboAvx512Yuv420` | `JpegEncoder::Avx512Yuv420` |
-| `BackendFallbackPolicy` | Removed; an unavailable executor is an error |
-| `pixel_occlusion_dry_run` | `PixelOcclusion::Measure` |
-| `pixel_occlusion_execute` | `PixelOcclusion::Cull` |
-| `collect_telemetry` | Removed; telemetry is always collected |
-| `render_page_with_backend(_generation)` | `render_pinned` |
-| `render_profile_batch_with_backend(_generation)` | `render_batch_pinned` |
-| `render_animation_with_profile_backend` | `render_animation_pinned` |
-| `animation_preflight_with_profile` | `animation_preflight` |
-| `profile_backend_capabilities()` | `capabilities()` |
-| `profile_backend_cache_identity(_for_generation)` | `cache_identity(_pinned)` |
-| `prewarm_profile_backend_resources()` | `prewarm()` |
-| `ProfileRenderTelemetry` | `RenderTelemetry`, schema `allium.profile-render.telemetry.v4` |
-
-The render entry points return a `RenderedPage` instead of encoded bytes, so a caller encodes
-with `encode_png` or `encode_jpeg`. Cached pages from 0.6 are not reused: the cache key prefix
-changed from `profile-backend-` to `profile-render-`, and the telemetry schema with it.
-
 ## Cache and resource ownership
 
 - Font bytes and logical families supplied directly or through an arbitrary asynchronous `FontProvider` are the authoritative source for font resolution and glyph cache identity.
