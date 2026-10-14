@@ -268,8 +268,10 @@ pub fn prepare(handle: u32, input: &str) -> Result<String, String> {
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
-                locale,
-                localized_text,
+                ProfileLocalization {
+                    locale,
+                    localized_text,
+                },
             ),
             None => prepare_profile(
                 &card,

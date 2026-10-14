@@ -1,6 +1,6 @@
 //! The honor panel (type 6): standard and bonds honors and their stars.
 
-use super::nodes::{group_node, item_region, shape_node, text_node, NodeKey, RecipeLayer};
+use super::nodes::{group_node, shape_node, text_node, NodeKey, RecipeLayer};
 use super::{
     GeneralGeometry, GeneralGroupPhase, GeneralImageSampling, GeneralImageSource,
     GeneralImageSourceConstraint, GeneralRecipeNode, GeneralRecipePayload, GeneralTextAlign,
@@ -8,19 +8,14 @@ use super::{
 use crate::profile_scene::{
     HonorVisualKind, HonorVisualSnapshot, ProfileComponentSnapshot, ResourceDescriptor,
 };
-use crate::{BlendMode, InteractionRegionSource, ParameterValue, Rect, StableId, TextSource};
+use crate::{BlendMode, InteractionRegionSource, ParameterValue, Rect, TextSource};
 
 pub(super) fn build_honors_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) {
-    let layer = RecipeLayer {
-        layer_id,
-        source_key,
-    };
     nodes.push(shape_node(
         layer.key("honors-background", 0),
         Rect {
@@ -88,13 +83,7 @@ pub(super) fn build_honors_recipe(
                 }
             }
         }
-        interaction_regions.push(item_region(
-            layer_id,
-            source_key,
-            &format!("honor-slot-{slot}"),
-            bounds,
-            data,
-        ));
+        interaction_regions.push(layer.item_region(&format!("honor-slot-{slot}"), bounds, data));
     }
 }
 

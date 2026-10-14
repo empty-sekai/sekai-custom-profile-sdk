@@ -32,6 +32,31 @@ impl<'a> RecipeLayer<'a> {
             ordinal,
         }
     }
+
+    /// The inspectable region of an item drawn on this panel at `bounds`.
+    pub(super) fn item_region(
+        self,
+        role: &str,
+        bounds: Rect,
+        resolved_data: std::collections::BTreeMap<String, ParameterValue>,
+    ) -> InteractionRegionSource {
+        InteractionRegionSource {
+            id: StableId::derive(
+                "general-interaction-v1",
+                format!("{}\0{role}", self.source_key).as_bytes(),
+            ),
+            layer_id: self.layer_id,
+            role: role.into(),
+            bounds,
+            quad: crate::profile_scene::rect_quad(bounds),
+            matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            hit_geometry: crate::profile_scene::rect_quad(bounds),
+            clip: None,
+            control_bindings: Vec::new(),
+            resolved_data,
+            capabilities: vec!["inspect".into(), "select_item".into()],
+        }
+    }
 }
 
 /// Identity of one recipe node: the panel it belongs to, its role, and the
@@ -196,31 +221,6 @@ pub fn cover_source_rect(
             width: source_width,
             height,
         }
-    }
-}
-
-pub(super) fn item_region(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    bounds: Rect,
-    resolved_data: std::collections::BTreeMap<String, ParameterValue>,
-) -> InteractionRegionSource {
-    InteractionRegionSource {
-        id: StableId::derive(
-            "general-interaction-v1",
-            format!("{source_key}\0{role}").as_bytes(),
-        ),
-        layer_id,
-        role: role.into(),
-        bounds,
-        quad: crate::profile_scene::rect_quad(bounds),
-        matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        hit_geometry: crate::profile_scene::rect_quad(bounds),
-        clip: None,
-        control_bindings: Vec::new(),
-        resolved_data,
-        capabilities: vec!["inspect".into(), "select_item".into()],
     }
 }
 

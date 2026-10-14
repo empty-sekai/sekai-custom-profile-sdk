@@ -38,8 +38,8 @@ use character_rank::build_character_rank_recipe;
 use honor::build_honors_recipe;
 use music::{build_detailed_music_recipe, build_tabbed_music_recipe};
 use nodes::{
-    count_source, image_node, image_node_without_source, item_region, layout_rect,
-    localized_source, localized_two_line_sources, shape_node, text_node, RecipeLayer,
+    count_source, image_node, image_node_without_source, layout_rect, localized_source,
+    localized_two_line_sources, shape_node, text_node, RecipeLayer,
 };
 use story_favorite::build_story_favorite_recipe;
 
@@ -232,30 +232,11 @@ pub fn build_general_recipe(
     let mut controls = Vec::new();
     let mut interaction_regions = Vec::new();
     match general_type {
-        3 => build_deck_recipe(
-            layer_id,
-            source_key,
-            snapshot,
-            &mut nodes,
-            &mut interaction_regions,
-        )?,
-        5 => build_leader_member_recipe(
-            layer_id,
-            source_key,
-            snapshot,
-            &mut nodes,
-            &mut interaction_regions,
-        ),
-        6 => build_honors_recipe(
-            layer_id,
-            source_key,
-            snapshot,
-            &mut nodes,
-            &mut interaction_regions,
-        ),
+        3 => build_deck_recipe(layer, snapshot, &mut nodes, &mut interaction_regions)?,
+        5 => build_leader_member_recipe(layer, snapshot, &mut nodes, &mut interaction_regions),
+        6 => build_honors_recipe(layer, snapshot, &mut nodes, &mut interaction_regions),
         14 => build_story_favorite_recipe(
-            layer_id,
-            source_key,
+            layer,
             snapshot,
             &mut nodes,
             &mut controls,
@@ -263,8 +244,7 @@ pub fn build_general_recipe(
         )?,
         11 | 15 => build_character_rank_recipe(
             general_type,
-            layer_id,
-            source_key,
+            layer,
             snapshot,
             &mut nodes,
             &mut controls,
@@ -527,9 +507,7 @@ pub fn build_general_recipe(
                         [0.87, 0.87, 0.87, 1.0],
                     ));
                 }
-                interaction_regions.push(item_region(
-                    layer_id,
-                    source_key,
+                interaction_regions.push(layer.item_region(
                     "challenge-character",
                     avatar_bounds,
                     std::collections::BTreeMap::from([
@@ -556,10 +534,9 @@ pub fn build_general_recipe(
                 GeneralTextAlign::Left,
             ));
         }
-        12 => build_detailed_music_recipe(layer_id, source_key, snapshot, &mut nodes)?,
+        12 => build_detailed_music_recipe(layer, snapshot, &mut nodes)?,
         16 => build_tabbed_music_recipe(
-            layer_id,
-            source_key,
+            layer,
             snapshot,
             &mut nodes,
             &mut controls,
@@ -663,9 +640,7 @@ pub fn build_general_recipe(
                         }],
                     ));
                 }
-                interaction_regions.push(item_region(
-                    layer_id,
-                    source_key,
+                interaction_regions.push(layer.item_region(
                     "player-avatar-card",
                     avatar_bounds,
                     std::collections::BTreeMap::from([

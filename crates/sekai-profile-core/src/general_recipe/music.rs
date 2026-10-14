@@ -28,15 +28,10 @@ const DIFFICULTY_LABEL_COLORS: [[f32; 4]; 6] = [
 ];
 
 pub(super) fn build_detailed_music_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) -> Result<(), ProfileResolveError> {
-    let layer = RecipeLayer {
-        layer_id,
-        source_key,
-    };
     let results = snapshot.music_results.clone().unwrap_or_default();
     let difficulties = [
         ("easy", results.easy),
@@ -156,17 +151,16 @@ pub(super) fn build_detailed_music_recipe(
 }
 
 pub(super) fn build_tabbed_music_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
-    let layer = RecipeLayer {
+    let RecipeLayer {
         layer_id,
         source_key,
-    };
+    } = layer;
     let control_id = StableId::derive(
         "general-control-v1",
         format!("{source_key}\0music-result-mode").as_bytes(),

@@ -399,16 +399,15 @@ pub fn prepare_profile_with_localizations(
     profile: Option<&ProfileData>,
     masterdata: &impl ProfileMasterData,
     document_key: &str,
-    locale: &str,
-    localized_text: &BTreeMap<String, String>,
+    localization: ProfileLocalization<'_>,
 ) -> Result<AuthoredProfilePreparation, AuthoredProfileResolveError> {
     prepare_profile_inner(
         card,
         profile,
         masterdata,
         document_key,
-        locale,
-        Some(localized_text),
+        localization.locale,
+        Some(localization.localized_text),
     )
 }
 

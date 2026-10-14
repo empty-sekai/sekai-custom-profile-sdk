@@ -934,8 +934,10 @@ fn strict_external_localization_snapshot_drives_general_glyphs_without_region_fa
         Some(&profile),
         &data,
         "localized-general",
-        "cn",
-        &localized,
+        ProfileLocalization {
+            locale: "cn",
+            localized_text: &localized,
+        },
     )
     .unwrap();
     assert!(prepared
@@ -952,8 +954,10 @@ fn strict_external_localization_snapshot_drives_general_glyphs_without_region_fa
         Some(&profile),
         &data,
         "missing-localized-general",
-        "cn",
-        &BTreeMap::new(),
+        ProfileLocalization {
+            locale: "cn",
+            localized_text: &BTreeMap::new(),
+        },
     )
     .unwrap_err();
     assert!(error

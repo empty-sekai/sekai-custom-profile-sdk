@@ -1,8 +1,6 @@
 //! The story favorite panel (type 14) and its scrolling list.
 
-use super::nodes::{
-    image_node, item_region, layout_rect, localized_source, shape_node, text_node, RecipeLayer,
-};
+use super::nodes::{image_node, layout_rect, localized_source, shape_node, text_node, RecipeLayer};
 use super::{
     GeneralClip, GeneralGeometry, GeneralImageSource, GeneralImageSourceConstraint,
     GeneralRecipeNode, GeneralTextAlign,
@@ -10,20 +8,19 @@ use super::{
 use crate::profile_scene::{
     ComponentControlSource, ComponentControlState, ProfileComponentSnapshot, ProfileResolveError,
 };
-use crate::{CommandControlBinding, InteractionRegionSource, ParameterValue, Rect, StableId};
+use crate::{CommandControlBinding, InteractionRegionSource, ParameterValue, Rect};
 
 pub(super) fn build_story_favorite_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
-    let layer = RecipeLayer {
+    let RecipeLayer {
         layer_id,
         source_key,
-    };
+    } = layer;
     let panel = &crate::profile_layout::STORY_FAVORITE;
     nodes.push(text_node(
         layer.key("title", 0),
@@ -92,9 +89,7 @@ pub(super) fn build_story_favorite_recipe(
                 [0.82, 0.82, 0.82, 0.4],
             ));
         }
-        interaction_regions.push(item_region(
-            layer_id,
-            source_key,
+        interaction_regions.push(layer.item_region(
             &role,
             bounds,
             std::collections::BTreeMap::from([
@@ -174,9 +169,7 @@ pub(super) fn build_story_favorite_recipe(
             .control_bindings
             .push(CommandControlBinding::ScrollThumb { control_id });
         nodes.push(thumb);
-        let mut thumb_region = item_region(
-            layer_id,
-            source_key,
+        let mut thumb_region = layer.item_region(
             "story-scroll-thumb",
             thumb_bounds,
             std::collections::BTreeMap::from([
@@ -205,9 +198,7 @@ pub(super) fn build_story_favorite_recipe(
                 step: 195.0,
             },
         });
-        let mut scroll_region = item_region(
-            layer_id,
-            source_key,
+        let mut scroll_region = layer.item_region(
             "story-favorite-scroll",
             viewport,
             std::collections::BTreeMap::from([

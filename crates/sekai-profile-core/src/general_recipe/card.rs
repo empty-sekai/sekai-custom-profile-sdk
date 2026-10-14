@@ -2,8 +2,7 @@
 //! level caption, and rarity and master-rank sprite keys.
 
 use super::nodes::{
-    cover_source_rect, image_node, item_region, layout_rect, shape_node, text_node, NodeKey,
-    RecipeLayer,
+    cover_source_rect, image_node, layout_rect, shape_node, text_node, NodeKey, RecipeLayer,
 };
 use super::{
     GeneralClip, GeneralGeometry, GeneralImageSampling, GeneralImageSource,
@@ -71,16 +70,11 @@ pub fn build_card_member_overlay_recipe(
 }
 
 pub(super) fn build_deck_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
-    let layer = RecipeLayer {
-        layer_id,
-        source_key,
-    };
     const SLOT_COUNT: usize = 5;
     const CARD_WIDTH: f32 = 312.0;
     const CARD_HEIGHT: f32 = 512.0;
@@ -116,9 +110,7 @@ pub(super) fn build_deck_recipe(
         let member = snapshot.deck_members.get(slot_index);
 
         if let Some(card) = member {
-            interaction_regions.push(item_region(
-                layer_id,
-                source_key,
+            interaction_regions.push(layer.item_region(
                 &format!("deck-slot-{slot_index}-card"),
                 slot,
                 std::collections::BTreeMap::from([
@@ -448,16 +440,11 @@ impl CardOverlay<'_> {
 }
 
 pub(super) fn build_leader_member_recipe(
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) {
-    let layer = RecipeLayer {
-        layer_id,
-        source_key,
-    };
     let cover = layout_rect(crate::profile_layout::LEADER_MEMBER.elements[0]);
     let Some(card) = snapshot.leader_card.as_ref() else {
         nodes.push(shape_node(
@@ -469,9 +456,7 @@ pub(super) fn build_leader_member_recipe(
         return;
     };
 
-    interaction_regions.push(item_region(
-        layer_id,
-        source_key,
+    interaction_regions.push(layer.item_region(
         "leader-card",
         cover,
         std::collections::BTreeMap::from([

@@ -1,8 +1,6 @@
 //! The character rank panel (types 11 and 15) and its mode tabs.
 
-use super::nodes::{
-    image_node, item_region, layout_rect, localized_source, shape_node, text_node, RecipeLayer,
-};
+use super::nodes::{image_node, layout_rect, localized_source, shape_node, text_node, RecipeLayer};
 use super::{
     GeneralClip, GeneralGeometry, GeneralImageSource, GeneralImageSourceConstraint,
     GeneralRecipeNode, GeneralTextAlign,
@@ -10,23 +8,20 @@ use super::{
 use crate::profile_scene::{
     ComponentControlSource, ComponentControlState, ProfileComponentSnapshot, ProfileResolveError,
 };
-use crate::{
-    CommandControlBinding, InteractionRegionSource, ParameterValue, Rect, StableId, TextSource,
-};
+use crate::{CommandControlBinding, InteractionRegionSource, ParameterValue, Rect, TextSource};
 
 pub(super) fn build_character_rank_recipe(
     general_type: i32,
-    layer_id: StableId,
-    source_key: &str,
+    layer: RecipeLayer<'_>,
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
-    let layer = RecipeLayer {
+    let RecipeLayer {
         layer_id,
         source_key,
-    };
+    } = layer;
     let shift_y = if general_type == 15 { 150.0 } else { 0.0 };
     let shifted = |layout: crate::profile_layout::ElementLayout| {
         let mut bounds = layout_rect(layout);
@@ -141,9 +136,7 @@ pub(super) fn build_character_rank_recipe(
     .into_iter()
     .enumerate()
     {
-        let mut region = item_region(
-            layer_id,
-            source_key,
+        let mut region = layer.item_region(
             role,
             shifted(layout),
             std::collections::BTreeMap::from([
@@ -286,9 +279,7 @@ pub(super) fn build_character_rank_recipe(
                 nodes.push(node);
                 ordinal += 1;
             }
-            interaction_regions.push(item_region(
-                layer_id,
-                source_key,
+            interaction_regions.push(layer.item_region(
                 &format!("character-{character_id}"),
                 Rect {
                     x: pill_bounds.x,
@@ -380,9 +371,7 @@ pub(super) fn build_character_rank_recipe(
                 control_id: scroll_id,
             });
         nodes.push(thumb);
-        let mut thumb_region = item_region(
-            layer_id,
-            source_key,
+        let mut thumb_region = layer.item_region(
             "character-rank-scroll-thumb",
             thumb_bounds,
             std::collections::BTreeMap::from([
@@ -413,9 +402,7 @@ pub(super) fn build_character_rank_recipe(
                 step: 105.0,
             },
         });
-        let mut scroll_region = item_region(
-            layer_id,
-            source_key,
+        let mut scroll_region = layer.item_region(
             "character-rank-scroll",
             viewport,
             std::collections::BTreeMap::from([
