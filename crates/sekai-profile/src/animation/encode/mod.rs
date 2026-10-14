@@ -11,16 +11,20 @@ use self::apng::encode_apng;
 use self::gif_encoder::{encode_gif, gif_delay_centiseconds};
 use self::mp4::{encode_mp4, H264EncoderConfig};
 use self::webp::encode_webp;
-use super::compositor::{blit_layer, read_canvas_rgba_into, FrameRect, PixelRect};
-use super::{AnimationEncodeSpec, AnimationFormat, EncodedAnimation, ResolvedAnimationPreset};
+use super::compositor::{
+    blit_layer, read_canvas_rgba_into, FrameRect, PixelRect, PixelsMut, PixelsRef,
+};
+use super::{
+    AnimationEncodeSpec, AnimationError, AnimationFormat, EncodedAnimation, ResolvedAnimationPreset,
+};
 
 pub fn encode_rgba_frames<F>(
     format: AnimationFormat,
     spec: &AnimationEncodeSpec,
     frame_at: F,
-) -> Result<EncodedAnimation, String>
+) -> Result<EncodedAnimation, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     encode_rgba_frames_with_h264(format, spec, &H264EncoderConfig::default(), frame_at)
 }
@@ -50,9 +54,9 @@ fn encode_rgba_frames_with_h264<F>(
     spec: &AnimationEncodeSpec,
     h264: &H264EncoderConfig,
     frame_at: F,
-) -> Result<EncodedAnimation, String>
+) -> Result<EncodedAnimation, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     encode_rgba_frames_with_h264_and_telemetry(format, spec, h264, 0, frame_at)
         .map(|(encoded, _)| encoded)
@@ -64,9 +68,9 @@ pub(super) fn encode_rgba_frames_with_h264_and_telemetry<F>(
     h264: &H264EncoderConfig,
     gif_retention_budget: usize,
     mut frame_at: F,
-) -> Result<(EncodedAnimation, AnimationEncodeTelemetry), String>
+) -> Result<(EncodedAnimation, AnimationEncodeTelemetry), AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     validate_spec(spec)?;
     let expected = frame_byte_len(spec.width, spec.height)?;
@@ -92,9 +96,12 @@ pub(super) fn finish_encoded_animation(
     spec: &AnimationEncodeSpec,
     expected: usize,
     data: Vec<u8>,
-) -> Result<EncodedAnimation, String> {
+) -> Result<EncodedAnimation, AnimationError> {
     if data.len() > spec.output_budget_bytes {
-        return Err(output_budget_exceeded(data.len(), spec.output_budget_bytes));
+        return Err(AnimationError::OutputBudgetExceeded {
+            bytes: data.len(),
+            budget: spec.output_budget_bytes,
+        });
     }
     validate_magic(format, &data)?;
     Ok(EncodedAnimation {
@@ -125,9 +132,8 @@ fn encoded_duration_ms(format: AnimationFormat, spec: &AnimationEncodeSpec) -> u
 pub fn wrap_static_png(
     png: &[u8],
     preset: &ResolvedAnimationPreset,
-) -> Result<EncodedAnimation, String> {
-    let decoded = crate::codec::png::decode(png)
-        .map_err(|error| format!("decode static PNG for animation wrap failed: {error}"))?;
+) -> Result<EncodedAnimation, AnimationError> {
+    let decoded = crate::codec::png::decode(png).map_err(AnimationError::StaticPng)?;
     let source_width = decoded.width;
     let source_height = decoded.height;
     let scale = (preset.maximum_long_edge as f32 / source_width.max(source_height) as f32).min(1.0);
@@ -146,12 +152,16 @@ pub fn wrap_static_png(
     }
     let mut canvas = vec![0u8; bytes];
     blit_layer(
-        &mut canvas,
-        width,
-        height,
-        &source,
-        source_width,
-        source_height,
+        PixelsMut {
+            pixels: &mut canvas,
+            width,
+            height,
+        },
+        PixelsRef {
+            pixels: &source,
+            width: source_width,
+            height: source_height,
+        },
         FrameRect::from_xywh(0.0, 0.0, width as f32, height as f32),
         PixelRect::full(width, height),
     );
@@ -173,43 +183,40 @@ pub fn wrap_static_png(
     )
 }
 
-pub(super) fn validate_spec(spec: &AnimationEncodeSpec) -> Result<(), String> {
+pub(super) fn validate_spec(spec: &AnimationEncodeSpec) -> Result<(), AnimationError> {
     if spec.width == 0 || spec.height == 0 || spec.frame_count == 0 || spec.fps == 0 {
-        return Err("animation dimensions/frame_count/fps must be positive".into());
+        return Err(AnimationError::EmptySpec);
     }
     if spec.fps > 60 {
-        return Err("animation fps must not exceed the 60Hz core clock".into());
+        return Err(AnimationError::FpsAboveCoreClock(spec.fps));
     }
     frame_byte_len(spec.width, spec.height)?;
     Ok(())
 }
 
 /// Bytes in one tight RGBA8 frame.
-pub(super) fn frame_byte_len(width: u32, height: u32) -> Result<usize, String> {
+pub(super) fn frame_byte_len(width: u32, height: u32) -> Result<usize, AnimationError> {
     (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| format!("animation frame size overflow: {width}x{height}"))
-}
-
-pub(super) fn output_budget_exceeded(bytes: usize, budget: usize) -> String {
-    format!("OUTPUT_BUDGET_EXCEEDED: {bytes} > {budget}")
+        .ok_or(AnimationError::FrameSizeOverflow { width, height })
 }
 
 pub(super) fn checked_frame<F>(
     frame_at: &mut F,
     index: u32,
     expected: usize,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     let frame = frame_at(index)?;
     if frame.len() != expected {
-        return Err(format!(
-            "frame {index} has {} bytes, expected {expected}",
-            frame.len()
-        ));
+        return Err(AnimationError::FrameLength {
+            index,
+            actual: frame.len(),
+            expected,
+        });
     }
     Ok(frame)
 }
@@ -219,9 +226,9 @@ pub(super) fn checked_frame_timed<F>(
     index: u32,
     expected: usize,
     telemetry: &mut AnimationEncodeTelemetry,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     let started = std::time::Instant::now();
     let frame = checked_frame(frame_at, index, expected);
@@ -232,14 +239,14 @@ where
     frame
 }
 
-pub fn validate_magic(format: AnimationFormat, data: &[u8]) -> Result<(), String> {
+pub fn validate_magic(format: AnimationFormat, data: &[u8]) -> Result<(), AnimationError> {
     let valid = match format {
         AnimationFormat::Gif => validate_gif_container(data),
         AnimationFormat::Webp => validate_webp_container(data),
         AnimationFormat::Apng => validate_apng_container(data),
         AnimationFormat::Mp4 => validate_mp4_container(data),
     };
-    valid.map_err(|reason| format!("ANIMATION_ARTIFACT_INVALID: {format:?} {reason}"))
+    valid.map_err(|reason| AnimationError::InvalidArtifact { format, reason })
 }
 
 fn validate_gif_container(data: &[u8]) -> Result<(), &'static str> {
@@ -342,12 +349,12 @@ pub fn validate_encoded_artifact(
     expected_bytes: usize,
     actual_bytes: usize,
     prefix: &[u8],
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     if !path.ends_with(&format!(".{}", format.extension()))
         || content_type != format.content_type()
         || expected_bytes != actual_bytes
     {
-        return Err("ANIMATION_ARTIFACT_INVALID: path/mime/size mismatch".into());
+        return Err(AnimationError::ArtifactMismatch);
     }
     validate_magic(format, prefix)
 }

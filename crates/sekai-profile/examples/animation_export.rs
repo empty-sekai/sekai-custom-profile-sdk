@@ -13,7 +13,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sekai_profile::animation::{resolve_preset, validate_magic, AnimationFormat};
+use sekai_profile::animation::{
+    resolve_preset, validate_magic, AnimationDocument, AnimationFormat,
+};
 use sekai_profile::profile::ProfileData;
 use sekai_profile::types::UserCustomProfileCard;
 use sekai_profile::{
@@ -100,7 +102,7 @@ fn parse_executor(value: &str) -> Result<SdfExecutor, String> {
     }
 }
 
-fn main() -> Result<(), String> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args()?;
     if let Some(font_dir) = &args.font_dir {
         sekai_profile::set_font_dirs([font_dir]);
@@ -151,20 +153,19 @@ fn main() -> Result<(), String> {
         for format in &args.formats {
             let preset = resolve_preset(&args.preset, Some(*format))?;
             let document_key = format!("seq{}-{}", user_card.seq, preset.format.extension());
-            let export = match renderer.render_animation(
-                card,
-                profile.as_ref(),
-                &document_key,
-                &args.region,
-                &preset,
-                &config,
-            ) {
-                Ok(export) => export,
-                Err(error) => {
-                    println!("seq{} {} ERROR {error}", user_card.seq, format.extension());
-                    continue;
-                }
+            let document = AnimationDocument {
+                key: &document_key,
+                region: &args.region,
             };
+            let export =
+                match renderer.render_animation(card, profile.as_ref(), document, &preset, &config)
+                {
+                    Ok(export) => export,
+                    Err(error) => {
+                        println!("seq{} {} ERROR {error}", user_card.seq, format.extension());
+                        continue;
+                    }
+                };
             if !export.animated {
                 println!("seq{} static (not animated)", user_card.seq);
                 break;

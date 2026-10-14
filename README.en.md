@@ -248,7 +248,12 @@ fallback glyph cache are present.
 `RenderedBatch` alongside the `CompiledProfileBatch` and any prepared render objects, which lets
 a caller render and cache a whole profile from a single compile. `render_animation` renders an
 animation instead of a page, and `animation_preflight` reports what such a render needs before
-any frames are drawn.
+any frames are drawn. Both take an `AnimationDocument`: the key the scene's stable ids derive
+from and the region its fixed text is localized for. Both, like the functions in
+`sekai_profile::animation`, return `AnimationError` on failure: `OutputBudgetExceeded` and
+`ExportMemoryExceeded` mean the artifact or the memory the export holds outgrew the preset's
+budget, `Render` carries the `RenderError` of the render itself, and the other variants name the
+preset, encoder, artifact check or export step that failed.
 
 ### Caching rendered pages
 

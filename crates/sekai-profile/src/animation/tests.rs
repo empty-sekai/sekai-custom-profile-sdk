@@ -415,48 +415,21 @@ fn dirty_compositor_matches_full_redraw_with_interleaved_static_layer() {
     ];
     let dirty = before[1].pixel_bounds.union(after[1].pixel_bounds);
 
-    let mut incremental = vec![0u8; 8 * 4 * 4];
-    redraw_full_frame(
-        None,
-        &mut None,
-        &mut incremental,
-        8,
-        4,
-        &layers,
-        &before,
-        1.0,
-        &mut DeferredSdfTileCache::new(0),
-    )
-    .unwrap();
-    redraw_dirty_frame(
-        None,
-        &mut None,
-        &mut incremental,
-        8,
-        4,
-        &layers,
-        &after,
-        dirty,
-        1.0,
-        &mut DeferredSdfTileCache::new(0),
-    )
-    .unwrap();
+    let mut incremental =
+        AnimationFrameCompositor::new(8, 4, 1.0).expect("allocate the incremental compositor");
+    incremental.redraw_full_frame(&layers, &before).unwrap();
+    incremental
+        .redraw_dirty_frame(&layers, &after, dirty)
+        .unwrap();
 
-    let mut oracle = vec![0u8; 8 * 4 * 4];
-    redraw_full_frame(
-        None,
-        &mut None,
-        &mut oracle,
-        8,
-        4,
-        &layers,
-        &after,
-        1.0,
-        &mut DeferredSdfTileCache::new(0),
-    )
-    .unwrap();
+    let mut oracle =
+        AnimationFrameCompositor::new(8, 4, 1.0).expect("allocate the oracle compositor");
+    oracle.redraw_full_frame(&layers, &after).unwrap();
 
-    assert_eq!(read_frame(&incremental, 8, 4), read_frame(&oracle, 8, 4));
+    assert_eq!(
+        read_frame(incremental.canvas(), 8, 4),
+        read_frame(oracle.canvas(), 8, 4)
+    );
 }
 
 /// A provider that names exactly one shape resource, so a shape element
@@ -653,20 +626,25 @@ fn ordered_layer_raster_reports_atlas_identity_runs_and_realtime_edt_totals() {
         ..crate::render_config::RenderConfig::default()
     };
     let md = renderer.masterdata();
-    let (layers, _bytes, _scratch, telemetry) = rasterize_animation_groups(
-        &renderer,
-        &card,
-        None,
-        &md,
-        Some(assets.as_ref()),
-        None,
-        &std::collections::BTreeMap::new(),
-        &groups,
-        &config,
-        crate::render_object::MappedRenderObjectStore::empty(),
-        usize::MAX,
-    )
-    .expect("rasterize the shape layer");
+    let rasterizer = GroupRasterizer {
+        renderer: &renderer,
+        card: &card,
+        sources: crate::renderer::CardSources {
+            md: &md,
+            assets: Some(assets.as_ref()),
+            profile: None,
+            render_objects: crate::render_object::MappedRenderObjectStore::empty(),
+        },
+    };
+    let (layers, _bytes, _scratch, telemetry) = rasterizer
+        .rasterize_animation_groups(
+            None,
+            &std::collections::BTreeMap::new(),
+            &groups,
+            &config,
+            usize::MAX,
+        )
+        .expect("rasterize the shape layer");
     assert_eq!(layers.len(), 1, "the shape group produced one raster layer");
 
     let telemetry = telemetry.expect("rasterizing layers reports telemetry");
@@ -1314,16 +1292,20 @@ fn frame_size_and_output_budget_fail_closed() {
         output_budget_bytes: 1,
         gif_quality: 80,
     };
-    assert!(
+    assert!(matches!(
         encode_rgba_frames(AnimationFormat::Apng, &spec, |_| Ok(vec![0; 15]))
-            .unwrap_err()
-            .contains("expected 16")
-    );
-    assert!(
+            .expect_err("a short frame is rejected"),
+        AnimationError::FrameLength {
+            index: 0,
+            actual: 15,
+            expected: 16,
+        }
+    ));
+    assert!(matches!(
         encode_rgba_frames(AnimationFormat::Apng, &spec, |_| Ok(vec![0; 16]))
-            .unwrap_err()
-            .contains("OUTPUT_BUDGET_EXCEEDED")
-    );
+            .expect_err("an artifact over the output budget is rejected"),
+        AnimationError::OutputBudgetExceeded { .. }
+    ));
 }
 
 #[test]
@@ -1416,9 +1398,10 @@ fn immutable_presets_resolve_auto_without_format_guessing() {
             .format,
         AnimationFormat::Apng
     );
-    assert!(resolve_preset("future", None)
-        .unwrap_err()
-        .contains("ANIMATION_PRESET_UNSUPPORTED"));
+    assert!(matches!(
+        resolve_preset("future", None).expect_err("an unknown preset is rejected"),
+        AnimationError::UnsupportedPreset(alias) if alias == "future"
+    ));
 }
 
 #[test]
@@ -1452,7 +1435,10 @@ fn budget_ladder_retries_only_output_budget_failures_in_order() {
     let (value, step, attempts) = run_animation_budget_ladder(&preset, |step| {
         attempted.push(step.index);
         if step.index < 3 {
-            Err(format!("OUTPUT_BUDGET_EXCEEDED: step {}", step.index))
+            Err(AnimationError::OutputBudgetExceeded {
+                bytes: 2,
+                budget: 1,
+            })
         } else {
             Ok("encoded")
         }
@@ -1464,10 +1450,13 @@ fn budget_ladder_retries_only_output_budget_failures_in_order() {
     assert_eq!(attempted, vec![0, 1, 2, 3]);
 
     let error = run_animation_budget_ladder::<(), _>(&preset, |_| {
-        Err("ANIMATION_ENCODE_FAILED: corrupt input".into())
+        Err(AnimationError::encoder(
+            AnimationFormat::Gif,
+            "corrupt input",
+        ))
     })
     .unwrap_err();
-    assert!(error.contains("ANIMATION_ENCODE_FAILED"));
+    assert!(matches!(error, AnimationError::Encoder { .. }), "{error}");
 }
 
 #[test]
@@ -1613,7 +1602,10 @@ fn gif_rejects_frames_wider_or_taller_than_its_16_bit_screen() {
             Ok([255, 0, 0, 255].repeat(65_536))
         })
         .expect_err("a GIF extent beyond 16 bits is rejected");
-        assert!(error.contains("65535"), "{width}x{height}: {error}");
+        assert!(
+            matches!(error, AnimationError::GifFrameTooLarge { .. }),
+            "{width}x{height}: {error}"
+        );
     }
 
     let widest = AnimationEncodeSpec {
@@ -1663,7 +1655,10 @@ fn frame_byte_size_overflow_is_reported_instead_of_wrapping() {
             Ok(Vec::new())
         })
         .expect_err("an unrepresentable frame size is rejected");
-        assert!(error.contains("overflow"), "{format:?}: {error}");
+        assert!(
+            matches!(error, AnimationError::FrameSizeOverflow { .. }),
+            "{format:?}: {error}"
+        );
         assert!(!requested, "{format:?} asked for a frame it cannot hold");
     }
 }
@@ -1747,15 +1742,17 @@ fn gif_retained_and_streamed_deltas_agree_when_quantized_colors_share_an_entry()
 fn unsupported_static_policy_is_rejected_for_animated_pages_too() {
     for animated in [false, true] {
         assert!(
-            plan_page_execution(animated, "passthru")
-                .expect_err("an unknown static policy is rejected")
-                .contains("static_policy=passthru"),
+            matches!(
+                plan_page_execution(animated, "passthru")
+                    .expect_err("an unknown static policy is rejected"),
+                AnimationError::UnsupportedStaticPolicy(policy) if policy == "passthru"
+            ),
             "animated={animated}"
         );
     }
     assert_eq!(
-        plan_page_execution(true, "wrap"),
-        Ok(PageExecution::Animation)
+        plan_page_execution(true, "wrap").expect("an animated page plans animation work"),
+        PageExecution::Animation
     );
 }
 
@@ -1809,7 +1806,10 @@ fn encoders_stop_pulling_frames_once_the_output_budget_is_exceeded() {
         },
     )
     .expect_err("the GIF crosses its budget");
-    assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+    assert!(
+        matches!(error, AnimationError::OutputBudgetExceeded { .. }),
+        "{error}"
+    );
     // One analysis pass over every frame, then the encode pass stops at
     // the first frame that crosses the budget.
     assert!(gif_calls < 2 * frame_count, "GIF pulled {gif_calls} frames");
@@ -1820,7 +1820,10 @@ fn encoders_stop_pulling_frames_once_the_output_budget_is_exceeded() {
         Ok(frame(index))
     })
     .expect_err("the APNG crosses its budget");
-    assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+    assert!(
+        matches!(error, AnimationError::OutputBudgetExceeded { .. }),
+        "{error}"
+    );
     assert!(apng_calls < frame_count, "APNG pulled {apng_calls} frames");
 
     let mut mp4_calls = 0u32;
@@ -1829,6 +1832,9 @@ fn encoders_stop_pulling_frames_once_the_output_budget_is_exceeded() {
         Ok(frame(index))
     })
     .expect_err("the MP4 crosses its budget");
-    assert!(error.contains("OUTPUT_BUDGET_EXCEEDED"), "{error}");
+    assert!(
+        matches!(error, AnimationError::OutputBudgetExceeded { .. }),
+        "{error}"
+    );
     assert!(mp4_calls < frame_count, "MP4 pulled {mp4_calls} frames");
 }

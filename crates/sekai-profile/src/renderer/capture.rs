@@ -1,15 +1,14 @@
 //! SDF capture: the text and shape primitives of a card, mapped to draw commands
 //! that sample larger atlas tiers or realtime EDT glyphs when magnified.
 
-use super::elapsed_ns;
 #[cfg(feature = "parallel")]
 use super::realtime_edt::realtime_edt_pool;
 use super::realtime_edt::{
     active_realtime_edt_batch, realtime_edt_request_key, realtime_edt_sampling_spread,
     RealtimeEdtPreparedEntry, RealtimeEdtRequestKey,
 };
-use crate::assets::AssetStore;
-use crate::masterdata::MasterData;
+use super::{elapsed_ns, CardSources};
+use crate::elements::SdfCaptureObserver;
 use crate::types::CustomProfileCard;
 
 pub(super) enum CapturedSdfPrimitive {
@@ -44,18 +43,22 @@ pub(super) struct CapturedSdfPrimitives {
     pub(super) shape_count: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Captures the visible text and shape primitives `kinds` selects from `card`,
+/// laid out on a `canvas_width` x `canvas_height` canvas at the surface origin.
 pub(super) fn capture_sdf_primitives(
     card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
+    sources: CardSources<'_>,
     text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    profile: Option<&crate::profile::ProfileData>,
     canvas_width: u32,
     canvas_height: u32,
     kinds: SdfCaptureKinds,
 ) -> Result<CapturedSdfPrimitives, String> {
-    let _ = profile;
+    let canvas = sekai_profile_core::Rect {
+        x: 0.0,
+        y: 0.0,
+        width: canvas_width as f32,
+        height: canvas_height as f32,
+    };
     let mut primitives = Vec::new();
     let mut failures = Vec::new();
     let mut text_count = 0u64;
@@ -79,14 +82,11 @@ pub(super) fn capture_sdf_primitives(
                 };
                 crate::elements::capture_element_sdf(
                     &element,
-                    md,
-                    assets,
-                    canvas_width as f32,
-                    canvas_height as f32,
-                    [0.0, 0.0],
+                    sources.md,
+                    sources.assets,
+                    canvas,
                     text_atlases,
-                    Some(&mut observer),
-                    None,
+                    SdfCaptureObserver::Text(&mut observer),
                 );
             }
             crate::elements::RenderElement::Shape(_) if kinds.shape => {
@@ -102,14 +102,11 @@ pub(super) fn capture_sdf_primitives(
                 };
                 crate::elements::capture_element_sdf(
                     &element,
-                    md,
-                    assets,
-                    canvas_width as f32,
-                    canvas_height as f32,
-                    [0.0, 0.0],
+                    sources.md,
+                    sources.assets,
+                    canvas,
                     text_atlases,
-                    None,
-                    Some(&mut observer),
+                    SdfCaptureObserver::Shape(&mut observer),
                 );
             }
             _ => {}
@@ -223,11 +220,19 @@ pub(super) fn align_substituted_text_sdf_command(
     Some(substitution)
 }
 
+/// The installed SDF atlases captured primitives are mapped against: the text
+/// atlas set, the shape atlas when one is installed, and the mixed source over
+/// both.
+#[derive(Clone, Copy)]
+pub(super) struct SdfAtlases<'a> {
+    pub(super) text: &'a crate::sdf::atlas::MappedSdfAtlasSet,
+    pub(super) shape: Option<&'a crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
+    pub(super) source: &'a crate::sdf::tile::MixedSdfAtlasSource<'a>,
+}
+
 pub(super) fn map_captured_sdf_commands(
     captured: &[CapturedSdfPrimitive],
-    text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
-    shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
-    source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
+    atlases: SdfAtlases<'_>,
     runtime_text_pages: Option<&mut Vec<crate::sdf::tile::RuntimeTextSdfPage>>,
     realtime_edt_telemetry: Option<&mut Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>>,
     mut realtime_edt_batch_telemetry: Option<&mut crate::telemetry::RealtimeEdtBatchTelemetry>,
@@ -236,6 +241,12 @@ pub(super) fn map_captured_sdf_commands(
     >,
 ) -> Result<Vec<crate::sdf::tile::SdfDrawCommand>, String> {
     use std::collections::BTreeMap;
+
+    let SdfAtlases {
+        text: text_atlases,
+        shape: shape_atlas,
+        source,
+    } = atlases;
 
     #[derive(Clone)]
     enum PreparedCommand {

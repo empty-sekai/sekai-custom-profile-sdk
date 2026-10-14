@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::yuv::{rgba_to_yuv420p_into, rgba_to_yuv420p_macroblocks_into};
-use super::{checked_frame, output_budget_exceeded, AnimationEncodeTelemetry};
+use super::{checked_frame, AnimationEncodeTelemetry};
 use crate::animation::compositor::FrameCompositeUpdate;
-use crate::animation::AnimationEncodeSpec;
+use crate::animation::{AnimationEncodeSpec, AnimationError, AnimationFormat};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -16,12 +16,12 @@ pub enum H264YuvConverter {
 }
 
 impl H264YuvConverter {
-    pub fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, AnimationError> {
         match value {
             "auto" => Ok(Self::Auto),
             "scalar" => Ok(Self::Scalar),
             "avx512" => Ok(Self::Avx512),
-            _ => Err(format!("unsupported H.264 YUV converter: {value}")),
+            _ => Err(AnimationError::UnsupportedYuvConverter(value.into())),
         }
     }
 
@@ -56,14 +56,14 @@ impl Default for H264EncoderConfig {
 }
 
 impl H264EncoderConfig {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), AnimationError> {
         if self.qp > 51 {
-            return Err(format!("invalid H.264 QP: {}", self.qp));
+            return Err(AnimationError::InvalidH264Qp(self.qp));
         }
         if (self.require_avx512 || self.validate_avx512)
             && self.yuv_converter == H264YuvConverter::Scalar
         {
-            return Err("H.264 AVX-512 was required but the scalar converter was selected".into());
+            return Err(AnimationError::ConflictingYuvConverter);
         }
         if self.encoder_revision.is_empty()
             || !self
@@ -71,12 +71,12 @@ impl H264EncoderConfig {
                 .bytes()
                 .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
         {
-            return Err("H.264 encoder revision must use [A-Za-z0-9._-]".into());
+            return Err(AnimationError::InvalidEncoderRevision);
         }
         Ok(())
     }
 
-    pub fn cache_identity(&self) -> Result<String, String> {
+    pub fn cache_identity(&self) -> Result<String, AnimationError> {
         self.validate()?;
         Ok(format!(
             "h264-v2-{}-qp-{}-yuv-{}-require512-{}",
@@ -94,9 +94,9 @@ pub(super) fn encode_mp4<F>(
     config: &H264EncoderConfig,
     telemetry: &mut AnimationEncodeTelemetry,
     frame_at: &mut F,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     encode_mp4_into(spec, expected, config, telemetry, |index, rgba| {
         *rgba = checked_frame(frame_at, index, expected)?;
@@ -181,7 +181,7 @@ struct DirectX264Encoder {
 }
 
 impl DirectX264Encoder {
-    fn new(spec: &AnimationEncodeSpec, config: &H264EncoderConfig) -> Result<Self, String> {
+    fn new(spec: &AnimationEncodeSpec, config: &H264EncoderConfig) -> Result<Self, AnimationError> {
         // SAFETY: `allium_x264_create` takes only integers and validates them,
         // returning null on invalid input or failure. A null result becomes an
         // error below; a non-null one moves straight into `Self`, whose `Drop`
@@ -195,7 +195,7 @@ impl DirectX264Encoder {
             )
         };
         if encoder.is_null() {
-            return Err("initialize direct libx264 encoder failed".into());
+            return Err(mp4_error("initialize direct libx264 encoder failed"));
         }
         // The native side places the second chroma plane a quarter of the
         // luma size after the first and reads `width / 2` by `height / 2`
@@ -215,15 +215,15 @@ impl DirectX264Encoder {
         mb_info: &[u8],
         pts: i64,
         output: &mut Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AnimationError> {
         if yuv.len() < self.frame_bytes || mb_info.len() < self.mb_info_bytes {
-            return Err(format!(
+            return Err(mp4_error(format!(
                 "direct libx264 frame {pts} needs {} I420 and {} macroblock bytes, got {} and {}",
                 self.frame_bytes,
                 self.mb_info_bytes,
                 yuv.len(),
                 mb_info.len()
-            ));
+            )));
         }
         let mut data = std::ptr::null();
         let mut size = 0usize;
@@ -246,7 +246,7 @@ impl DirectX264Encoder {
             )
         };
         if encoded < 0 || (size != 0 && data.is_null()) {
-            return Err(format!("direct libx264 frame {pts} failed"));
+            return Err(mp4_error(format!("direct libx264 frame {pts} failed")));
         }
         if size != 0 {
             // SAFETY: the call above succeeded with `size != 0` and a non-null
@@ -259,7 +259,7 @@ impl DirectX264Encoder {
         Ok(())
     }
 
-    fn flush(&mut self, output: &mut Vec<u8>) -> Result<(), String> {
+    fn flush(&mut self, output: &mut Vec<u8>) -> Result<(), AnimationError> {
         // SAFETY: `self.handle` is the non-null handle this wrapper owns and has
         // not destroyed; the call only reads the encoder's delayed-picture
         // count.
@@ -271,7 +271,7 @@ impl DirectX264Encoder {
             // it, and `data` and `size` are local, writable output slots.
             let encoded = unsafe { allium_x264_flush(self.handle, &mut data, &mut size) };
             if encoded < 0 || (size != 0 && data.is_null()) {
-                return Err("flush direct libx264 encoder failed".into());
+                return Err(mp4_error("flush direct libx264 encoder failed"));
             }
             if size != 0 {
                 // SAFETY: the flush above succeeded with `size != 0` and a
@@ -301,12 +301,15 @@ pub(in crate::animation) fn encode_mp4_into<F>(
     config: &H264EncoderConfig,
     telemetry: &mut AnimationEncodeTelemetry,
     mut fill_frame: F,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32, &mut Vec<u8>) -> Result<FrameCompositeUpdate, String>,
+    F: FnMut(u32, &mut Vec<u8>) -> Result<FrameCompositeUpdate, AnimationError>,
 {
     if !spec.width.is_multiple_of(2) || !spec.height.is_multiple_of(2) {
-        return Err("H.264 yuv420p requires even animation dimensions".into());
+        return Err(AnimationError::OddH264Dimensions {
+            width: spec.width,
+            height: spec.height,
+        });
     }
     config.validate()?;
     let mut encoder = DirectX264Encoder::new(spec, config)?;
@@ -323,10 +326,11 @@ where
             .frame_callback_ns
             .saturating_add(frame_started.elapsed().as_nanos() as u64);
         if rgba.len() != expected {
-            return Err(format!(
-                "frame {index} has {} bytes, expected {expected}",
-                rgba.len()
-            ));
+            return Err(AnimationError::FrameLength {
+                index,
+                actual: rgba.len(),
+                expected,
+            });
         }
         let yuv_started = std::time::Instant::now();
         match &update {
@@ -360,7 +364,7 @@ where
         let mut access_unit = Vec::new();
         encoder.encode(&yuv, &mb_info, index as i64, &mut access_unit)?;
         if access_unit.is_empty() {
-            return Err(format!("direct libx264 delayed frame {index}"));
+            return Err(mp4_error(format!("direct libx264 delayed frame {index}")));
         }
         sample_bytes = sample_bytes.saturating_add(avc_sample_len(&access_unit));
         access_units.push(access_unit);
@@ -370,16 +374,18 @@ where
         // The muxed file holds every sample byte, so stop as soon as the
         // samples alone cross the budget.
         if sample_bytes > spec.output_budget_bytes {
-            return Err(output_budget_exceeded(
-                sample_bytes,
-                spec.output_budget_bytes,
-            ));
+            return Err(AnimationError::OutputBudgetExceeded {
+                bytes: sample_bytes,
+                budget: spec.output_budget_bytes,
+            });
         }
     }
     let mut delayed = Vec::new();
     encoder.flush(&mut delayed)?;
     if !delayed.is_empty() {
-        return Err("direct libx264 produced an unexpected delayed access unit".into());
+        return Err(mp4_error(
+            "direct libx264 produced an unexpected delayed access unit",
+        ));
     }
     drop(encoder);
 
@@ -394,13 +400,15 @@ pub(in crate::animation) fn fill_x264_mb_info(
     width: u32,
     height: u32,
     output: &mut Vec<u8>,
-) -> Result<(usize, usize), String> {
+) -> Result<(usize, usize), AnimationError> {
     const X264_MBINFO_CONSTANT: u8 = 1;
     let mb_width = width.div_ceil(16) as usize;
     let mb_height = height.div_ceil(16) as usize;
     let total = mb_width
         .checked_mul(mb_height)
-        .ok_or_else(|| "H.264 macroblock map size overflow".to_string())?;
+        .ok_or(AnimationError::Internal(
+            "H.264 macroblock map size overflow",
+        ))?;
     output.resize(total, X264_MBINFO_CONSTANT);
     output.fill(X264_MBINFO_CONSTANT);
     match update {
@@ -410,7 +418,9 @@ pub(in crate::animation) fn fill_x264_mb_info(
             for &index in changed_macroblocks {
                 let index = index as usize;
                 if index >= total {
-                    return Err("H.264 changed macroblock index is out of range".into());
+                    return Err(AnimationError::Internal(
+                        "H.264 changed macroblock index is out of range",
+                    ));
                 }
                 output[index] = 0;
             }
@@ -430,7 +440,7 @@ fn mux_avc_mp4(
     height: u32,
     fps: u32,
     access_units: &[Vec<u8>],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AnimationError> {
     let mut sps = None;
     let mut pps = None;
     let mut samples = Vec::with_capacity(access_units.len());
@@ -457,27 +467,29 @@ fn mux_avc_mp4(
             }
             mp4_u32(
                 &mut sample,
-                u32::try_from(nal.len()).map_err(|_| "AVC NAL too large")?,
+                u32::try_from(nal.len()).map_err(|_| mp4_error("AVC NAL too large"))?,
             );
             sample.extend_from_slice(nal);
         }
         if sample.is_empty() {
-            return Err(format!("AVC access unit {sample_index} has no sample NAL"));
+            return Err(mp4_error(format!(
+                "AVC access unit {sample_index} has no sample NAL"
+            )));
         }
         if sync {
             sync_samples.push(sample_index as u32 + 1);
         }
         samples.push(sample);
     }
-    let sps = sps.ok_or_else(|| "AVC stream is missing SPS".to_string())?;
-    let pps = pps.ok_or_else(|| "AVC stream is missing PPS".to_string())?;
+    let sps = sps.ok_or_else(|| mp4_error("AVC stream is missing SPS"))?;
+    let pps = pps.ok_or_else(|| mp4_error("AVC stream is missing PPS"))?;
     if sps.len() < 4
         || access_units.is_empty()
         || fps == 0
         || width > u16::MAX as u32
         || height > u16::MAX as u32
     {
-        return Err("invalid AVC MP4 track parameters".into());
+        return Err(mp4_error("invalid AVC MP4 track parameters"));
     }
 
     let ftyp = mp4_box(*b"ftyp", |payload| {
@@ -487,33 +499,35 @@ fn mux_avc_mp4(
     })?;
     let sample_sizes = samples
         .iter()
-        .map(|sample| u32::try_from(sample.len()).map_err(|_| "AVC sample too large".to_string()))
+        .map(|sample| u32::try_from(sample.len()).map_err(|_| mp4_error("AVC sample too large")))
         .collect::<Result<Vec<_>, _>>()?;
     let mdat_payload_bytes = sample_sizes.iter().try_fold(0u32, |total, &size| {
         total
             .checked_add(size)
-            .ok_or_else(|| "AVC mdat exceeds 4GiB".to_string())
+            .ok_or_else(|| mp4_error("AVC mdat exceeds 4GiB"))
     })?;
-    let mdat_data_offset = u32::try_from(ftyp.len() + 8).map_err(|_| "AVC mdat offset overflow")?;
-    let duration = u32::try_from(samples.len()).map_err(|_| "AVC frame count overflow")?;
-    let moov = build_avc_moov(
-        width as u16,
-        height as u16,
-        fps,
+    let mdat_data_offset =
+        u32::try_from(ftyp.len() + 8).map_err(|_| mp4_error("AVC mdat offset overflow"))?;
+    let duration =
+        u32::try_from(samples.len()).map_err(|_| mp4_error("AVC frame count overflow"))?;
+    let moov = build_avc_moov(&AvcTrack {
+        width: width as u16,
+        height: height as u16,
+        timescale: fps,
         duration,
-        &sps,
-        &pps,
-        &sample_sizes,
-        &sync_samples,
-        mdat_data_offset,
-    )?;
+        sps: &sps,
+        pps: &pps,
+        sample_sizes: &sample_sizes,
+        sync_samples: &sync_samples,
+        chunk_offset: mdat_data_offset,
+    })?;
     let mut output = Vec::with_capacity(ftyp.len() + 8 + mdat_payload_bytes as usize + moov.len());
     output.extend_from_slice(&ftyp);
     mp4_u32(
         &mut output,
         mdat_payload_bytes
             .checked_add(8)
-            .ok_or("AVC mdat size overflow")?,
+            .ok_or_else(|| mp4_error("AVC mdat size overflow"))?,
     );
     output.extend_from_slice(b"mdat");
     for sample in samples {
@@ -574,11 +588,16 @@ fn mp4_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());
 }
 
-fn mp4_box(kind: [u8; 4], fill: impl FnOnce(&mut Vec<u8>)) -> Result<Vec<u8>, String> {
+/// A failure of the libx264 encoder or the MP4 muxer.
+fn mp4_error(reason: impl Into<String>) -> AnimationError {
+    AnimationError::encoder(AnimationFormat::Mp4, reason)
+}
+
+fn mp4_box(kind: [u8; 4], fill: impl FnOnce(&mut Vec<u8>)) -> Result<Vec<u8>, AnimationError> {
     let mut output = vec![0, 0, 0, 0];
     output.extend_from_slice(&kind);
     fill(&mut output);
-    let size = u32::try_from(output.len()).map_err(|_| "MP4 box exceeds 4GiB".to_string())?;
+    let size = u32::try_from(output.len()).map_err(|_| mp4_error("MP4 box exceeds 4GiB"))?;
     output[..4].copy_from_slice(&size.to_be_bytes());
     Ok(output)
 }
@@ -587,25 +606,47 @@ fn mp4_full_box(
     kind: [u8; 4],
     version_and_flags: u32,
     fill: impl FnOnce(&mut Vec<u8>),
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AnimationError> {
     mp4_box(kind, |output| {
         mp4_u32(output, version_and_flags);
         fill(output);
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_avc_moov(
+/// The single video track of an AVC MP4 file: frame size and timing, the decoder
+/// configuration, and the sample table of the one chunk holding every sample.
+struct AvcTrack<'a> {
     width: u16,
     height: u16,
+    /// Ticks per second; every sample lasts one tick.
     timescale: u32,
+    /// Track length in ticks.
     duration: u32,
-    sps: &[u8],
-    pps: &[u8],
-    sample_sizes: &[u32],
-    sync_samples: &[u32],
+    /// Sequence parameter set NAL unit.
+    sps: &'a [u8],
+    /// Picture parameter set NAL unit.
+    pps: &'a [u8],
+    /// Byte length of each sample, in decode order.
+    sample_sizes: &'a [u32],
+    /// One-based numbers of the sync samples.
+    sync_samples: &'a [u32],
+    /// File offset of the chunk.
     chunk_offset: u32,
-) -> Result<Vec<u8>, String> {
+}
+
+/// The `moov` box describing `track`.
+fn build_avc_moov(track: &AvcTrack<'_>) -> Result<Vec<u8>, AnimationError> {
+    let AvcTrack {
+        width,
+        height,
+        timescale,
+        duration,
+        sps,
+        pps,
+        sample_sizes,
+        sync_samples,
+        chunk_offset,
+    } = *track;
     let matrix = [0x0001_0000u32, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
     let mvhd = mp4_full_box(*b"mvhd", 0, |output| {
         mp4_u32(output, 0);

@@ -6,6 +6,7 @@ use super::deferred::{
 };
 use super::elapsed_ns;
 use super::encode::frame_byte_len;
+use super::AnimationError;
 
 pub(super) struct RasterLayer {
     pub(super) dynamic_layer_id: Option<sekai_profile_core::LayerId>,
@@ -82,6 +83,21 @@ fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
     }
 }
 
+/// Premultiplied RGBA8 pixels, `width * 4` bytes per row.
+#[derive(Clone, Copy)]
+pub(super) struct PixelsRef<'a> {
+    pub(super) pixels: &'a [u8],
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+/// Premultiplied RGBA8 pixels being drawn into, `width * 4` bytes per row.
+pub(super) struct PixelsMut<'a> {
+    pub(super) pixels: &'a mut [u8],
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
 /// Draws a premultiplied RGBA8 source into `destination` over the device
 /// rectangle `rect`, source-over, sampling nearest.
 ///
@@ -91,15 +107,21 @@ fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
 /// restricts the write without moving the sampling grid, so a dirty-region
 /// redraw produces the pixels a full redraw would.
 pub(super) fn blit_layer(
-    destination: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    source: &[u8],
-    source_width: u32,
-    source_height: u32,
+    destination: PixelsMut<'_>,
+    source: PixelsRef<'_>,
     rect: FrameRect,
     clip: PixelRect,
 ) {
+    let PixelsMut {
+        pixels: destination,
+        width: canvas_width,
+        height: canvas_height,
+    } = destination;
+    let PixelsRef {
+        pixels: source,
+        width: source_width,
+        height: source_height,
+    } = source;
     let width = rect.right - rect.left;
     let height = rect.bottom - rect.top;
     if width <= 0.0 || height <= 0.0 || source_width == 0 || source_height == 0 {
@@ -301,7 +323,7 @@ impl DirtyRegionSet {
 
 impl<'a> AnimationFrameCompositor<'a> {
     #[cfg(test)]
-    pub(super) fn new(width: u32, height: u32, scale: f32) -> Result<Self, String> {
+    pub(super) fn new(width: u32, height: u32, scale: f32) -> Result<Self, AnimationError> {
         Self::new_inner(None, width, height, scale, None, 0)
     }
 
@@ -312,7 +334,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         scale: f32,
         render_telemetry: Option<crate::telemetry::RenderTelemetry>,
         deferred_cache_budget: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AnimationError> {
         Self::new_inner(
             Some(renderer),
             width,
@@ -330,7 +352,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         scale: f32,
         render_telemetry: Option<crate::telemetry::RenderTelemetry>,
         deferred_cache_budget: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AnimationError> {
         let bytes = frame_byte_len(width, height)?;
         Ok(Self {
             renderer,
@@ -354,7 +376,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         index: u32,
         scene: &sekai_profile_core::Scene,
         layers: &[RasterLayer],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, AnimationError> {
         let mut rgba = std::mem::take(&mut self.rgba);
         self.composite_into(index, scene, layers, &mut rgba)?;
         self.rgba = rgba;
@@ -367,7 +389,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         scene: &sekai_profile_core::Scene,
         layers: &[RasterLayer],
         rgba: &mut Vec<u8>,
-    ) -> Result<FrameCompositeUpdate, String> {
+    ) -> Result<FrameCompositeUpdate, AnimationError> {
         rgba.resize(self.width as usize * self.height as usize * 4, 0);
         let states = layers
             .iter()
@@ -382,24 +404,14 @@ impl<'a> AnimationFrameCompositor<'a> {
         layers: &[RasterLayer],
         states: Vec<LayerFrameState>,
         rgba: &mut Vec<u8>,
-    ) -> Result<FrameCompositeUpdate, String> {
+    ) -> Result<FrameCompositeUpdate, AnimationError> {
         let sequential = self
             .previous_index
             .is_some_and(|previous| index == previous.saturating_add(1))
             && self.previous_states.len() == states.len();
         let composite_started = std::time::Instant::now();
         let (mut update, dirty_regions) = if !sequential {
-            redraw_full_frame(
-                self.renderer,
-                &mut self.render_telemetry,
-                &mut self.canvas,
-                self.width,
-                self.height,
-                layers,
-                &states,
-                self.scale,
-                &mut self.deferred_cache,
-            )?;
+            self.redraw_full_frame(layers, &states)?;
             self.telemetry.full_composites = self.telemetry.full_composites.saturating_add(1);
             (FrameCompositeUpdate::Full, None)
         } else {
@@ -420,18 +432,7 @@ impl<'a> AnimationFrameCompositor<'a> {
                 (FrameCompositeUpdate::Reused, None)
             } else {
                 for region in &dirty.regions {
-                    redraw_dirty_frame(
-                        self.renderer,
-                        &mut self.render_telemetry,
-                        &mut self.canvas,
-                        self.width,
-                        self.height,
-                        layers,
-                        &states,
-                        *region,
-                        self.scale,
-                        &mut self.deferred_cache,
-                    )?;
+                    self.redraw_dirty_frame(layers, &states, *region)?;
                 }
                 self.telemetry.dirty_composites = self.telemetry.dirty_composites.saturating_add(1);
                 self.telemetry.dirty_regions = self
@@ -529,126 +530,108 @@ pub(super) fn pixel_bounds_for_destination(
     }
 }
 
-pub(super) fn redraw_full_frame(
-    renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    layers: &[RasterLayer],
-    states: &[LayerFrameState],
-    scale: f32,
-    deferred_cache: &mut DeferredSdfTileCache,
-) -> Result<(), String> {
-    let full = PixelRect::full(width, height);
-    fill_white(canvas, width, full);
-    draw_animation_layers(
-        renderer,
-        render_telemetry,
-        canvas,
-        width,
-        height,
-        layers,
-        states,
-        full,
-        scale,
-        deferred_cache,
-    )
-}
+impl AnimationFrameCompositor<'_> {
+    /// Clears the whole canvas to white and draws every visible layer.
+    pub(super) fn redraw_full_frame(
+        &mut self,
+        layers: &[RasterLayer],
+        states: &[LayerFrameState],
+    ) -> Result<(), AnimationError> {
+        let full = PixelRect::full(self.width, self.height);
+        fill_white(&mut self.canvas, self.width, full);
+        self.draw_animation_layers(layers, states, full)
+    }
 
-pub(super) fn redraw_dirty_frame(
-    renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    layers: &[RasterLayer],
-    states: &[LayerFrameState],
-    dirty: PixelRect,
-    scale: f32,
-    deferred_cache: &mut DeferredSdfTileCache,
-) -> Result<(), String> {
-    fill_white(canvas, width, dirty);
-    draw_animation_layers(
-        renderer,
-        render_telemetry,
-        canvas,
-        width,
-        height,
-        layers,
-        states,
-        dirty,
-        scale,
-        deferred_cache,
-    )
-}
+    /// Clears `dirty` to white and redraws the visible layers that reach it,
+    /// leaving the canvas outside `dirty` untouched.
+    pub(super) fn redraw_dirty_frame(
+        &mut self,
+        layers: &[RasterLayer],
+        states: &[LayerFrameState],
+        dirty: PixelRect,
+    ) -> Result<(), AnimationError> {
+        fill_white(&mut self.canvas, self.width, dirty);
+        self.draw_animation_layers(layers, states, dirty)
+    }
 
-fn draw_animation_layers(
-    renderer: Option<&crate::renderer::CustomProfileRenderer>,
-    render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    layers: &[RasterLayer],
-    states: &[LayerFrameState],
-    dirty: PixelRect,
-    scale: f32,
-    deferred_cache: &mut DeferredSdfTileCache,
-) -> Result<(), String> {
-    for (layer_index, (layer, state)) in layers.iter().zip(states).enumerate() {
-        if !state.visible || !state.pixel_bounds.intersects(dirty) {
-            continue;
+    /// Draws each visible layer that reaches `dirty`, clipped to `dirty`, in
+    /// order. Deferred layers rasterize the window `dirty` needs first.
+    fn draw_animation_layers(
+        &mut self,
+        layers: &[RasterLayer],
+        states: &[LayerFrameState],
+        dirty: PixelRect,
+    ) -> Result<(), AnimationError> {
+        let scale = self.scale;
+        for (layer_index, (layer, state)) in layers.iter().zip(states).enumerate() {
+            if !state.visible || !state.pixel_bounds.intersects(dirty) {
+                continue;
+            }
+            match &layer.content {
+                RasterLayerContent::Pixels(pixels) => {
+                    blit_layer(
+                        self.canvas_mut(),
+                        PixelsRef {
+                            pixels,
+                            width: layer.width,
+                            height: layer.height,
+                        },
+                        state.destination,
+                        dirty,
+                    );
+                }
+                RasterLayerContent::Deferred(deferred) => {
+                    let renderer = self.renderer.ok_or(AnimationError::Internal(
+                        "deferred animation layer requires an export renderer",
+                    ))?;
+                    let Some(window) = deferred_source_window(layer, state, dirty, scale) else {
+                        continue;
+                    };
+                    let rendered = render_deferred_animation_window_cached(
+                        renderer,
+                        deferred,
+                        window,
+                        layer_index,
+                        &mut self.deferred_cache,
+                        &mut self.render_telemetry,
+                    )?;
+                    let dx = state.destination.left() / scale - layer.x;
+                    let dy = state.destination.top() / scale - layer.y;
+                    let destination = FrameRect::from_xywh(
+                        (rendered.x as f32 + dx) * scale,
+                        (rendered.y as f32 + dy) * scale,
+                        rendered.width as f32 * scale,
+                        rendered.height as f32 * scale,
+                    );
+                    blit_layer(
+                        self.canvas_mut(),
+                        PixelsRef {
+                            pixels: &rendered.pixels,
+                            width: rendered.width,
+                            height: rendered.height,
+                        },
+                        destination,
+                        dirty,
+                    );
+                }
+            }
         }
-        match &layer.content {
-            RasterLayerContent::Pixels(pixels) => {
-                blit_layer(
-                    canvas,
-                    width,
-                    height,
-                    pixels,
-                    layer.width,
-                    layer.height,
-                    state.destination,
-                    dirty,
-                );
-            }
-            RasterLayerContent::Deferred(deferred) => {
-                let renderer = renderer.ok_or_else(|| {
-                    "deferred animation layer requires an export renderer".to_string()
-                })?;
-                let Some(window) = deferred_source_window(layer, state, dirty, scale) else {
-                    continue;
-                };
-                let rendered = render_deferred_animation_window_cached(
-                    renderer,
-                    deferred,
-                    window,
-                    layer_index,
-                    deferred_cache,
-                    render_telemetry,
-                )?;
-                let dx = state.destination.left() / scale - layer.x;
-                let dy = state.destination.top() / scale - layer.y;
-                let destination = FrameRect::from_xywh(
-                    (rendered.x as f32 + dx) * scale,
-                    (rendered.y as f32 + dy) * scale,
-                    rendered.width as f32 * scale,
-                    rendered.height as f32 * scale,
-                );
-                blit_layer(
-                    canvas,
-                    width,
-                    height,
-                    &rendered.pixels,
-                    rendered.width,
-                    rendered.height,
-                    destination,
-                    dirty,
-                );
-            }
+        Ok(())
+    }
+
+    fn canvas_mut(&mut self) -> PixelsMut<'_> {
+        PixelsMut {
+            pixels: &mut self.canvas,
+            width: self.width,
+            height: self.height,
         }
     }
-    Ok(())
+
+    /// The premultiplied canvas the frames composite into.
+    #[cfg(test)]
+    pub(super) fn canvas(&self) -> &[u8] {
+        &self.canvas
+    }
 }
 
 /// Copies the whole premultiplied canvas out as non-premultiplied RGBA, which is
@@ -658,10 +641,12 @@ pub(super) fn read_canvas_rgba_into(
     width: u32,
     height: u32,
     rgba: &mut [u8],
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     let required = width as usize * height as usize * 4;
     if rgba.len() != required || canvas.len() != required {
-        return Err("animation frame RGBA buffer has the wrong length".into());
+        return Err(AnimationError::Internal(
+            "animation frame RGBA buffer has the wrong length",
+        ));
     }
     for (source, destination) in canvas
         .as_chunks::<4>()
@@ -705,21 +690,27 @@ fn read_canvas_regions_rgba_into_exact(
     rgba: &mut [u8],
     scratch: &mut Vec<u8>,
     changed_macroblock_flags: &mut Vec<u8>,
-) -> Result<Vec<u32>, String> {
+) -> Result<Vec<u32>, AnimationError> {
     let row_bytes = width as usize * 4;
     let required = row_bytes * height as usize;
     if rgba.len() != required {
-        return Err("animation frame RGBA buffer has the wrong length".into());
+        return Err(AnimationError::Internal(
+            "animation frame RGBA buffer has the wrong length",
+        ));
     }
     let mb_width = width.div_ceil(16) as usize;
     let mb_height = height.div_ceil(16) as usize;
     let mb_count = mb_width
         .checked_mul(mb_height)
-        .ok_or_else(|| "animation macroblock map size overflow".to_string())?;
+        .ok_or(AnimationError::Internal(
+            "animation macroblock map size overflow",
+        ))?;
     changed_macroblock_flags.resize(mb_count, 0);
     changed_macroblock_flags.fill(0);
     if canvas.len() != required {
-        return Err("animation canvas has the wrong length".into());
+        return Err(AnimationError::Internal(
+            "animation canvas has the wrong length",
+        ));
     }
     for region in regions {
         if region.is_empty() {
@@ -768,7 +759,7 @@ pub(super) fn mark_changed_macroblocks_for_region(
     width: u32,
     region: PixelRect,
     changed_macroblock_flags: &mut [u8],
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     if region.is_empty() {
         return Ok(());
     }
@@ -780,7 +771,9 @@ pub(super) fn mark_changed_macroblocks_for_region(
     if !rgba.len().is_multiple_of(row_bytes)
         || packed_region.len() != packed_row_bytes * region_height
     {
-        return Err("invalid exact dirty-region buffers".into());
+        return Err(AnimationError::Internal(
+            "invalid exact dirty-region buffers",
+        ));
     }
     let mb_width = width.div_ceil(16);
     let first_mb_x = region.left.max(0) as usize / 16;
@@ -847,7 +840,7 @@ pub(super) fn composite_frame(
     width: u32,
     height: u32,
     scale: f32,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AnimationError> {
     let bytes = frame_byte_len(width, height)?;
     let mut canvas = vec![0u8; bytes];
     let full = PixelRect::full(width, height);
@@ -871,15 +864,21 @@ pub(super) fn composite_frame(
             layer.height as f32 * scale,
         );
         let RasterLayerContent::Pixels(pixels) = &layer.content else {
-            return Err("deferred animation layers require the streaming compositor".to_string());
+            return Err(AnimationError::Internal(
+                "deferred animation layers require the streaming compositor",
+            ));
         };
         blit_layer(
-            &mut canvas,
-            width,
-            height,
-            pixels,
-            layer.width,
-            layer.height,
+            PixelsMut {
+                pixels: &mut canvas,
+                width,
+                height,
+            },
+            PixelsRef {
+                pixels,
+                width: layer.width,
+                height: layer.height,
+            },
             destination,
             full,
         );

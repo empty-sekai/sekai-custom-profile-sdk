@@ -237,7 +237,11 @@ feature 时 `to_jpeg` 输出 JPEG，常驻服务可用 `CustomProfileRenderer::e
 
 `render_batch` 由一次编译出的批量结果渲染一个 profile 的全部页面，返回 `RenderedBatch`，并带回
 `CompiledProfileBatch` 与预取的 render object，便于一次性渲染与缓存整个 profile。`render_animation`
-渲染动画而非页面，`animation_preflight` 在实际绘制任何一帧之前报告该动画需要什么。
+渲染动画而非页面，`animation_preflight` 在实际绘制任何一帧之前报告该动画需要什么。两者都接收
+`AnimationDocument`，即场景稳定 id 所依据的 key 与固定文字本地化所用的区服。两者与
+`sekai_profile::animation` 中的函数失败时都返回 `AnimationError`：`OutputBudgetExceeded` 与
+`ExportMemoryExceeded` 表示产物或导出占用的内存超出预设的预算，`Render` 带出渲染本身的 `RenderError`，
+其余变体分别指出出错的预设、编码器、产物校验或导出步骤。
 
 ### 缓存已渲染的页面
 

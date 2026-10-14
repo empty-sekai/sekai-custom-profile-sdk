@@ -1,15 +1,15 @@
 //! Animated WebP encoding.
 
 use super::checked_frame;
-use crate::animation::AnimationEncodeSpec;
+use crate::animation::{AnimationEncodeSpec, AnimationError, AnimationFormat};
 
 pub(super) fn encode_webp<F>(
     spec: &AnimationEncodeSpec,
     expected: usize,
     frame_at: &mut F,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     use webp_animation::prelude::*;
     let mut encoder = Encoder::new_with_options(
@@ -21,17 +21,19 @@ where
             ..Default::default()
         },
     )
-    .map_err(|error| format!("WebP encoder init: {error}"))?;
+    .map_err(|error| {
+        AnimationError::encoder(AnimationFormat::Webp, format!("encoder init: {error}"))
+    })?;
     for index in 0..spec.frame_count {
         let rgba = checked_frame(frame_at, index, expected)?;
         let timestamp = index as i32 * 1000 / spec.fps as i32;
-        encoder
-            .add_frame(&rgba, timestamp)
-            .map_err(|error| format!("WebP frame {index}: {error}"))?;
+        encoder.add_frame(&rgba, timestamp).map_err(|error| {
+            AnimationError::encoder(AnimationFormat::Webp, format!("frame {index}: {error}"))
+        })?;
     }
     let final_timestamp = spec.frame_count as i32 * 1000 / spec.fps as i32;
-    let data = encoder
-        .finalize(final_timestamp)
-        .map_err(|error| format!("WebP finalize: {error}"))?;
+    let data = encoder.finalize(final_timestamp).map_err(|error| {
+        AnimationError::encoder(AnimationFormat::Webp, format!("finalize: {error}"))
+    })?;
     Ok(data.to_vec())
 }

@@ -2,6 +2,7 @@
 //! that serves it.
 
 use super::compositor::{LayerFrameState, PixelRect, RasterLayer};
+use super::AnimationError;
 
 /// Source-space cache for deferred SDF layers. The cache stores only pixels
 /// that were actually requested by a dirty window; it never changes the
@@ -135,7 +136,6 @@ fn record_deferred_window_execution(
 /// when it is enabled and assembling them into a contiguous window buffer by
 /// exact sub-rectangle copy. When the cache is disabled the window is rendered
 /// whole.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_deferred_animation_window_cached(
     renderer: &crate::renderer::CustomProfileRenderer,
     layer: &crate::renderer::DeferredAnimationSdfLayer,
@@ -143,11 +143,11 @@ pub(super) fn render_deferred_animation_window_cached(
     layer_index: usize,
     cache: &mut DeferredSdfTileCache,
     render_telemetry: &mut Option<crate::telemetry::RenderTelemetry>,
-) -> Result<crate::renderer::RenderedDeferredAnimationWindow, String> {
+) -> Result<crate::renderer::RenderedDeferredAnimationWindow, AnimationError> {
     let width = u32::try_from(window.right - window.left)
-        .map_err(|_| "deferred animation window width overflow")?;
+        .map_err(|_| AnimationError::Internal("deferred animation window width overflow"))?;
     let height = u32::try_from(window.bottom - window.top)
-        .map_err(|_| "deferred animation window height overflow")?;
+        .map_err(|_| AnimationError::Internal("deferred animation window height overflow"))?;
     if !cache.enabled() {
         let rendered = renderer.render_deferred_animation_sdf_window(
             layer,
@@ -165,12 +165,18 @@ pub(super) fn render_deferred_animation_window_cached(
     let layer_top = layer.y;
     let layer_right = layer
         .x
-        .checked_add(i32::try_from(layer.width).map_err(|_| "deferred layer width overflow")?)
-        .ok_or("deferred layer right overflow")?;
+        .checked_add(
+            i32::try_from(layer.width)
+                .map_err(|_| AnimationError::Internal("deferred layer width overflow"))?,
+        )
+        .ok_or(AnimationError::Internal("deferred layer right overflow"))?;
     let layer_bottom = layer
         .y
-        .checked_add(i32::try_from(layer.height).map_err(|_| "deferred layer height overflow")?)
-        .ok_or("deferred layer bottom overflow")?;
+        .checked_add(
+            i32::try_from(layer.height)
+                .map_err(|_| AnimationError::Internal("deferred layer height overflow"))?,
+        )
+        .ok_or(AnimationError::Internal("deferred layer bottom overflow"))?;
     let edge = DeferredSdfTileCache::TILE_EDGE;
     let mut tile_top = layer_top + (window.top - layer_top).div_euclid(edge) * edge;
     let mut scratch_peak_bytes = width as usize * height as usize * 8;
@@ -184,9 +190,9 @@ pub(super) fn render_deferred_animation_window_cached(
                 x: tile_left,
                 y: tile_top,
                 width: u32::try_from(tile_right - tile_left)
-                    .map_err(|_| "deferred cache tile width overflow")?,
+                    .map_err(|_| AnimationError::Internal("deferred cache tile width overflow"))?,
                 height: u32::try_from(tile_bottom - tile_top)
-                    .map_err(|_| "deferred cache tile height overflow")?,
+                    .map_err(|_| AnimationError::Internal("deferred cache tile height overflow"))?,
             };
             let cached = cache.get(key);
             if let Some(telemetry) = render_telemetry.as_mut() {

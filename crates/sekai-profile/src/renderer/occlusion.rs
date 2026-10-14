@@ -14,7 +14,6 @@ pub(super) struct PixelOcclusionDryRun {
     pub(super) build_ns: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build_pixel_occlusion_dry_run(
     card: &CustomProfileCard,
     elements: &[crate::elements::RenderElement<'_>],

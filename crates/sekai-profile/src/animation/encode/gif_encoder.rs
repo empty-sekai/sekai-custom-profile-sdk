@@ -1,8 +1,8 @@
 //! GIF encoding: palette training and lookup, per-frame index deltas and the LZW
 //! writer.
 
-use super::{checked_frame_timed, output_budget_exceeded, AnimationEncodeTelemetry};
-use crate::animation::AnimationEncodeSpec;
+use super::{checked_frame_timed, AnimationEncodeTelemetry};
+use crate::animation::{AnimationEncodeSpec, AnimationError, AnimationFormat};
 
 enum GifRetainedFrame {
     Full(Vec<u8>),
@@ -232,17 +232,17 @@ pub(super) fn encode_gif<F>(
     retention_budget: usize,
     telemetry: &mut AnimationEncodeTelemetry,
     frame_at: &mut F,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     const MAX_PALETTE_SAMPLE_PIXELS: usize = 65_536;
     // The logical screen and every image descriptor store 16-bit extents.
     if spec.width > u32::from(u16::MAX) || spec.height > u32::from(u16::MAX) {
-        return Err(format!(
-            "GIF frames are limited to 65535x65535 pixels, got {}x{}",
-            spec.width, spec.height
-        ));
+        return Err(AnimationError::GifFrameTooLarge {
+            width: spec.width,
+            height: spec.height,
+        });
     }
     let pixels_per_frame = (MAX_PALETTE_SAMPLE_PIXELS / spec.frame_count as usize).max(1);
     let mut quantization_pixels = Vec::with_capacity(MAX_PALETTE_SAMPLE_PIXELS * 4);
@@ -290,7 +290,10 @@ where
     }
     telemetry.gif_palette_sample_ns = palette_sample_started.elapsed().as_nanos() as u64;
     if quantization_pixels.is_empty() {
-        return Err("GIF palette analysis produced no pixels".into());
+        return Err(AnimationError::encoder(
+            AnimationFormat::Gif,
+            "palette analysis produced no pixels",
+        ));
     }
     let palette_quantize_started = std::time::Instant::now();
     let sampled_pixels = quantization_pixels.len() / 4;
@@ -332,14 +335,18 @@ where
         // retained between the two passes.
         let mut encoder =
             gif::Encoder::new(&mut output, spec.width as u16, spec.height as u16, &palette)
-                .map_err(|error| format!("GIF encoder init: {error}"))?;
+                .map_err(|error| {
+                    AnimationError::encoder(AnimationFormat::Gif, format!("encoder init: {error}"))
+                })?;
         encoder
             .set_repeat(if spec.looped {
                 gif::Repeat::Infinite
             } else {
                 gif::Repeat::Finite(0)
             })
-            .map_err(|error| format!("GIF repeat: {error}"))?;
+            .map_err(|error| {
+                AnimationError::encoder(AnimationFormat::Gif, format!("repeat: {error}"))
+            })?;
         telemetry.gif_retained_frame_bytes = retained_peak_bytes
             .saturating_add(palette_lookup_bytes)
             .saturating_add(FastGifLzwEncoder::HEAP_BYTES);
@@ -395,7 +402,9 @@ where
             frame.buffer = std::borrow::Cow::Owned(encoded_lzw);
             encoder
                 .write_lzw_pre_encoded_frame(&frame)
-                .map_err(|error| format!("GIF frame {index}: {error}"))?;
+                .map_err(|error| {
+                    AnimationError::encoder(AnimationFormat::Gif, format!("frame {index}: {error}"))
+                })?;
             if let std::borrow::Cow::Owned(buffer) = frame.buffer {
                 lzw.recycle(buffer);
             }
@@ -405,7 +414,10 @@ where
             // The stream only grows, so stop as soon as it crosses the budget.
             let written = encoder.get_ref().len();
             if written > spec.output_budget_bytes {
-                return Err(output_budget_exceeded(written, spec.output_budget_bytes));
+                return Err(AnimationError::OutputBudgetExceeded {
+                    bytes: written,
+                    budget: spec.output_budget_bytes,
+                });
             }
         }
     }

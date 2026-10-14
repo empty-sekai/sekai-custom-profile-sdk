@@ -114,54 +114,57 @@ pub(crate) struct SdfObservationTimings {
     pub text_capture: crate::text::TextSdfCaptureTimings,
 }
 
-/// Capture of one element's SDF command stream. Only Text and Shape elements
-/// produce SDF primitives; the ordered path routes every other element kind
-/// through the image compositor before reaching here. The device transform is
-/// the surface origin composed with [`element_device_affine`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn capture_element_sdf(
-    elem: &RenderElement<'_>,
-    md: &crate::masterdata::MasterData,
-    assets: Option<&crate::assets::AssetStore>,
-    canvas_width: f32,
-    canvas_height: f32,
-    origin: [f32; 2],
-    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
-    text_observer: Option<
-        &mut dyn FnMut(Result<crate::text::ResolvedTextSdfGlyph, crate::text::TextSdfCaptureError>),
-    >,
-    shape_observer: Option<
-        &mut dyn FnMut(
+/// Receives the SDF primitives one element capture produces: the glyphs of a
+/// text element or the command of a shape element. An element of the other
+/// kind produces nothing.
+pub(crate) enum SdfCaptureObserver<'a> {
+    Text(
+        &'a mut dyn FnMut(
+            Result<crate::text::ResolvedTextSdfGlyph, crate::text::TextSdfCaptureError>,
+        ),
+    ),
+    Shape(
+        &'a mut dyn FnMut(
             Result<
                 crate::elements::shape::ResolvedShapeSdfCommand,
                 crate::elements::shape::ShapeSdfCaptureError,
             >,
         ),
-    >,
+    ),
+}
+
+/// Capture of one element's SDF command stream. Only Text and Shape elements
+/// produce SDF primitives; the ordered path routes every other element kind
+/// through the image compositor before reaching here.
+///
+/// `canvas` is the card canvas on the capture surface: element positions
+/// resolve against its size, and its origin offsets the device transform,
+/// which is that offset composed with [`element_device_affine`].
+pub(crate) fn capture_element_sdf(
+    elem: &RenderElement<'_>,
+    md: &crate::masterdata::MasterData,
+    assets: Option<&crate::assets::AssetStore>,
+    canvas: sekai_profile_core::Rect,
+    text_atlases: Option<&crate::sdf::atlas::MappedSdfAtlasSet>,
+    observer: SdfCaptureObserver<'_>,
 ) -> SdfObservationTimings {
     let mut observation_timings = SdfObservationTimings::default();
     let device = concat_affine(
-        [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]],
-        element_device_affine(elem.object_data(), canvas_width, canvas_height),
+        [1.0, 0.0, 0.0, 1.0, canvas.x, canvas.y],
+        element_device_affine(elem.object_data(), canvas.width, canvas.height),
     );
-    match elem {
-        RenderElement::Text(e) => {
-            if let Some(observer) = text_observer {
-                observation_timings.text_capture = crate::text::capture_text_sdf_from_affine(
-                    scale_affine(device, crate::text::TEXT_SCALE),
-                    e,
-                    md,
-                    text_atlases,
-                    observer,
-                );
-            }
+    match (elem, observer) {
+        (RenderElement::Text(e), SdfCaptureObserver::Text(observer)) => {
+            observation_timings.text_capture = crate::text::capture_text_sdf_from_affine(
+                scale_affine(device, crate::text::TEXT_SCALE),
+                e,
+                md,
+                text_atlases,
+                observer,
+            );
         }
-        RenderElement::Shape(e) => {
-            if let Some(observer) = shape_observer {
-                crate::elements::shape::capture_shape_sdf_from_affine(
-                    device, e, md, assets, observer,
-                );
-            }
+        (RenderElement::Shape(e), SdfCaptureObserver::Shape(observer)) => {
+            crate::elements::shape::capture_shape_sdf_from_affine(device, e, md, assets, observer);
         }
         _ => {}
     }

@@ -1,15 +1,15 @@
 //! APNG encoding with per-frame delta rectangles.
 
-use super::{checked_frame, output_budget_exceeded};
-use crate::animation::AnimationEncodeSpec;
+use super::checked_frame;
+use crate::animation::{AnimationEncodeSpec, AnimationError};
 
 pub(super) fn encode_apng<F>(
     spec: &AnimationEncodeSpec,
     expected: usize,
     frame_at: &mut F,
-) -> Result<Vec<u8>, String>
+) -> Result<Vec<u8>, AnimationError>
 where
-    F: FnMut(u32) -> Result<Vec<u8>, String>,
+    F: FnMut(u32) -> Result<Vec<u8>, AnimationError>,
 {
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
@@ -54,11 +54,12 @@ where
             scanlines.extend_from_slice(row);
         }
         let mut zlib = ZlibEncoder::new(Vec::new(), Compression::best());
-        zlib.write_all(&scanlines)
-            .map_err(|error| format!("APNG frame {index} compress: {error}"))?;
-        let compressed = zlib
-            .finish()
-            .map_err(|error| format!("APNG frame {index} finish: {error}"))?;
+        let compression_failed = |source: std::io::Error| AnimationError::ApngCompression {
+            frame: index,
+            source,
+        };
+        zlib.write_all(&scanlines).map_err(compression_failed)?;
+        let compressed = zlib.finish().map_err(compression_failed)?;
         if index == 0 {
             write_png_chunk(&mut output, b"IDAT", &compressed);
         } else {
@@ -71,10 +72,10 @@ where
         previous = Some(rgba);
         // The stream only grows, so stop as soon as it crosses the budget.
         if output.len() > spec.output_budget_bytes {
-            return Err(output_budget_exceeded(
-                output.len(),
-                spec.output_budget_bytes,
-            ));
+            return Err(AnimationError::OutputBudgetExceeded {
+                bytes: output.len(),
+                budget: spec.output_budget_bytes,
+            });
         }
     }
     write_png_chunk(&mut output, b"IEND", &[]);

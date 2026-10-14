@@ -2,6 +2,7 @@
 //! AVX-512 kernels.
 
 use super::mp4::{H264EncoderConfig, H264YuvConverter};
+use crate::animation::AnimationError;
 
 #[cfg(test)]
 pub(in crate::animation) fn rgba_to_yuv420p(
@@ -9,7 +10,7 @@ pub(in crate::animation) fn rgba_to_yuv420p(
     width: u32,
     height: u32,
     config: &H264EncoderConfig,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AnimationError> {
     let mut yuv = Vec::new();
     rgba_to_yuv420p_into(rgba, width, height, config, &mut yuv)?;
     Ok(yuv)
@@ -21,13 +22,17 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
     height: u32,
     config: &H264EncoderConfig,
     yuv: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-        return Err("YUV420 conversion requires positive even dimensions".into());
+        return Err(AnimationError::Internal(
+            "YUV420 conversion requires positive even dimensions",
+        ));
     }
     let pixels = width as usize * height as usize;
     if rgba.len() != pixels * 4 {
-        return Err("YUV420 conversion received a truncated RGBA frame".into());
+        return Err(AnimationError::Internal(
+            "YUV420 conversion received a truncated RGBA frame",
+        ));
     }
     yuv.resize(pixels + pixels / 2, 0);
     config.validate()?;
@@ -48,9 +53,11 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
                 .enumerate()
                 .find(|(_, (actual, expected))| actual != expected)
             {
-                return Err(format!(
-                    "H.264 AVX-512 YUV mismatch at byte {offset}: {actual} != {expected}"
-                ));
+                return Err(AnimationError::YuvMismatch {
+                    offset,
+                    actual,
+                    expected,
+                });
             }
         }
         return Ok(());
@@ -59,7 +66,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_into(
         || config.validate_avx512
         || config.yuv_converter == H264YuvConverter::Avx512
     {
-        return Err("H.264 AVX-512 RGBA-to-YUV420 is unavailable".into());
+        return Err(AnimationError::Avx512Unavailable);
     }
     rgba_to_yuv420p_scalar(rgba, width as usize, height as usize, yuv);
     Ok(())
@@ -72,13 +79,17 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
     changed_macroblocks: &[u32],
     config: &H264EncoderConfig,
     yuv: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-        return Err("YUV420 macroblock conversion requires positive even dimensions".into());
+        return Err(AnimationError::Internal(
+            "YUV420 macroblock conversion requires positive even dimensions",
+        ));
     }
     let pixels = width as usize * height as usize;
     if rgba.len() != pixels * 4 || yuv.len() != pixels + pixels / 2 {
-        return Err("YUV420 macroblock conversion requires an initialized frame".into());
+        return Err(AnimationError::Internal(
+            "YUV420 macroblock conversion requires an initialized frame",
+        ));
     }
     config.validate()?;
     let mb_count = width.div_ceil(16) as usize * height.div_ceil(16) as usize;
@@ -86,7 +97,9 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         .iter()
         .any(|&index| index as usize >= mb_count)
     {
-        return Err("YUV420 changed macroblock index is out of range".into());
+        return Err(AnimationError::Internal(
+            "YUV420 changed macroblock index is out of range",
+        ));
     }
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx512f")
@@ -119,9 +132,11 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
                 .enumerate()
                 .find(|(_, (actual, expected))| actual != expected)
             {
-                return Err(format!(
-                    "H.264 AVX-512 macroblock YUV mismatch at byte {offset}: {actual} != {expected}"
-                ));
+                return Err(AnimationError::YuvMismatch {
+                    offset,
+                    actual,
+                    expected,
+                });
             }
         }
         return Ok(());
@@ -130,7 +145,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         || config.validate_avx512
         || config.yuv_converter == H264YuvConverter::Avx512
     {
-        return Err("H.264 AVX-512 macroblock RGBA-to-YUV420 is unavailable".into());
+        return Err(AnimationError::Avx512Unavailable);
     }
     rgba_to_yuv420p_macroblocks_scalar(
         rgba,
@@ -154,30 +169,35 @@ fn rgba_to_yuv420p_macroblocks_scalar(
         let index = index as usize;
         let x = index % mb_width * 16;
         let y = index / mb_width * 16;
-        rgba_to_yuv420p_block_scalar(
-            rgba,
-            width,
-            height,
+        let block = MacroblockRect {
             x,
             y,
-            (width - x).min(16),
-            (height - y).min(16),
-            yuv,
-        );
+            width: (width - x).min(16),
+            height: (height - y).min(16),
+        };
+        rgba_to_yuv420p_block_scalar(rgba, width, block, yuv);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rgba_to_yuv420p_block_scalar(
-    rgba: &[u8],
+/// The pixels of a frame one macroblock covers: 16x16, clipped at the right
+/// and bottom edges of the frame.
+#[derive(Clone, Copy)]
+struct MacroblockRect {
+    x: usize,
+    y: usize,
     width: usize,
-    _height: usize,
-    start_x: usize,
-    start_y: usize,
-    block_width: usize,
-    block_height: usize,
-    yuv: &mut [u8],
-) {
+    height: usize,
+}
+
+/// Converts the pixels `block` covers of a `width`-pixel-wide RGBA frame into
+/// an existing yuv420p buffer whose plane split follows from `yuv.len()`.
+fn rgba_to_yuv420p_block_scalar(rgba: &[u8], width: usize, block: MacroblockRect, yuv: &mut [u8]) {
+    let MacroblockRect {
+        x: start_x,
+        y: start_y,
+        width: block_width,
+        height: block_height,
+    } = block;
     let pixels = yuv.len() * 2 / 3;
     let (y_plane, chroma) = yuv.split_at_mut(pixels);
     let (u_plane, v_plane) = chroma.split_at_mut(pixels / 4);
@@ -253,16 +273,13 @@ unsafe fn rgba_to_yuv420p_macroblocks_avx512(
         let block_width = (width - start_x).min(16);
         let block_height = (height - start_y).min(16);
         if block_width != 16 {
-            rgba_to_yuv420p_block_scalar(
-                rgba,
-                width,
-                height,
-                start_x,
-                start_y,
-                block_width,
-                block_height,
-                yuv,
-            );
+            let block = MacroblockRect {
+                x: start_x,
+                y: start_y,
+                width: block_width,
+                height: block_height,
+            };
+            rgba_to_yuv420p_block_scalar(rgba, width, block, yuv);
             continue;
         }
         for y in (start_y..start_y + block_height).step_by(2) {

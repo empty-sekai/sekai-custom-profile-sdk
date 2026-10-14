@@ -16,6 +16,7 @@ use crate::types::CustomProfileCard;
 mod compositor;
 mod deferred;
 mod encode;
+mod error;
 mod export;
 mod timeline;
 
@@ -23,6 +24,7 @@ pub use self::encode::mp4::{H264EncoderConfig, H264YuvConverter};
 pub use self::encode::{
     encode_rgba_frames, validate_encoded_artifact, validate_magic, wrap_static_png,
 };
+pub use self::error::AnimationError;
 pub(crate) use self::export::export_profile_animation;
 
 #[cfg(test)]
@@ -49,7 +51,9 @@ pub enum AnimationPreset {
     ArchiveV1,
 }
 
-pub fn animation_encoder_cache_suffix(preset: &ResolvedAnimationPreset) -> Result<String, String> {
+pub fn animation_encoder_cache_suffix(
+    preset: &ResolvedAnimationPreset,
+) -> Result<String, AnimationError> {
     match preset.format {
         AnimationFormat::Mp4 => Ok(format!("-{}", preset.h264.cache_identity()?)),
         AnimationFormat::Gif | AnimationFormat::Webp | AnimationFormat::Apng => Ok(String::new()),
@@ -110,28 +114,27 @@ pub fn animation_budget_steps(preset: &ResolvedAnimationPreset) -> Vec<Animation
 pub fn run_animation_budget_ladder<T, F>(
     preset: &ResolvedAnimationPreset,
     mut attempt: F,
-) -> Result<(T, AnimationBudgetStep, u8), String>
+) -> Result<(T, AnimationBudgetStep, u8), AnimationError>
 where
-    F: FnMut(&AnimationBudgetStep) -> Result<T, String>,
+    F: FnMut(&AnimationBudgetStep) -> Result<T, AnimationError>,
 {
     let mut last_budget_error = None;
     for step in animation_budget_steps(preset) {
         match attempt(&step) {
             Ok(value) => return Ok((value, step.clone(), step.index + 1)),
-            Err(error) if error.contains("OUTPUT_BUDGET_EXCEEDED") => {
+            Err(error) if error.is_output_budget_exceeded() => {
                 last_budget_error = Some(error);
             }
             Err(error) => return Err(error),
         }
     }
-    Err(last_budget_error
-        .unwrap_or_else(|| "OUTPUT_BUDGET_EXCEEDED: animation budget ladder exhausted".into()))
+    Err(last_budget_error.unwrap_or(AnimationError::BudgetLadderExhausted))
 }
 
 pub fn resolve_preset(
     alias: &str,
     requested_format: Option<AnimationFormat>,
-) -> Result<ResolvedAnimationPreset, String> {
+) -> Result<ResolvedAnimationPreset, AnimationError> {
     let (preset, auto_format, fps, seconds, edge, output_mib, memory_mib) = match alias {
         "qq-v1" => (
             AnimationPreset::QqV1,
@@ -169,7 +172,7 @@ pub fn resolve_preset(
             256,
             512,
         ),
-        value => return Err(format!("ANIMATION_PRESET_UNSUPPORTED: {value}")),
+        value => return Err(AnimationError::UnsupportedPreset(value.into())),
     };
     let format = requested_format.unwrap_or(auto_format);
     Ok(ResolvedAnimationPreset {
@@ -311,6 +314,17 @@ pub struct AnimationExportTelemetry {
     pub render_telemetry: Option<crate::telemetry::RenderTelemetry>,
 }
 
+/// The document a card's animation scene is built as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnimationDocument<'a> {
+    /// Key the scene's stable ids derive from. The same card under the same
+    /// key builds the same scene.
+    pub key: &'a str,
+    /// Region code, such as `cn`, the scene is resolved for. It selects the
+    /// locale of the fixed text in general panels.
+    pub region: &'a str,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProfileAnimationExport {
     pub animated: bool,
@@ -325,11 +339,14 @@ pub enum PageExecution {
     Animation,
 }
 
-pub fn plan_page_execution(animated: bool, static_policy: &str) -> Result<PageExecution, String> {
+pub fn plan_page_execution(
+    animated: bool,
+    static_policy: &str,
+) -> Result<PageExecution, AnimationError> {
     let static_execution = match static_policy {
         "passthrough" => PageExecution::StaticPassthrough,
         "wrap" => PageExecution::StaticWrap,
-        value => return Err(format!("unsupported static_policy={value}")),
+        value => return Err(AnimationError::UnsupportedStaticPolicy(value.into())),
     };
     Ok(if animated {
         PageExecution::Animation

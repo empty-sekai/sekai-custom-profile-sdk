@@ -17,7 +17,7 @@ pub(crate) use animation_layer::{
 };
 pub use prewarm::PrewarmReport;
 #[cfg(feature = "animation-export")]
-pub(crate) use surface::SurfaceOutput;
+pub(crate) use surface::{SdfPass, SurfaceOutput};
 
 use crate::assets::AssetStore;
 use crate::masterdata::{MasterData, MasterDataProvider};
@@ -416,6 +416,16 @@ impl CustomProfileRenderer {
         }
         warnings
     }
+}
+
+/// The read-only data a card's elements are drawn from: the master data, the
+/// asset store, the player profile and the render-object store.
+#[derive(Clone, Copy)]
+pub(crate) struct CardSources<'a> {
+    pub(crate) md: &'a MasterData,
+    pub(crate) assets: Option<&'a AssetStore>,
+    pub(crate) profile: Option<&'a crate::profile::ProfileData>,
+    pub(crate) render_objects: &'a crate::render_object::MappedRenderObjectStore,
 }
 
 fn elapsed_ns(started: std::time::Instant) -> u64 {

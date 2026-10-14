@@ -1,10 +1,10 @@
 //! Realtime EDT glyphs: oversized glyphs generated from their font during a
 //! request, prepared once for a set of cards and installed for the current thread.
 
-use super::capture::{capture_sdf_primitives, map_captured_sdf_commands, SdfCaptureKinds};
-use super::CustomProfileRenderer;
-use crate::assets::AssetStore;
-use crate::masterdata::MasterData;
+use super::capture::{
+    capture_sdf_primitives, map_captured_sdf_commands, SdfAtlases, SdfCaptureKinds,
+};
+use super::{CardSources, CustomProfileRenderer};
 use crate::types::CustomProfileCard;
 use std::sync::Arc;
 
@@ -12,9 +12,7 @@ impl CustomProfileRenderer {
     pub(crate) fn prepare_realtime_edt_batch(
         &self,
         cards: &[CustomProfileCard],
-        md: &MasterData,
-        assets: Option<&AssetStore>,
-        profile: Option<&crate::profile::ProfileData>,
+        sources: CardSources<'_>,
     ) -> Result<Arc<RealtimeEdtPreparedBatch>, String> {
         let text_atlases = self.sdf_atlases.load_full();
         let source = crate::sdf::tile::MixedSdfAtlasSource::new(
@@ -26,10 +24,8 @@ impl CustomProfileRenderer {
         for card in cards {
             let captured = capture_sdf_primitives(
                 card,
-                md,
-                assets,
+                sources,
                 Some(&text_atlases),
-                profile,
                 crate::transform::CANVAS_WIDTH as u32,
                 crate::transform::CANVAS_HEIGHT as u32,
                 SdfCaptureKinds::TEXT,
@@ -43,11 +39,14 @@ impl CustomProfileRenderer {
         let runtime_pages = self
             .realtime_oversized_glyph_generation
             .then_some(&mut pages);
+        let atlases = SdfAtlases {
+            text: &text_atlases,
+            shape: self.shape_sdf_atlas.as_deref(),
+            source: &source,
+        };
         let _ = map_captured_sdf_commands(
             &primitives,
-            &text_atlases,
-            self.shape_sdf_atlas.as_deref(),
-            &source,
+            atlases,
             runtime_pages,
             Some(&mut glyphs),
             Some(&mut telemetry),

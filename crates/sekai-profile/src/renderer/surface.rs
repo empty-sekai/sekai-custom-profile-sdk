@@ -5,12 +5,11 @@ use super::authored::{
     profile_command_kind, render_authored_image_into_pixels, render_element_authored_identity,
     resolve_native_profile_scene,
 };
-use super::capture::{map_captured_sdf_commands, CapturedSdfPrimitive};
+use super::capture::{map_captured_sdf_commands, CapturedSdfPrimitive, SdfAtlases};
 use super::occlusion::{add_sdf_occlusion_stats, build_pixel_occlusion_dry_run};
 use super::realtime_edt::active_realtime_edt_batch;
-use super::{elapsed_ns, CustomProfileRenderer};
-use crate::assets::AssetStore;
-use crate::masterdata::MasterData;
+use super::{elapsed_ns, CardSources, CustomProfileRenderer};
+use crate::elements::SdfCaptureObserver;
 use crate::render_config::{Executor, PixelOcclusion, RenderConfig};
 use crate::types::CustomProfileCard;
 use serde::{Deserialize, Serialize};
@@ -30,27 +29,25 @@ impl CustomProfileRenderer {
         render_object_store: &crate::render_object::MappedRenderObjectStore,
     ) -> Result<SurfaceOutput, String> {
         let md = self.snapshot();
+        let sources = CardSources {
+            md: &md,
+            assets: self.assets.as_deref(),
+            profile,
+            render_objects: render_object_store,
+        };
         let render = || {
             self.render_ordered_sdf_surface(
                 card,
-                profile,
+                sources,
                 pass,
                 OrderedSdfSurfaceSpec::full_card(clear_rgba),
-                &md,
-                self.assets.as_deref(),
                 pre_resolved_scene,
-                render_object_store,
             )
         };
         if !self.realtime_oversized_glyph_generation || active_realtime_edt_batch().is_some() {
             return render();
         }
-        let prepared = self.prepare_realtime_edt_batch(
-            std::slice::from_ref(card),
-            &md,
-            self.assets.as_deref(),
-            profile,
-        )?;
+        let prepared = self.prepare_realtime_edt_batch(std::slice::from_ref(card), sources)?;
         let prepared_for_telemetry = Arc::clone(&prepared);
         let mut output = self.with_realtime_edt_batch(prepared, render)?;
         output
@@ -65,18 +62,20 @@ impl CustomProfileRenderer {
     /// Draws the visible elements of `card` in layer order onto a surface
     /// `spec` describes: text and shapes as ordered SDF runs, every other
     /// element through the image compositor.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_ordered_sdf_surface(
         &self,
         card: &CustomProfileCard,
-        profile: Option<&crate::profile::ProfileData>,
+        sources: CardSources<'_>,
         pass: SdfPass,
         spec: OrderedSdfSurfaceSpec,
-        md: &MasterData,
-        assets: Option<&AssetStore>,
         pre_resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
-        render_object_store: &crate::render_object::MappedRenderObjectStore,
     ) -> Result<SurfaceOutput, String> {
+        let CardSources {
+            md,
+            assets,
+            profile,
+            render_objects: render_object_store,
+        } = sources;
         let total_started = std::time::Instant::now();
         let semantic_resolve_started = std::time::Instant::now();
         let resolved_scene = if pre_resolved_scene.is_none() {
@@ -110,7 +109,16 @@ impl CustomProfileRenderer {
             tile_height: pass.tile_height,
         };
         let elements = crate::elements::flatten_and_sort(card);
-        let pixel_occlusion_execute = pass.pixel_occlusion == PixelOcclusion::Cull;
+        let run_context = SdfRunContext {
+            atlases: SdfAtlases {
+                text: text_atlases,
+                shape: shape_atlas,
+                source: &source,
+            },
+            grid,
+            shape_program_cache: &self.shape_row_program_cache,
+            execute_occlusion: pass.pixel_occlusion == PixelOcclusion::Cull,
+        };
         let occlusion_dry_run = if pass.pixel_occlusion.enabled() {
             Some(build_pixel_occlusion_dry_run(
                 card,
@@ -123,9 +131,7 @@ impl CustomProfileRenderer {
         } else {
             None
         };
-        let mut pending = Vec::new();
-        let mut pending_executor = None;
-        let mut pending_occlusion_mask = None;
+        let mut pending = PendingSdfRun::default();
         let mut aggregate = SurfaceAggregate::default();
         aggregate.prepare_direct_axis_shape = spec.prepare_direct_axis_shape;
         aggregate.realtime_oversized_glyph_generation = self.realtime_oversized_glyph_generation;
@@ -146,7 +152,12 @@ impl CustomProfileRenderer {
             fill_premultiplied_clear(&mut rgba, spec.clear_rgba);
         }
         aggregate.timings.surface_clear_ns = elapsed_ns(clear_started);
-        let origin = [spec.canvas_origin_x, spec.canvas_origin_y];
+        let canvas = sekai_profile_core::Rect {
+            x: spec.canvas_origin_x,
+            y: spec.canvas_origin_y,
+            width: spec.canvas_width as f32,
+            height: spec.canvas_height as f32,
+        };
 
         for (element_index, element) in elements.into_iter().enumerate() {
             if !element.visible() {
@@ -159,21 +170,13 @@ impl CustomProfileRenderer {
                     }
                     aggregate.sdf_text_element_count =
                         aggregate.sdf_text_element_count.saturating_add(1);
-                    select_full_card_sdf_executor(
-                        rgba.as_mut_slice(),
-                        &mut pending,
-                        &mut pending_executor,
-                        &mut pending_occlusion_mask,
+                    pending.select(
                         pass.executor,
                         occlusion_dry_run
                             .as_ref()
                             .and_then(|dry_run| dry_run.masks_by_element[element_index].clone()),
-                        pixel_occlusion_execute,
-                        text_atlases,
-                        shape_atlas,
-                        &source,
-                        grid,
-                        &self.shape_row_program_cache,
+                        run_context,
+                        rgba.as_mut_slice(),
                         &mut aggregate,
                     )?;
                     let capture_started = std::time::Instant::now();
@@ -185,7 +188,7 @@ impl CustomProfileRenderer {
                         Ok(glyph) => {
                             aggregate.captured_text_count =
                                 aggregate.captured_text_count.saturating_add(1);
-                            pending.push(CapturedSdfPrimitive::Text(glyph));
+                            pending.primitives.push(CapturedSdfPrimitive::Text(glyph));
                         }
                         Err(error) => failure = Some(format!("Text: {error:?}")),
                     };
@@ -193,12 +196,9 @@ impl CustomProfileRenderer {
                         &element,
                         md,
                         assets,
-                        spec.canvas_width as f32,
-                        spec.canvas_height as f32,
-                        origin,
+                        canvas,
                         Some(text_atlases),
-                        Some(&mut observer),
-                        None,
+                        SdfCaptureObserver::Text(&mut observer),
                     );
                     aggregate.timings.capture_rich_parse_ns = aggregate
                         .timings
@@ -238,21 +238,13 @@ impl CustomProfileRenderer {
                     }
                     aggregate.sdf_shape_element_count =
                         aggregate.sdf_shape_element_count.saturating_add(1);
-                    select_full_card_sdf_executor(
-                        rgba.as_mut_slice(),
-                        &mut pending,
-                        &mut pending_executor,
-                        &mut pending_occlusion_mask,
+                    pending.select(
                         pass.executor,
                         occlusion_dry_run
                             .as_ref()
                             .and_then(|dry_run| dry_run.masks_by_element[element_index].clone()),
-                        pixel_occlusion_execute,
-                        text_atlases,
-                        shape_atlas,
-                        &source,
-                        grid,
-                        &self.shape_row_program_cache,
+                        run_context,
+                        rgba.as_mut_slice(),
                         &mut aggregate,
                     )?;
                     let capture_started = std::time::Instant::now();
@@ -262,7 +254,7 @@ impl CustomProfileRenderer {
                         crate::elements::shape::ShapeSdfCaptureError,
                     >| match result {
                         Ok(shape) => {
-                            pending.push(CapturedSdfPrimitive::Shape(shape));
+                            pending.primitives.push(CapturedSdfPrimitive::Shape(shape));
                         }
                         Err(error) => failure = Some(format!("Shape: {error}")),
                     };
@@ -270,12 +262,9 @@ impl CustomProfileRenderer {
                         &element,
                         md,
                         assets,
-                        spec.canvas_width as f32,
-                        spec.canvas_height as f32,
-                        origin,
+                        canvas,
                         Some(text_atlases),
-                        None,
-                        Some(&mut observer),
+                        SdfCaptureObserver::Shape(&mut observer),
                     );
                     aggregate.timings.capture_ns = aggregate
                         .timings
@@ -286,19 +275,7 @@ impl CustomProfileRenderer {
                     }
                 }
                 _ => {
-                    flush_active_full_card_sdf_run(
-                        rgba.as_mut_slice(),
-                        &mut pending,
-                        &mut pending_executor,
-                        &mut pending_occlusion_mask,
-                        pixel_occlusion_execute,
-                        text_atlases,
-                        shape_atlas,
-                        &source,
-                        grid,
-                        &self.shape_row_program_cache,
-                        &mut aggregate,
-                    )?;
+                    pending.flush(run_context, rgba.as_mut_slice(), &mut aggregate)?;
                     let (kind, index) = render_element_authored_identity(card, &element)
                         .ok_or_else(|| {
                             format!(
@@ -385,19 +362,7 @@ impl CustomProfileRenderer {
                 }
             }
         }
-        flush_active_full_card_sdf_run(
-            rgba.as_mut_slice(),
-            &mut pending,
-            &mut pending_executor,
-            &mut pending_occlusion_mask,
-            pixel_occlusion_execute,
-            text_atlases,
-            shape_atlas,
-            &source,
-            grid,
-            &self.shape_row_program_cache,
-            &mut aggregate,
-        )?;
+        pending.flush(run_context, rgba.as_mut_slice(), &mut aggregate)?;
 
         let snapshot_started = std::time::Instant::now();
         if rgba.len() != row_bytes * height as usize {
@@ -633,98 +598,93 @@ fn fill_premultiplied_clear(pixels: &mut [u8], clear: [u8; 4]) {
     }
 }
 
-fn select_full_card_sdf_executor(
-    pixels: &mut [u8],
-    pending: &mut Vec<CapturedSdfPrimitive>,
-    active_executor: &mut Option<Executor>,
-    active_occlusion_mask: &mut Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
-    next_executor: Executor,
-    next_occlusion_mask: Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
-    execute_occlusion: bool,
-    text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
-    shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
-    source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
+/// What every SDF run of one surface is drawn with: the atlases, the tile grid
+/// over the surface, the cache of shape row programs, and whether fragments
+/// under the run's occlusion mask are skipped rather than only counted.
+#[derive(Clone, Copy)]
+struct SdfRunContext<'a> {
+    atlases: SdfAtlases<'a>,
     grid: crate::sdf::tile::TileGrid,
-    shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
-    aggregate: &mut SurfaceAggregate,
-) -> Result<(), String> {
-    if active_executor.is_some_and(|active| active != next_executor) {
-        flush_active_full_card_sdf_run(
+    shape_program_cache: &'a crate::sdf::tile::ShapeRowProgramCache,
+    execute_occlusion: bool,
+}
+
+/// The text and shape primitives captured since the last run was drawn, with
+/// the executor and occlusion mask they are drawn with. Consecutive SDF
+/// elements on one executor share a run.
+#[derive(Default)]
+struct PendingSdfRun {
+    primitives: Vec<CapturedSdfPrimitive>,
+    executor: Option<Executor>,
+    occlusion_mask: Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
+}
+
+impl PendingSdfRun {
+    /// Continues the run on `executor`, drawing the pending primitives first
+    /// when the run uses another executor. A run keeps the first occlusion
+    /// mask it is given.
+    fn select(
+        &mut self,
+        executor: Executor,
+        occlusion_mask: Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
+        context: SdfRunContext<'_>,
+        pixels: &mut [u8],
+        aggregate: &mut SurfaceAggregate,
+    ) -> Result<(), String> {
+        if self.executor.is_some_and(|active| active != executor) {
+            self.flush(context, pixels, aggregate)?;
+        }
+        self.executor = Some(executor);
+        if self.occlusion_mask.is_none() {
+            self.occlusion_mask = occlusion_mask;
+        }
+        Ok(())
+    }
+
+    /// Draws the pending primitives into `pixels` and ends the run.
+    fn flush(
+        &mut self,
+        context: SdfRunContext<'_>,
+        pixels: &mut [u8],
+        aggregate: &mut SurfaceAggregate,
+    ) -> Result<(), String> {
+        let Some(executor) = self.executor.take() else {
+            debug_assert!(self.primitives.is_empty());
+            self.occlusion_mask = None;
+            return Ok(());
+        };
+        let occlusion_mask = self.occlusion_mask.take();
+        if self.primitives.is_empty() {
+            return Ok(());
+        }
+        flush_full_card_sdf_run(
+            &mut self.primitives,
+            executor,
+            occlusion_mask.as_deref(),
+            context,
             pixels,
-            pending,
-            active_executor,
-            active_occlusion_mask,
-            execute_occlusion,
-            text_atlases,
-            shape_atlas,
-            source,
-            grid,
-            shape_program_cache,
             aggregate,
-        )?;
+        )
     }
-    *active_executor = Some(next_executor);
-    if active_occlusion_mask.is_none() {
-        *active_occlusion_mask = next_occlusion_mask;
-    }
-    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn flush_active_full_card_sdf_run(
-    pixels: &mut [u8],
-    pending: &mut Vec<CapturedSdfPrimitive>,
-    active_executor: &mut Option<Executor>,
-    active_occlusion_mask: &mut Option<Arc<crate::sdf::tile::PixelOcclusionMask>>,
-    execute_occlusion: bool,
-    text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
-    shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
-    source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
-    grid: crate::sdf::tile::TileGrid,
-    shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
-    aggregate: &mut SurfaceAggregate,
-) -> Result<(), String> {
-    let Some(executor) = active_executor.take() else {
-        debug_assert!(pending.is_empty());
-        *active_occlusion_mask = None;
-        return Ok(());
-    };
-    let occlusion_mask = active_occlusion_mask.take();
-    if pending.is_empty() {
-        return Ok(());
-    }
-    flush_full_card_sdf_run(
-        pixels,
-        pending,
-        text_atlases,
-        shape_atlas,
-        source,
-        grid,
-        shape_program_cache,
-        executor,
-        occlusion_mask.as_deref(),
-        execute_occlusion,
-        aggregate,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn flush_full_card_sdf_run(
-    pixels: &mut [u8],
     pending: &mut Vec<CapturedSdfPrimitive>,
-    text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
-    shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
-    source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
-    grid: crate::sdf::tile::TileGrid,
-    shape_program_cache: &crate::sdf::tile::ShapeRowProgramCache,
     executor: Executor,
     occlusion_mask: Option<&crate::sdf::tile::PixelOcclusionMask>,
-    execute_occlusion: bool,
+    context: SdfRunContext<'_>,
+    pixels: &mut [u8],
     aggregate: &mut SurfaceAggregate,
 ) -> Result<(), String> {
     if pending.is_empty() {
         return Ok(());
     }
+    let SdfRunContext {
+        atlases,
+        grid,
+        shape_program_cache,
+        execute_occlusion,
+    } = context;
 
     let mapping_started = std::time::Instant::now();
     let mut runtime_text_pages = Vec::new();
@@ -734,9 +694,7 @@ fn flush_full_card_sdf_run(
         .then_some(&mut runtime_text_pages);
     let commands = map_captured_sdf_commands(
         pending,
-        text_atlases,
-        shape_atlas,
-        source,
+        atlases,
         runtime_pages,
         Some(&mut aggregate.realtime_edt_glyphs),
         Some(&mut aggregate.realtime_edt_batch),
@@ -748,8 +706,8 @@ fn flush_full_card_sdf_run(
         .map(|batch| batch.pages.as_slice())
         .unwrap_or(runtime_text_pages.as_slice());
     let execution_source = crate::sdf::tile::MixedSdfAtlasSource::with_runtime_text(
-        text_atlases,
-        shape_atlas,
+        atlases.text,
+        atlases.shape,
         runtime_pages,
     )
     .map_err(|error| format!("full-card SDF runtime source: {error}"))?;

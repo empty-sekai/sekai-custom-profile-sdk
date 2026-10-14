@@ -1,13 +1,17 @@
 //! Animation layers: element layers rasterized through the ordered SDF path and
 //! cropped to their opaque bounds, or kept as commands when too large to retain.
 
-use super::capture::{capture_sdf_primitives, map_captured_sdf_commands, SdfCaptureKinds};
+use super::capture::{
+    capture_sdf_primitives, map_captured_sdf_commands, SdfAtlases, SdfCaptureKinds,
+};
 use super::realtime_edt::active_realtime_edt_batch;
 use super::surface::{OrderedSdfSurfaceSpec, SdfPass, SurfaceOutput};
-use super::{elapsed_ns, CustomProfileRenderer, RenderObjectGenerationPin};
-use crate::assets::AssetStore;
+use super::{elapsed_ns, CardSources, CustomProfileRenderer, RenderObjectGenerationPin};
+use crate::animation::{AnimationDocument, AnimationError};
 use crate::masterdata::MasterData;
-use crate::render_config::{sdf_simd_available, Executor, PixelOcclusion, RenderConfig};
+use crate::render_config::{
+    sdf_simd_available, Executor, PixelOcclusion, RenderConfig, RenderError,
+};
 use crate::types::CustomProfileCard;
 use serde::{Deserialize, Serialize};
 
@@ -104,23 +108,21 @@ impl CustomProfileRenderer {
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        document_key: &str,
-        region: &str,
+        document: AnimationDocument<'_>,
         maximum_tick: u64,
-    ) -> Result<sekai_profile_core::AnimationPreflight, String> {
+    ) -> Result<sekai_profile_core::AnimationPreflight, AnimationError> {
         let md = self.snapshot();
         let scene = crate::core_shadow::build_scene(
             card,
             &md,
-            document_key,
-            region,
+            document.key,
+            document.region,
             profile,
-            region,
+            document.region,
             self.assets.as_deref(),
-        )?;
-        scene
-            .animation_preflight(maximum_tick)
-            .map_err(|error| error.to_string())
+        )
+        .map_err(RenderError::Render)?;
+        Ok(scene.animation_preflight(maximum_tick)?)
     }
 
     /// Renders a card's animation export: preflights the compiled scene,
@@ -134,82 +136,60 @@ impl CustomProfileRenderer {
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        document_key: &str,
-        region: &str,
+        document: AnimationDocument<'_>,
         preset: &crate::animation::ResolvedAnimationPreset,
         config: &RenderConfig,
-    ) -> Result<crate::animation::ProfileAnimationExport, String> {
+    ) -> Result<crate::animation::ProfileAnimationExport, AnimationError> {
         let generation = self.pin_render_object_generation();
-        self.render_animation_pinned(
-            card,
-            profile,
-            document_key,
-            region,
-            preset,
-            config,
-            &generation,
-        )
+        self.render_animation_pinned(card, profile, document, preset, config, &generation)
     }
 
     /// [`Self::render_animation`] against the render objects `generation`
     /// pins.
-    #[allow(clippy::too_many_arguments)]
     pub fn render_animation_pinned(
         &self,
         card: &CustomProfileCard,
         profile: Option<&crate::profile::ProfileData>,
-        document_key: &str,
-        region: &str,
+        document: AnimationDocument<'_>,
         preset: &crate::animation::ResolvedAnimationPreset,
         config: &RenderConfig,
         generation: &RenderObjectGenerationPin,
-    ) -> Result<crate::animation::ProfileAnimationExport, String> {
+    ) -> Result<crate::animation::ProfileAnimationExport, AnimationError> {
         let md = self.snapshot();
-        crate::animation::export_profile_animation(
-            self,
-            card,
+        let sources = CardSources {
+            md: &md,
+            assets: self.assets.as_deref(),
             profile,
-            document_key,
-            region,
-            &md,
-            self.assets.as_deref(),
-            preset,
-            config,
-            generation
+            render_objects: generation
                 .store()
                 .unwrap_or_else(|| crate::render_object::MappedRenderObjectStore::empty()),
-        )
+        };
+        crate::animation::export_profile_animation(self, card, document, sources, preset, config)
     }
 
     /// Resolves the executor an animation export runs on.
-    pub(crate) fn resolve_executor(&self, config: &RenderConfig) -> Result<Executor, String> {
-        config
-            .resolve(sdf_simd_available())
-            .map_err(|error| error.to_string())
+    pub(crate) fn resolve_executor(&self, config: &RenderConfig) -> Result<Executor, RenderError> {
+        config.resolve(sdf_simd_available())
     }
 
     /// Renders one element layer through the ordered SDF path — the same
     /// pipeline full pages use — onto a transparent surface expanded for the
     /// layer's dynamic travel, then crops to the tight non-transparent bounds.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Layers are drawn without pixel occlusion, whatever `pass` asks for.
     pub(crate) fn render_ordered_element_layer_cropped(
         &self,
         card: &CustomProfileCard,
-        md: &MasterData,
-        assets: Option<&AssetStore>,
-        profile: Option<&crate::profile::ProfileData>,
-        executor: Executor,
+        sources: CardSources<'_>,
+        pass: SdfPass,
         include_dynamic_bounds: bool,
-        tile_width: u16,
-        tile_height: u16,
-        render_object_store: &crate::render_object::MappedRenderObjectStore,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<CroppedLayerRaster, String> {
+    ) -> Result<CroppedLayerRaster, AnimationError> {
         let w = crate::transform::CANVAS_WIDTH as i32;
         let h = crate::transform::CANVAS_HEIGHT as i32;
         let elements = crate::elements::flatten_and_sort(card);
         let dynamic = if include_dynamic_bounds {
-            layer_dynamic_for_elements(&elements, md)
+            layer_dynamic_for_elements(&elements, sources.md)
         } else {
             None
         };
@@ -220,12 +200,8 @@ impl CustomProfileRenderer {
         if layer_draws_only_sdf(&elements) {
             return self.render_animation_sdf_layer_tight(
                 card,
-                md,
-                assets,
-                profile,
-                executor,
-                tile_width,
-                tile_height,
+                sources,
+                pass,
                 expansion,
                 maximum_retained_layer_bytes,
             );
@@ -234,9 +210,9 @@ impl CustomProfileRenderer {
         let surface_h = h + expansion.top + expansion.bottom;
         let spec = OrderedSdfSurfaceSpec {
             surface_width: u32::try_from(surface_w)
-                .map_err(|_| "layer surface width overflow".to_string())?,
+                .map_err(|_| AnimationError::Internal("layer surface width overflow"))?,
             surface_height: u32::try_from(surface_h)
-                .map_err(|_| "layer surface height overflow".to_string())?,
+                .map_err(|_| AnimationError::Internal("layer surface height overflow"))?,
             canvas_width: w as u32,
             canvas_height: h as u32,
             canvas_origin_x: expansion.left as f32,
@@ -245,21 +221,12 @@ impl CustomProfileRenderer {
             prepare_direct_axis_shape: false,
         };
         let pass = SdfPass {
-            executor,
-            tile_width,
-            tile_height,
             pixel_occlusion: PixelOcclusion::Off,
+            ..pass
         };
-        let mut output = self.render_ordered_sdf_surface(
-            card,
-            profile,
-            pass,
-            spec,
-            md,
-            assets,
-            None,
-            render_object_store,
-        )?;
+        let mut output = self
+            .render_ordered_sdf_surface(card, sources, pass, spec, None)
+            .map_err(RenderError::Render)?;
         let rgba = std::mem::take(&mut output.rgba);
         let row_bytes = surface_w as usize * 4;
         let surface_bytes = row_bytes * surface_h as usize;
@@ -279,10 +246,12 @@ impl CustomProfileRenderer {
         } else {
             OrderedLayerRaster {
                 pixels: crop_pixels_lossless(
-                    &rgba,
-                    row_bytes,
-                    surface_w as u32,
-                    surface_h as u32,
+                    LayerSurface {
+                        pixels: &rgba,
+                        row_bytes,
+                        width: surface_w as u32,
+                        height: surface_h as u32,
+                    },
                     bx,
                     by,
                     bw,
@@ -309,39 +278,41 @@ impl CustomProfileRenderer {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Renders a layer of only text and shapes onto a surface sized to its SDF
+    /// commands, clipped to the canvas the layer can travel across, or keeps
+    /// the commands when that surface exceeds `maximum_retained_layer_bytes`.
     fn render_animation_sdf_layer_tight(
         &self,
         card: &CustomProfileCard,
-        md: &MasterData,
-        assets: Option<&AssetStore>,
-        profile: Option<&crate::profile::ProfileData>,
-        executor: Executor,
-        tile_width: u16,
-        tile_height: u16,
+        sources: CardSources<'_>,
+        pass: SdfPass,
         reachable: CanvasExpansion,
         maximum_retained_layer_bytes: usize,
-    ) -> Result<CroppedLayerRaster, String> {
+    ) -> Result<CroppedLayerRaster, AnimationError> {
+        let SdfPass {
+            executor,
+            tile_width,
+            tile_height,
+            ..
+        } = pass;
         let total_started = std::time::Instant::now();
         let sdf_atlases = self.sdf_atlases.load_full();
         let capture_started = std::time::Instant::now();
         let captured = capture_sdf_primitives(
             card,
-            md,
-            assets,
+            sources,
             Some(&sdf_atlases),
-            profile,
             crate::transform::CANVAS_WIDTH as u32,
             crate::transform::CANVAS_HEIGHT as u32,
             SdfCaptureKinds::TEXT_AND_SHAPE,
-        )?;
+        )
+        .map_err(RenderError::Render)?;
         let capture_ns = elapsed_ns(capture_started);
 
         let base_source = crate::sdf::tile::MixedSdfAtlasSource::new(
             &sdf_atlases,
             self.shape_sdf_atlas.as_deref(),
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
 
         let mut runtime_text_pages = Vec::new();
         let mut realtime_edt_glyphs = Vec::new();
@@ -351,16 +322,20 @@ impl CustomProfileRenderer {
             .realtime_oversized_glyph_generation
             .then_some(&mut runtime_text_pages);
         let mapping_started = std::time::Instant::now();
+        let atlases = SdfAtlases {
+            text: &sdf_atlases,
+            shape: self.shape_sdf_atlas.as_deref(),
+            source: &base_source,
+        };
         let mut commands = map_captured_sdf_commands(
             &captured.primitives,
-            &sdf_atlases,
-            self.shape_sdf_atlas.as_deref(),
-            &base_source,
+            atlases,
             runtime_pages,
             Some(&mut realtime_edt_glyphs),
             Some(&mut realtime_edt_batch),
             None,
-        )?;
+        )
+        .map_err(RenderError::Render)?;
         let command_mapping_ns = elapsed_ns(mapping_started);
 
         let empty = CroppedLayerRaster {
@@ -388,20 +363,27 @@ impl CustomProfileRenderer {
         let left = content_x.max(-reachable.left);
         let top = content_y.max(-reachable.top);
         let right = content_x
-            .checked_add(i32::try_from(content_w).map_err(|_| "layer width overflow".to_string())?)
-            .ok_or_else(|| "layer right edge overflow".to_string())?
+            .checked_add(
+                i32::try_from(content_w)
+                    .map_err(|_| AnimationError::Internal("layer width overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("layer right edge overflow"))?
             .min(canvas_w + reachable.right);
         let bottom = content_y
-            .checked_add(i32::try_from(content_h).map_err(|_| "layer height overflow".to_string())?)
-            .ok_or_else(|| "layer bottom edge overflow".to_string())?
+            .checked_add(
+                i32::try_from(content_h)
+                    .map_err(|_| AnimationError::Internal("layer height overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("layer bottom edge overflow"))?
             .min(canvas_h + reachable.bottom);
         if right <= left || bottom <= top {
             return Ok(empty);
         }
         let (origin_x, origin_y) = (left, top);
-        let width = u32::try_from(right - left).map_err(|_| "layer width overflow".to_string())?;
-        let height =
-            u32::try_from(bottom - top).map_err(|_| "layer height overflow".to_string())?;
+        let width = u32::try_from(right - left)
+            .map_err(|_| AnimationError::Internal("layer width overflow"))?;
+        let height = u32::try_from(bottom - top)
+            .map_err(|_| AnimationError::Internal("layer height overflow"))?;
         let (surface_bytes, retained_peak_bytes) =
             animation_sdf_retained_surface_bytes(width, height)?;
 
@@ -440,8 +422,7 @@ impl CustomProfileRenderer {
             &sdf_atlases,
             self.shape_sdf_atlas.as_deref(),
             runtime_pages,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
 
         let plan_started = std::time::Instant::now();
         let plan = crate::sdf::tile::SdfTilePlan::build_for_one_shot_dynamic_layer(
@@ -453,33 +434,30 @@ impl CustomProfileRenderer {
             },
             &commands,
             &source,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let plan_build_ns = elapsed_ns(plan_started);
 
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
         let execute_started = std::time::Instant::now();
         let execution_stats = match executor {
-            Executor::Scalar => plan
-                .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
-                .map_err(|error| error.to_string())?,
-            Executor::Simd => plan
-                .execute_simd(
-                    &source,
-                    [0, 0, 0, 0],
-                    &mut rgba,
-                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
-                )
-                .map_err(|error| error.to_string())?,
+            Executor::Scalar => plan.execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)?,
+            Executor::Simd => plan.execute_simd(
+                &source,
+                [0, 0, 0, 0],
+                &mut rgba,
+                crate::sdf::tile::SdfAccumulationMode::F32Tile,
+            )?,
         };
         let execute_ns = elapsed_ns(execute_started);
 
         let crop_started = std::time::Instant::now();
         let pixels = crop_pixels_lossless(
-            &rgba,
-            width as usize * 4,
-            width,
-            height,
+            LayerSurface {
+                pixels: &rgba,
+                row_bytes: width as usize * 4,
+                width,
+                height,
+            },
             0,
             0,
             width,
@@ -547,26 +525,42 @@ impl CustomProfileRenderer {
         y: i32,
         width: u32,
         height: u32,
-    ) -> Result<RenderedDeferredAnimationWindow, String> {
+    ) -> Result<RenderedDeferredAnimationWindow, AnimationError> {
         if width == 0 || height == 0 {
-            return Err("deferred animation SDF window must be non-empty".into());
+            return Err(AnimationError::Internal(
+                "deferred animation SDF window must be non-empty",
+            ));
         }
         let right = x
-            .checked_add(i32::try_from(width).map_err(|_| "deferred window width overflow")?)
-            .ok_or("deferred window right overflow")?;
+            .checked_add(
+                i32::try_from(width)
+                    .map_err(|_| AnimationError::Internal("deferred window width overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("deferred window right overflow"))?;
         let bottom = y
-            .checked_add(i32::try_from(height).map_err(|_| "deferred window height overflow")?)
-            .ok_or("deferred window bottom overflow")?;
+            .checked_add(
+                i32::try_from(height)
+                    .map_err(|_| AnimationError::Internal("deferred window height overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("deferred window bottom overflow"))?;
         let layer_right = layer
             .x
-            .checked_add(i32::try_from(layer.width).map_err(|_| "deferred layer width overflow")?)
-            .ok_or("deferred layer right overflow")?;
+            .checked_add(
+                i32::try_from(layer.width)
+                    .map_err(|_| AnimationError::Internal("deferred layer width overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("deferred layer right overflow"))?;
         let layer_bottom = layer
             .y
-            .checked_add(i32::try_from(layer.height).map_err(|_| "deferred layer height overflow")?)
-            .ok_or("deferred layer bottom overflow")?;
+            .checked_add(
+                i32::try_from(layer.height)
+                    .map_err(|_| AnimationError::Internal("deferred layer height overflow"))?,
+            )
+            .ok_or(AnimationError::Internal("deferred layer bottom overflow"))?;
         if x < layer.x || y < layer.y || right > layer_right || bottom > layer_bottom {
-            return Err("deferred animation SDF window is outside the source layer".into());
+            return Err(AnimationError::Internal(
+                "deferred animation SDF window is outside the source layer",
+            ));
         }
 
         let mut commands = layer.commands.clone();
@@ -575,8 +569,7 @@ impl CustomProfileRenderer {
             &layer.text_atlases,
             layer.shape_atlas.as_deref(),
             &layer.runtime_text,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let plan = crate::sdf::tile::SdfTilePlan::build_for_one_shot_dynamic_layer(
             crate::sdf::tile::TileGrid {
                 canvas_width: width,
@@ -586,31 +579,30 @@ impl CustomProfileRenderer {
             },
             &commands,
             &source,
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         let surface_bytes = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| "deferred animation SDF surface byte length overflow".to_string())?;
+            .ok_or(AnimationError::Internal(
+                "deferred animation SDF surface byte length overflow",
+            ))?;
         let mut rgba = self.take_profile_rgba_scratch(surface_bytes, [0, 0, 0, 0]);
         match layer.executor {
-            Executor::Scalar => plan
-                .execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)
-                .map_err(|error| error.to_string())?,
-            Executor::Simd => plan
-                .execute_simd(
-                    &source,
-                    [0, 0, 0, 0],
-                    &mut rgba,
-                    crate::sdf::tile::SdfAccumulationMode::F32Tile,
-                )
-                .map_err(|error| error.to_string())?,
+            Executor::Scalar => plan.execute_scalar_f32(&source, [0, 0, 0, 0], &mut rgba)?,
+            Executor::Simd => plan.execute_simd(
+                &source,
+                [0, 0, 0, 0],
+                &mut rgba,
+                crate::sdf::tile::SdfAccumulationMode::F32Tile,
+            )?,
         };
         let pixels = crop_pixels_lossless(
-            &rgba,
-            width as usize * 4,
-            width,
-            height,
+            LayerSurface {
+                pixels: &rgba,
+                row_bytes: width as usize * 4,
+                width,
+                height,
+            },
             0,
             0,
             width,
@@ -708,11 +700,13 @@ fn tight_sdf_command_bounds(
 pub(super) fn animation_sdf_retained_surface_bytes(
     width: u32,
     height: u32,
-) -> Result<(usize, usize), String> {
+) -> Result<(usize, usize), AnimationError> {
     let surface_bytes = (width as usize)
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "animation SDF layer surface byte length overflow".to_string())?;
+        .ok_or(AnimationError::Internal(
+            "animation SDF layer surface byte length overflow",
+        ))?;
     Ok((surface_bytes, surface_bytes.saturating_mul(2)))
 }
 
@@ -731,44 +725,71 @@ fn shift_sdf_commands(commands: &mut [crate::sdf::tile::SdfDrawCommand], dx: f32
     }
 }
 
-/// Copies a tight sub-rectangle out of a premultiplied RGBA8 buffer.
+/// A borrowed premultiplied RGBA8 layer surface: `height` rows `row_bytes`
+/// apart, each holding `width` pixels.
+#[derive(Clone, Copy)]
+pub(super) struct LayerSurface<'a> {
+    pub(super) pixels: &'a [u8],
+    pub(super) row_bytes: usize,
+    pub(super) width: u32,
+    pub(super) height: u32,
+}
+
+/// Copies the `width` x `height` rectangle at `x`, `y` out of `surface` into a
+/// tight premultiplied RGBA8 buffer.
 pub(super) fn crop_pixels_lossless(
-    pixels: &[u8],
-    source_row_bytes: usize,
-    surface_width: u32,
-    surface_height: u32,
+    surface: LayerSurface<'_>,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-) -> Result<Vec<u8>, String> {
-    let required_row_bytes = (surface_width as usize)
-        .checked_mul(4)
-        .ok_or_else(|| "layer surface row stride overflow".to_string())?;
+) -> Result<Vec<u8>, AnimationError> {
+    let LayerSurface {
+        pixels,
+        row_bytes: source_row_bytes,
+        width: surface_width,
+        height: surface_height,
+    } = surface;
+    let required_row_bytes =
+        (surface_width as usize)
+            .checked_mul(4)
+            .ok_or(AnimationError::Internal(
+                "layer surface row stride overflow",
+            ))?;
     if source_row_bytes < required_row_bytes {
-        return Err("layer surface row stride is shorter than one row".to_string());
+        return Err(AnimationError::Internal(
+            "layer surface row stride is shorter than one row",
+        ));
     }
     let required_bytes = source_row_bytes
         .checked_mul(surface_height as usize)
-        .ok_or_else(|| "layer surface byte length overflow".to_string())?;
+        .ok_or(AnimationError::Internal(
+            "layer surface byte length overflow",
+        ))?;
     if pixels.len() < required_bytes {
-        return Err("layer surface buffer is truncated".to_string());
+        return Err(AnimationError::Internal(
+            "layer surface buffer is truncated",
+        ));
     }
     let right = x
         .checked_add(width)
-        .ok_or_else(|| "crop x overflow".to_string())?;
+        .ok_or(AnimationError::Internal("crop x overflow"))?;
     let bottom = y
         .checked_add(height)
-        .ok_or_else(|| "crop y overflow".to_string())?;
+        .ok_or(AnimationError::Internal("crop y overflow"))?;
     if width == 0 || height == 0 || right > surface_width || bottom > surface_height {
-        return Err("crop rect is empty or outside the layer surface".to_string());
+        return Err(AnimationError::Internal(
+            "crop rect is empty or outside the layer surface",
+        ));
     }
     let row_bytes = (width as usize)
         .checked_mul(4)
-        .ok_or_else(|| "crop row stride overflow".to_string())?;
+        .ok_or(AnimationError::Internal("crop row stride overflow"))?;
     let start_of = |row: usize| (y as usize + row) * source_row_bytes + x as usize * 4;
     if pixels.len() < start_of(height as usize - 1) + row_bytes {
-        return Err("crop rect exceeds the layer pixel buffer".to_string());
+        return Err(AnimationError::Internal(
+            "crop rect exceeds the layer pixel buffer",
+        ));
     }
     let mut cropped = vec![0u8; row_bytes * height as usize];
     for row in 0..height as usize {
@@ -855,9 +876,11 @@ fn opaque_bounds_for_pixels(
     w: i32,
     h: i32,
     row_bytes: usize,
-) -> Result<(u32, u32, u32, u32), String> {
+) -> Result<(u32, u32, u32, u32), AnimationError> {
     if pixels.len() < row_bytes * h as usize {
-        return Err("layer surface buffer is truncated".to_string());
+        return Err(AnimationError::Internal(
+            "layer surface buffer is truncated",
+        ));
     }
     Ok(find_opaque_bounds(pixels, w as u32, h as u32, row_bytes))
 }

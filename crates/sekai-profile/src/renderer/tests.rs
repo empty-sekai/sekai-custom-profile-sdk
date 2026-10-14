@@ -3,7 +3,7 @@ use super::animation_layer::find_opaque_bounds_avx512;
 #[cfg(feature = "animation-export")]
 use super::animation_layer::{
     animation_sdf_retained_surface_bytes, crop_pixels_lossless, find_opaque_bounds,
-    find_opaque_bounds_scalar,
+    find_opaque_bounds_scalar, LayerSurface,
 };
 use super::authored::resolve_native_profile_scene;
 use super::capture::{
@@ -241,21 +241,39 @@ fn substituted_text_tier_preserves_primary_sample_grid() {
 #[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_short_row_stride() {
-    let result = crop_pixels_lossless(&[0; 16], 12, 4, 1, 0, 0, 1, 1);
+    let surface = LayerSurface {
+        pixels: &[0; 16],
+        row_bytes: 12,
+        width: 4,
+        height: 1,
+    };
+    let result = crop_pixels_lossless(surface, 0, 0, 1, 1);
     assert!(matches!(result, Err(_)));
 }
 
 #[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_out_of_bounds_rect() {
-    let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 4, 0, 1, 1);
+    let surface = LayerSurface {
+        pixels: &[0; 16],
+        row_bytes: 16,
+        width: 4,
+        height: 1,
+    };
+    let result = crop_pixels_lossless(surface, 4, 0, 1, 1);
     assert!(matches!(result, Err(_)));
 }
 
 #[cfg(feature = "animation-export")]
 #[test]
 fn lossless_crop_rejects_zero_sized_rect() {
-    let result = crop_pixels_lossless(&[0; 16], 16, 4, 1, 0, 0, 0, 1);
+    let surface = LayerSurface {
+        pixels: &[0; 16],
+        row_bytes: 16,
+        width: 4,
+        height: 1,
+    };
+    let result = crop_pixels_lossless(surface, 0, 0, 0, 1);
     assert!(matches!(result, Err(_)));
 }
 
@@ -1005,7 +1023,11 @@ fn a_batch_renders_each_page_as_a_single_render_does() {
     assert_eq!(prepared.mapped_object_count, 0);
     assert!(!prepared.missing_object_keys.is_empty());
     assert_eq!(
-        prepared.missing_page_object_keys.keys().copied().collect::<Vec<_>>(),
+        prepared
+            .missing_page_object_keys
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
         [1, 2]
     );
 }

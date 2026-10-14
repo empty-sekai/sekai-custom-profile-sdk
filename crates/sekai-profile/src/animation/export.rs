@@ -1,8 +1,8 @@
 //! Profile animation export: groups a card's elements into static and dynamic layers,
 //! prepares a raster for each group, and streams composited frames into the encoder.
 
-use crate::assets::AssetStore;
-use crate::masterdata::MasterData;
+use crate::render_config::RenderError;
+use crate::renderer::{CardSources, CustomProfileRenderer, SdfPass};
 use crate::types::CustomProfileCard;
 
 use super::compositor::{AnimationFrameCompositor, RasterLayer, RasterLayerContent};
@@ -13,8 +13,8 @@ use super::encode::{
 };
 use super::timeline::{animation_loop_period_ticks, plan_ticks};
 use super::{
-    elapsed_ns, AnimationEncodeSpec, AnimationExportTelemetry, AnimationFormat, AnimationPreset,
-    ProfileAnimationExport, ResolvedAnimationPreset,
+    elapsed_ns, AnimationDocument, AnimationEncodeSpec, AnimationError, AnimationExportTelemetry,
+    AnimationFormat, AnimationPreset, ProfileAnimationExport, ResolvedAnimationPreset,
 };
 
 /// Atlas-identity usage label for the animation layer raster.
@@ -26,44 +26,44 @@ pub(super) type AnimationRasterGroup = (
 );
 
 pub(crate) fn export_profile_animation(
-    renderer: &crate::renderer::CustomProfileRenderer,
+    renderer: &CustomProfileRenderer,
     card: &CustomProfileCard,
-    profile: Option<&crate::profile::ProfileData>,
-    document_key: &str,
-    region: &str,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
+    document: AnimationDocument<'_>,
+    sources: CardSources<'_>,
     preset: &ResolvedAnimationPreset,
     config: &crate::render_config::RenderConfig,
-    render_object_store: &crate::render_object::MappedRenderObjectStore,
-) -> Result<ProfileAnimationExport, String> {
+) -> Result<ProfileAnimationExport, AnimationError> {
+    let CardSources {
+        md,
+        assets,
+        profile,
+        ..
+    } = sources;
     let (mut scene, resolved_scene) = if card.generals.is_empty() {
         let text_atlases = renderer.mapped_text_sdf_atlases();
         (
             crate::core_shadow::build_text_scene_with_atlases(
                 card,
                 md,
-                document_key,
+                document.key,
                 text_atlases.as_deref(),
-            )
-            .map_err(|error| error.to_string())?,
+            )?,
             None,
         )
     } else {
         let (scene, resolved) = crate::core_shadow::build_scene_with_resolved(
             card,
             md,
-            document_key,
-            region,
+            document.key,
+            document.region,
             profile,
-            region,
+            document.region,
             assets,
-        )?;
+        )
+        .map_err(RenderError::Render)?;
         (scene, Some(resolved))
     };
-    let preflight = scene
-        .animation_preflight(preset.maximum_ticks)
-        .map_err(|error| error.to_string())?;
+    let preflight = scene.animation_preflight(preset.maximum_ticks)?;
     if !preflight.animated {
         return Ok(ProfileAnimationExport {
             animated: false,
@@ -137,7 +137,7 @@ pub(crate) fn export_profile_animation(
         scene.advance_to_tick(0);
         std::collections::BTreeMap::new()
     };
-    let authored = sekai_profile_core::profile_scene::ordered_profile_elements(card, document_key);
+    let authored = sekai_profile_core::profile_scene::ordered_profile_elements(card, document.key);
     let mut groups: Vec<AnimationRasterGroup> = Vec::new();
     let mut static_span = Vec::new();
     for element in &authored {
@@ -170,27 +170,26 @@ pub(crate) fn export_profile_animation(
     let retained_layer_budget = preset
         .export_memory_budget_bytes
         .saturating_sub(frame_bytes.saturating_mul(2));
-    let (layers, layer_raster_bytes, layer_scratch_peak_bytes, render_telemetry) =
-        rasterize_animation_groups(
-            renderer,
-            card,
-            profile,
-            md,
-            assets,
+    let rasterizer = GroupRasterizer {
+        renderer,
+        card,
+        sources,
+    };
+    let (layers, layer_raster_bytes, layer_scratch_peak_bytes, render_telemetry) = rasterizer
+        .rasterize_animation_groups(
             resolved_scene.as_ref(),
             &dynamic_expansions,
             &groups,
             config,
-            render_object_store,
             retained_layer_budget,
         )?;
 
     let base_peak_export_bytes = animation_peak_export_bytes(layer_raster_bytes, frame_bytes);
     if base_peak_export_bytes > preset.export_memory_budget_bytes {
-        return Err(format!(
-            "ANIMATION_EXPORT_MEMORY_EXCEEDED: {base_peak_export_bytes} > {}",
-            preset.export_memory_budget_bytes
-        ));
+        return Err(AnimationError::ExportMemoryExceeded {
+            bytes: base_peak_export_bytes,
+            budget: preset.export_memory_budget_bytes,
+        });
     }
     let gif_retention_budget = preset
         .export_memory_budget_bytes
@@ -368,137 +367,140 @@ fn animation_layer_expansions(
         .collect()
 }
 
-pub(super) fn rasterize_animation_groups(
-    renderer: &crate::renderer::CustomProfileRenderer,
-    card: &CustomProfileCard,
-    profile: Option<&crate::profile::ProfileData>,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
-    _dynamic_expansions: &std::collections::BTreeMap<sekai_profile_core::LayerId, [i32; 4]>,
-    groups: &[AnimationRasterGroup],
-    config: &crate::render_config::RenderConfig,
-    render_object_store: &crate::render_object::MappedRenderObjectStore,
-    retained_layer_budget: usize,
-) -> Result<
-    (
-        Vec<RasterLayer>,
-        usize,
-        usize,
-        Option<crate::telemetry::RenderTelemetry>,
-    ),
-    String,
-> {
-    use crate::telemetry::RenderTelemetry;
-
-    let started = std::time::Instant::now();
-    let executor = renderer.resolve_executor(config)?;
-    let mut telemetry = RenderTelemetry::new(config.clone(), executor.public());
-    telemetry.fallback_glyph_cache = match resolved_scene {
-        Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, md)?,
-        None => renderer.prepare_profile_fallback_for_animation_card(card, md)?,
-    };
-    telemetry.work.page_count = 1;
-    telemetry.work.dynamic_layer_count = groups
-        .iter()
-        .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
-        .count() as u64;
-
-    renderer.record_atlas_identities(&mut telemetry, ANIMATION_LAYER_RASTER_USAGE);
-    let (layers, bytes, scratch) = rasterize_animation_groups_ordered(
-        renderer,
-        card,
-        md,
-        assets,
-        profile,
-        groups,
-        executor,
-        config.tile_width,
-        config.tile_height,
-        &mut telemetry,
-        render_object_store,
-        retained_layer_budget,
-    )?;
-    telemetry.bytes.layer_cache_bytes = bytes as u64;
-    telemetry.bytes.scratch_peak_bytes = scratch as u64;
-    telemetry.timings.total_ns = elapsed_ns(started);
-    Ok((layers, bytes, scratch, Some(telemetry)))
+/// Rasterizes the element groups of one card's animation export through the
+/// renderer's ordered SDF path.
+#[derive(Clone, Copy)]
+pub(super) struct GroupRasterizer<'a> {
+    pub(super) renderer: &'a CustomProfileRenderer,
+    /// The card the groups' elements index into.
+    pub(super) card: &'a CustomProfileCard,
+    pub(super) sources: CardSources<'a>,
 }
 
-/// Rasterizes each animation group through the ordered SDF path — the same
-/// pipeline pages use — on `executor`.
-///
-/// Oversized glyphs are generated once for the whole export rather than once
-/// per layer: every group's card contributes to a single realtime-EDT batch
-/// that stays installed for the layer loop, so layers that share a glyph share
-/// the page generated for it.
-#[allow(clippy::too_many_arguments)]
-fn rasterize_animation_groups_ordered(
-    renderer: &crate::renderer::CustomProfileRenderer,
-    card: &CustomProfileCard,
-    md: &MasterData,
-    assets: Option<&AssetStore>,
-    profile: Option<&crate::profile::ProfileData>,
-    groups: &[AnimationRasterGroup],
-    executor: crate::render_config::Executor,
-    tile_width: u16,
-    tile_height: u16,
-    telemetry: &mut crate::telemetry::RenderTelemetry,
-    render_object_store: &crate::render_object::MappedRenderObjectStore,
-    retained_layer_budget: usize,
-) -> Result<(Vec<RasterLayer>, usize, usize), String> {
-    let mut layers = Vec::with_capacity(groups.len());
-    let mut layer_raster_bytes = 0usize;
-    let mut scratch_peak_bytes = 0usize;
-    let layer_cards = groups
-        .iter()
-        .map(|(_, members)| grouped_layer_card(card, members))
-        .collect::<Vec<_>>();
-    let prepared = renderer.prepare_realtime_edt_batch(&layer_cards, md, assets, profile)?;
-    telemetry.work.realtime_edt_glyph_count = prepared
-        .glyphs
-        .iter()
-        .map(|glyph| glyph.substitution_count)
-        .sum();
-    telemetry.bytes.realtime_edt_page_bytes =
-        prepared.glyphs.iter().map(|glyph| glyph.page_bytes).sum();
-    telemetry.timings.realtime_edt_generation_ns = prepared
-        .glyphs
-        .iter()
-        .map(|glyph| glyph.generation_ns)
-        .sum();
-    telemetry
-        .realtime_edt_glyphs
-        .extend(prepared.glyphs.iter().cloned());
-    telemetry.realtime_edt_batch.accumulate(&prepared.telemetry);
+impl GroupRasterizer<'_> {
+    /// Rasterizes `groups` on the executor `config` resolves to, preparing the
+    /// fallback glyphs of `resolved_scene` (or of the card itself when it
+    /// resolved to no scene) first, and reports the layers with their
+    /// retained and peak scratch bytes and the render telemetry.
+    pub(super) fn rasterize_animation_groups(
+        &self,
+        resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
+        _dynamic_expansions: &std::collections::BTreeMap<sekai_profile_core::LayerId, [i32; 4]>,
+        groups: &[AnimationRasterGroup],
+        config: &crate::render_config::RenderConfig,
+        retained_layer_budget: usize,
+    ) -> Result<
+        (
+            Vec<RasterLayer>,
+            usize,
+            usize,
+            Option<crate::telemetry::RenderTelemetry>,
+        ),
+        AnimationError,
+    > {
+        use crate::telemetry::RenderTelemetry;
 
-    renderer.with_realtime_edt_batch(prepared, || {
-        for ((dynamic_layer_id, _), layer_card) in groups.iter().zip(&layer_cards) {
-            let output = renderer.render_ordered_element_layer_cropped(
-                layer_card,
-                md,
-                assets,
-                profile,
-                executor,
-                animation_group_uses_dynamic_bounds(*dynamic_layer_id),
-                tile_width,
-                tile_height,
-                render_object_store,
-                retained_layer_budget.saturating_sub(layer_raster_bytes),
-            )?;
-            if let Some(execution) = output.execution.as_ref() {
-                record_animation_layer_execution(telemetry, execution);
-            }
-            push_animation_raster(
-                &mut layers,
-                &mut layer_raster_bytes,
-                &mut scratch_peak_bytes,
-                *dynamic_layer_id,
-                output.raster,
-            )?;
+        let Self {
+            renderer,
+            card,
+            sources,
+        } = *self;
+        let started = std::time::Instant::now();
+        let executor = renderer.resolve_executor(config)?;
+        let mut telemetry = RenderTelemetry::new(config.clone(), executor.public());
+        telemetry.fallback_glyph_cache = match resolved_scene {
+            Some(scene) => renderer.prepare_profile_fallback_for_animation_scene(scene, sources.md),
+            None => renderer.prepare_profile_fallback_for_animation_card(card, sources.md),
         }
-        Ok((layers, layer_raster_bytes, scratch_peak_bytes))
-    })
+        .map_err(RenderError::Render)?;
+        telemetry.work.page_count = 1;
+        telemetry.work.dynamic_layer_count = groups
+            .iter()
+            .filter(|(dynamic_layer_id, _)| dynamic_layer_id.is_some())
+            .count() as u64;
+
+        renderer.record_atlas_identities(&mut telemetry, ANIMATION_LAYER_RASTER_USAGE);
+        let (layers, bytes, scratch) = self.rasterize_animation_groups_ordered(
+            groups,
+            SdfPass::new(config, executor),
+            &mut telemetry,
+            retained_layer_budget,
+        )?;
+        telemetry.bytes.layer_cache_bytes = bytes as u64;
+        telemetry.bytes.scratch_peak_bytes = scratch as u64;
+        telemetry.timings.total_ns = elapsed_ns(started);
+        Ok((layers, bytes, scratch, Some(telemetry)))
+    }
+
+    /// Rasterizes each animation group through the ordered SDF path — the same
+    /// pipeline pages use — with `pass`.
+    ///
+    /// Oversized glyphs are generated once for the whole export rather than once
+    /// per layer: every group's card contributes to a single realtime-EDT batch
+    /// that stays installed for the layer loop, so layers that share a glyph share
+    /// the page generated for it.
+    fn rasterize_animation_groups_ordered(
+        &self,
+        groups: &[AnimationRasterGroup],
+        pass: SdfPass,
+        telemetry: &mut crate::telemetry::RenderTelemetry,
+        retained_layer_budget: usize,
+    ) -> Result<(Vec<RasterLayer>, usize, usize), AnimationError> {
+        let Self {
+            renderer,
+            card,
+            sources,
+        } = *self;
+        let mut layers = Vec::with_capacity(groups.len());
+        let mut layer_raster_bytes = 0usize;
+        let mut scratch_peak_bytes = 0usize;
+        let layer_cards = groups
+            .iter()
+            .map(|(_, members)| grouped_layer_card(card, members))
+            .collect::<Vec<_>>();
+        let prepared = renderer
+            .prepare_realtime_edt_batch(&layer_cards, sources)
+            .map_err(RenderError::Render)?;
+        telemetry.work.realtime_edt_glyph_count = prepared
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.substitution_count)
+            .sum();
+        telemetry.bytes.realtime_edt_page_bytes =
+            prepared.glyphs.iter().map(|glyph| glyph.page_bytes).sum();
+        telemetry.timings.realtime_edt_generation_ns = prepared
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.generation_ns)
+            .sum();
+        telemetry
+            .realtime_edt_glyphs
+            .extend(prepared.glyphs.iter().cloned());
+        telemetry.realtime_edt_batch.accumulate(&prepared.telemetry);
+
+        renderer.with_realtime_edt_batch(prepared, || {
+            for ((dynamic_layer_id, _), layer_card) in groups.iter().zip(&layer_cards) {
+                let output = renderer.render_ordered_element_layer_cropped(
+                    layer_card,
+                    sources,
+                    pass,
+                    animation_group_uses_dynamic_bounds(*dynamic_layer_id),
+                    retained_layer_budget.saturating_sub(layer_raster_bytes),
+                )?;
+                if let Some(execution) = output.execution.as_ref() {
+                    record_animation_layer_execution(telemetry, execution);
+                }
+                push_animation_raster(
+                    &mut layers,
+                    &mut layer_raster_bytes,
+                    &mut scratch_peak_bytes,
+                    *dynamic_layer_id,
+                    output.raster,
+                )?;
+            }
+            Ok((layers, layer_raster_bytes, scratch_peak_bytes))
+        })
+    }
 }
 
 /// Folds one layer's SDF execution record into the export-wide telemetry.
@@ -621,7 +623,7 @@ fn push_animation_raster(
     scratch_peak_bytes: &mut usize,
     dynamic_layer_id: Option<sekai_profile_core::LayerId>,
     output: crate::renderer::AnimationLayerRaster,
-) -> Result<(), String> {
+) -> Result<(), AnimationError> {
     match output {
         crate::renderer::AnimationLayerRaster::Ordered(output) => {
             if output.width == 0 || output.height == 0 {
@@ -629,7 +631,9 @@ fn push_animation_raster(
             }
             *layer_raster_bytes = layer_raster_bytes
                 .checked_add(output.width as usize * output.height as usize * 4)
-                .ok_or_else(|| "animation layer raster byte overflow".to_string())?;
+                .ok_or(AnimationError::Internal(
+                    "animation layer raster byte overflow",
+                ))?;
             *scratch_peak_bytes = (*scratch_peak_bytes).max(output.scratch_peak_bytes);
             layers.push(RasterLayer {
                 dynamic_layer_id,
