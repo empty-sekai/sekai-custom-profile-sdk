@@ -7,28 +7,44 @@ import { createDemoServer } from "../serve-demo.mjs";
 
 const {
   createEmptySekaiResourceProvider,
+  defaultAssetBase,
   emptySekaiResourceUrl,
 } = await import("../../demo/workbench/emptySekaiResourceProvider.js");
 
 const config = {
   region: "cn",
-  assetBase: "https://cdn.emptysekai.com/assets/cn",
-  staticBase: "https://cdn.emptysekai.com/renderer-static/v0.2",
+  assetBase: "https://assets.example.test/cn",
+  staticBase: "https://static.example.test/renderer-static",
 };
 
-test("demo provider maps semantic descriptors to configured EmptySekai resources", () => {
+test("demo provider maps semantic descriptors to the configured bases", () => {
   const cases = [
-    [{ namespace: "static", key: "chara_avatar/chara01_02" }, "https://cdn.emptysekai.com/renderer-static/v0.2/chara_avatar/chara01_02.png"],
-    [{ namespace: "assets", key: "character/member_small/example/card_normal" }, "https://cdn.emptysekai.com/assets/cn/character/member_small/example/card_normal.png"],
-    [{ namespace: "assets", key: "bonds_honor/chr_sd_07_01" }, "https://cdn.emptysekai.com/assets/cn/bonds_honor/character/chr_sd_07_01/chr_sd_07_01.png"],
-    [{ namespace: "assets", key: "bonds_honor/word/example_01" }, "https://cdn.emptysekai.com/assets/cn/bonds_honor/word/example_01/example_01.png"],
-    [{ namespace: "assets", key: "ugc/editor_image/2026-07/example.png" }, "https://cdn.emptysekai.com/ugc/editor_image/2026-07/example.png"],
-    [{ namespace: "assets", key: "uploads/avatar/2026-07/example.png" }, "https://cdn.emptysekai.com/uploads/avatar/2026-07/example.png"],
-    [{ namespace: "assets", key: "presets/stamp/example.png" }, "https://cdn.emptysekai.com/presets/stamp/example.png"],
+    [{ namespace: "static", key: "chara_avatar/chara01_02" }, "https://static.example.test/renderer-static/chara_avatar/chara01_02.png"],
+    [{ namespace: "assets", key: "character/member_small/example/card_normal" }, "https://assets.example.test/cn/character/member_small/example/card_normal.png"],
+    [{ namespace: "assets", key: "bonds_honor/chr_sd_07_01" }, "https://assets.example.test/cn/bonds_honor/character/chr_sd_07_01/chr_sd_07_01.png"],
+    [{ namespace: "assets", key: "bonds_honor/word/example_01" }, "https://assets.example.test/cn/bonds_honor/word/example_01/example_01.png"],
+    [{ namespace: "assets", key: "ugc/editor_image/2026-07/example.png" }, "https://assets.example.test/ugc/editor_image/2026-07/example.png"],
+    [{ namespace: "assets", key: "uploads/avatar/2026-07/example.png" }, "https://assets.example.test/uploads/avatar/2026-07/example.png"],
+    [{ namespace: "assets", key: "presets/stamp/example.png" }, "https://assets.example.test/presets/stamp/example.png"],
   ];
   for (const [resource, expected] of cases) {
     assert.equal(emptySekaiResourceUrl(resource, config), expected);
   }
+});
+
+test("demo provider defaults to the region's asset tree and the shared static images", () => {
+  for (const region of ["jp", "cn", "tw", "kr", "en"]) {
+    assert.equal(defaultAssetBase(region), `https://storage.pjsk.moe/sekai-${region}-assets`);
+    assert.equal(
+      emptySekaiResourceUrl({ namespace: "assets", key: "honor/honor_0001/degree_main" }, { region }),
+      `https://storage.pjsk.moe/sekai-${region}-assets/honor/honor_0001/degree_main.png`,
+    );
+  }
+  assert.equal(defaultAssetBase("XX"), "https://storage.pjsk.moe/sekai-cn-assets");
+  assert.equal(
+    emptySekaiResourceUrl({ namespace: "static", key: "chara_avatar/chara01_02" }, { region: "jp" }),
+    "https://profile-assets.emptysekai.dev/game-profile/cn/6.0.0/renderer-static/chara_avatar/chara01_02.png",
+  );
 });
 
 test("demo provider performs asynchronous fetch with the runtime AbortSignal", async () => {
@@ -50,7 +66,7 @@ test("demo provider performs asynchronous fetch with the runtime AbortSignal", a
     }, { signal: controller.signal });
     assert.ok(result.source instanceof Blob);
     assert.deepEqual(request, {
-      url: "https://cdn.emptysekai.com/assets/cn/card/example.png",
+      url: "https://assets.example.test/cn/card/example.png",
       signal: controller.signal,
       cache: "default",
     });

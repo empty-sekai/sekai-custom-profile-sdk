@@ -1,4 +1,5 @@
-const DEFAULT_STATIC_BASE = "https://cdn.emptysekai.com/renderer-static/v0.2";
+const DEFAULT_STATIC_BASE = "https://profile-assets.emptysekai.dev/game-profile/cn/6.0.0/renderer-static";
+const ASSET_REGIONS = new Set(["jp", "cn", "tw", "kr", "en"]);
 const STATIC_CACHE = "sekai-custom-profile-sdk-demo-static-v0.3";
 const ROOT_ASSET_PREFIXES = [
   "ugc/editor_image/",
@@ -7,6 +8,12 @@ const ROOT_ASSET_PREFIXES = [
   "uploads/avatar/",
   "presets/",
 ];
+
+/** Game asset base for `region`: its asset tree on storage.pjsk.moe, without a trailing slash. */
+export function defaultAssetBase(region) {
+  const key = String(region || "cn").toLowerCase();
+  return `https://storage.pjsk.moe/sekai-${ASSET_REGIONS.has(key) ? key : "cn"}-assets`;
+}
 
 export function createEmptySekaiResourceProvider(config) {
   const normalized = normalizeConfig(config);
@@ -60,9 +67,10 @@ function gameAssetObjectPath(key, region) {
 }
 
 function normalizeConfig(config) {
+  const region = String(config.region || "cn").toLowerCase();
   return {
-    region: String(config.region || "cn").toLowerCase(),
-    assetBase: trimSlash(config.assetBase),
+    region,
+    assetBase: trimSlash(config.assetBase ?? defaultAssetBase(region)),
     staticBase: trimSlash(config.staticBase || DEFAULT_STATIC_BASE),
   };
 }

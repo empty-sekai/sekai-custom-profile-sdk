@@ -1,5 +1,5 @@
 import { BrowserRenderer } from "../../dist/index.js?v=20260715-13";
-import { createEmptySekaiResourceProvider } from "./emptySekaiResourceProvider.js?v=20260715-13";
+import { createEmptySekaiResourceProvider, defaultAssetBase } from "./emptySekaiResourceProvider.js?v=20260715-13";
 import { BrowserInputStore } from "./inputPersistence.js?v=20260715-13";
 
 const CARD_WIDTH = 1830;
@@ -336,7 +336,7 @@ function normalizeConfig(config) {
     region: String(config.region || "cn").toLowerCase(),
     revision: String(config.revision || DEFAULT_MASTERDATA_REVISION),
     masterdataBase: trimSlash(config.masterdataBase ?? defaultMasterdataBase(config.region, config.revision)),
-    assetBase: trimSlash(config.assetBase),
+    assetBase: trimSlash(config.assetBase ?? defaultAssetBase(config.region)),
     sdfBackend: config.sdfBackend === "analytic" ? "analytic" : "edt",
     persistence: config.persistence === "memory-only" ? "memory-only" : "origin",
     debugLevel: ["off", "trace"].includes(config.debugLevel) ? config.debugLevel : "summary",
