@@ -11,7 +11,7 @@ Sekai Custom Profile SDK 是面向 Project SEKAI（PJSK）自定义名片的非�
 
 ## 在线演示
 
-[profile.mizore.art](https://profile.mizore.art) 基于浏览器渲染器构建，可在浏览器中编辑并
+[profile.emptysekai.dev](https://profile.emptysekai.dev) 基于浏览器渲染器构建，可在浏览器中编辑并
 预览自定义名片。
 
 ![名片编辑器文本工具](docs/images/editor-text-tool.png)

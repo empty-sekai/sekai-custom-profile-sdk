@@ -15,8 +15,8 @@ pixels.
 
 ## Live demo
 
-[profile.mizore.art](https://profile.mizore.art) is built on the browser
-renderer and edits and previews custom profile cards in the browser.
+[profile.emptysekai.dev](https://profile.emptysekai.dev) is built on the
+browser renderer and edits and previews custom profile cards in the browser.
 
 ![Card editor text tool](docs/images/editor-text-tool.png)
 
