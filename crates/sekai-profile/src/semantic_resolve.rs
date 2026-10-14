@@ -102,21 +102,21 @@ pub fn resolve_card_commands_with_resources(
 }
 
 pub fn build_profile_resolve_base_snapshot(
-    seed_card: &CustomProfileCard,
+    _seed_card: &CustomProfileCard,
     md: &MasterData,
     profile: Option<&ProfileData>,
     locale: &str,
     resources: ResolveResourceContext<'_>,
 ) -> ProfileResolveBaseSnapshot {
-    let mut snapshot = build_resolve_snapshot_parts(
-        seed_card,
-        md,
-        "profile-base",
-        profile,
-        locale,
-        resources,
-        false,
-        true,
+    let mut snapshot = ProfileResolveSnapshot::default();
+    populate_profile_base(
+        &mut snapshot,
+        SnapshotSources {
+            md,
+            profile,
+            locale,
+            resources,
+        },
     );
     // Font 1 is copied into component.region_fonts while building the base.
     // Keeping it in this top-level map would make page overlay replacement
@@ -153,16 +153,16 @@ pub fn resolve_card_commands_with_base_timed(
     debug_assert!(base.snapshot.honor_visuals.is_empty());
     debug_assert!(base.snapshot.card_member_visuals.is_empty());
     debug_assert!(base.snapshot.omikuji_visuals.is_empty());
-    populate_resolve_snapshot_parts(
+    populate_page_overlay(
         &mut base.snapshot,
         card,
-        md,
         document_key,
-        profile,
-        "unused-page-locale",
-        resources,
-        true,
-        false,
+        SnapshotSources {
+            md,
+            profile,
+            locale: "unused-page-locale",
+            resources,
+        },
     );
     let page_snapshot_overlay_ns = elapsed_ns(overlay_started);
     let semantic_started = std::time::Instant::now();
@@ -186,465 +186,460 @@ pub fn resolve_card_commands_with_base_timed(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_resolve_snapshot_parts(
-    card: &CustomProfileCard,
-    md: &MasterData,
-    document_key: &str,
-    profile: Option<&ProfileData>,
-    locale: &str,
-    resources: ResolveResourceContext<'_>,
-    include_page_overlay: bool,
-    include_profile_base: bool,
-) -> ProfileResolveSnapshot {
-    let mut snapshot = ProfileResolveSnapshot::default();
-    populate_resolve_snapshot_parts(
-        &mut snapshot,
-        card,
-        md,
-        document_key,
-        profile,
-        locale,
-        resources,
-        include_page_overlay,
-        include_profile_base,
-    );
-    snapshot
+/// Read-only inputs of the resolve-snapshot builders.
+#[derive(Clone, Copy)]
+struct SnapshotSources<'a> {
+    md: &'a MasterData,
+    profile: Option<&'a ProfileData>,
+    locale: &'a str,
+    /// Asset store and render-object metadata catalog that resource
+    /// descriptors are sized from.
+    resources: ResolveResourceContext<'a>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn populate_resolve_snapshot_parts(
+/// Adds the page-local maps of one card page: fonts, colors, resource
+/// descriptors, line-indent programs, and the honor, card-member and omikuji
+/// visuals of its visible elements.
+fn populate_page_overlay(
     snapshot: &mut ProfileResolveSnapshot,
     card: &CustomProfileCard,
-    md: &MasterData,
     document_key: &str,
-    profile: Option<&ProfileData>,
-    locale: &str,
-    resources: ResolveResourceContext<'_>,
-    include_page_overlay: bool,
-    include_profile_base: bool,
+    sources: SnapshotSources<'_>,
 ) {
-    // The context carries both the AssetStore and the mmap metadata catalog.
-    let assets = resources;
-    if include_page_overlay {
-        for element in ordered_profile_elements(card, document_key) {
-            // The viewer does not build hidden elements.
-            if !element.object().visible {
-                continue;
-            }
-            match element.value {
-                ProfileElementRef::Text(text) => {
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        snapshot.fonts.entry(text.font_id)
-                    {
-                        if let Some(font) = md.resolve_font_or_default(text.font_id) {
-                            entry.insert(font);
-                        }
-                    }
-                    insert_color(snapshot, md, text.color_id);
-                    insert_color(snapshot, md, text.outline_color_id);
-                }
-                ProfileElementRef::Shape(shape) => {
-                    insert_color(snapshot, md, shape.color_id);
-                    insert_color(snapshot, md, shape.outline_color_id);
-                }
-                ProfileElementRef::UserInterfaceIcon(icon) => {
-                    insert_color(snapshot, md, icon.color_id);
-                }
-                _ => {}
-            }
-            match authored_resource(element.value, md) {
-                AuthoredResource::None => {}
-                AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
-                    snapshot.omitted_elements.insert(element.source_key);
-                }
-                AuthoredResource::Request(request) => {
-                    let (table, id) = resource_provenance(element.value);
-                    insert_resource_descriptor(
-                        snapshot,
-                        request.lookup_key,
-                        request.resource.key,
-                        (request.fallback.width, request.fallback.height),
-                        table,
-                        id,
-                        assets,
-                    );
-                }
-                AuthoredResource::Omikuji(plan) => {
-                    let client = OmikujiClient::for_masterdata(md, locale);
-                    snapshot
-                        .omikuji_visuals
-                        .insert(element.source_key, plan.visual(client));
-                }
-                AuthoredResource::LitBadge { image, normal_map } => {
-                    let (table, id) = resource_provenance(element.value);
-                    insert_resource_descriptor(
-                        snapshot,
-                        image.lookup_key,
-                        image.resource.key,
-                        (image.fallback.width, image.fallback.height),
-                        table,
-                        id,
-                        assets,
-                    );
-                    // The normal map is a static asset, resolved like the
-                    // static honor frames.
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        snapshot.resources.entry(normal_map.lookup_key)
-                    {
-                        entry.insert(static_descriptor(
-                            normal_map.resource.key,
-                            (normal_map.fallback.width, normal_map.fallback.height),
-                            "badge_material",
-                            id,
-                            assets,
-                        ));
-                    }
-                }
-            }
+    let SnapshotSources {
+        md,
+        profile,
+        locale,
+        resources: assets,
+    } = sources;
+    for element in ordered_profile_elements(card, document_key) {
+        // The viewer does not build hidden elements.
+        if !element.object().visible {
+            continue;
         }
-        for element in ordered_profile_elements(card, document_key) {
-            if !element.object().visible || snapshot.omitted_elements.contains(&element.source_key)
-            {
-                continue;
+        match element.value {
+            ProfileElementRef::Text(text) => {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    snapshot.fonts.entry(text.font_id)
+                {
+                    if let Some(font) = md.resolve_font_or_default(text.font_id) {
+                        entry.insert(font);
+                    }
+                }
+                insert_color(snapshot, md, text.color_id);
+                insert_color(snapshot, md, text.outline_color_id);
             }
-            match element.value {
-                ProfileElementRef::Text(text) => {
-                    if let Some(mut program) = crate::text::line_indent_program(text, md) {
-                        let (_, _, rotation_deg, scale_x, _) =
-                            sekai_profile_core::profile_transform::extract_transform(
-                                element.object(),
-                            );
-                        program.rotation_deg = rotation_deg;
-                        program.scale_x = scale_x;
-                        snapshot.line_indent.insert(element.source_key, program);
-                    }
-                }
-                ProfileElementRef::Honor(honor) => {
-                    let Some(level) = sekai_profile_core::profile_data::placed_honor_level(
-                        profile.map(|profile| &profile.owned_honors),
-                        honor.id,
-                        honor.honor_level,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(visual) = build_standard_honor_visual(
-                        "customProfile.honors",
-                        honor.id,
-                        level,
-                        honor.full_size,
-                        profile,
-                        md,
+            ProfileElementRef::Shape(shape) => {
+                insert_color(snapshot, md, shape.color_id);
+                insert_color(snapshot, md, shape.outline_color_id);
+            }
+            ProfileElementRef::UserInterfaceIcon(icon) => {
+                insert_color(snapshot, md, icon.color_id);
+            }
+            _ => {}
+        }
+        match authored_resource(element.value, md) {
+            AuthoredResource::None => {}
+            AuthoredResource::MissingRow | AuthoredResource::NotDrawn => {
+                snapshot.omitted_elements.insert(element.source_key);
+            }
+            AuthoredResource::Request(request) => {
+                let (table, id) = resource_provenance(element.value);
+                insert_resource_descriptor(
+                    snapshot,
+                    request.lookup_key,
+                    request.resource.key,
+                    (request.fallback.width, request.fallback.height),
+                    table,
+                    id,
+                    assets,
+                );
+            }
+            AuthoredResource::Omikuji(plan) => {
+                let client = OmikujiClient::for_masterdata(md, locale);
+                snapshot
+                    .omikuji_visuals
+                    .insert(element.source_key, plan.visual(client));
+            }
+            AuthoredResource::LitBadge { image, normal_map } => {
+                let (table, id) = resource_provenance(element.value);
+                insert_resource_descriptor(
+                    snapshot,
+                    image.lookup_key,
+                    image.resource.key,
+                    (image.fallback.width, image.fallback.height),
+                    table,
+                    id,
+                    assets,
+                );
+                // The normal map is a static asset, resolved like the
+                // static honor frames.
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    snapshot.resources.entry(normal_map.lookup_key)
+                {
+                    entry.insert(static_descriptor(
+                        normal_map.resource.key,
+                        (normal_map.fallback.width, normal_map.fallback.height),
+                        "badge_material",
+                        id,
                         assets,
-                    ) {
-                        snapshot.honor_visuals.insert(element.source_key, visual);
-                    }
+                    ));
                 }
-                ProfileElementRef::BondsHonor(honor) => {
-                    let Some(level) = sekai_profile_core::profile_data::placed_bonds_honor_level(
-                        profile.map(|profile| &profile.owned_honors),
-                        honor.id,
-                        honor.honor_level,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(visual) = build_bonds_honor_visual(
-                        "customProfile.bondsHonors",
-                        honor.id,
-                        level,
-                        honor.full_size,
-                        honor.word_id,
-                        honor.inverse,
-                        honor.use_unit_virtual_singer,
-                        md,
-                        assets,
-                    ) {
-                        snapshot.honor_visuals.insert(element.source_key, visual);
-                    }
-                }
-                ProfileElementRef::CardMember(value) if value.show_master_rank.unwrap_or(false) => {
-                    if let Some(card) = md.get_card(value.id) {
-                        let member_type = value.member_type.unwrap_or(2);
-                        let lookup_key = card_member_lookup_key(value);
-                        let user_card = profile.and_then(|profile| profile.user_card(value.id));
-                        snapshot.card_member_visuals.insert(
-                            element.source_key,
-                            CardVisualSnapshot {
-                                card_id: value.id,
-                                after_training: user_card.map_or(
-                                    value.use_after_special_training.unwrap_or(false),
-                                    |card| card.special_training_done,
-                                ),
-                                master_rank: user_card.map_or(0, |card| card.master_rank),
-                                level: user_card.map_or(60, |card| card.level),
-                                rarity: card.card_rarity_type,
-                                attribute: card.attr,
-                                image: ComponentImageSnapshot {
-                                    source_field: "customProfile.cardMembers".into(),
-                                    source_id: value.id.to_string(),
-                                    descriptor: snapshot.resources.get(&lookup_key).cloned(),
-                                },
-                            },
-                        );
-                        if member_type == 1 && !snapshot.fonts.contains_key(&1) {
-                            if let Some(font) = md.resolve_font(1) {
-                                snapshot.fonts.insert(1, font);
-                            }
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
-    if include_profile_base {
-        if let Some(profile) = profile {
-            let challenge_rank_by_character = profile
-                .challenge_ranks
-                .iter()
-                .map(|challenge| (challenge.character_id, challenge.rank))
-                .collect::<std::collections::HashMap<_, _>>();
-            if let Some(font) = md.resolve_font(1) {
-                snapshot.fonts.insert(1, font);
+    for element in ordered_profile_elements(card, document_key) {
+        if !element.object().visible || snapshot.omitted_elements.contains(&element.source_key) {
+            continue;
+        }
+        match element.value {
+            ProfileElementRef::Text(text) => {
+                if let Some(mut program) = crate::text::line_indent_program(text, md) {
+                    let (_, _, rotation_deg, scale_x, _) =
+                        sekai_profile_core::profile_transform::extract_transform(element.object());
+                    program.rotation_deg = rotation_deg;
+                    program.scale_x = scale_x;
+                    snapshot.line_indent.insert(element.source_key, program);
+                }
             }
-            let story_favorites = sekai_profile_core::profile_data::story_favorite_slots(
-                &profile.story_favorites,
-                |favorite| favorite.share_no,
-            )
-            .into_iter()
-            .map(|favorite| match favorite {
-                Some(favorite) => StoryFavoriteSnapshot {
-                    story_id: favorite.story_id,
-                    story_type: favorite.story_type.clone(),
-                    image: ComponentImageSnapshot {
-                        source_field: "userProfile.storyFavorites".into(),
-                        source_id: format!("{}:{}", favorite.story_type, favorite.story_id),
-                        descriptor: md
-                            .resolve_story_banner(&favorite.story_type, favorite.story_id)
-                            .map(|key| {
-                                make_resource_descriptor(
-                                    key,
-                                    (400.0, 170.0),
-                                    "storyFavorites",
-                                    favorite.story_id,
-                                    assets,
-                                )
-                            }),
+            ProfileElementRef::Honor(honor) => {
+                let Some(level) = sekai_profile_core::profile_data::placed_honor_level(
+                    profile.map(|profile| &profile.owned_honors),
+                    honor.id,
+                    honor.honor_level,
+                ) else {
+                    continue;
+                };
+                if let Some(visual) = build_standard_honor_visual(
+                    "customProfile.honors",
+                    honor.id,
+                    level,
+                    honor.full_size,
+                    profile,
+                    md,
+                    assets,
+                ) {
+                    snapshot.honor_visuals.insert(element.source_key, visual);
+                }
+            }
+            ProfileElementRef::BondsHonor(honor) => {
+                let Some(level) = sekai_profile_core::profile_data::placed_bonds_honor_level(
+                    profile.map(|profile| &profile.owned_honors),
+                    honor.id,
+                    honor.honor_level,
+                ) else {
+                    continue;
+                };
+                if let Some(visual) = build_bonds_honor_visual(
+                    "customProfile.bondsHonors",
+                    honor.id,
+                    level,
+                    honor.full_size,
+                    BondsHonorView {
+                        word_id: honor.word_id,
+                        inverse: honor.inverse,
+                        use_unit_virtual_singer: honor.use_unit_virtual_singer,
                     },
+                    md,
+                    assets,
+                ) {
+                    snapshot.honor_visuals.insert(element.source_key, visual);
+                }
+            }
+            ProfileElementRef::CardMember(value) if value.show_master_rank.unwrap_or(false) => {
+                if let Some(card) = md.get_card(value.id) {
+                    let member_type = value.member_type.unwrap_or(2);
+                    let lookup_key = card_member_lookup_key(value);
+                    let user_card = profile.and_then(|profile| profile.user_card(value.id));
+                    snapshot.card_member_visuals.insert(
+                        element.source_key,
+                        CardVisualSnapshot {
+                            card_id: value.id,
+                            after_training: user_card.map_or(
+                                value.use_after_special_training.unwrap_or(false),
+                                |card| card.special_training_done,
+                            ),
+                            master_rank: user_card.map_or(0, |card| card.master_rank),
+                            level: user_card.map_or(60, |card| card.level),
+                            rarity: card.card_rarity_type,
+                            attribute: card.attr,
+                            image: ComponentImageSnapshot {
+                                source_field: "customProfile.cardMembers".into(),
+                                source_id: value.id.to_string(),
+                                descriptor: snapshot.resources.get(&lookup_key).cloned(),
+                            },
+                        },
+                    );
+                    if member_type == 1 && !snapshot.fonts.contains_key(&1) {
+                        if let Some(font) = md.resolve_font(1) {
+                            snapshot.fonts.insert(1, font);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Installs region font 1 and the player-wide component snapshot that every
+/// page of one profile shares. Without a profile the snapshot is unchanged.
+fn populate_profile_base(snapshot: &mut ProfileResolveSnapshot, sources: SnapshotSources<'_>) {
+    let SnapshotSources {
+        md,
+        profile,
+        locale,
+        resources: assets,
+    } = sources;
+    if let Some(profile) = profile {
+        let challenge_rank_by_character = profile
+            .challenge_ranks
+            .iter()
+            .map(|challenge| (challenge.character_id, challenge.rank))
+            .collect::<std::collections::HashMap<_, _>>();
+        if let Some(font) = md.resolve_font(1) {
+            snapshot.fonts.insert(1, font);
+        }
+        let story_favorites = sekai_profile_core::profile_data::story_favorite_slots(
+            &profile.story_favorites,
+            |favorite| favorite.share_no,
+        )
+        .into_iter()
+        .map(|favorite| match favorite {
+            Some(favorite) => StoryFavoriteSnapshot {
+                story_id: favorite.story_id,
+                story_type: favorite.story_type.clone(),
+                image: ComponentImageSnapshot {
+                    source_field: "userProfile.storyFavorites".into(),
+                    source_id: format!("{}:{}", favorite.story_type, favorite.story_id),
+                    descriptor: md
+                        .resolve_story_banner(&favorite.story_type, favorite.story_id)
+                        .map(|key| {
+                            make_resource_descriptor(
+                                key,
+                                (400.0, 170.0),
+                                "storyFavorites",
+                                favorite.story_id,
+                                assets,
+                            )
+                        }),
                 },
-                None => StoryFavoriteSnapshot {
-                    story_id: 0,
-                    story_type: String::new(),
-                    image: ComponentImageSnapshot {
-                        source_field: "userProfile.storyFavorites".into(),
-                        source_id: String::new(),
-                        descriptor: None,
-                    },
+            },
+            None => StoryFavoriteSnapshot {
+                story_id: 0,
+                story_type: String::new(),
+                image: ComponentImageSnapshot {
+                    source_field: "userProfile.storyFavorites".into(),
+                    source_id: String::new(),
+                    descriptor: None,
+                },
+            },
+        })
+        .collect();
+        let player_avatar = profile.leader_card.as_ref().and_then(|leader| {
+            let card = md.get_card(leader.card_id)?;
+            let training = if leader.after_training {
+                "after_training"
+            } else {
+                "normal"
+            };
+            Some(ComponentImageSnapshot {
+                source_field: "userProfile.leaderCard".into(),
+                source_id: leader.card_id.to_string(),
+                descriptor: Some(make_resource_descriptor(
+                    format!("thumbnail/chara/{}_{}", card.asset_bundle_name, training),
+                    (180.0, 180.0),
+                    "cards",
+                    leader.card_id,
+                    assets,
+                )),
+            })
+        });
+        let character_ranks = profile
+            .char_ranks
+            .iter()
+            .map(|rank| CharacterRankSnapshot {
+                character_id: rank.character_id,
+                rank: rank.rank,
+                challenge_rank: challenge_rank_by_character.get(&rank.character_id).copied(),
+                avatar: ComponentImageSnapshot {
+                    source_field: "userProfile.characterRanks".into(),
+                    source_id: rank.character_id.to_string(),
+                    descriptor: Some(make_resource_descriptor(
+                        format!("chara_avatar/chara{:02}_02", rank.character_id),
+                        (76.0, 76.0),
+                        "gameCharacters",
+                        rank.character_id,
+                        assets,
+                    )),
                 },
             })
             .collect();
-            let player_avatar = profile.leader_card.as_ref().and_then(|leader| {
-                let card = md.get_card(leader.card_id)?;
-                let training = if leader.after_training {
-                    "after_training"
-                } else {
-                    "normal"
-                };
-                Some(ComponentImageSnapshot {
-                    source_field: "userProfile.leaderCard".into(),
-                    source_id: leader.card_id.to_string(),
-                    descriptor: Some(make_resource_descriptor(
-                        format!("thumbnail/chara/{}_{}", card.asset_bundle_name, training),
-                        (180.0, 180.0),
-                        "cards",
-                        leader.card_id,
-                        assets,
-                    )),
-                })
+        let challenge_avatar =
+            (profile.challenge_character_id > 0).then(|| ComponentImageSnapshot {
+                source_field: "userProfile.challengeLiveSoloResult.characterId".into(),
+                source_id: profile.challenge_character_id.to_string(),
+                descriptor: Some(make_resource_descriptor(
+                    format!("chara_avatar/chara{:02}_02", profile.challenge_character_id),
+                    (76.0, 76.0),
+                    "gameCharacters",
+                    profile.challenge_character_id,
+                    assets,
+                )),
             });
-            let character_ranks = profile
-                .char_ranks
-                .iter()
-                .map(|rank| CharacterRankSnapshot {
-                    character_id: rank.character_id,
-                    rank: rank.rank,
-                    challenge_rank: challenge_rank_by_character.get(&rank.character_id).copied(),
-                    avatar: ComponentImageSnapshot {
-                        source_field: "userProfile.characterRanks".into(),
-                        source_id: rank.character_id.to_string(),
-                        descriptor: Some(make_resource_descriptor(
-                            format!("chara_avatar/chara{:02}_02", rank.character_id),
-                            (76.0, 76.0),
-                            "gameCharacters",
-                            rank.character_id,
-                            assets,
-                        )),
-                    },
-                })
-                .collect();
-            let challenge_avatar =
-                (profile.challenge_character_id > 0).then(|| ComponentImageSnapshot {
-                    source_field: "userProfile.challengeLiveSoloResult.characterId".into(),
-                    source_id: profile.challenge_character_id.to_string(),
-                    descriptor: Some(make_resource_descriptor(
-                        format!("chara_avatar/chara{:02}_02", profile.challenge_character_id),
-                        (76.0, 76.0),
-                        "gameCharacters",
-                        profile.challenge_character_id,
-                        assets,
-                    )),
-                });
-            let deck_members = profile
-                .deck_members
-                .iter()
-                .filter_map(|member| {
-                    let card = md.get_card(member.card_id)?;
-                    let training = if member.after_training {
-                        "after_training"
-                    } else {
-                        "normal"
-                    };
-                    Some(CardVisualSnapshot {
-                        card_id: member.card_id,
-                        after_training: member.special_training_done,
-                        master_rank: member.master_rank,
-                        level: member.level,
-                        rarity: card.card_rarity_type.clone(),
-                        attribute: card.attr.clone(),
-                        image: ComponentImageSnapshot {
-                            source_field: "userProfile.deckMembers".into(),
-                            source_id: member.card_id.to_string(),
-                            descriptor: resolve_card_member_key(member.card_id, 1, training, md)
-                                .map(|key| {
-                                    make_resource_descriptor(
-                                        key,
-                                        (600.0, 576.0),
-                                        "cards",
-                                        member.card_id,
-                                        assets,
-                                    )
-                                }),
-                        },
-                    })
-                })
-                .collect();
-            let leader_card = profile.leader_card.as_ref().and_then(|leader| {
-                let card = md.get_card(leader.card_id)?;
-                let training = if leader.after_training {
+        let deck_members = profile
+            .deck_members
+            .iter()
+            .filter_map(|member| {
+                let card = md.get_card(member.card_id)?;
+                let training = if member.after_training {
                     "after_training"
                 } else {
                     "normal"
                 };
                 Some(CardVisualSnapshot {
-                    card_id: leader.card_id,
-                    after_training: leader.after_training,
-                    master_rank: leader.master_rank,
-                    // Same fallback as the card-member snapshot: a leader card
-                    // absent from userCards is stale data, rendered at the
-                    // default level rather than level 0.
-                    level: profile
-                        .user_cards
-                        .get(&leader.card_id)
-                        .map(|card| card.level)
-                        .unwrap_or(60),
+                    card_id: member.card_id,
+                    after_training: member.special_training_done,
+                    master_rank: member.master_rank,
+                    level: member.level,
                     rarity: card.card_rarity_type.clone(),
                     attribute: card.attr.clone(),
                     image: ComponentImageSnapshot {
-                        source_field: "userProfile.leaderCard".into(),
-                        source_id: leader.card_id.to_string(),
-                        descriptor: resolve_card_member_key(leader.card_id, 2, training, md).map(
+                        source_field: "userProfile.deckMembers".into(),
+                        source_id: member.card_id.to_string(),
+                        descriptor: resolve_card_member_key(member.card_id, 1, training, md).map(
                             |key| {
                                 make_resource_descriptor(
                                     key,
-                                    (940.0, 530.0),
+                                    (600.0, 576.0),
                                     "cards",
-                                    leader.card_id,
+                                    member.card_id,
                                     assets,
                                 )
                             },
                         ),
                     },
                 })
-            });
-            let mut ordered_honor_slots = profile.honor_slots.iter().collect::<Vec<_>>();
-            ordered_honor_slots.sort_by(|left, right| right.full_size.cmp(&left.full_size));
-            if ordered_honor_slots.len() >= 2 {
-                ordered_honor_slots.swap(0, 1);
-            }
-            let honor_slots = ordered_honor_slots
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, slot)| {
-                    let render_full = index == 0;
-                    if slot.profile_honor_type == "bonds" {
-                        build_bonds_honor_visual(
-                            "userProfile.honorSlots",
-                            slot.honor_id,
-                            slot.honor_level,
-                            render_full,
-                            slot.bonds_honor_word_id.unwrap_or_default(),
-                            slot.bonds_honor_view_type.as_deref() == Some("reverse"),
-                            false,
-                            md,
-                            assets,
-                        )
-                    } else {
-                        build_standard_honor_visual(
-                            "userProfile.honorSlots",
-                            slot.honor_id,
-                            slot.honor_level,
-                            render_full,
-                            Some(profile),
-                            md,
-                            assets,
-                        )
-                    }
-                })
-                .collect();
-            snapshot.component = Some(ProfileComponentSnapshot {
-                locale: locale.into(),
-                region_fonts: snapshot
-                    .fonts
-                    .get(&1)
-                    .cloned()
-                    .map(|font| std::collections::BTreeMap::from([(1, font)]))
-                    .unwrap_or_default(),
-                localized_text: sekai_profile_core::locale::GENERAL_LOCALIZATION_KEYS
-                    .iter()
-                    .filter_map(|key| {
-                        md.resolve_localized_text(key)
-                            .or_else(|| sekai_profile_core::locale::resolve(locale, key))
-                            .map(|value| ((*key).into(), value))
-                    })
-                    .collect(),
-                user_name: profile.user_name.clone(),
-                word: profile.word.clone(),
-                user_rank: profile.user_rank,
-                total_power: profile.total_power,
-                mvp: profile.mvp,
-                superstar: profile.superstar,
-                challenge_score: profile.challenge_score,
-                challenge_character_id: profile.challenge_character_id,
-                challenge_avatar,
-                music_results: profile
-                    .music_results
-                    .as_ref()
-                    .map(|results| MusicResultsSnapshot {
-                        easy: music_stats(results.easy.clone()),
-                        normal: music_stats(results.normal.clone()),
-                        hard: music_stats(results.hard.clone()),
-                        expert: music_stats(results.expert.clone()),
-                        master: music_stats(results.master.clone()),
-                        append: music_stats(results.append.clone()),
-                    }),
-                story_favorites,
-                player_avatar,
-                character_ranks,
-                deck_members,
-                leader_card,
-                honor_slots,
-            });
+            })
+            .collect();
+        let leader_card = profile.leader_card.as_ref().and_then(|leader| {
+            let card = md.get_card(leader.card_id)?;
+            let training = if leader.after_training {
+                "after_training"
+            } else {
+                "normal"
+            };
+            Some(CardVisualSnapshot {
+                card_id: leader.card_id,
+                after_training: leader.after_training,
+                master_rank: leader.master_rank,
+                // Same fallback as the card-member snapshot: a leader card
+                // absent from userCards is stale data, rendered at the
+                // default level rather than level 0.
+                level: profile
+                    .user_cards
+                    .get(&leader.card_id)
+                    .map(|card| card.level)
+                    .unwrap_or(60),
+                rarity: card.card_rarity_type.clone(),
+                attribute: card.attr.clone(),
+                image: ComponentImageSnapshot {
+                    source_field: "userProfile.leaderCard".into(),
+                    source_id: leader.card_id.to_string(),
+                    descriptor: resolve_card_member_key(leader.card_id, 2, training, md).map(
+                        |key| {
+                            make_resource_descriptor(
+                                key,
+                                (940.0, 530.0),
+                                "cards",
+                                leader.card_id,
+                                assets,
+                            )
+                        },
+                    ),
+                },
+            })
+        });
+        let mut ordered_honor_slots = profile.honor_slots.iter().collect::<Vec<_>>();
+        ordered_honor_slots.sort_by(|left, right| right.full_size.cmp(&left.full_size));
+        if ordered_honor_slots.len() >= 2 {
+            ordered_honor_slots.swap(0, 1);
         }
+        let honor_slots = ordered_honor_slots
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, slot)| {
+                let render_full = index == 0;
+                if slot.profile_honor_type == "bonds" {
+                    build_bonds_honor_visual(
+                        "userProfile.honorSlots",
+                        slot.honor_id,
+                        slot.honor_level,
+                        render_full,
+                        BondsHonorView {
+                            word_id: slot.bonds_honor_word_id.unwrap_or_default(),
+                            inverse: slot.bonds_honor_view_type.as_deref() == Some("reverse"),
+                            use_unit_virtual_singer: false,
+                        },
+                        md,
+                        assets,
+                    )
+                } else {
+                    build_standard_honor_visual(
+                        "userProfile.honorSlots",
+                        slot.honor_id,
+                        slot.honor_level,
+                        render_full,
+                        Some(profile),
+                        md,
+                        assets,
+                    )
+                }
+            })
+            .collect();
+        snapshot.component = Some(ProfileComponentSnapshot {
+            locale: locale.into(),
+            region_fonts: snapshot
+                .fonts
+                .get(&1)
+                .cloned()
+                .map(|font| std::collections::BTreeMap::from([(1, font)]))
+                .unwrap_or_default(),
+            localized_text: sekai_profile_core::locale::GENERAL_LOCALIZATION_KEYS
+                .iter()
+                .filter_map(|key| {
+                    md.resolve_localized_text(key)
+                        .or_else(|| sekai_profile_core::locale::resolve(locale, key))
+                        .map(|value| ((*key).into(), value))
+                })
+                .collect(),
+            user_name: profile.user_name.clone(),
+            word: profile.word.clone(),
+            user_rank: profile.user_rank,
+            total_power: profile.total_power,
+            mvp: profile.mvp,
+            superstar: profile.superstar,
+            challenge_score: profile.challenge_score,
+            challenge_character_id: profile.challenge_character_id,
+            challenge_avatar,
+            music_results: profile
+                .music_results
+                .as_ref()
+                .map(|results| MusicResultsSnapshot {
+                    easy: music_stats(results.easy.clone()),
+                    normal: music_stats(results.normal.clone()),
+                    hard: music_stats(results.hard.clone()),
+                    expert: music_stats(results.expert.clone()),
+                    master: music_stats(results.master.clone()),
+                    append: music_stats(results.append.clone()),
+                }),
+            story_favorites,
+            player_avatar,
+            character_ranks,
+            deck_members,
+            leader_card,
+            honor_slots,
+        });
     }
 }
 
@@ -742,18 +737,29 @@ fn build_standard_honor_visual(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How a bonds honor is drawn: the word shown over it, whether its two
+/// characters swap sides, and whether the unit virtual singer art is used.
+#[derive(Clone, Copy)]
+struct BondsHonorView {
+    word_id: i64,
+    inverse: bool,
+    use_unit_virtual_singer: bool,
+}
+
 fn build_bonds_honor_visual(
     source_field: &str,
     honor_id: i32,
     honor_level: i32,
     full_size: bool,
-    word_id: i64,
-    inverse: bool,
-    use_unit_virtual_singer: bool,
+    view: BondsHonorView,
     md: &MasterData,
     resources: ResolveResourceContext<'_>,
 ) -> Option<HonorVisualSnapshot> {
+    let BondsHonorView {
+        word_id,
+        inverse,
+        use_unit_virtual_singer,
+    } = view;
     md.get_bonds_honor(honor_id)?;
     let plan = sekai_profile_core::masterdata::bonds_honor_asset_plan(
         md,
@@ -899,7 +905,6 @@ fn insert_color(snapshot: &mut ProfileResolveSnapshot, md: &MasterData, color_id
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn insert_resource_descriptor(
     snapshot: &mut ProfileResolveSnapshot,
     lookup_key: String,

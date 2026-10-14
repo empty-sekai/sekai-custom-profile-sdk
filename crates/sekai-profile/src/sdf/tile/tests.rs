@@ -729,13 +729,17 @@ fn atlas_glyph_builder_reuses_manifest_plane_geometry() {
     };
     let command = SdfDrawCommand::from_atlas_glyph(
         SdfPrimitiveKind::Text,
-        0,
+        SdfGlyphAtlas {
+            atlas_set: 0,
+            point_size: 10.0,
+            spread: 1.0,
+        },
         &glyph,
-        10.0,
-        1.0,
-        Point2::new(10.0, 20.0),
-        20.0,
-        Affine2::IDENTITY,
+        SdfGlyphPlacement {
+            baseline_origin: Point2::new(10.0, 20.0),
+            font_size: 20.0,
+            local_to_device: Affine2::IDENTITY,
+        },
         SdfMaterial::default(),
     )
     .expect("valid glyph placement");
@@ -772,13 +776,17 @@ fn atlas_glyph_builder_applies_resolved_affine_without_relayout() {
     };
     let command = SdfDrawCommand::from_atlas_glyph(
         SdfPrimitiveKind::Text,
-        0,
+        SdfGlyphAtlas {
+            atlas_set: 0,
+            point_size: 1.0,
+            spread: 0.0,
+        },
         &glyph,
-        1.0,
-        0.0,
-        Point2::new(0.0, 0.0),
-        1.0,
-        affine,
+        SdfGlyphPlacement {
+            baseline_origin: Point2::new(0.0, 0.0),
+            font_size: 1.0,
+            local_to_device: affine,
+        },
         SdfMaterial::default(),
     )
     .expect("affine glyph placement");

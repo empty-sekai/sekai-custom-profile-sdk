@@ -489,13 +489,17 @@ impl ResolvedTextSdfGlyph {
     ) -> Result<crate::sdf::tile::SdfDrawCommand, TextSdfCommandError> {
         crate::sdf::tile::SdfDrawCommand::from_atlas_glyph(
             crate::sdf::tile::SdfPrimitiveKind::Text,
-            atlas_set,
+            crate::sdf::tile::SdfGlyphAtlas {
+                atlas_set,
+                point_size: atlas_point_size,
+                spread: atlas_spread,
+            },
             glyph,
-            atlas_point_size,
-            atlas_spread,
-            self.baseline_origin,
-            self.font_size,
-            self.local_to_device,
+            crate::sdf::tile::SdfGlyphPlacement {
+                baseline_origin: self.baseline_origin,
+                font_size: self.font_size,
+                local_to_device: self.local_to_device,
+            },
             self.material,
         )
         .map_err(TextSdfCommandError::Placement)

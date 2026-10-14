@@ -127,7 +127,6 @@ pub fn compile_profile_batch<'a>(
     compile_profile_batch_with_store(batch_key, locale, pages, md, profile, assets, None)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn compile_profile_batch_with_store<'a>(
     batch_key: &str,
     locale: &str,

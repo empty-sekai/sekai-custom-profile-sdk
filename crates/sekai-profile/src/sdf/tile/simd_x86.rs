@@ -105,6 +105,14 @@ pub(super) unsafe fn execute(
         let valid_width = (plan.grid.canvas_width - origin_x).min(u32::from(plan.grid.tile_width));
         let valid_height =
             (plan.grid.canvas_height - origin_y).min(u32::from(plan.grid.tile_height));
+        let window = TileWindow {
+            tile_width,
+            valid_width: valid_width as usize,
+            valid_height: valid_height as usize,
+            origin_x: origin_x as usize,
+            origin_y: origin_y as usize,
+            canvas_width: plan.grid.canvas_width as usize,
+        };
         match destination {
             SdfDestination::Clear(_) => {
                 for channel in 0..4 {
@@ -115,16 +123,7 @@ pub(super) unsafe fn execute(
                 for channel in &mut tile {
                     channel.fill(0.0);
                 }
-                load_existing_tile_rgba8(
-                    &mut tile,
-                    tile_width,
-                    valid_width as usize,
-                    valid_height as usize,
-                    origin_x as usize,
-                    origin_y as usize,
-                    plan.grid.canvas_width as usize,
-                    output,
-                );
+                load_existing_tile_rgba8(&mut tile, window, output);
             }
         }
 
@@ -248,20 +247,9 @@ pub(super) unsafe fn execute(
         let write_span = |row: usize, x0: usize, x1: usize, output: &mut [u8]| unsafe {
             // SAFETY: the target features were checked before this call; `row`
             // and `x0..x1` come from plan spans already clipped to the tile and
-            // the canvas, and `tile_width`, `origin_x`, `origin_y` and the
-            // canvas width are the same grid values those spans were built
-            // from, so every index stays inside `tile` and `output`.
-            write_span_rgba8(
-                &tile,
-                tile_width,
-                row,
-                x0,
-                x1,
-                origin_x as usize,
-                origin_y as usize,
-                plan.grid.canvas_width as usize,
-                output,
-            );
+            // the canvas, and `window` holds the same grid values those spans
+            // were built from, so every index stays inside `tile` and `output`.
+            write_span_rgba8(&tile, window, row, x0, x1, output);
         };
         match destination {
             SdfDestination::Clear(_) => {
@@ -415,27 +403,45 @@ unsafe fn blend_output_constant_span_rgba8(
     }
 }
 
-/// # Safety
+/// Placement of one tile in the RGBA8 canvas, in pixels.
 ///
-/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
-///
-/// `execute` is the only caller and passes `valid_width`/`valid_height` clipped
-/// to the tile, so `valid_width <= tile_width` and `valid_height <= tile_height`
-/// must hold. The read window `[origin_y + valid_height) x [origin_x +
-/// valid_width)` must lie inside a canvas of `canvas_width * canvas_height * 4`
-/// bytes, and every channel vector must hold at least
-/// `(valid_height - 1) * tile_width + valid_width` elements.
-#[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
-unsafe fn load_existing_tile_rgba8(
-    tile: &mut [Vec<f32>; 4],
+/// The tile's channel vectors are row-major with a stride of `tile_width`. Its
+/// top-left pixel is canvas pixel `(origin_x, origin_y)`, and its leading
+/// `valid_width x valid_height` block is the part that lies inside a canvas
+/// `canvas_width` pixels wide.
+#[derive(Clone, Copy)]
+struct TileWindow {
     tile_width: usize,
     valid_width: usize,
     valid_height: usize,
     origin_x: usize,
     origin_y: usize,
     canvas_width: usize,
-    output: &[u8],
-) {
+}
+
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
+///
+/// `execute` is the only caller and builds `window` from a tile clipped to the
+/// canvas, so `window.valid_width <= window.tile_width` and
+/// `window.valid_height <= tile_height` must hold. The read window of
+/// `window.valid_width x window.valid_height` pixels at
+/// `(window.origin_x, window.origin_y)` must lie inside a canvas of
+/// `window.canvas_width * canvas_height * 4` bytes, and every channel vector
+/// must hold at least
+/// `(window.valid_height - 1) * window.tile_width + window.valid_width`
+/// elements.
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
+unsafe fn load_existing_tile_rgba8(tile: &mut [Vec<f32>; 4], window: TileWindow, output: &[u8]) {
+    let TileWindow {
+        tile_width,
+        valid_width,
+        valid_height,
+        origin_x,
+        origin_y,
+        canvas_width,
+    } = window;
     let channel_base = _mm512_castsi128_si512(_mm_setr_epi8(
         0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60,
     ));
@@ -465,23 +471,28 @@ unsafe fn load_existing_tile_rgba8(
 ///
 /// The calling CPU must support `avx512f` and `avx512bw`.
 ///
-/// `row < tile_height` and `x1 <= tile_width` for the four `tile` channel
-/// vectors, and `(origin_y + row) * canvas_width + origin_x + x1` must not
-/// exceed `canvas_width * canvas_height`. `execute` calls this through the
-/// `write_span` closure with tile-relative rows and columns taken from the plan
-/// spans, which `SdfTilePlan` clips to the tile and canvas.
+/// `row < tile_height` and `x1 <= window.tile_width` for the four `tile`
+/// channel vectors, and `(window.origin_y + row) * window.canvas_width +
+/// window.origin_x + x1` must not exceed `canvas_width * canvas_height`.
+/// `execute` calls this through the `write_span` closure with tile-relative
+/// rows and columns taken from the plan spans, which `SdfTilePlan` clips to the
+/// tile and canvas.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn write_span_rgba8(
     tile: &[Vec<f32>; 4],
-    tile_width: usize,
+    window: TileWindow,
     row: usize,
     x0: usize,
     x1: usize,
-    origin_x: usize,
-    origin_y: usize,
-    canvas_width: usize,
     output: &mut [u8],
 ) {
+    let TileWindow {
+        tile_width,
+        origin_x,
+        origin_y,
+        canvas_width,
+        ..
+    } = window;
     let mut x = x0;
     while x < x1 {
         let remaining = (x1 - x).min(LANES);

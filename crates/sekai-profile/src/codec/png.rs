@@ -80,6 +80,19 @@ struct Header {
     color_type: ColorType,
 }
 
+/// Contents of the `PLTE` and `tRNS` chunks, which turn 8-bit samples into
+/// RGBA. Only the `tRNS` form that matches the colour type is ever set.
+#[derive(Default)]
+struct ColorChunks {
+    palette: Vec<[u8; 3]>,
+    /// Alpha per palette index; indices past its end are opaque.
+    trns_palette: Vec<u8>,
+    /// Grayscale sample that decodes as fully transparent.
+    trns_gray: Option<u8>,
+    /// RGB sample that decodes as fully transparent.
+    trns_rgb: Option<[u8; 3]>,
+}
+
 fn be_u32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
@@ -169,10 +182,7 @@ pub fn dimensions(data: &[u8]) -> Result<(u32, u32), CodecError> {
 /// Decodes a PNG into non-premultiplied RGBA8.
 pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     let (header, mut pos) = read_header(data)?;
-    let mut palette: Vec<[u8; 3]> = Vec::new();
-    let mut trns_palette: Vec<u8> = Vec::new();
-    let mut trns_gray: Option<u8> = None;
-    let mut trns_rgb: Option<[u8; 3]> = None;
+    let mut colors = ColorChunks::default();
     let mut idat: Vec<u8> = Vec::new();
 
     while pos + 8 <= data.len() {
@@ -183,7 +193,7 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
                 if body.len() % 3 != 0 {
                     return Err(CodecError::Format("PLTE length is not a multiple of 3"));
                 }
-                palette = body
+                colors.palette = body
                     .as_chunks::<3>()
                     .0
                     .iter()
@@ -193,18 +203,18 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
             // A colour key is stored in two bytes per sample. At bit depth 8
             // only the low byte applies; the high one is masked off.
             b"tRNS" => match header.color_type {
-                ColorType::Palette => trns_palette = body.to_vec(),
+                ColorType::Palette => colors.trns_palette = body.to_vec(),
                 ColorType::Gray => {
                     if body.len() < 2 {
                         return Err(CodecError::Format("grayscale tRNS too short"));
                     }
-                    trns_gray = Some(body[1]);
+                    colors.trns_gray = Some(body[1]);
                 }
                 ColorType::Rgb => {
                     if body.len() < 6 {
                         return Err(CodecError::Format("RGB tRNS too short"));
                     }
-                    trns_rgb = Some([body[1], body[3], body[5]]);
+                    colors.trns_rgb = Some([body[1], body[3], body[5]]);
                 }
                 // tRNS is meaningless for colour types that already carry alpha.
                 ColorType::GrayAlpha | ColorType::Rgba => {}
@@ -229,7 +239,7 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     if idat.is_empty() {
         return Err(CodecError::Format("missing IDAT"));
     }
-    if header.color_type == ColorType::Palette && palette.is_empty() {
+    if header.color_type == ColorType::Palette && colors.palette.is_empty() {
         return Err(CodecError::Format("palette image without PLTE"));
     }
 
@@ -256,16 +266,7 @@ pub fn decode(data: &[u8]) -> Result<RgbaImage, CodecError> {
     for y in 0..height {
         let src = &unfiltered[y * stride..(y + 1) * stride];
         let dst = &mut pixels[y * width * 4..(y + 1) * width * 4];
-        expand_row(
-            src,
-            dst,
-            width,
-            header.color_type,
-            &palette,
-            &trns_palette,
-            trns_gray,
-            trns_rgb,
-        )?;
+        expand_row(src, dst, width, header.color_type, &colors)?;
     }
 
     Ok(RgbaImage {
@@ -349,17 +350,17 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn expand_row(
     src: &[u8],
     dst: &mut [u8],
     width: usize,
     color_type: ColorType,
-    palette: &[[u8; 3]],
-    trns_palette: &[u8],
-    trns_gray: Option<u8>,
-    trns_rgb: Option<[u8; 3]>,
+    colors: &ColorChunks,
 ) -> Result<(), CodecError> {
+    let palette = colors.palette.as_slice();
+    let trns_palette = colors.trns_palette.as_slice();
+    let trns_gray = colors.trns_gray;
+    let trns_rgb = colors.trns_rgb;
     for x in 0..width {
         let out = &mut dst[x * 4..x * 4 + 4];
         match color_type {

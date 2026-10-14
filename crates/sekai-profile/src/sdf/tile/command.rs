@@ -115,20 +115,51 @@ pub struct SdfDrawCommand {
     pub material: SdfCommandMaterial,
 }
 
+/// The SDF atlas a glyph is sampled from: its index in the installed atlas set
+/// and the point size and spread the atlas was generated at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfGlyphAtlas {
+    /// Index of the atlas in the atlas set, stored on the built command.
+    pub atlas_set: u16,
+    /// Point size the atlas glyphs were generated at.
+    pub point_size: f32,
+    /// Distance-field padding around each glyph plane, in the units of the
+    /// glyph plane metrics.
+    pub spread: f32,
+}
+
+/// Where one glyph is drawn: its layout-space baseline origin and font size,
+/// and the resolved transform from layout space to device space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfGlyphPlacement {
+    /// Baseline origin of the glyph in layout space.
+    pub baseline_origin: Point2,
+    /// Font size the glyph is laid out at.
+    pub font_size: f32,
+    /// Layout-to-device transform applied to the padded glyph plane.
+    pub local_to_device: Affine2,
+}
+
 impl SdfDrawCommand {
     /// Builds the padded plane of an atlas glyph, then maps it to device space
     /// through the already-resolved layout matrix.
     pub fn from_atlas_glyph(
         kind: SdfPrimitiveKind,
-        atlas_set: u16,
+        atlas: SdfGlyphAtlas,
         glyph: &SdfAtlasGlyphManifest,
-        atlas_point_size: f32,
-        atlas_spread: f32,
-        baseline_origin: Point2,
-        font_size: f32,
-        local_to_device: Affine2,
+        placement: SdfGlyphPlacement,
         material: SdfMaterial,
     ) -> Result<Self, SdfCommandBuildError> {
+        let SdfGlyphAtlas {
+            atlas_set,
+            point_size: atlas_point_size,
+            spread: atlas_spread,
+        } = atlas;
+        let SdfGlyphPlacement {
+            baseline_origin,
+            font_size,
+            local_to_device,
+        } = placement;
         let finite = [
             atlas_point_size,
             atlas_spread,

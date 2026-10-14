@@ -109,13 +109,13 @@ pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json(
 ) -> *mut c_char {
     install_panic_hook();
     let result = build_glyph_batch_json(
-        font_ptr,
-        font_len,
-        codepoints_ptr,
-        codepoints_len,
-        region_ptr,
-        family_ptr,
-        font_source_hash_ptr,
+        RawSlice::new(font_ptr, font_len),
+        RawSlice::new(codepoints_ptr, codepoints_len),
+        RawFontIdentity {
+            region: region_ptr,
+            family: family_ptr,
+            font_source_hash: font_source_hash_ptr,
+        },
         0,
     );
     into_c_string(result.unwrap_or_else(|message| {
@@ -146,13 +146,13 @@ pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json_edt(
 ) -> *mut c_char {
     install_panic_hook();
     let result = build_glyph_batch_json(
-        font_ptr,
-        font_len,
-        codepoints_ptr,
-        codepoints_len,
-        region_ptr,
-        family_ptr,
-        font_source_hash_ptr,
+        RawSlice::new(font_ptr, font_len),
+        RawSlice::new(codepoints_ptr, codepoints_len),
+        RawFontIdentity {
+            region: region_ptr,
+            family: family_ptr,
+            font_source_hash: font_source_hash_ptr,
+        },
         supersample.clamp(1, 4),
     );
     into_c_string(result.unwrap_or_else(|message| {
@@ -182,13 +182,13 @@ pub unsafe extern "C" fn sdf_layout_freetype_map_glyphs_json(
 ) -> *mut c_char {
     install_panic_hook();
     let result = map_glyphs_json(
-        font_ptr,
-        font_len,
-        codepoints_ptr,
-        codepoints_len,
-        region_ptr,
-        family_ptr,
-        font_source_hash_ptr,
+        RawSlice::new(font_ptr, font_len),
+        RawSlice::new(codepoints_ptr, codepoints_len),
+        RawFontIdentity {
+            region: region_ptr,
+            family: family_ptr,
+            font_source_hash: font_source_hash_ptr,
+        },
     );
     into_c_string(result.unwrap_or_else(|message| {
         serde_json::to_string(&GlyphBatchError { error: message })
@@ -983,31 +983,24 @@ where
 
 /// # Safety
 ///
-/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
-/// `codepoints_len` readable, 4-byte aligned `u32` values; both are checked
+/// `font.ptr` must point to `font.len` readable bytes and `codepoints.ptr` to
+/// `codepoints.len` readable, 4-byte aligned `u32` values; both are checked
 /// for null and copied before FreeType sees them, so they only need to stay
-/// valid for the call. `region_ptr`, `family_ptr` and `font_source_hash_ptr`
-/// must each be null or point to a NUL-terminated string, as
-/// [`read_c_string`] requires.
+/// valid for the call. The `raw_identity` pointers must each be null or point
+/// to a NUL-terminated string, as [`RawFontIdentity::read`] requires.
 unsafe fn build_glyph_batch_json(
-    font_ptr: *const u8,
-    font_len: usize,
-    codepoints_ptr: *const u32,
-    codepoints_len: usize,
-    region_ptr: *const c_char,
-    family_ptr: *const c_char,
-    font_source_hash_ptr: *const c_char,
+    font: RawSlice<u8>,
+    codepoints: RawSlice<u32>,
+    raw_identity: RawFontIdentity,
     supersample: usize,
 ) -> Result<String, String> {
-    if font_ptr.is_null() || codepoints_ptr.is_null() {
+    if font.ptr.is_null() || codepoints.ptr.is_null() {
         return Err("null font or codepoint pointer".to_string());
     }
     let t0 = Instant::now();
-    let font_bytes = Rc::new(slice::from_raw_parts(font_ptr, font_len).to_vec());
-    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
-    let region = read_c_string(region_ptr)?;
-    let family = read_c_string(family_ptr)?;
-    let font_source_hash = read_c_string(font_source_hash_ptr)?;
+    let font_bytes = Rc::new(font.as_slice().to_vec());
+    let codepoints = codepoints.as_slice();
+    let identity = raw_identity.read()?;
 
     let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
     let t1 = Instant::now();
@@ -1038,31 +1031,28 @@ unsafe fn build_glyph_batch_json(
         }
         let g0 = Instant::now();
         let glyph_result = if supersample > 0 {
-            build_glyph_edt(
-                &face,
-                raster_face,
-                &region,
-                &family,
-                &font_source_hash,
-                ch,
-                supersample,
-            )
-            .or_else(|_| build_glyph(&face, &region, &family, &font_source_hash, ch))
+            build_glyph_edt(&face, raster_face, &identity, ch, supersample)
+                .or_else(|_| build_glyph(&face, &identity, ch))
         } else {
-            build_glyph(&face, &region, &family, &font_source_hash, ch)
+            build_glyph(&face, &identity, ch)
         };
         match glyph_result {
             Ok(glyph) => {
                 total_pixel_count += glyph.width * glyph.height;
                 glyphs.push(glyph);
             }
-            Err(message) => missing.push(format!("{family}:{ch}:{message}")),
+            Err(message) => missing.push(format!("{}:{ch}:{message}", identity.family)),
         }
         glyph_total_ms += g0.elapsed().as_secs_f64() * 1000.0;
     }
     let t3 = Instant::now();
 
     let glyph_count = glyphs.len();
+    let FontIdentity {
+        region,
+        family,
+        font_source_hash,
+    } = identity;
     serde_json::to_string(&GlyphBatch {
         region,
         family,
@@ -1094,28 +1084,26 @@ unsafe fn build_glyph_batch_json(
 
 /// # Safety
 ///
-/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
-/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// `font.ptr` must point to `font.len` readable bytes and `codepoints.ptr` to
+/// `codepoints.len` readable, 4-byte aligned `u32` values, both valid for the
 /// call; null for either is rejected and the font bytes are copied into the
-/// face. `region_ptr`, `family_ptr` and `font_source_hash_ptr` must each be
-/// null or point to a NUL-terminated string, as [`read_c_string`] requires.
+/// face. The `raw_identity` pointers must each be null or point to a
+/// NUL-terminated string, as [`RawFontIdentity::read`] requires.
 unsafe fn map_glyphs_json(
-    font_ptr: *const u8,
-    font_len: usize,
-    codepoints_ptr: *const u32,
-    codepoints_len: usize,
-    region_ptr: *const c_char,
-    family_ptr: *const c_char,
-    font_source_hash_ptr: *const c_char,
+    font: RawSlice<u8>,
+    codepoints: RawSlice<u32>,
+    raw_identity: RawFontIdentity,
 ) -> Result<String, String> {
-    if font_ptr.is_null() || codepoints_ptr.is_null() {
+    if font.ptr.is_null() || codepoints.ptr.is_null() {
         return Err("null font or codepoint pointer".to_string());
     }
-    let font_bytes = slice::from_raw_parts(font_ptr, font_len).to_vec();
-    let codepoints = slice::from_raw_parts(codepoints_ptr, codepoints_len);
-    let region = read_c_string(region_ptr)?;
-    let family = read_c_string(family_ptr)?;
-    let font_source_hash = read_c_string(font_source_hash_ptr)?;
+    let font_bytes = font.as_slice().to_vec();
+    let codepoints = codepoints.as_slice();
+    let FontIdentity {
+        region,
+        family,
+        font_source_hash,
+    } = raw_identity.read()?;
     let library = Library::init().map_err(|err| format!("FreeType init failed: {err:?}"))?;
     let face = library
         .new_memory_face(Rc::new(font_bytes), 0)
@@ -1163,6 +1151,61 @@ unsafe fn read_c_string(ptr: *const c_char) -> Result<String, String> {
         .to_str()
         .map(str::to_string)
         .map_err(|err| format!("invalid utf8 string: {err}"))
+}
+
+/// A C array passed across the module boundary: `len` elements at `ptr`.
+#[derive(Clone, Copy)]
+struct RawSlice<T> {
+    ptr: *const T,
+    len: usize,
+}
+
+impl<T> RawSlice<T> {
+    fn new(ptr: *const T, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
+    /// # Safety
+    ///
+    /// `ptr` must be non-null, aligned for `T` and point to `len` readable
+    /// elements, with `len * size_of::<T>() <= isize::MAX`, that remain valid
+    /// and unmodified for the caller-chosen lifetime `'a`.
+    unsafe fn as_slice<'a>(&self) -> &'a [T] {
+        slice::from_raw_parts(self.ptr, self.len)
+    }
+}
+
+/// The NUL-terminated strings that name a font across the module boundary.
+#[derive(Clone, Copy)]
+struct RawFontIdentity {
+    region: *const c_char,
+    family: *const c_char,
+    font_source_hash: *const c_char,
+}
+
+impl RawFontIdentity {
+    /// Copies the three strings in field order; a null pointer reads as an
+    /// empty string.
+    ///
+    /// # Safety
+    ///
+    /// Each pointer must be null or point to a NUL-terminated string, as
+    /// [`read_c_string`] requires.
+    unsafe fn read(self) -> Result<FontIdentity, String> {
+        Ok(FontIdentity {
+            region: read_c_string(self.region)?,
+            family: read_c_string(self.family)?,
+            font_source_hash: read_c_string(self.font_source_hash)?,
+        })
+    }
+}
+
+/// The font a glyph export reads: its region, family name and source hash.
+/// Every glyph key built from the font starts with these three values.
+struct FontIdentity {
+    region: String,
+    family: String,
+    font_source_hash: String,
 }
 
 /// # Safety
@@ -1236,13 +1279,7 @@ fn has_outline(slot: &freetype::GlyphSlot) -> bool {
     outline.n_contours > 0 && outline.n_points > 0
 }
 
-fn build_glyph(
-    face: &freetype::Face,
-    region: &str,
-    family: &str,
-    font_source_hash: &str,
-    ch: char,
-) -> Result<GlyphSdf, String> {
+fn build_glyph(face: &freetype::Face, font: &FontIdentity, ch: char) -> Result<GlyphSdf, String> {
     let glyph_id = face
         .get_char_index(ch as usize)
         .ok_or_else(|| "missing cmap entry".to_string())?;
@@ -1252,41 +1289,18 @@ fn build_glyph(
     let slot = face.glyph();
     let metrics = SamplingMetrics::from_slot(slot);
     if !has_outline(slot) {
-        return Ok(empty_metric_glyph(
-            region,
-            family,
-            font_source_hash,
-            ch,
-            glyph_id,
-            metrics.advance,
-        ));
+        return Ok(empty_metric_glyph(font, ch, glyph_id, metrics.advance));
     }
     // SAFETY: `slot` borrows `face`, whose `load_glyph` above filled it, so the
     // outline's point, tag and contour arrays are alive until the next load on
     // this face; `has_outline` has just confirmed both counts are positive.
     let contours = unsafe { extract_segments(&slot.raw().outline) };
     if contours.is_empty() {
-        return Ok(empty_metric_glyph(
-            region,
-            family,
-            font_source_hash,
-            ch,
-            glyph_id,
-            metrics.advance,
-        ));
+        return Ok(empty_metric_glyph(font, ch, glyph_id, metrics.advance));
     }
     let grid = metrics.grid();
     let pixels = sdf_glyph::analytic_sdf(&contours, grid, TMP_SPREAD);
-    Ok(glyph_sdf(
-        region,
-        family,
-        font_source_hash,
-        ch,
-        glyph_id,
-        metrics,
-        grid,
-        &pixels,
-    ))
+    Ok(glyph_sdf(font, ch, glyph_id, metrics, grid, &pixels))
 }
 
 /// `face` is at the sampling point size and supplies the metrics and grid;
@@ -1295,9 +1309,7 @@ fn build_glyph(
 fn build_glyph_edt(
     face: &freetype::Face,
     raster_face: &freetype::Face,
-    region: &str,
-    family: &str,
-    font_source_hash: &str,
+    font: &FontIdentity,
     ch: char,
     supersample: usize,
 ) -> Result<GlyphSdf, String> {
@@ -1310,14 +1322,7 @@ fn build_glyph_edt(
     let slot = face.glyph();
     let metrics = SamplingMetrics::from_slot(slot);
     if !has_outline(slot) {
-        return Ok(empty_metric_glyph(
-            region,
-            family,
-            font_source_hash,
-            ch,
-            glyph_id,
-            metrics.advance,
-        ));
+        return Ok(empty_metric_glyph(font, ch, glyph_id, metrics.advance));
     }
     let grid = metrics.grid();
 
@@ -1344,23 +1349,11 @@ fn build_glyph_edt(
         top: raster.bitmap_top(),
     };
     let pixels = sdf_glyph::edt_sdf(&coverage, grid, supersample, TMP_SPREAD);
-    Ok(glyph_sdf(
-        region,
-        family,
-        font_source_hash,
-        ch,
-        glyph_id,
-        metrics,
-        grid,
-        &pixels,
-    ))
+    Ok(glyph_sdf(font, ch, glyph_id, metrics, grid, &pixels))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn glyph_sdf(
-    region: &str,
-    family: &str,
-    font_source_hash: &str,
+    font: &FontIdentity,
     ch: char,
     glyph_index: u32,
     metrics: SamplingMetrics,
@@ -1368,10 +1361,10 @@ fn glyph_sdf(
     pixels: &[u8],
 ) -> GlyphSdf {
     GlyphSdf {
-        key: glyph_key(region, family, font_source_hash, ch),
-        region: region.to_string(),
-        family: family.to_string(),
-        font_source_hash: font_source_hash.to_string(),
+        key: glyph_key(&font.region, &font.family, &font.font_source_hash, ch),
+        region: font.region.clone(),
+        family: font.family.clone(),
+        font_source_hash: font.font_source_hash.clone(),
         ch: ch.to_string(),
         glyph_index,
         width: grid.width,
@@ -1390,19 +1383,12 @@ fn glyph_sdf(
     }
 }
 
-fn empty_metric_glyph(
-    region: &str,
-    family: &str,
-    font_source_hash: &str,
-    ch: char,
-    glyph_index: u32,
-    advance: f32,
-) -> GlyphSdf {
+fn empty_metric_glyph(font: &FontIdentity, ch: char, glyph_index: u32, advance: f32) -> GlyphSdf {
     GlyphSdf {
-        key: glyph_key(region, family, font_source_hash, ch),
-        region: region.to_string(),
-        family: family.to_string(),
-        font_source_hash: font_source_hash.to_string(),
+        key: glyph_key(&font.region, &font.family, &font.font_source_hash, ch),
+        region: font.region.clone(),
+        family: font.family.clone(),
+        font_source_hash: font.font_source_hash.clone(),
         ch: ch.to_string(),
         glyph_index,
         width: 1,
@@ -1526,10 +1512,14 @@ mod tests {
         let face = open_memory_face(&library, &bytes, TMP_POINT_SIZE).expect("face");
         let raster_face =
             open_memory_face(&library, &bytes, TMP_POINT_SIZE * 4.0).expect("raster face");
+        let font = FontIdentity {
+            region: "cn".into(),
+            family: "test".into(),
+            font_source_hash: "hash".into(),
+        };
         for ch in ['O', 'g'] {
-            let exact = build_glyph(&face, "cn", "test", "hash", ch).expect("analytic glyph");
-            let edt = build_glyph_edt(&face, &raster_face, "cn", "test", "hash", ch, 4)
-                .expect("EDT glyph");
+            let exact = build_glyph(&face, &font, ch).expect("analytic glyph");
+            let edt = build_glyph_edt(&face, &raster_face, &font, ch, 4).expect("EDT glyph");
             assert_eq!((edt.width, edt.height), (exact.width, exact.height));
             assert_eq!(
                 (edt.bearing_x, edt.bearing_y, edt.advance),

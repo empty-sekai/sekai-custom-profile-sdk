@@ -5,7 +5,7 @@
 //! identity, device quad and material into a command the shape atlas can
 //! place.
 
-use crate::assets::AssetStore;
+use crate::assets::{AssetStore, ShapeSdfSourceIdentity};
 use crate::masterdata::{MasterData, ResolvedColor};
 use crate::sdf::shape::ShapeSdfMaterial;
 use crate::sdf::tile::{Affine2, Point2, SdfCommandBuildError, SdfDrawCommand};
@@ -108,18 +108,22 @@ pub(crate) enum ShapeSdfCaptureError {
     ReadPixels { asset_key: String },
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Builds the SDF command of a shape whose sprite `identity` is drawn over the
+/// layout-space rectangle `dst_ltrb` and mapped to device space by `affine`.
 fn resolve_shape_sdf_command(
     affine: [f32; 6],
     shape: &ShapeElement,
     asset_key: &str,
-    width: i32,
-    height: i32,
+    identity: ShapeSdfSourceIdentity,
     face_color: ResolvedColor,
     outline_color: ResolvedColor,
     dst_ltrb: [f32; 4],
-    source_rg8_sha256: String,
 ) -> Result<ResolvedShapeSdfCommand, ShapeSdfCaptureError> {
+    let ShapeSdfSourceIdentity {
+        width,
+        height,
+        rg8_sha256: source_rg8_sha256,
+    } = identity;
     let source_size = [
         u32::try_from(width).map_err(|_| ShapeSdfCaptureError::InvalidDimensions {
             asset_key: asset_key.to_string(),
@@ -230,12 +234,10 @@ pub(crate) fn capture_shape_sdf_from_affine(
                 affine,
                 shape,
                 &asset_key,
-                identity.width,
-                identity.height,
+                identity,
                 color,
                 outline_color,
                 [left, top, left + sprite_w, top + sprite_h],
-                identity.rg8_sha256,
             )
         }
         Err(crate::assets::ShapeSourceIdentityError::Unreadable) => {

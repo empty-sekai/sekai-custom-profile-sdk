@@ -33,7 +33,6 @@ pub fn build_scene(
         .map(|(scene, _)| scene)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build_scene_with_resolved(
     card: &CustomProfileCard,
     md: &MasterData,

@@ -106,8 +106,16 @@ fn existing_rgba8_loads_match_the_scalar_conversion() {
         vec![0.0; 256],
         vec![0.0; 256],
     ];
+    let window = TileWindow {
+        tile_width: 256,
+        valid_width: 256,
+        valid_height: 1,
+        origin_x: 0,
+        origin_y: 0,
+        canvas_width: 256,
+    };
     // SAFETY: the required target features were detected above.
-    unsafe { load_existing_tile_rgba8(&mut tile, 256, 256, 1, 0, 0, 256, &output) };
+    unsafe { load_existing_tile_rgba8(&mut tile, window, &output) };
     for byte in 0..=255u8 {
         let expected = f32::from(byte) / 255.0;
         for channel in &tile {

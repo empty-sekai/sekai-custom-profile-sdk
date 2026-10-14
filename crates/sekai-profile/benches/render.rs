@@ -22,13 +22,11 @@ use sekai_profile::prepare::{build_text_atlas, TextAtlasOptions};
 use sekai_profile::sdf::atlas::MappedSdfAtlas;
 use sekai_profile::sdf::outline::{OfflineAtlasGlyphGenerator, OfflineGenerationMethod};
 use sekai_profile::sdf::tile::{
-    Affine2, Point2, SdfAccumulationMode, SdfDrawCommand, SdfMaterial, SdfPrimitiveKind,
-    SdfTilePlan, TileGrid,
+    Affine2, Point2, SdfAccumulationMode, SdfDrawCommand, SdfGlyphAtlas, SdfGlyphPlacement,
+    SdfMaterial, SdfPrimitiveKind, SdfTilePlan, TileGrid,
 };
 use sekai_profile::types::CustomProfileCard;
-use sekai_profile::{
-    CustomProfileRenderer, JsonMasterDataProvider, RenderConfig, SdfExecutor,
-};
+use sekai_profile::{CustomProfileRenderer, JsonMasterDataProvider, RenderConfig, SdfExecutor};
 
 /// The size of a rendered custom profile page.
 const PAGE_WIDTH: u32 = 1830;
@@ -69,6 +67,11 @@ fn fixture() -> Option<&'static Fixture> {
 /// glyph.
 fn page_commands(atlas: &MappedSdfAtlas, font_size: f32) -> Vec<SdfDrawCommand> {
     let manifest = atlas.manifest();
+    let glyph_atlas = SdfGlyphAtlas {
+        atlas_set: 0,
+        point_size: manifest.point_size,
+        spread: manifest.spread,
+    };
     let scale = font_size / manifest.point_size;
     let line_height = font_size * 1.3;
     let mut commands = Vec::new();
@@ -82,13 +85,13 @@ fn page_commands(atlas: &MappedSdfAtlas, font_size: f32) -> Vec<SdfDrawCommand> 
                 };
                 if let Ok(command) = SdfDrawCommand::from_atlas_glyph(
                     SdfPrimitiveKind::Text,
-                    0,
+                    glyph_atlas,
                     glyph,
-                    manifest.point_size,
-                    manifest.spread,
-                    Point2::new(x, baseline),
-                    font_size,
-                    Affine2::IDENTITY,
+                    SdfGlyphPlacement {
+                        baseline_origin: Point2::new(x, baseline),
+                        font_size,
+                        local_to_device: Affine2::IDENTITY,
+                    },
                     SdfMaterial::default(),
                 ) {
                     commands.push(command);
@@ -279,7 +282,11 @@ fn pages(c: &mut Criterion) {
             ..RenderConfig::default()
         };
         group.bench_function(BenchmarkId::new("render", name), |b| {
-            b.iter(|| renderer.render(black_box(&card), None, &config).expect("page"))
+            b.iter(|| {
+                renderer
+                    .render(black_box(&card), None, &config)
+                    .expect("page")
+            })
         });
         let batch: Vec<_> = (1..=3).map(|seq| (seq, &card)).collect();
         group.bench_function(BenchmarkId::new("render-batch-3", name), |b| {

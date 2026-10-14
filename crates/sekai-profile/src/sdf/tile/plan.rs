@@ -620,7 +620,14 @@ fn scan_command(
         let x1 = (x1.clamp(0.0, grid.canvas_width as f32) as u32).min(clip_x1);
         if x0 < x1 {
             for y in first_y..end_y {
-                push_scanline_spans(grid, command_index, kind, y, x0, x1, per_tile, stats)?;
+                push_scanline_spans(
+                    grid,
+                    command_index,
+                    kind,
+                    ScanlineSpan { y, x0, x1 },
+                    per_tile,
+                    stats,
+                )?;
             }
         }
         return Ok(());
@@ -666,7 +673,14 @@ fn scan_command(
         if x0 >= x1 {
             continue;
         }
-        push_scanline_spans(grid, command_index, kind, y, x0, x1, per_tile, stats)?;
+        push_scanline_spans(
+            grid,
+            command_index,
+            kind,
+            ScanlineSpan { y, x0, x1 },
+            per_tile,
+            stats,
+        )?;
     }
     Ok(())
 }
@@ -685,17 +699,26 @@ fn axis_aligned_quad_bounds(quad: [Point2; 4]) -> Option<(f32, f32, f32, f32)> {
     Some((top_left.x, top_left.y, bottom_right.x, bottom_right.y))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Covered pixels `x0..x1` of device row `y`, already clipped to the canvas
+/// and the command's device clip; `x0 < x1`.
+#[derive(Clone, Copy)]
+struct ScanlineSpan {
+    y: u32,
+    x0: u32,
+    x1: u32,
+}
+
+/// Splits one covered scanline into the tile spans of every tile it crosses
+/// and counts its fragments and spans.
 fn push_scanline_spans(
     grid: TileGrid,
     command_index: u32,
     kind: SdfPrimitiveKind,
-    y: u32,
-    x0: u32,
-    x1: u32,
+    span: ScanlineSpan,
     per_tile: &mut [Vec<TileSpan>],
     stats: &mut SdfPlanStats,
 ) -> Result<(), SdfTileError> {
+    let ScanlineSpan { y, x0, x1 } = span;
     let fragments = u64::from(x1 - x0);
     stats.covered_fragment_count += fragments;
     match kind {

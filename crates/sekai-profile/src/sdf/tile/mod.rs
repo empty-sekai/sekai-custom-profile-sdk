@@ -28,7 +28,7 @@ pub use self::atlas_source::{
 };
 pub use self::command::{
     Affine2, Point2, SdfCommandBuildError, SdfCommandMaterial, SdfDeviceClip, SdfDrawCommand,
-    SdfMaterial, SdfPrimitiveKind,
+    SdfGlyphAtlas, SdfGlyphPlacement, SdfMaterial, SdfPrimitiveKind,
 };
 
 #[cfg(test)]

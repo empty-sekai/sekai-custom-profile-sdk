@@ -304,6 +304,11 @@ fn layout_layer(
     };
 
     let default_align = segments.first().and_then(|segment| segment.align);
+    let context = LayerGlyphContext {
+        layer,
+        atlas,
+        layout_metrics: &layout_metrics,
+    };
     let mut instances = Vec::new();
     let mut plain_text_index = 0usize;
     for (i, line) in lines.iter().enumerate() {
@@ -353,7 +358,6 @@ fn layout_layer(
             let baseline_shift = -seg.baseline_offset / TEXT_SCALE;
             let cspace_px = seg.character_spacing / TEXT_SCALE;
             let fill = resolve_fill(layer, seg);
-            let outline = layer.outline_color;
             let italic_slope = seg.italic.map(|angle| angle as f32 * 0.01);
             let mono_cell = seg.monospace.map(|cell| cell / TEXT_SCALE);
 
@@ -397,17 +401,12 @@ fn layout_layer(
                     skew_x: italic_slope.map_or(0.0, |slope| -slope),
                     rotate_deg: seg.rotate.unwrap_or(0.0),
                 };
-                instances.push(make_instance(
-                    layer,
+                instances.push(context.instance(
                     plain_text_index,
-                    atlas,
                     glyph,
                     &resolved.drawn_char().to_string(),
                     op,
                     fill,
-                    outline,
-                    layout_metrics.clone(),
-                    glyph_size,
                     compute_sdf_shader_params(
                         glyph_size,
                         seg.bold,
@@ -447,121 +446,135 @@ fn layout_layer(
     (instances, dynamic_program)
 }
 
-fn make_instance(
-    layer: &TextLayer,
-    plain_text_index: usize,
-    atlas: &AtlasInput,
-    glyph: Option<&GlyphInfo>,
-    ch: &str,
-    op: GlyphOp,
-    fill: [f32; 4],
-    outline: [f32; 4],
-    layout_metrics: LayoutMetrics,
-    render_size: f32,
-    shader_params: SdfShaderParams,
-) -> GlyphInstance {
-    let glyph_scale = render_size / atlas.base_size;
-    let mut local = Vec::<[f32; 4]>::new();
-    if let Some(glyph) = glyph {
-        if glyph.drawable {
-            let local_left = (glyph.plane_bearing_x - atlas.spread) * glyph_scale - op.pivot_x;
-            let local_top = -(glyph.plane_bearing_y + atlas.spread) * glyph_scale - op.pivot_y;
-            let local_right = (glyph.plane_bearing_x + glyph.plane_width + atlas.spread)
-                * glyph_scale
-                - op.pivot_x;
-            let local_bottom = (-glyph.plane_bearing_y + glyph.plane_height + atlas.spread)
-                * glyph_scale
-                - op.pivot_y;
-            local.push([local_left, local_top, glyph.u0, glyph.v0]);
-            local.push([local_right, local_top, glyph.u1, glyph.v0]);
-            local.push([local_right, local_bottom, glyph.u1, glyph.v1]);
-            local.push([local_left, local_bottom, glyph.u0, glyph.v1]);
+/// Inputs shared by every glyph instance of one text layer.
+#[derive(Clone, Copy)]
+struct LayerGlyphContext<'a> {
+    layer: &'a TextLayer,
+    atlas: &'a AtlasInput,
+    layout_metrics: &'a LayoutMetrics,
+}
+
+impl LayerGlyphContext<'_> {
+    /// Places one character of the layer: its glyph quad, character
+    /// footprints and shader inputs.
+    fn instance(
+        &self,
+        plain_text_index: usize,
+        glyph: Option<&GlyphInfo>,
+        ch: &str,
+        op: GlyphOp,
+        fill: [f32; 4],
+        shader_params: SdfShaderParams,
+    ) -> GlyphInstance {
+        let Self {
+            layer,
+            atlas,
+            layout_metrics,
+        } = *self;
+        let render_size = shader_params.font_size;
+        let glyph_scale = render_size / atlas.base_size;
+        let mut local = Vec::<[f32; 4]>::new();
+        if let Some(glyph) = glyph {
+            if glyph.drawable {
+                let local_left = (glyph.plane_bearing_x - atlas.spread) * glyph_scale - op.pivot_x;
+                let local_top = -(glyph.plane_bearing_y + atlas.spread) * glyph_scale - op.pivot_y;
+                let local_right = (glyph.plane_bearing_x + glyph.plane_width + atlas.spread)
+                    * glyph_scale
+                    - op.pivot_x;
+                let local_bottom = (-glyph.plane_bearing_y + glyph.plane_height + atlas.spread)
+                    * glyph_scale
+                    - op.pivot_y;
+                local.push([local_left, local_top, glyph.u0, glyph.v0]);
+                local.push([local_right, local_top, glyph.u1, glyph.v0]);
+                local.push([local_right, local_bottom, glyph.u1, glyph.v1]);
+                local.push([local_left, local_bottom, glyph.u0, glyph.v1]);
+            }
         }
-    }
 
-    let glyph_matrix = multiply(
-        translate(op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y),
-        multiply(
-            rotate(-op.rotate_deg),
-            multiply(scale(op.scale_x, 1.0), skew(op.skew_x)),
-        ),
-    );
-    let text_scale = scale(TEXT_SCALE, TEXT_SCALE);
-    let outer = layer_base_matrix(layer);
-    let matrix = multiply(outer, multiply(text_scale, glyph_matrix));
-    let quad = local
-        .iter()
-        .map(|[x, y, u, v]| {
-            let [px, py] = apply(matrix, *x, *y);
-            [px, py, *u, *v, atlas.spread * glyph_scale]
-        })
-        .collect::<Vec<_>>();
+        let glyph_matrix = multiply(
+            translate(op.x + op.pivot_x + op.shear_cx, op.y + op.pivot_y),
+            multiply(
+                rotate(-op.rotate_deg),
+                multiply(scale(op.scale_x, 1.0), skew(op.skew_x)),
+            ),
+        );
+        let text_scale = scale(TEXT_SCALE, TEXT_SCALE);
+        let outer = layer_base_matrix(layer);
+        let matrix = multiply(outer, multiply(text_scale, glyph_matrix));
+        let quad = local
+            .iter()
+            .map(|[x, y, u, v]| {
+                let [px, py] = apply(matrix, *x, *y);
+                [px, py, *u, *v, atlas.spread * glyph_scale]
+            })
+            .collect::<Vec<_>>();
 
-    let hx = op.pivot_x.abs().max(1.0);
-    let hy = op.pivot_y.abs().max(1.0);
-    let footprint_local = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
-    let char_quad = footprint_local
-        .iter()
-        .map(|[x, y]| {
-            let [px, py] = apply(glyph_matrix, *x, *y);
-            [px * TEXT_SCALE, -py * TEXT_SCALE]
-        })
-        .collect::<Vec<_>>();
-    let device_char_quad = footprint_local
-        .iter()
-        .map(|[x, y]| apply(matrix, *x, *y))
-        .collect::<Vec<_>>();
-    let [device_cx, device_cy] = apply(
-        outer,
-        (op.x + op.pivot_x + op.shear_cx) * TEXT_SCALE,
-        (op.y + op.pivot_y) * TEXT_SCALE,
-    );
-
-    GlyphInstance {
-        layer_id: layer.id.clone(),
-        plain_text_index,
-        char_value: ch.to_string(),
-        drawable: glyph.is_some(),
-        glyph_key: glyph.map(|glyph| glyph.key.clone()).unwrap_or_default(),
-        atlas_page: glyph.map(|glyph| glyph.page).unwrap_or(0),
-        z: layer.z,
-        quad: quad.clone(),
-        char_position: (
-            ch.to_string(),
+        let hx = op.pivot_x.abs().max(1.0);
+        let hy = op.pivot_y.abs().max(1.0);
+        let footprint_local = [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+        let char_quad = footprint_local
+            .iter()
+            .map(|[x, y]| {
+                let [px, py] = apply(glyph_matrix, *x, *y);
+                [px * TEXT_SCALE, -py * TEXT_SCALE]
+            })
+            .collect::<Vec<_>>();
+        let device_char_quad = footprint_local
+            .iter()
+            .map(|[x, y]| apply(matrix, *x, *y))
+            .collect::<Vec<_>>();
+        let [device_cx, device_cy] = apply(
+            outer,
             (op.x + op.pivot_x + op.shear_cx) * TEXT_SCALE,
-            -(op.y + op.pivot_y) * TEXT_SCALE,
-            op.scale_x,
-            op.skew_x,
-            op.pivot_x,
-        ),
-        char_op: (
-            ch.to_string(),
-            op.x,
-            op.y,
-            op.scale_x,
-            op.pivot_x,
-            op.pivot_y,
-            op.rotate_deg,
-        ),
-        char_quad: (ch.to_string(), char_quad),
-        device_char_position: (ch.to_string(), device_cx, device_cy),
-        device_char_quad: (ch.to_string(), device_char_quad),
-        device_glyph_quad: (
-            ch.to_string(),
-            quad.iter().map(|row| [row[0], row[1]]).collect(),
-        ),
-        layout_metrics,
-        fill,
-        // Card text always draws the underlay; a zero width puts it on the
-        // face edge rather than removing it.
-        outline,
-        outline_width: layer.outline_width,
-        shader_font_size: render_size,
-        shader_face_scale: shader_params.face_scale,
-        shader_face_bias: shader_params.face_bias,
-        shader_underlay_scale: shader_params.underlay_scale,
-        shader_underlay_bias: shader_params.underlay_bias,
-        shader_vertex_alpha: shader_params.vertex_alpha,
+            (op.y + op.pivot_y) * TEXT_SCALE,
+        );
+
+        GlyphInstance {
+            layer_id: layer.id.clone(),
+            plain_text_index,
+            char_value: ch.to_string(),
+            drawable: glyph.is_some(),
+            glyph_key: glyph.map(|glyph| glyph.key.clone()).unwrap_or_default(),
+            atlas_page: glyph.map(|glyph| glyph.page).unwrap_or(0),
+            z: layer.z,
+            quad: quad.clone(),
+            char_position: (
+                ch.to_string(),
+                (op.x + op.pivot_x + op.shear_cx) * TEXT_SCALE,
+                -(op.y + op.pivot_y) * TEXT_SCALE,
+                op.scale_x,
+                op.skew_x,
+                op.pivot_x,
+            ),
+            char_op: (
+                ch.to_string(),
+                op.x,
+                op.y,
+                op.scale_x,
+                op.pivot_x,
+                op.pivot_y,
+                op.rotate_deg,
+            ),
+            char_quad: (ch.to_string(), char_quad),
+            device_char_position: (ch.to_string(), device_cx, device_cy),
+            device_char_quad: (ch.to_string(), device_char_quad),
+            device_glyph_quad: (
+                ch.to_string(),
+                quad.iter().map(|row| [row[0], row[1]]).collect(),
+            ),
+            layout_metrics: layout_metrics.clone(),
+            fill,
+            // Card text always draws the underlay; a zero width puts it on the
+            // face edge rather than removing it.
+            outline: layer.outline_color,
+            outline_width: layer.outline_width,
+            shader_font_size: render_size,
+            shader_face_scale: shader_params.face_scale,
+            shader_face_bias: shader_params.face_bias,
+            shader_underlay_scale: shader_params.underlay_scale,
+            shader_underlay_bias: shader_params.underlay_bias,
+            shader_vertex_alpha: shader_params.vertex_alpha,
+        }
     }
 }
 
@@ -573,6 +586,7 @@ fn compute_sdf_shader_params(
 ) -> SdfShaderParams {
     let material = TmpGlyphMaterial::new(tmp_uv2_y(point_size, is_bold), outline_size);
     SdfShaderParams {
+        font_size: point_size,
         face_scale: material.face_scale,
         face_bias: material.face_bias,
         underlay_scale: material.underlay_scale,
@@ -1390,6 +1404,8 @@ struct GlyphOp {
 
 #[derive(Clone, Copy)]
 struct SdfShaderParams {
+    /// Point size the material terms were derived for.
+    font_size: f32,
     face_scale: f32,
     face_bias: f32,
     underlay_scale: f32,

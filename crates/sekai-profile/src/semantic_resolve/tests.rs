@@ -254,20 +254,23 @@ fn placed_honors_follow_the_profile_honor_lists() {
     .expect("card fixture");
     let md = MasterData::new(Arc::new(EmptyProvider));
     let levels = |profile: Option<&ProfileData>| {
-        build_resolve_snapshot_parts(
+        let mut snapshot = ProfileResolveSnapshot::default();
+        populate_page_overlay(
+            &mut snapshot,
             &card,
-            &md,
             "placed-honors",
-            profile,
-            "cn",
-            ResolveResourceContext::default(),
-            true,
-            false,
-        )
-        .honor_visuals
-        .values()
-        .map(|visual| visual.honor_level)
-        .collect::<Vec<_>>()
+            SnapshotSources {
+                md: &md,
+                profile,
+                locale: "cn",
+                resources: ResolveResourceContext::default(),
+            },
+        );
+        snapshot
+            .honor_visuals
+            .values()
+            .map(|visual| visual.honor_level)
+            .collect::<Vec<_>>()
     };
     assert_eq!(levels(None), vec![1]);
     let owned = ProfileData::from_json(&serde_json::json!({ "userHonors": [[4242, 3, null]] }));
