@@ -133,12 +133,17 @@ impl CustomProfileRenderer {
             None
         };
         let mut pending = PendingSdfRun::default();
-        let mut aggregate = SurfaceAggregate::default();
-        aggregate.prepare_direct_axis_shape = spec.prepare_direct_axis_shape;
-        aggregate.realtime_oversized_glyph_generation = self.realtime_oversized_glyph_generation;
-        aggregate.render_object_mapped_bytes = render_object_store.mapped_bytes();
-        aggregate.timings.semantic_resolve_ns = semantic_resolve_ns;
-        aggregate.timings.surface_create_ns = surface_create_ns;
+        let mut aggregate = SurfaceAggregate {
+            prepare_direct_axis_shape: spec.prepare_direct_axis_shape,
+            realtime_oversized_glyph_generation: self.realtime_oversized_glyph_generation,
+            render_object_mapped_bytes: render_object_store.mapped_bytes(),
+            timings: SurfaceTimings {
+                semantic_resolve_ns,
+                surface_create_ns,
+                ..SurfaceTimings::default()
+            },
+            ..SurfaceAggregate::default()
+        };
         if let Some(dry_run) = occlusion_dry_run.as_ref() {
             aggregate.occlusion_eligible_image_count = dry_run.eligible_image_count;
             aggregate.occlusion_mask_snapshot_count = dry_run.mask_snapshot_count;

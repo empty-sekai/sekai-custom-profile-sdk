@@ -47,8 +47,10 @@ fn avx512_yuv420_matches_scalar_at_profile_export_resolution() {
 fn yuv420_scratch_reuse_overwrites_dirty_storage() {
     let width = 4;
     let height = 2;
-    let mut config = H264EncoderConfig::default();
-    config.yuv_converter = H264YuvConverter::Scalar;
+    let config = H264EncoderConfig {
+        yuv_converter: H264YuvConverter::Scalar,
+        ..H264EncoderConfig::default()
+    };
     let first = [17, 91, 203, 255].repeat((width * height) as usize);
     let second = [241, 37, 11, 255].repeat((width * height) as usize);
     let expected_first = rgba_to_yuv420p(&first, width, height, &config).unwrap();
@@ -637,13 +639,7 @@ fn ordered_layer_raster_reports_atlas_identity_runs_and_realtime_edt_totals() {
         },
     };
     let (layers, _bytes, _scratch, telemetry) = rasterizer
-        .rasterize_animation_groups(
-            None,
-            &std::collections::BTreeMap::new(),
-            &groups,
-            &config,
-            usize::MAX,
-        )
+        .rasterize_animation_groups(None, &groups, &config, usize::MAX)
         .expect("rasterize the shape layer");
     assert_eq!(layers.len(), 1, "the shape group produced one raster layer");
 
@@ -718,7 +714,7 @@ fn every_encoder_is_byte_deterministic_for_one_frame_sequence() {
     };
     let frame_at = |index: u32| {
         let shade = (index * 40 + 15) as u8;
-        Ok(vec![shade, 255 - shade, shade / 2, 255].repeat(16 * 8))
+        Ok([shade, 255 - shade, shade / 2, 255].repeat(16 * 8))
     };
     for format in [
         AnimationFormat::Gif,
@@ -1095,7 +1091,7 @@ fn gif_palette_covers_colors_introduced_after_the_first_frame() {
     let mut decoder = options.read_info(Cursor::new(&encoded.data)).unwrap();
     for expected in [[255, 0, 0], [0, 255, 0], [0, 0, 255]] {
         let decoded = decoder.read_next_frame().unwrap().unwrap();
-        assert!(decoded.buffer.chunks_exact(4).all(|pixel| {
+        assert!(decoded.buffer.as_chunks::<4>().0.iter().all(|pixel| {
             pixel[..3]
                 .iter()
                 .zip(expected)

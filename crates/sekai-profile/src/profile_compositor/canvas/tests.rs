@@ -87,7 +87,9 @@ fn clip_bounds_shapes_and_curves() {
     }
     assert!(canvas
         .premultiplied_rgba()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|p| p[3] > 0));
 }
 

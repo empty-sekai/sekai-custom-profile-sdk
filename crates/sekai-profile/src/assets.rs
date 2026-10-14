@@ -193,8 +193,8 @@ impl AssetStore {
         let mut pixels = decoded.pixels;
         for pixel in pixels.as_chunks_mut::<4>().0 {
             let alpha = pixel[3];
-            for channel in 0..3 {
-                pixel[channel] = crate::codec::premultiply_channel(pixel[channel], alpha);
+            for value in &mut pixel[..3] {
+                *value = crate::codec::premultiply_channel(*value, alpha);
             }
         }
         Some((decoded.width, decoded.height, pixels))

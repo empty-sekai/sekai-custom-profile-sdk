@@ -250,9 +250,10 @@ fn plan_is_variable_sized_and_preserves_command_order_per_tile() {
         .execute_scalar(&atlas, [0, 0, 0, 0], &mut output)
         .expect("execute scalar");
     assert_eq!(stats.shaded_fragment_count, 12);
-    assert_eq!(&output[(0 * 5 + 0) * 4..][..4], &[255, 0, 0, 255]);
-    assert_eq!(&output[(0 * 5 + 1) * 4..][..4], &[0, 255, 0, 255]);
-    assert_eq!(&output[(0 * 5 + 4) * 4..][..4], &[0, 0, 0, 0]);
+    let pixels = output.as_chunks::<4>().0;
+    assert_eq!(pixels[0], [255, 0, 0, 255]);
+    assert_eq!(pixels[1], [0, 255, 0, 255]);
+    assert_eq!(pixels[4], [0, 0, 0, 0]);
 }
 
 #[test]
@@ -498,8 +499,8 @@ fn simd_dispatch_is_exact_to_f32_oracle_or_fails_closed() {
         *value = (index * 4).min(255) as u8;
     }
     let mut shape = [0u8; 128];
-    for texel in shape.chunks_exact_mut(2) {
-        texel.copy_from_slice(&[220, 200]);
+    for texel in shape.as_chunks_mut::<2>().0 {
+        *texel = [220, 200];
     }
     let atlas = PhysicalMixedAtlas { text, shape };
     let text = command([0.7, 0.2, 0.1, 0.75], rectangle(0.0, 0.0, 32.0, 4.0));
@@ -604,11 +605,11 @@ fn text_adjacent_blocks_use_swizzled_loads_without_gather() {
 #[test]
 fn shape_five_blocks_use_swizzled_loads_and_match_scalar() {
     let mut payload = [0u8; 640];
-    for (index, texel) in payload.chunks_exact_mut(2).enumerate() {
-        texel.copy_from_slice(&[
+    for (index, texel) in payload.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        *texel = [
             ((index * 29 + 17) & 0xff) as u8,
             ((index * 11 + 101) & 0xff) as u8,
-        ]);
+        ];
     }
     let atlas = WidePhysicalShapeAtlas { payload };
     let shape = SdfDrawCommand {
@@ -661,11 +662,11 @@ fn shape_five_blocks_use_swizzled_loads_and_match_scalar() {
 #[test]
 fn axis_aligned_shape_uses_row_program_without_sampling() {
     let mut payload = [0u8; 256];
-    for (index, texel) in payload.chunks_exact_mut(2).enumerate() {
-        texel.copy_from_slice(&[
+    for (index, texel) in payload.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        *texel = [
             ((index * 29 + 17) & 0xff) as u8,
             ((index * 11 + 101) & 0xff) as u8,
-        ]);
+        ];
     }
     let atlas = PhysicalShapeAtlas { payload };
     let shape = SdfDrawCommand {

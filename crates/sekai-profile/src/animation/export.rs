@@ -131,12 +131,6 @@ pub(crate) fn export_profile_animation(
         preset.maximum_ticks,
     )
     .is_some();
-    let dynamic_expansions = if preset.format == AnimationFormat::Mp4 {
-        animation_layer_expansions(&mut scene, &dynamic_layer_ids, &ticks)
-    } else {
-        scene.advance_to_tick(0);
-        std::collections::BTreeMap::new()
-    };
     let authored = sekai_profile_core::profile_scene::ordered_profile_elements(card, document.key);
     let mut groups: Vec<AnimationRasterGroup> = Vec::new();
     let mut static_span = Vec::new();
@@ -178,7 +172,6 @@ pub(crate) fn export_profile_animation(
     let (layers, layer_raster_bytes, layer_scratch_peak_bytes, render_telemetry) = rasterizer
         .rasterize_animation_groups(
             resolved_scene.as_ref(),
-            &dynamic_expansions,
             &groups,
             config,
             retained_layer_budget,
@@ -324,49 +317,6 @@ pub(super) const fn align_to_8(value: u32) -> u32 {
     value.saturating_add(7) & !7
 }
 
-fn animation_layer_expansions(
-    scene: &mut sekai_profile_core::Scene,
-    dynamic_layer_ids: &[sekai_profile_core::LayerId],
-    ticks: &[u64],
-) -> std::collections::BTreeMap<sekai_profile_core::LayerId, [i32; 4]> {
-    let mut ranges = dynamic_layer_ids
-        .iter()
-        .copied()
-        .map(|id| (id, [0.0f32; 4]))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for tick in ticks {
-        scene.advance_to_tick(*tick);
-        for id in dynamic_layer_ids {
-            let transform = scene
-                .state(*id)
-                .and_then(|state| state.dynamic.as_ref())
-                .map(|state| state.transform)
-                .unwrap_or_default();
-            let range = ranges.get_mut(id).unwrap();
-            range[0] = range[0].min(transform.dx);
-            range[1] = range[1].max(transform.dx);
-            range[2] = range[2].min(transform.dy);
-            range[3] = range[3].max(transform.dy);
-        }
-    }
-    scene.advance_to_tick(0);
-    ranges
-        .into_iter()
-        .map(|(id, [min_dx, max_dx, min_dy, max_dy])| {
-            const PAD: i32 = 8;
-            (
-                id,
-                [
-                    max_dx.max(0.0).ceil() as i32 + PAD,
-                    (-min_dx).max(0.0).ceil() as i32 + PAD,
-                    max_dy.max(0.0).ceil() as i32 + PAD,
-                    (-min_dy).max(0.0).ceil() as i32 + PAD,
-                ],
-            )
-        })
-        .collect()
-}
-
 /// Rasterizes the element groups of one card's animation export through the
 /// renderer's ordered SDF path.
 #[derive(Clone, Copy)]
@@ -385,7 +335,6 @@ impl GroupRasterizer<'_> {
     pub(super) fn rasterize_animation_groups(
         &self,
         resolved_scene: Option<&sekai_profile_core::profile_scene::ResolvedProfileScene>,
-        _dynamic_expansions: &std::collections::BTreeMap<sekai_profile_core::LayerId, [i32; 4]>,
         groups: &[AnimationRasterGroup],
         config: &crate::render_config::RenderConfig,
         retained_layer_budget: usize,

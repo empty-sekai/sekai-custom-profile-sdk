@@ -28,9 +28,9 @@ impl Huffman {
         }
         // An entirely unused table (all lengths zero) is legal; over-subscribed is not.
         let mut left: i32 = 1;
-        for len in 1..=MAX_BITS {
+        for &count in &counts[1..] {
             left <<= 1;
-            left -= i32::from(counts[len]);
+            left -= i32::from(count);
             if left < 0 {
                 return Err(CodecError::Deflate("over-subscribed Huffman code"));
             }

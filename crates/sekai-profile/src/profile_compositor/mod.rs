@@ -411,7 +411,7 @@ struct GeneralBasePlan {
 enum GeneralBaseAttempt {
     NotEligible,
     Miss,
-    Hit(ProfileCompositorStats),
+    Hit(Box<ProfileCompositorStats>),
 }
 
 fn axis_aligned_command_clip(

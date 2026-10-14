@@ -107,7 +107,7 @@ fn rgba_delta_rect(
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(current.chunks_exact(4))
+        .zip(current.as_chunks::<4>().0.iter())
         .enumerate()
     {
         if before == after {

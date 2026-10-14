@@ -299,13 +299,10 @@ impl DirtyRegionSet {
             return;
         }
         self.regions.retain(|value| !region.contains(*value));
-        loop {
-            let Some(index) = self.regions.iter().position(|value| {
-                let union = value.union(region);
-                union.area() <= value.area().saturating_add(region.area())
-            }) else {
-                break;
-            };
+        while let Some(index) = self.regions.iter().position(|value| {
+            let union = value.union(region);
+            union.area() <= value.area().saturating_add(region.area())
+        }) {
             region = region.union(self.regions.swap_remove(index));
             self.regions.retain(|value| !region.contains(*value));
         }
@@ -403,7 +400,7 @@ impl<'a> AnimationFrameCompositor<'a> {
         index: u32,
         layers: &[RasterLayer],
         states: Vec<LayerFrameState>,
-        rgba: &mut Vec<u8>,
+        rgba: &mut [u8],
     ) -> Result<FrameCompositeUpdate, AnimationError> {
         let sequential = self
             .previous_index
@@ -652,7 +649,7 @@ pub(super) fn read_canvas_rgba_into(
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(rgba.chunks_exact_mut(4))
+        .zip(rgba.as_chunks_mut::<4>().0.iter_mut())
     {
         unpremultiply_pixel(source, destination);
     }

@@ -20,7 +20,7 @@ use sekai_profile::atlas_dir::AtlasDir;
 use sekai_profile::masterdata::JsonMasterDataProvider;
 use sekai_profile::prepare::{prepare_atlas_dir, PrepareOptions, PrepareReport, Prepared};
 use sekai_profile::profile::ProfileData;
-use sekai_profile::region::Region;
+use sekai_profile::region::{Region, UnknownRegion};
 use sekai_profile::types::{CustomProfileCard, UserCustomProfileCard};
 use sekai_profile::{Background, CustomProfileRenderer, RenderConfig, SdfExecutor};
 use serde_json::Value;
@@ -217,8 +217,9 @@ impl From<Executor> for SdfExecutor {
 }
 
 fn parse_region(value: &str) -> Result<Region, String> {
-    Region::from_str(value)
-        .ok_or_else(|| format!("unknown region {value}; expected cn, jp, tw, kr or en"))
+    value
+        .parse()
+        .map_err(|error: UnknownRegion| error.to_string())
 }
 
 /// Which page of a card list to draw.

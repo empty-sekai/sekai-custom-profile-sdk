@@ -175,9 +175,21 @@ fn font_path_cache() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
 /// 消除别名 family（如 "FZLanTingHei-DB-GBK" 与 "FOT-RodinNTLGPro-DB" 指向同一文件）的重复缓存。
 const GLYPH_CACHE_CAPACITY: usize = 4096;
 
-fn glyph_cache() -> &'static Mutex<LruCache<(PathBuf, char), Arc<OutlineSdfGlyph>>> {
-    static CACHE: OnceLock<Mutex<LruCache<(PathBuf, char), Arc<OutlineSdfGlyph>>>> =
-        OnceLock::new();
+/// A codepoint of one font file, the key of the per-glyph caches.
+type FontGlyphKey = (PathBuf, char);
+/// Generated SDF glyphs, evicting the least recently used.
+type GlyphCache = LruCache<FontGlyphKey, Arc<OutlineSdfGlyph>>;
+/// Font file bytes by path; `None` records a file that could not be read.
+type FontBytesCache = HashMap<PathBuf, Option<Arc<Vec<u8>>>>;
+/// Glyph indices by font and codepoint; `None` records a codepoint the font
+/// does not map, or a font that could not be read or parsed.
+type GlyphIdCache = HashMap<FontGlyphKey, Option<u32>>;
+/// Horizontal advances by font and codepoint; `None` records an advance that
+/// could not be loaded.
+type AdvanceCache = HashMap<FontGlyphKey, Option<f32>>;
+
+fn glyph_cache() -> &'static Mutex<GlyphCache> {
+    static CACHE: OnceLock<Mutex<GlyphCache>> = OnceLock::new();
     CACHE.get_or_init(|| {
         Mutex::new(LruCache::new(
             NonZeroUsize::new(GLYPH_CACHE_CAPACITY).expect("glyph cache capacity > 0"),
@@ -185,13 +197,13 @@ fn glyph_cache() -> &'static Mutex<LruCache<(PathBuf, char), Arc<OutlineSdfGlyph
     })
 }
 
-fn font_bytes_cache() -> &'static Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<Vec<u8>>>>>> = OnceLock::new();
+fn font_bytes_cache() -> &'static Mutex<FontBytesCache> {
+    static CACHE: OnceLock<Mutex<FontBytesCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn glyph_id_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<u32>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<u32>>>> = OnceLock::new();
+fn glyph_id_cache() -> &'static Mutex<GlyphIdCache> {
+    static CACHE: OnceLock<Mutex<GlyphIdCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -709,8 +721,8 @@ pub fn sampling_spread() -> f32 {
     TMP_SPREAD
 }
 
-fn advance_cache() -> &'static Mutex<HashMap<(PathBuf, char), Option<f32>>> {
-    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, char), Option<f32>>>> = OnceLock::new();
+fn advance_cache() -> &'static Mutex<AdvanceCache> {
+    static CACHE: OnceLock<Mutex<AdvanceCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

@@ -714,7 +714,7 @@ pub(in crate::animation) fn gif_changed_bounds_scalar(
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(current.chunks_exact(4))
+        .zip(current.as_chunks::<4>().0.iter())
         .enumerate()
     {
         if before == after {
@@ -926,7 +926,7 @@ unsafe fn index_gif_pixels_avx512(
 
     for (output, pixel) in indexed[offset..]
         .iter_mut()
-        .zip(rgba[offset * 4..].chunks_exact(4))
+        .zip(rgba[offset * 4..].as_chunks::<4>().0.iter())
     {
         *output = nearest_gif_palette_index(pixel, palette, palette_lookup);
     }

@@ -455,7 +455,8 @@ pub(super) fn raster_image_command(
                 }
                 stats.simd_packets = stats.simd_packets.saturating_add(1);
             } else {
-                for lane in 0..usize::try_from(packet_end - x).unwrap_or_default() {
+                let lane_count = usize::try_from(packet_end - x).unwrap_or_default();
+                for (lane, &packed_pixel) in source_pixels.iter().enumerate().take(lane_count) {
                     if active_mask & (1u16 << lane) == 0 {
                         continue;
                     }
@@ -468,7 +469,7 @@ pub(super) fn raster_image_command(
                             width: canvas_width,
                             height: canvas_height,
                         })?;
-                    let source_pixel = apply_tint(source_pixels[lane].to_le_bytes(), blend_tint);
+                    let source_pixel = apply_tint(packed_pixel.to_le_bytes(), blend_tint);
                     blend_pixel(destination_pixel, source_pixel, blend_mode);
                 }
                 stats.scalar_fragments = stats.scalar_fragments.saturating_add(active_fragments);

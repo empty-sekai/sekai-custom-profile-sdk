@@ -191,7 +191,7 @@ fn render_authored_profile_into(
             surface.reborrow(),
             executor,
         )? {
-            GeneralBaseAttempt::Hit(stats) => return Ok(stats),
+            GeneralBaseAttempt::Hit(stats) => return Ok(*stats),
             GeneralBaseAttempt::Miss => general_base_miss = true,
             GeneralBaseAttempt::NotEligible => {}
         }

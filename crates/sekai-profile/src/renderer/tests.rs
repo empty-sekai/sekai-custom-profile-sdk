@@ -104,7 +104,7 @@ fn realtime_edt_threshold_uses_final_command_geometry() {
         ],
     );
     assert_eq!(sdf_command_device_magnification(&exactly_three), Some(3.0));
-    assert!(!(sdf_command_device_magnification(&exactly_three).unwrap() > 3.0));
+    assert!(sdf_command_device_magnification(&exactly_three).unwrap() <= 3.0);
     assert!(sdf_command_device_magnification(&above_three).unwrap() > 3.0);
 }
 
@@ -248,7 +248,7 @@ fn lossless_crop_rejects_short_row_stride() {
         height: 1,
     };
     let result = crop_pixels_lossless(surface, 0, 0, 1, 1);
-    assert!(matches!(result, Err(_)));
+    assert!(result.is_err());
 }
 
 #[cfg(feature = "animation-export")]
@@ -261,7 +261,7 @@ fn lossless_crop_rejects_out_of_bounds_rect() {
         height: 1,
     };
     let result = crop_pixels_lossless(surface, 4, 0, 1, 1);
-    assert!(matches!(result, Err(_)));
+    assert!(result.is_err());
 }
 
 #[cfg(feature = "animation-export")]
@@ -274,7 +274,7 @@ fn lossless_crop_rejects_zero_sized_rect() {
         height: 1,
     };
     let result = crop_pixels_lossless(surface, 0, 0, 0, 1);
-    assert!(matches!(result, Err(_)));
+    assert!(result.is_err());
 }
 
 #[cfg(feature = "animation-export")]
@@ -453,7 +453,11 @@ fn deferred_animation_window_keeps_complete_source_across_viewport_changes() {
         .unwrap();
 
     let first_rgba = first.pixels.clone();
-    assert!(first_rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    assert!(first_rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|pixel| pixel[3] != 0));
     assert_eq!(shifted.pixels, first_rgba);
     assert_eq!(restored.pixels, first_rgba);
     assert_eq!(first.scratch_peak_bytes, 64 * 64 * 8);

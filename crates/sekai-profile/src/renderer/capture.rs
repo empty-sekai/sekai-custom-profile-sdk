@@ -248,15 +248,20 @@ pub(super) fn map_captured_sdf_commands(
         source,
     } = atlases;
 
+    /// A glyph drawn from a runtime-generated atlas page, with the atlas
+    /// command it falls back to when generation or command building fails.
+    #[derive(Clone)]
+    struct RealtimeCommand {
+        atlas: crate::sdf::tile::SdfDrawCommand,
+        glyph: crate::text::ResolvedTextSdfGlyph,
+        primary_grid: TextSdfSamplingGrid,
+        request_index: usize,
+    }
+
     #[derive(Clone)]
     enum PreparedCommand {
         Atlas(crate::sdf::tile::SdfDrawCommand),
-        Realtime {
-            atlas: crate::sdf::tile::SdfDrawCommand,
-            glyph: crate::text::ResolvedTextSdfGlyph,
-            primary_grid: TextSdfSamplingGrid,
-            request_index: usize,
-        },
+        Realtime(Box<RealtimeCommand>),
     }
 
     #[derive(Clone)]
@@ -484,12 +489,12 @@ pub(super) fn map_captured_sdf_commands(
                     });
                     index
                 };
-                prepared.push(PreparedCommand::Realtime {
+                prepared.push(PreparedCommand::Realtime(Box::new(RealtimeCommand {
                     atlas: fallback_command,
                     glyph: glyph.clone(),
                     primary_grid,
                     request_index,
-                });
+                })));
             }
             CapturedSdfPrimitive::Shape(shape) => {
                 let atlas =
@@ -514,7 +519,7 @@ pub(super) fn map_captured_sdf_commands(
             .into_iter()
             .map(|command| match command {
                 PreparedCommand::Atlas(command) => command,
-                PreparedCommand::Realtime { atlas, .. } => atlas,
+                PreparedCommand::Realtime(realtime) => realtime.atlas,
             })
             .collect());
     }
@@ -608,12 +613,13 @@ pub(super) fn map_captured_sdf_commands(
     for command in prepared {
         match command {
             PreparedCommand::Atlas(command) => commands.push(command),
-            PreparedCommand::Realtime {
-                atlas,
-                glyph,
-                primary_grid,
-                request_index,
-            } => {
+            PreparedCommand::Realtime(realtime) => {
+                let RealtimeCommand {
+                    atlas,
+                    glyph,
+                    primary_grid,
+                    request_index,
+                } = *realtime;
                 let Some(runtime) = runtime_requests[request_index].as_ref() else {
                     commands.push(atlas);
                     continue;

@@ -456,11 +456,11 @@ unsafe fn load_existing_tile_rgba8(tile: &mut [Vec<f32>; 4], window: TileWindow,
                 output.as_ptr().add(output_pixel).cast(),
             );
             let tile_pixel = row * tile_width + x;
-            for channel in 0..4 {
+            for (channel, plane) in tile.iter_mut().enumerate() {
                 let indices = _mm512_add_epi8(channel_base, _mm512_set1_epi8(channel as i8));
                 let bytes = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, rgba));
                 let values = unit_from_steps(_mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(bytes)));
-                _mm512_mask_storeu_ps(tile[channel].as_mut_ptr().add(tile_pixel), active, values);
+                _mm512_mask_storeu_ps(plane.as_mut_ptr().add(tile_pixel), active, values);
             }
             x += LANES;
         }
@@ -652,12 +652,12 @@ unsafe fn shade_text_packet(
     );
     let vertex_alpha = _mm512_set1_ps(material.vertex_alpha.clamp(0.0, 1.0));
     let mut source = [_mm512_setzero_ps(); 4];
-    for channel in 0..4 {
-        source[channel] = _mm512_mul_ps(
+    for ((value, &outline), &face) in source.iter_mut().zip(&material.outline).zip(&material.face) {
+        *value = _mm512_mul_ps(
             _mm512_fmadd_ps(
-                _mm512_set1_ps(material.outline[channel]),
+                _mm512_set1_ps(outline),
                 outline_weight,
-                _mm512_mul_ps(_mm512_set1_ps(material.face[channel]), face_t),
+                _mm512_mul_ps(_mm512_set1_ps(face), face_t),
             ),
             vertex_alpha,
         );
@@ -713,11 +713,11 @@ unsafe fn shade_shape_packet(
         _mm512_sub_ps(_mm512_set1_ps(1.0), face_alpha),
     );
     let mut source = [_mm512_setzero_ps(); 4];
-    for channel in 0..4 {
-        source[channel] = _mm512_fmadd_ps(
-            _mm512_set1_ps(material.outline[channel]),
+    for ((value, &outline), &face) in source.iter_mut().zip(&material.outline).zip(&material.face) {
+        *value = _mm512_fmadd_ps(
+            _mm512_set1_ps(outline),
             outline_above_weight,
-            _mm512_mul_ps(_mm512_set1_ps(material.face[channel]), face_coverage),
+            _mm512_mul_ps(_mm512_set1_ps(face), face_coverage),
         );
     }
     Ok((source, used_swizzle, 1))

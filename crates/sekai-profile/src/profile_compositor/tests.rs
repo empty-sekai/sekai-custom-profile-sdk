@@ -505,7 +505,7 @@ fn live_master_progress_follows_scaled_and_rotated_honors() {
         );
         let inked = |pixels: &[u8]| {
             let mut bounds = (usize::MAX, usize::MAX, 0, 0);
-            for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
                 if pixel[3] != 0 {
                     let (x, y) = (index % 300, index / 300);
                     bounds = (
@@ -1264,7 +1264,9 @@ fn image_tint_scales_premultiplied_channels_and_matches_across_executors() {
     ];
     let tint = [0.5f32, 0.25, 1.0, 0.8];
     let expected: Vec<u8> = source
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| {
             let scale = |value: u8, factor: f32| {
                 (f32::from(value) / 255.0 * factor * tint[3])

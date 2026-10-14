@@ -78,7 +78,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
     height: u32,
     changed_macroblocks: &[u32],
     config: &H264EncoderConfig,
-    yuv: &mut Vec<u8>,
+    yuv: &mut [u8],
 ) -> Result<(), AnimationError> {
     if width == 0 || height == 0 || !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(AnimationError::Internal(
@@ -106,7 +106,7 @@ pub(in crate::animation) fn rgba_to_yuv420p_macroblocks_into(
         && std::arch::is_x86_feature_detected!("avx512bw")
         && config.yuv_converter != H264YuvConverter::Scalar
     {
-        let scalar_oracle = config.validate_avx512.then(|| yuv.clone());
+        let scalar_oracle = config.validate_avx512.then(|| yuv.to_vec());
         // SAFETY: runtime feature detection and the bounds checks above satisfy
         // the target-feature and memory contracts.
         unsafe {

@@ -16,12 +16,17 @@ pub struct Vec2 {
     pub y: f32,
 }
 
+impl std::ops::Sub for Vec2 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        Self::new(self.x - other.x, self.y - other.y)
+    }
+}
+
 impl Vec2 {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
-    }
-    pub fn sub(self, other: Self) -> Self {
-        Self::new(self.x - other.x, self.y - other.y)
     }
     pub fn lerp(self, other: Self, t: f32) -> Self {
         Self::new(
@@ -345,14 +350,10 @@ fn append_cubic_lines_to(cubic: CubicSeg, steps: usize, mut append: impl FnMut(L
 }
 
 fn dist_to_line(point: Vec2, segment: LineSeg) -> f32 {
-    let delta = segment.p1.sub(segment.p0);
-    let t = (point.sub(segment.p0).dot(delta) / delta.length_sq().max(1e-12)).clamp(0.0, 1.0);
-    point
-        .sub(Vec2::new(
-            segment.p0.x + delta.x * t,
-            segment.p0.y + delta.y * t,
-        ))
-        .length()
+    let delta = segment.p1 - segment.p0;
+    let t = ((point - segment.p0).dot(delta) / delta.length_sq().max(1e-12)).clamp(0.0, 1.0);
+    let closest = Vec2::new(segment.p0.x + delta.x * t, segment.p0.y + delta.y * t);
+    (point - closest).length()
 }
 
 fn dist_to_quad(point: Vec2, segment: QuadSeg) -> f32 {
@@ -364,7 +365,7 @@ fn dist_to_quad(point: Vec2, segment: QuadSeg) -> f32 {
         2.0 * (segment.p1.x - segment.p0.x),
         2.0 * (segment.p1.y - segment.p0.y),
     );
-    let c = segment.p0.sub(point);
+    let c = segment.p0 - point;
     let mut best = f32::INFINITY;
     for t in solve_cubic_real(
         2.0 * a.dot(a),
@@ -374,18 +375,17 @@ fn dist_to_quad(point: Vec2, segment: QuadSeg) -> f32 {
     ) {
         best = best.min(dist_to_point_quad(point, segment, t.clamp(0.0, 1.0)));
     }
-    best.min(point.sub(segment.p0).length())
-        .min(point.sub(segment.p2).length())
+    best.min((point - segment.p0).length())
+        .min((point - segment.p2).length())
 }
 
 fn dist_to_point_quad(point: Vec2, segment: QuadSeg, t: f32) -> f32 {
     let mt = 1.0 - t;
-    point
-        .sub(Vec2::new(
-            mt * mt * segment.p0.x + 2.0 * mt * t * segment.p1.x + t * t * segment.p2.x,
-            mt * mt * segment.p0.y + 2.0 * mt * t * segment.p1.y + t * t * segment.p2.y,
-        ))
-        .length()
+    let closest = Vec2::new(
+        mt * mt * segment.p0.x + 2.0 * mt * t * segment.p1.x + t * t * segment.p2.x,
+        mt * mt * segment.p0.y + 2.0 * mt * t * segment.p1.y + t * t * segment.p2.y,
+    );
+    (point - closest).length()
 }
 
 fn solve_quadratic_real(a: f32, b: f32, c: f32) -> Vec<f32> {
@@ -459,10 +459,10 @@ fn solve_cubic_real(c3: f32, c2: f32, c1: f32, c0: f32) -> Vec<f32> {
 
 fn winding_line(point: Vec2, a: Vec2, b: Vec2) -> i32 {
     if a.y <= point.y {
-        if b.y > point.y && b.sub(a).cross(point.sub(a)) > 0.0 {
+        if b.y > point.y && (b - a).cross(point - a) > 0.0 {
             return 1;
         }
-    } else if b.y <= point.y && b.sub(a).cross(point.sub(a)) < 0.0 {
+    } else if b.y <= point.y && (b - a).cross(point - a) < 0.0 {
         return -1;
     }
     0

@@ -4,9 +4,10 @@
 //! 面板标签本地化由 `sekai_profile_core::locale` 提供。
 
 /// sekai 5 个服务器 region。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Region {
-    /// 国服（简体中文，方正字体）
+    /// 国服（简体中文，方正字体），默认值
+    #[default]
     Cn,
     /// 日服
     Jp,
@@ -30,28 +31,31 @@ impl Region {
         }
     }
 
-    /// 从字符串解析 region。未知值返回 `None`。
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "cn" | "sc" => Some(Region::Cn),
-            "jp" => Some(Region::Jp),
-            "tw" | "tc" => Some(Region::Tw),
-            "kr" => Some(Region::Kr),
-            "en" | "world" => Some(Region::En),
-            _ => None,
-        }
-    }
-
     /// 是否国服。
     pub fn is_cn(self) -> bool {
         matches!(self, Region::Cn)
     }
 }
 
-impl Default for Region {
-    /// 默认国服（保留内网历史行为）。
-    fn default() -> Self {
-        Region::Cn
+/// A region string that is neither a region code nor one of its aliases.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown region {0}; expected cn, jp, tw, kr or en")]
+pub struct UnknownRegion(pub String);
+
+impl std::str::FromStr for Region {
+    type Err = UnknownRegion;
+
+    /// 解析 region 编码，大小写不敏感；另接受 `sc`（国服）、`tc`（繁中服）与
+    /// `world`（国际服）。
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "cn" | "sc" => Ok(Region::Cn),
+            "jp" => Ok(Region::Jp),
+            "tw" | "tc" => Ok(Region::Tw),
+            "kr" => Ok(Region::Kr),
+            "en" | "world" => Ok(Region::En),
+            _ => Err(UnknownRegion(s.to_owned())),
+        }
     }
 }
 
@@ -62,16 +66,19 @@ mod tests {
     #[test]
     fn region_roundtrip() {
         for r in [Region::Cn, Region::Jp, Region::Tw, Region::Kr, Region::En] {
-            assert_eq!(Region::from_str(r.as_str()), Some(r));
+            assert_eq!(r.as_str().parse(), Ok(r));
         }
     }
 
     #[test]
     fn region_aliases() {
-        assert_eq!(Region::from_str("SC"), Some(Region::Cn));
-        assert_eq!(Region::from_str("TC"), Some(Region::Tw));
-        assert_eq!(Region::from_str("world"), Some(Region::En));
-        assert_eq!(Region::from_str("unknown"), None);
+        assert_eq!("SC".parse(), Ok(Region::Cn));
+        assert_eq!("TC".parse(), Ok(Region::Tw));
+        assert_eq!("world".parse(), Ok(Region::En));
+        assert_eq!(
+            "unknown".parse::<Region>(),
+            Err(UnknownRegion("unknown".into()))
+        );
     }
 
     #[test]

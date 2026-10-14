@@ -191,7 +191,7 @@ pub(super) fn try_render_general_base_into(
     stats.general_base_avoided_source_bytes = avoided_source_bytes;
     stats.general_base_composite_ns = base_composite_ns;
     stats.render_ns = stats.render_ns.saturating_add(base_composite_ns);
-    Ok(GeneralBaseAttempt::Hit(stats))
+    Ok(GeneralBaseAttempt::Hit(Box::new(stats)))
 }
 
 pub(super) fn general_base_plan(

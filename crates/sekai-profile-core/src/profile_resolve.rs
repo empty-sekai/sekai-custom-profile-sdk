@@ -1153,7 +1153,7 @@ fn build_component(
         })
     });
     let mut slots = profile.honor_slots.iter().collect::<Vec<_>>();
-    slots.sort_by(|a, b| b.full_size.cmp(&a.full_size));
+    slots.sort_by_key(|slot| std::cmp::Reverse(slot.full_size));
     if slots.len() >= 2 {
         slots.swap(0, 1);
     }

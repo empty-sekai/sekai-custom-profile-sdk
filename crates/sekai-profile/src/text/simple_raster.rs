@@ -273,9 +273,10 @@ mod tests {
 
     #[test]
     fn the_blend_is_exact_at_the_coverage_endpoints() {
+        let blend = |dst: u32, coverage: u32| dst + (((255 - dst) * (coverage + 1)) >> 8);
         for dst in 0..=255u32 {
-            assert_eq!(dst + (((255 - dst) * 256) >> 8), 255, "full coverage");
-            assert_eq!(dst + (((255 - dst) * 1) >> 8), dst, "zero coverage stays");
+            assert_eq!(blend(dst, 255), 255, "full coverage");
+            assert_eq!(blend(dst, 0), dst, "zero coverage stays");
         }
     }
 }

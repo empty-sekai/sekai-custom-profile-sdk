@@ -566,7 +566,7 @@ fn populate_profile_base(snapshot: &mut ProfileResolveSnapshot, sources: Snapsho
             })
         });
         let mut ordered_honor_slots = profile.honor_slots.iter().collect::<Vec<_>>();
-        ordered_honor_slots.sort_by(|left, right| right.full_size.cmp(&left.full_size));
+        ordered_honor_slots.sort_by_key(|slot| std::cmp::Reverse(slot.full_size));
         if ordered_honor_slots.len() >= 2 {
             ordered_honor_slots.swap(0, 1);
         }
