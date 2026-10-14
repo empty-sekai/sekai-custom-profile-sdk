@@ -133,11 +133,12 @@ struct RenderArgs {
     /// Keep the page background transparent (PNG only)
     #[arg(long)]
     transparent: bool,
-    /// JPEG quality
+    /// JPEG quality; ignored for PNG output
     #[arg(long, value_name = "1-100", default_value_t = 90,
           value_parser = clap::value_parser!(u8).range(1..=100))]
     quality: u8,
-    /// SDF executor; `auto` uses AVX-512 when the CPU supports it
+    /// SDF executor; `auto` uses AVX-512 when the CPU supports it, and
+    /// `simd` fails on a CPU without AVX-512 F, BW and VBMI plus FMA
     #[arg(long, value_enum, default_value_t = Executor::Auto)]
     executor: Executor,
 }
@@ -694,7 +695,12 @@ mod tests {
     #[test]
     fn a_card_argument_takes_precedence_over_the_profile_pages() {
         let profile = json!({ "userCustomProfileCards": "not pages" });
-        assert!(select_card(Some(json!({})), Some(&profile), PageSelection::Index(0)).is_ok());
+        let card = select_card(Some(json!({})), Some(&profile), PageSelection::Index(0))
+            .expect("the card argument");
+        assert_eq!(
+            card,
+            serde_json::from_value::<CustomProfileCard>(json!({})).expect("empty card")
+        );
         assert!(select_card(None, Some(&profile), PageSelection::Index(0)).is_err());
         assert!(select_card(None, None, PageSelection::Index(0)).is_err());
     }

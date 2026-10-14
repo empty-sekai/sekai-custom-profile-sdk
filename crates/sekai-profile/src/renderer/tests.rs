@@ -290,6 +290,10 @@ fn direct_opaque_bounds_match_scalar_and_vector_paths() {
         && std::arch::is_x86_feature_detected!("bmi2")
     {
         assert_eq!(
+            // SAFETY: the AVX-512F/BW/BMI2 detection above satisfies the
+            // kernel's target-feature contract, and `source` is
+            // `row_bytes * surface_height` bytes with
+            // `row_bytes >= surface_width * 4`.
             unsafe { find_opaque_bounds_avx512(&source, surface_width, surface_height, row_bytes) },
             (1, 1, 2, 2)
         );
@@ -496,7 +500,7 @@ impl MasterDataProvider for RegionalProvider {
         None
     }
     fn resolve_font(&self, _font_id: i32) -> Option<String> {
-        Some(crate::profile_compositor::theme::fonts::PRIMARY.into())
+        Some("FZLanTingHei-DB-GBK".into())
     }
     fn resolve_stamp(&self, _stamp_id: i32) -> Option<String> {
         None
@@ -957,5 +961,195 @@ fn a_region_without_the_icon_tables_still_renders_the_rest_of_the_page() {
     assert_eq!(pixel_at(&output, 0.0, 200.0), [0, 0, 255, 255]);
     for (x, y) in [(-600.0, 0.0), (0.0, 0.0), (600.0, 0.0)] {
         assert_eq!(pixel_at(&output, x, y), [0; 4], "({x}, {y})");
+    }
+}
+
+/// The scalar, transparent config the pixel checks above render with.
+fn scalar_transparent() -> RenderConfig {
+    RenderConfig {
+        executor: crate::SdfExecutor::Scalar,
+        background: crate::Background::Transparent,
+        ..RenderConfig::default()
+    }
+}
+
+#[test]
+fn a_batch_renders_each_page_as_a_single_render_does() {
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let config = scalar_transparent();
+    let single = renderer.render(&card, None, &config).expect("single page");
+    let batch = renderer
+        .render_batch("batch", "cn", [(2, &card), (1, &card)], None, &config)
+        .expect("batch");
+    let seqs: Vec<i32> = batch.pages.iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(seqs, [1, 2], "pages come back in ascending seq order");
+    assert_eq!(batch.compiled.pages.len(), 2);
+    for (seq, page) in &batch.pages {
+        assert_eq!(
+            (page.width(), page.height()),
+            (single.width(), single.height()),
+            "seq {seq}"
+        );
+        assert_eq!(
+            page.premultiplied_rgba(),
+            single.premultiplied_rgba(),
+            "seq {seq}"
+        );
+    }
+    // The store holds none of the page's images, so the batch reports each
+    // one missing and decodes it from the asset store instead.
+    let prepared = batch
+        .prepared_render_objects
+        .expect("a store is installed, so the batch reports its coverage");
+    assert_eq!(prepared.mapped_object_count, 0);
+    assert!(!prepared.missing_object_keys.is_empty());
+    assert_eq!(
+        prepared.missing_page_object_keys.keys().copied().collect::<Vec<_>>(),
+        [1, 2]
+    );
+}
+
+#[test]
+fn a_batch_refuses_a_config_the_cpu_cannot_run_before_compiling() {
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let invalid = RenderConfig {
+        tile_width: 24,
+        ..scalar_transparent()
+    };
+    match renderer.render_batch("batch", "cn", [(1, &card)], None, &invalid) {
+        Err(crate::RenderError::InvalidTileSize { width, height }) => {
+            assert_eq!((width, height), (24, 32));
+        }
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("an invalid tile size renders"),
+    }
+}
+
+#[test]
+fn a_white_page_differs_from_a_transparent_one_only_where_nothing_is_drawn() {
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let transparent = renderer
+        .render(&card, None, &scalar_transparent())
+        .expect("transparent");
+    let white = renderer
+        .render(
+            &card,
+            None,
+            &RenderConfig {
+                background: crate::Background::White,
+                ..scalar_transparent()
+            },
+        )
+        .expect("white");
+    assert_eq!(transparent.background(), crate::Background::Transparent);
+    assert_eq!(white.background(), crate::Background::White);
+    // An empty spot is cleared to each background.
+    assert_eq!(pixel_at(&transparent, 600.0, 200.0), [0; 4]);
+    assert_eq!(pixel_at(&white, 600.0, 200.0), [255; 4]);
+    // An opaque icon covers the background either way.
+    assert_eq!(pixel_at(&white, -600.0, 0.0), [255, 0, 0, 255]);
+    assert_eq!(pixel_at(&transparent, -600.0, 0.0), [255, 0, 0, 255]);
+}
+
+#[test]
+fn capabilities_report_what_the_renderer_has_installed() {
+    let bare = CustomProfileRenderer::new(Arc::new(NullProvider));
+    let capabilities = bare.capabilities();
+    assert_eq!(capabilities.simd, crate::sdf_simd_available());
+    assert_eq!(capabilities.text_atlases, 0);
+    assert!(!capabilities.shape_atlas);
+    assert!(!capabilities.render_objects);
+    assert!(!capabilities.fallback_glyphs);
+
+    let (_temp, with_store) = icon_page_renderer(true);
+    assert!(with_store.capabilities().render_objects);
+}
+
+#[test]
+fn an_empty_atlas_directory_installs_nothing_and_still_renders() {
+    let root = tempfile::tempdir().expect("root");
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let renderer = renderer
+        .with_atlas_dir(root.path().join("absent"))
+        .expect("an absent directory installs no atlas");
+    let capabilities = renderer.capabilities();
+    assert_eq!(capabilities.text_atlases, 0);
+    assert!(!capabilities.shape_atlas);
+    let page = render_transparent(&renderer, &card).expect("rendered page");
+    assert_eq!(pixel_at(&page, -600.0, 0.0), [255, 0, 0, 255]);
+}
+
+#[test]
+fn the_cache_identity_follows_the_installed_store() {
+    let without = CustomProfileRenderer::new(Arc::new(NullProvider));
+    let (_temp, with_store) = icon_page_renderer(true);
+    let config = RenderConfig::default();
+    assert_ne!(
+        without.cache_identity(&config).expect("identity"),
+        with_store.cache_identity(&config).expect("identity"),
+    );
+    let generation = with_store.pin_render_object_generation();
+    assert_eq!(
+        with_store.cache_identity(&config).expect("identity"),
+        with_store
+            .cache_identity_pinned(&config, &generation)
+            .expect("pinned identity"),
+    );
+}
+
+#[cfg(feature = "jpeg-turbo")]
+#[test]
+fn an_encoded_page_carries_the_page_size_and_its_telemetry() {
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let page = renderer
+        .render(
+            &card,
+            None,
+            &RenderConfig {
+                background: crate::Background::White,
+                ..scalar_transparent()
+            },
+        )
+        .expect("page");
+    let (width, height) = (page.width(), page.height());
+    let encoded = renderer
+        .encode_jpeg(page, crate::JpegOptions::default())
+        .expect("jpeg");
+    assert_eq!((encoded.width, encoded.height), (width, height));
+    assert_eq!(&encoded.bytes[..2], &[0xff, 0xd8], "a JPEG starts with SOI");
+    assert_eq!(
+        encoded.telemetry.bytes.encoded_output_bytes,
+        encoded.bytes.len() as u64
+    );
+    assert_eq!(encoded.telemetry.jpeg, Some(crate::JpegOptions::default()));
+}
+
+#[cfg(feature = "jpeg-turbo")]
+#[test]
+fn jpeg_quality_outside_1_to_100_is_refused() {
+    let card = icon_page();
+    let (_temp, renderer) = icon_page_renderer(true);
+    let white = RenderConfig {
+        background: crate::Background::White,
+        ..scalar_transparent()
+    };
+    for quality in [0, 101] {
+        let page = renderer.render(&card, None, &white).expect("page");
+        let error = renderer
+            .encode_jpeg(
+                page,
+                crate::JpegOptions {
+                    quality,
+                    ..crate::JpegOptions::default()
+                },
+            )
+            .err()
+            .expect("an out-of-range quality is refused");
+        assert!(error.to_string().contains("quality"), "{error}");
     }
 }

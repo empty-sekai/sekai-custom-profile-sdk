@@ -601,7 +601,8 @@ fn checkpoint_rejects_a_revision_that_cannot_round_trip_through_javascript() {
     }
     let mut largest = checkpoint;
     largest["revision"] = Value::from((1u64 << 53) - 1);
-    assert!(AuthoringSession::from_checkpoint_value(largest).is_ok());
+    let restored = AuthoringSession::from_checkpoint_value(largest).expect("largest revision");
+    assert_eq!(restored.revision(), (1u64 << 53) - 1);
 }
 
 #[test]

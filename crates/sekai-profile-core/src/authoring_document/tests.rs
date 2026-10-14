@@ -187,7 +187,8 @@ fn rejects_elements_without_the_game_object_data_shape() {
 
     let mut value = GameProfileDocument::blank().export_value();
     value["userCustomProfileCards"][0]["customProfileCard"]["shapes"] = json!([element()]);
-    assert!(GameProfileDocument::from_export_value(value).is_ok());
+    let document = GameProfileDocument::from_export_value(value.clone()).expect("valid element");
+    assert_eq!(document.export_value(), value);
 }
 
 #[test]
@@ -197,7 +198,12 @@ fn icon_arrays_may_be_absent_but_are_checked_when_present() {
         value["userCustomProfileCards"][0]["customProfileCard"][key] = values;
         GameProfileDocument::from_export_value(value)
     };
-    assert!(with("characterIcons", json!([element()])).is_ok());
+    assert_eq!(
+        with("characterIcons", json!([element()]))
+            .expect("an icon array")
+            .export_value()["userCustomProfileCards"][0]["customProfileCard"]["characterIcons"],
+        json!([element()])
+    );
     assert_eq!(
         with("materials", json!({})),
         Err(GameProfileDocumentError::CardCategoryMustBeArray {
