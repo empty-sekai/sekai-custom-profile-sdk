@@ -17,6 +17,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Tests that exercise font loading, SDF glyph generation and text layout look
+  # up families through the directories this names, and skip themselves when a
+  # family is missing. Pointing it at the runner's DejaVu fonts keeps those
+  # tests running instead of silently passing.
+  FONT_DIR: /usr/share/fonts/truetype/dejavu
 
 jobs:
   # -- 1. Lint + tests. Gates everything else. ----------------------
@@ -34,13 +39,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfreetype6-dev libx264-dev pkg-config
+            libfreetype6-dev libx264-dev pkg-config fonts-dejavu-core
 
       - run: cargo fmt --all -- --check
       # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
       # lints don't gate the release without touching engine source.
-      - run: cargo clippy --workspace --lib --tests -- --cap-lints warn
+      - run: cargo clippy --workspace --all-targets -- --cap-lints warn
       - run: cargo test --workspace --all-features
+      # Public API docs have to build without warnings before they are published.
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude sekai-profile-cli
 
   # -- 1b. Minimal feature set. -----------------------------------
   # The library and the CLI build and test with only FreeType (and
@@ -57,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfreetype6-dev pkg-config
+            libfreetype6-dev pkg-config fonts-dejavu-core
 
       - run: cargo test -p sekai-profile --no-default-features
       - run: cargo build -p sekai-profile-cli
