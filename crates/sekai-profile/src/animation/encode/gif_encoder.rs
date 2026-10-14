@@ -722,6 +722,18 @@ pub(in crate::animation) fn gif_changed_bounds_scalar(
     }
 }
 
+/// Vectorized changed-pixel bounds over two RGBA frames.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, since the body loads ZMM
+/// registers unconditionally.
+///
+/// `previous` and `current` must each be valid for
+/// `width as usize * height as usize * 4` bytes, and that product must not
+/// overflow `usize`. For every row `y` the body forms raw row pointers at
+/// `y * width * 4`, loads 64 bytes at `x * 4` while `x + 16 <= width`, and
+/// reads the remaining columns of the row as unaligned `u32`s.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(in crate::animation) unsafe fn gif_changed_bounds_avx512(
@@ -796,6 +808,22 @@ fn index_gif_pixels(rgba: &[u8], palette: &[u8], palette_lookup: &mut GifPalette
         .collect()
 }
 
+/// Indexes a whole RGBA buffer against the palette, with a vectorized main
+/// loop over the direct-mapped cache.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, since the body uses AVX-512
+/// loads, gathers and scatters unconditionally.
+///
+/// When `palette_lookup.direct` is `Some`, its table must hold at least
+/// `GifPaletteLookup::DIRECT_SLOTS` entries, as `GifPaletteLookup::new`
+/// allocates it: the body gathers from and scatters to that table through a
+/// raw pointer at slot indices masked with `DIRECT_SLOTS - 1`.
+///
+/// The vector loop reads 64 bytes of `rgba` at `offset * 4` only while
+/// `offset + 16 <= rgba.len() / 4` and stores 16 bytes of the output at
+/// `offset`, so those accesses stay in bounds for any `rgba`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn index_gif_pixels_avx512(
@@ -950,6 +978,19 @@ pub(in crate::animation) fn nearest_gif_palette_index_scalar(
     best_index
 }
 
+/// Nearest palette entry to one opaque RGBA pixel, scanning the palette in
+/// 16-entry vector batches.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, since the body loads ZMM
+/// registers unconditionally.
+///
+/// `palette.active_colors` must not exceed 256. The body loads 16 lanes at a
+/// time from `palette_r`, `palette_g` and `palette_b`, each a `[u32; 256]`, up
+/// to `active_colors.div_ceil(16) * 16` entries, which stays inside the arrays
+/// only under that bound. `GifPaletteLookup::new` clamps `active_colors` to
+/// `1..=255`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 pub(in crate::animation) unsafe fn nearest_gif_palette_index_avx512(

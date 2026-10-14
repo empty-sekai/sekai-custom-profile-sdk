@@ -131,6 +131,13 @@ pub(super) fn raster_semantic_shape_command(
             while x < x1 {
                 let packet = (x1 - x).min(16);
                 let destination_offset = ((y as usize * canvas_width as usize) + x as usize) * 4;
+                // SAFETY: `ImageExecutor::Simd` is only constructed after
+                // `is_x86_feature_detected!` has confirmed `avx512f` and
+                // `avx512bw`, and `fma` is detected on this branch. The command
+                // loop has checked `destination.len() == canvas_width *
+                // canvas_height * 4`; `x0..x1` and `y0..y1` are clamped to the
+                // canvas, so `destination_offset` is pixel `(x, y)` and the
+                // `packet <= 16` lanes up to `x1` stay inside that row.
                 let active = unsafe {
                     simd_x86::raster_semantic_shape_packet(
                         destination.as_mut_ptr().add(destination_offset),
@@ -304,6 +311,14 @@ pub(super) fn raster_image_command(
         && matrix[2].to_bits() == 0.0f32.to_bits()
     {
         #[cfg(target_arch = "x86_64")]
+        // SAFETY: `packet_blend` requires `ImageExecutor::Simd`, which is only
+        // constructed after `is_x86_feature_detected!` has confirmed `avx512f`
+        // and `avx512bw`, and the branch condition is the axis-aligned,
+        // positively scaled matrix the kernel requires. `validate_object` has
+        // shown `source.pixels` to be exactly `row_bytes * height` bytes with
+        // `row_bytes >= width * 4`, `destination` is the full canvas the
+        // command loop length-checked, and `x0..x1`/`y0..y1` are non-empty
+        // spans clamped to that canvas.
         unsafe {
             return Ok(raster_axis_aligned_image_command(
                 destination,
@@ -336,6 +351,15 @@ pub(super) fn raster_image_command(
                         height: canvas_height,
                     }
                 })?;
+                // SAFETY: `affine_packet_blend` implies `ImageExecutor::Simd`,
+                // which is only constructed after `is_x86_feature_detected!`
+                // has confirmed `avx512f` and `avx512bw`. It also requires
+                // `source.pixels.len()` and `row_bytes` to fit an `i32`, so the
+                // gather offsets cannot wrap, and `validate_object` has shown
+                // the source to be exactly `row_bytes * height` bytes with
+                // `row_bytes >= width * 4`. `destination_packet` starts at
+                // pixel `(x, y)` and `packet_end - x <= 16` lanes end at `x1`,
+                // inside the canvas row.
                 let active_mask = unsafe {
                     simd_x86::sample_affine_and_blend_rgba8_packet(
                         destination_packet.as_mut_ptr(),
@@ -414,6 +438,12 @@ pub(super) fn raster_image_command(
                     }
                 })?;
                 #[cfg(target_arch = "x86_64")]
+                // SAFETY: `packet_blend` implies `ImageExecutor::Simd`, which is
+                // only constructed after `is_x86_feature_detected!` has
+                // confirmed `avx512f` and `avx512bw`. `destination_packet`
+                // starts at pixel `(x, y)` and `active_mask` only sets lanes
+                // below `packet_end - x`, so every selected pixel is inside the
+                // canvas row; `source_pixels` is a local `[u32; 16]`.
                 unsafe {
                     simd_x86::blend_rgba8_packet(
                         destination_packet.as_mut_ptr(),
@@ -449,6 +479,23 @@ pub(super) fn raster_image_command(
     Ok(stats)
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`; [`raster_image_command`] reaches this only through
+/// `ImageExecutor::Simd`, which the compositor selects after
+/// `is_x86_feature_detected!` has confirmed both. `inverse` must be the inverse
+/// of an axis-aligned, positively scaled matrix, so every device column maps
+/// to one source column for the whole span.
+///
+/// `destination` must be a canvas of `canvas_width * 4`-byte rows holding at
+/// least `y1` rows, and `x0 <= x1 <= canvas_width` and `y0 <= y1` must hold.
+/// `source.pixels` must be exactly `source.entry.row_bytes *
+/// source.entry.height` bytes with `row_bytes >= width * 4`, as
+/// `validate_object` checks, so that every row base `source_y * row_bytes`
+/// and every texel column below `width` addresses a pixel inside it. The
+/// kernels are called with raw pointers derived from these buffers and only
+/// touch the lanes each packet's mask selects.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 #[allow(clippy::too_many_arguments)]

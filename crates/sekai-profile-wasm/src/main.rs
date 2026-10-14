@@ -46,6 +46,8 @@ fn keep_exports() {
         exports::sdf_layout_freetype_free_string as *const (),
     ];
     for &function in anchors {
+        // SAFETY: `&function` is a reference to a live local `*const ()`, so it
+        // is non-null, aligned and initialized for a volatile read.
         unsafe { core::ptr::read_volatile(&function) };
     }
 }

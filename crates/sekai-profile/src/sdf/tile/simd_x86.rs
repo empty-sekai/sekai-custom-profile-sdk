@@ -19,6 +19,21 @@ const LANE_OFFSETS: [f32; LANES] = [
     0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
 ];
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+/// `SdfTilePlan::execute_simd` and `SdfTilePlan::execute_simd_f32_over` in
+/// `execute.rs` are the only callers, and both establish this with
+/// `is_x86_feature_detected!` before the call.
+///
+/// No other precondition is placed on the caller. `output` must be exactly
+/// `canvas_width * canvas_height * 4` bytes for the plan's grid and is rejected
+/// with `SdfTileError::OutputLength` otherwise; command, span and program
+/// lookups go through checked accessors; every page payload is validated by
+/// `validate_page` and the block offsets derived from it are checked again at
+/// each table load. The tile vectors handed to the kernels below are sized
+/// `tile_width * tile_height` here, and all vector accesses in this module use
+/// unaligned loads and stores, so no alignment is required.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 pub(super) unsafe fn execute(
     plan: &SdfTilePlan,
@@ -231,6 +246,11 @@ pub(super) unsafe fn execute(
         }
 
         let write_span = |row: usize, x0: usize, x1: usize, output: &mut [u8]| unsafe {
+            // SAFETY: the target features were checked before this call; `row`
+            // and `x0..x1` come from plan spans already clipped to the tile and
+            // the canvas, and `tile_width`, `origin_x`, `origin_y` and the
+            // canvas width are the same grid values those spans were built
+            // from, so every index stays inside `tile` and `output`.
             write_span_rgba8(
                 &tile,
                 tile_width,
@@ -264,6 +284,15 @@ pub(super) unsafe fn execute(
     Ok(stats)
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `pixel + length` must not exceed the length of any of the four `tile`
+/// channel vectors. `execute` is the only caller: it passes a span start of
+/// `span.row * tile_width + (begin - origin_x)` and a length of `end - begin`
+/// over channel vectors sized `tile_width * tile_height`, so the span lies
+/// inside a single tile row and the bound holds.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn blend_constant_span(
     tile: &mut [Vec<f32>; 4],
@@ -281,6 +310,18 @@ unsafe fn blend_constant_span(
     }
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `output` must be at least `canvas_width * canvas_height * 4` bytes for the
+/// plan's grid. The offsets are computed as
+/// `(span.y * canvas_width + span.x0) * 4`, so every span of
+/// `plan.direct_axis_shape_spans()` must also satisfy `span.y < canvas_height`
+/// and `span.x1 <= canvas_width`; the spans are built by
+/// `SdfTilePlan::prepare_direct_axis_shape`, which clips them to the canvas.
+/// `execute` is the only caller and checks the output length before dispatching
+/// here.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn execute_axis_shape_direct_over(
     plan: &SdfTilePlan,
@@ -314,6 +355,14 @@ unsafe fn execute_axis_shape_direct_over(
     Ok(stats)
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// The run `[output_pixel, output_pixel + pixels * 4)` must lie inside
+/// `output`, and `output_pixel` must be a multiple of four so that a packet
+/// covers whole RGBA texels. `execute_axis_shape_direct_over` is the only
+/// caller and derives both from the clipped plan spans described there.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn blend_output_constant_span_rgba8(
     output: &mut [u8],
@@ -366,6 +415,16 @@ unsafe fn blend_output_constant_span_rgba8(
     }
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
+///
+/// `execute` is the only caller and passes `valid_width`/`valid_height` clipped
+/// to the tile, so `valid_width <= tile_width` and `valid_height <= tile_height`
+/// must hold. The read window `[origin_y + valid_height) x [origin_x +
+/// valid_width)` must lie inside a canvas of `canvas_width * canvas_height * 4`
+/// bytes, and every channel vector must hold at least
+/// `(valid_height - 1) * tile_width + valid_width` elements.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
 unsafe fn load_existing_tile_rgba8(
     tile: &mut [Vec<f32>; 4],
@@ -402,6 +461,15 @@ unsafe fn load_existing_tile_rgba8(
     }
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f` and `avx512bw`.
+///
+/// `row < tile_height` and `x1 <= tile_width` for the four `tile` channel
+/// vectors, and `(origin_y + row) * canvas_width + origin_x + x1` must not
+/// exceed `canvas_width * canvas_height`. `execute` calls this through the
+/// `write_span` closure with tile-relative rows and columns taken from the plan
+/// spans, which `SdfTilePlan` clips to the tile and canvas.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn write_span_rgba8(
     tile: &[Vec<f32>; 4],
@@ -463,6 +531,10 @@ unsafe fn write_span_rgba8(
     }
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f` and `avx512bw`. The argument is
+/// passed and returned by value, so no further precondition applies.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn quantize_packet(value: __m512) -> __m128i {
     _mm512_cvtusepi32_epi8(_mm512_cvttps_epi32(round_to_255_steps(value)))
@@ -503,6 +575,16 @@ fn validate_page(command: &PlannedCommand, page: SdfSwizzledPage<'_>) -> Result<
     Ok(())
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `page` must come from `atlas.swizzled_page` for the command's source and
+/// must have passed `validate_page`, which is what makes its `payload` the
+/// expected size and its `width`/`height` multiples of eight. `tx` and `ty` are
+/// register values and carry no pointer requirements; the block and texel
+/// offsets derived from them are bounds-checked before every load in
+/// `sample_text` and `gather_texel`. `execute` is the only caller.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn shade_text_packet(
     command: &PlannedCommand,
@@ -572,6 +654,14 @@ unsafe fn shade_text_packet(
     Ok((source, used_swizzle, 4))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// As with `shade_text_packet`, `page` must have passed `validate_page` so that
+/// its `payload` matches the command's format and its dimensions are multiples
+/// of eight; `sample_shape` and `gather_texel` then bounds-check every derived
+/// block offset against `page.payload.len()`. `execute` is the only caller.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn shade_shape_packet(
     command: &PlannedCommand,
@@ -622,6 +712,19 @@ unsafe fn shade_shape_packet(
     Ok((source, used_swizzle, 1))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `page` must have passed `validate_page`, so its `payload` is exactly
+/// `width * height` bytes of `TextR8` data and `width`/`height` are multiples
+/// of eight: `x0`/`x1` must be inside `[rect_x, rect_x + rect_width)` and
+/// `y0`/`y1` inside `[rect_y, rect_y + rect_height)`, and `rect_x + rect_width`
+/// and `rect_y + rect_height` must not exceed `page.width`/`page.height`. That
+/// keeps every `block_ids` index within `(width / 8) * (height / 8)`, and
+/// `sample_text_block` and `gather_texel` re-check each block and byte offset
+/// against `page.payload.len()` before loading. `shade_text_packet` is the only
+/// caller and clamps the coordinates to the atlas rectangle first.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn sample_text(
     page: SdfSwizzledPage<'_>,
@@ -690,6 +793,11 @@ unsafe fn sample_text(
     ))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`. All
+/// arguments and the result are register values, so no further precondition
+/// applies.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
 unsafe fn text_sample_indices(x0: __m512i, x1: __m512i, y0: __m512i, y1: __m512i) -> __m512i {
     let i00 = _mm512_cvtepi32_epi8(local_offsets(x0, y0));
@@ -702,6 +810,10 @@ unsafe fn text_sample_indices(x0: __m512i, x1: __m512i, y0: __m512i, y1: __m512i
     _mm512_inserti32x4(indices, i11, 3)
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. All arguments are register values
+/// and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn text_blocks_covered_by_pair(
     blocks: [__m512i; 4],
@@ -717,6 +829,18 @@ unsafe fn text_blocks_covered_by_pair(
     })
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
+///
+/// `block` must be a non-negative block id and `page.payload` must be the
+/// `TextR8` payload that `validate_page` accepted, so that the 64-byte table at
+/// `block * 64` lies inside it. The `block * 64` multiply, the
+/// `+ 64 <= page.payload.len()` bound and the `i32`-negative rejection are all
+/// performed here, so a caller that satisfies the format contract cannot make
+/// this load go out of bounds. `sample_text` is the only caller, and it only
+/// offers `first_block` and its `checked_add(1)`/`checked_sub(1)` neighbours
+/// derived from `block_ids`.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
 unsafe fn sample_text_block(
     page: SdfSwizzledPage<'_>,
@@ -738,6 +862,19 @@ unsafe fn sample_text_block(
     ])
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `page` must have passed `validate_page`, so its `payload` is exactly
+/// `width * height * 2` bytes of `ShapeRg8` data and `width`/`height` are
+/// multiples of eight. `x` and `y` must lie inside `[rect_x, rect_x +
+/// rect_width)` and `[rect_y, rect_y + rect_height)`, with those sums not
+/// exceeding `page.width`/`page.height`, so every `block_ids` value is a valid
+/// block id. `sample_shape_block` and `gather_texel` reject a block or byte
+/// offset that leaves `page.payload`, so a stale or inconsistent rectangle
+/// cannot turn into an out-of-bounds load. `shade_shape_packet` is the only
+/// caller and clamps the nearest texel to the rectangle first.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn sample_shape(
     page: SdfSwizzledPage<'_>,
@@ -812,6 +949,17 @@ unsafe fn sample_shape(
     ))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
+///
+/// `page` must satisfy the same `validate_page` contract as in `sample_shape`.
+/// `first_block` must match the block id of the lanes in `first_lanes`; the
+/// block ids collected for the remaining active lanes are derived from `blocks`
+/// itself, and each is passed to `sample_shape_block`, which rejects an offset
+/// that leaves `page.payload`. The `block_ids` and `lane_masks` staging arrays
+/// are fixed at eight entries and the collection loop stops at that length, so
+/// the indices used here stay inside both.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
 unsafe fn sample_shape_up_to_eight_blocks(
     page: SdfSwizzledPage<'_>,
@@ -850,6 +998,17 @@ unsafe fn sample_shape_up_to_eight_blocks(
     Ok(Some((distance, gate)))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw` and `avx512vbmi`.
+///
+/// `block` must be non-negative and `page.payload` must be the `ShapeRg8`
+/// payload `validate_page` accepted, so the 128-byte window at `block * 128`
+/// lies inside the payload, which the `+ 128 <= page.payload.len()` bound below
+/// checks along with the `i32`-negative rejection. `indices` is a register; the
+/// two table operands are loaded with plain 64-byte unaligned loads, so no
+/// alignment is required. Called from `sample_shape` and
+/// `sample_shape_up_to_eight_blocks` with block ids taken from `block_ids`.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi")]
 unsafe fn sample_shape_block(
     page: SdfSwizzledPage<'_>,
@@ -870,6 +1029,22 @@ unsafe fn sample_shape_block(
     ))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// `page` must have passed `validate_page`, and `x`/`y` must lie inside the
+/// command's atlas rectangle within `page.width`/`page.height`, so the derived
+/// `block_ids * block_bytes + local_offsets * channels + channel` offsets name
+/// an in-range texel. Two properties of the gather below depend on this: the
+/// masked-off lanes produce no memory access, and every active lane's `i32`
+/// offset is verified against `max_offset` (and against `max_logical_offset`,
+/// with a scalar `read_packed_texel` fallback when a four-byte load would read
+/// past the payload). `page.payload.len()` must therefore be the real extent of
+/// the payload slice rather than a truncated view, and `page.payload` must be
+/// the base the offsets were computed from. The `lane_offsets` and `packed`
+/// staging arrays hold exactly `LANES` entries, matching the gather's 16 lanes.
+/// Called from `sample_text`, `sample_shape` and `shade_shape_packet`.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn gather_texel(
     page: SdfSwizzledPage<'_>,
@@ -946,6 +1121,11 @@ fn read_packed_texel(payload: &[u8], offset: i32, channels: usize) -> Result<i32
         }))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+/// All arguments and the result are register values; the function touches no
+/// memory.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn shape_coverage(distance: __m512, gate: __m512, offset: f32, scale: f32) -> __m512 {
     let coverage = clamp01(_mm512_mul_ps(
@@ -955,6 +1135,18 @@ unsafe fn shape_coverage(distance: __m512, gate: __m512, offset: f32, scale: f32
     _mm512_mul_ps(coverage, unit_from_steps(gate))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`, `avx512bw`, `avx512vbmi` and `fma`.
+///
+/// For every lane selected in `active`, `pixel + lane` must be a valid index in
+/// each of the four `tile` channel vectors; `blend_packet` reads and writes
+/// exactly those lanes. `execute` and `blend_constant_span` are the only
+/// callers, and both index a tile of `tile_width * tile_height` elements within
+/// one or two consecutive 16-pixel runs, so the masked lanes stay inside the
+/// vectors. Lanes outside `active` are left untouched by the masked load and
+/// store, and the source-over result depends on the destination values read
+/// here, so the caller must own `tile` exclusively.
 #[target_feature(enable = "avx512f,avx512bw,avx512vbmi,fma")]
 unsafe fn blend_packet(
     tile: &mut [Vec<f32>; 4],
@@ -983,6 +1175,11 @@ unsafe fn blend_packet(
 /// The texel the scalar sampler picks: the floor, plus one once the
 /// fractional part reaches one half. Adding 0.5 before flooring would round
 /// coordinates just below a half up.
+///
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The argument and result are register
+/// values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn nearest_texel(coordinate: __m512) -> __m512i {
     let floor = floor_ps(coordinate);
@@ -994,6 +1191,11 @@ unsafe fn nearest_texel(coordinate: __m512) -> __m512i {
 /// `(clamp01(value) * 255).round()` with `f32::round` semantics, still in
 /// float. The scaled value is non-negative and its distance to its floor is
 /// exact, so ties and near-ties resolve exactly as in the scalar path.
+///
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The argument and result are register
+/// values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn round_to_255_steps(value: __m512) -> __m512 {
     let scaled = _mm512_mul_ps(clamp01(value), _mm512_set1_ps(255.0));
@@ -1003,16 +1205,29 @@ unsafe fn round_to_255_steps(value: __m512) -> __m512 {
 }
 
 /// Unit-range value of 8-bit samples, divided like the scalar path.
+///
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The argument and result are register
+/// values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn unit_from_steps(steps: __m512) -> __m512 {
     _mm512_div_ps(steps, _mm512_set1_ps(255.0))
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The argument and result are register
+/// values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn floor_ps(value: __m512) -> __m512 {
     _mm512_roundscale_ps::<{ _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC }>(value)
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The argument and result are register
+/// values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn clamp01(value: __m512) -> __m512 {
     _mm512_min_ps(
@@ -1021,6 +1236,10 @@ unsafe fn clamp01(value: __m512) -> __m512 {
     )
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The arguments and result are
+/// register values and the function touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn clamp_i32(value: __m512i, minimum: i32, maximum: i32) -> __m512i {
     _mm512_min_epi32(
@@ -1029,6 +1248,13 @@ unsafe fn clamp_i32(value: __m512i, minimum: i32, maximum: i32) -> __m512i {
     )
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The arguments and result are
+/// register values; the function touches no memory. `width` must be the width
+/// of the swizzled page the lanes will address so that the result is a real
+/// block id, which the callers `sample_text`, `sample_shape` and `gather_texel`
+/// re-check against `page.payload.len()` before any load.
 #[target_feature(enable = "avx512f")]
 unsafe fn block_ids(width: u32, x: __m512i, y: __m512i) -> __m512i {
     _mm512_add_epi32(
@@ -1040,6 +1266,12 @@ unsafe fn block_ids(width: u32, x: __m512i, y: __m512i) -> __m512i {
     )
 }
 
+/// # Safety
+///
+/// The calling CPU must support `avx512f`. The arguments and result are
+/// register values; the function touches no memory. The result is an index
+/// within one 8x8 swizzle block, so the caller must combine it with a block id
+/// and the page's per-block stride before using it to address `page.payload`.
 #[target_feature(enable = "avx512f")]
 unsafe fn local_offsets(x: __m512i, y: __m512i) -> __m512i {
     _mm512_add_epi32(

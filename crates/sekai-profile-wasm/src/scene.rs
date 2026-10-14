@@ -411,6 +411,23 @@ pub fn advance(handle: u32, tick: u64) -> Result<String, String> {
     })
 }
 
+/// Advances the scene behind `handle` to `tick` and writes the resulting delta
+/// into `output` in the little-endian binary layout the browser runtime reads:
+/// a 40-byte header followed by one 24-byte record per patch.
+///
+/// # Safety
+///
+/// `output` must either be null or point to at least `capacity` writable
+/// bytes that stay valid for the call and are not aliased by any other live
+/// reference. The required length is `40 + layer_count * 24`, where
+/// `layer_count` is the number of layers in that scene: the function checks
+/// that `output` is non-null and `capacity` reaches this length before
+/// writing, and returns an error without touching `output` otherwise. Each
+/// patch belongs to a distinct layer, so the `40 + patches * 24` bytes the
+/// internal `from_raw_parts_mut` covers never exceed `capacity`; that slice is
+/// sound only because the caller guarantees `capacity` describes real,
+/// writable memory at `output`. On success the return value is the number of
+/// bytes written.
 pub unsafe fn advance_binary(
     handle: u32,
     tick: u64,
@@ -426,6 +443,10 @@ pub unsafe fn advance_binary(
         }
         let delta = scene.advance_to_tick(tick);
         let required = 40 + delta.patches.len() * 24;
+        // SAFETY: `output` is non-null and `capacity >= maximum`, both checked
+        // above. Each patch belongs to a distinct layer, so
+        // `required <= maximum <= capacity`, and the caller's contract makes
+        // `capacity` bytes at `output` writable and unaliased.
         let bytes = unsafe { std::slice::from_raw_parts_mut(output, required) };
         bytes.fill(0);
         put_u32(bytes, 0, 0x3144_4341);

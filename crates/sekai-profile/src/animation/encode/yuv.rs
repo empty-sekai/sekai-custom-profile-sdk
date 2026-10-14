@@ -207,6 +207,28 @@ fn rgba_to_yuv420p_block_scalar(
     }
 }
 
+/// Converts only the listed macroblocks of one RGBA frame into an existing
+/// yuv420p buffer.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, since the body
+/// executes AVX-512 instructions unconditionally.
+///
+/// `width` and `height` must be non-zero and even, with `width * height * 4`
+/// free of overflow; each block is converted two rows at a time.
+///
+/// `rgba` must be valid for `width * height * 4` bytes, and `yuv.len()` must
+/// equal `width * height * 3 / 2`. The vector path writes the Y plane at
+/// offset 0 and the U and V planes from `width * height` and
+/// `width * height * 5 / 4` through raw pointers, while partial-width blocks
+/// go to `rgba_to_yuv420p_block_scalar`, which derives the plane split from
+/// `yuv.len()`; the two layouts agree only at that exact length.
+///
+/// Every index in `changed_macroblocks` must be below
+/// `width.div_ceil(16) * height.div_ceil(16)`. A larger index places the
+/// block's first row at or past `height`, and the unchecked row loads and
+/// stores would then leave both buffers.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn rgba_to_yuv420p_macroblocks_avx512(
@@ -315,6 +337,27 @@ fn rgb_to_limited_v(r: i32, g: i32, b: i32) -> u8 {
     (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8
 }
 
+/// Converts one whole RGBA frame to limited-range yuv420p.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, since the body
+/// executes AVX-512 instructions unconditionally.
+///
+/// `width` and `height` must be non-zero and even, with `width * height * 4`
+/// free of overflow: rows are converted in pairs and the scalar tail reads
+/// pixel pairs, so an odd dimension would read one row or column past the
+/// frame.
+///
+/// `rgba` must be valid for `width * height * 4` bytes. The vector path loads
+/// 32 pixels at a time from each row pair while `x < width & !31`, and the
+/// scalar tail reads the remaining columns.
+///
+/// `yuv` must be valid for `width * height * 3 / 2` bytes, laid out as I420:
+/// Y at offset 0, U at `width * height`, V at `width * height * 5 / 4`, rows
+/// tightly packed. The body writes 16 luma bytes at `y * width + x` and 16
+/// chroma bytes at `(y / 2) * (width / 2) + x / 2` in each plane through raw
+/// pointers, with no bounds check.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline(never)]
@@ -410,6 +453,14 @@ pub(in crate::animation) unsafe fn rgba_to_yuv420p_avx512(
     }
 }
 
+/// Splits sixteen packed RGBA8 pixels, one per 32-bit lane, into red, green
+/// and blue lanes holding `0..=255`.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, the feature this function is
+/// compiled with; it uses `_mm512_and_si512` and `_mm512_srli_epi32` and
+/// touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn avx512_rgb_channels(
@@ -428,6 +479,14 @@ unsafe fn avx512_rgb_channels(
     )
 }
 
+/// Limited-range luma for the sixteen lanes of `r`, `g` and `b`, each holding
+/// `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32` and
+/// `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_limited_y(
@@ -452,6 +511,15 @@ unsafe fn avx512_limited_y(
     _mm512_cvtusepi32_epi8(value)
 }
 
+/// Averages horizontally adjacent lane pairs of `top` and `bottom`, selected
+/// by the lane indices in `even` and `odd`, into eight 2x2 chroma samples in
+/// the low eight lanes, rounding with `+2` before the shift by two.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` support, the feature this function is
+/// compiled with; it uses `_mm512_permutexvar_epi32`, which reads only the low
+/// four bits of each index lane, and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn avx512_pair_average(
@@ -476,6 +544,14 @@ unsafe fn avx512_pair_average(
     ))
 }
 
+/// Limited-range Cb for the sixteen lanes of `r`, `g` and `b`, each holding
+/// `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32`,
+/// `_mm512_srai_epi32` and `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_limited_u(
@@ -500,6 +576,14 @@ unsafe fn avx512_limited_u(
     _mm512_cvtusepi32_epi8(value)
 }
 
+/// Limited-range Cr for the sixteen lanes of `r`, `g` and `b`, each holding
+/// `0..=255`, narrowed to sixteen bytes with unsigned saturation.
+///
+/// # Safety
+///
+/// The caller must verify `avx512f` and `avx512bw` support, the features this
+/// function is compiled with; it uses `_mm512_mullo_epi32`,
+/// `_mm512_srai_epi32` and `_mm512_cvtusepi32_epi8` and touches no memory.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn avx512_limited_v(

@@ -211,6 +211,12 @@ pub(super) fn composite_isolation(
                 } else {
                     (1u16 << packet) - 1
                 };
+                // SAFETY: `ImageExecutor::Simd` is only constructed after
+                // `is_x86_feature_detected!` has confirmed `avx512f` and
+                // `avx512bw`. `parent` and `child` are both full canvases of
+                // `canvas_width * 4`-byte rows, and `bounds` is clamped to the
+                // canvas, so the `packet <= 16` pixels from `offset` that
+                // `active` selects lie inside both buffers.
                 unsafe {
                     simd_x86::blend_rgba8_packet(
                         parent.as_mut_ptr().add(offset),

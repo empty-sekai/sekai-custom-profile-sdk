@@ -1184,6 +1184,9 @@ fn gif_changed_bounds_matches_scalar_across_zmm_tail() {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx512f") {
         assert_eq!(
+            // SAFETY: the `avx512f` detection above satisfies the kernel's
+            // target-feature contract; both frames are
+            // `width * height * 4` bytes.
             unsafe { gif_changed_bounds_avx512(&previous, &current, width, height) },
             expected
         );
@@ -1214,6 +1217,9 @@ fn avx512_gif_palette_distance_matches_scalar() {
             255,
         ];
         let scalar = nearest_gif_palette_index_scalar(&pixel, &palette, 255);
+        // SAFETY: the `avx512f` detection at the top of this test satisfies the
+        // kernel's target-feature contract; `lookup` was filled from a 255-entry
+        // palette, whose channel arrays the lookup pads to 256 lanes.
         let avx512 = unsafe { nearest_gif_palette_index_avx512(&pixel, &lookup) };
         assert_eq!(avx512, scalar, "pixel={pixel:?}");
     }

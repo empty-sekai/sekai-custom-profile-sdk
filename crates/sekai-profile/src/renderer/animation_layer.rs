@@ -927,6 +927,14 @@ pub(super) fn find_opaque_bounds_scalar(
 /// Checks 16 RGBA8 pixels per ZMM load. The compare produces one bit per byte;
 /// BMI2 PEXT compacts byte positions 3, 7, ... 63 into a 16-bit pixel mask.
 /// The tail remains scalar, avoiding masked-load setup once per scanline.
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f`,
+/// `avx512bw` and `bmi2`, as [`find_opaque_bounds`] does before calling.
+/// `pixels` must hold a complete RGBA8 surface: at least `row_bytes * height`
+/// bytes, with `row_bytes >= width * 4` so the stride covers a full row. Every
+/// ZMM load then reads 64 bytes within one row, and the trailing scalar lanes
+/// read the alpha byte of pixels strictly below `width`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,bmi2")]
 pub(super) unsafe fn find_opaque_bounds_avx512(

@@ -352,6 +352,9 @@ impl SdfTilePlan {
             {
                 return Err(SdfTileError::SimdUnavailable);
             }
+            // SAFETY: the AVX-512F/BW/VBMI/FMA checks immediately above
+            // returned for this call, and `output` is a slice whose length the
+            // kernel validates against the tile grid before writing.
             unsafe {
                 simd_x86::execute(
                     self,

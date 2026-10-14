@@ -10,6 +10,15 @@ use sekai_profile_core::{BlendMode, LinearGradient, Matrix2d, Rect, ShapePrimiti
 
 use super::ImageClipGeometry;
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`; the compositor does so with `is_x86_feature_detected!` before
+/// it selects `ImageExecutor::Simd`. For every lane `i` set in `active`,
+/// `source.add(i)` must be readable as a `u32` and the 4 bytes at
+/// `destination.add(i * 4)` must be readable and writable. Lanes outside
+/// `active` are never accessed, because the load and store are masked, and no
+/// alignment beyond that of `u8` is required.
 #[target_feature(enable = "avx512f,avx512bw")]
 pub(super) unsafe fn blend_rgba8_packet(
     destination: *mut u8,
@@ -22,6 +31,16 @@ pub(super) unsafe fn blend_rgba8_packet(
     blend_rgba8_vector(destination, source, active, blend_mode);
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`; the compositor does so with `is_x86_feature_detected!` before
+/// it selects `ImageExecutor::Simd`. For every lane `i` set in `active`,
+/// `source_columns.add(i)` must be readable as a `u32` holding a column below
+/// `i32::MAX / 4`, the 4 bytes at `source_row` plus four times that column
+/// must be readable, and the 4 bytes at `destination.add(i * 4)` must be
+/// readable and writable. The column load, the gather and the store are all
+/// masked by `active`, so other lanes are never accessed.
 #[target_feature(enable = "avx512f,avx512bw")]
 pub(super) unsafe fn gather_and_blend_rgba8_packet(
     destination: *mut u8,
@@ -41,6 +60,13 @@ pub(super) unsafe fn gather_and_blend_rgba8_packet(
     blend_rgba8_vector(destination, source, active, blend_mode);
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`; the compositor does so with `is_x86_feature_detected!` before
+/// it selects `ImageExecutor::Simd`. For every lane `i` set in `active`,
+/// `local_x.add(i)` must be readable as an `f32`. The load is masked by
+/// `active`, so other lanes are never accessed.
 #[target_feature(enable = "avx512f,avx512bw")]
 pub(super) unsafe fn axis_aligned_image_clip_mask(
     local_x: *const f32,
@@ -55,6 +81,19 @@ pub(super) unsafe fn axis_aligned_image_clip_mask(
     image_clip_mask(local_x, local_y, bounds, clip, active) as u16
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`; the compositor does so with `is_x86_feature_detected!` before
+/// it selects `ImageExecutor::Simd`. `lane_count` must be at most 16, and the
+/// `lane_count * 4` bytes at `destination` must be readable and writable.
+/// `source` must address a row-strided RGBA8 image of `source_height` rows of
+/// `source_row_bytes` bytes, with `source_row_bytes >= source_width * 4`, and
+/// `source_row_bytes * source_height` must not exceed `i32::MAX`: the gather
+/// offsets are `i32` and texel coordinates are clamped to
+/// `0..source_width` and `0..source_height`, so every gathered pixel then lies
+/// inside the image. Only lanes that pass the bounds and clip tests are
+/// gathered or written.
 #[target_feature(enable = "avx512f,avx512bw")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn sample_affine_and_blend_rgba8_packet(
@@ -160,6 +199,14 @@ pub(super) unsafe fn sample_affine_and_blend_rgba8_packet(
     active as u16
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f`,
+/// `avx512bw` and `fma`; the compositor detects the first two with
+/// `is_x86_feature_detected!` before it selects `ImageExecutor::Simd`, and
+/// `fma` at the call site. `lane_count` must be at most 16, and the
+/// `lane_count * 4` bytes at `destination` must be readable and writable;
+/// only lanes below `lane_count` that the shape covers are accessed.
 #[target_feature(enable = "avx512f,avx512bw,fma")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn raster_semantic_shape_packet(
@@ -300,6 +347,10 @@ pub(super) unsafe fn raster_semantic_shape_packet(
 /// `(clamp01(value) * 255).round()` with `f32::round` semantics. The distance
 /// from the scaled value to its floor is exact, so a value just below a half
 /// step stays below it instead of being carried up by adding 0.5 first.
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f`. The
+/// function works only on register values and touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn round_unit_to_byte(value: __m512) -> __m512i {
     let unit = _mm512_min_ps(
@@ -312,6 +363,11 @@ unsafe fn round_unit_to_byte(value: __m512) -> __m512i {
     _mm512_cvttps_epi32(_mm512_mask_add_ps(floor, upper, floor, _mm512_set1_ps(1.0)))
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f`. The
+/// function reads `primitive` through a shared reference and otherwise works
+/// only on register values.
 #[target_feature(enable = "avx512f")]
 unsafe fn semantic_shape_mask(
     x: __m512,
@@ -378,6 +434,11 @@ unsafe fn semantic_shape_mask(
     }
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`. The function works only on register values and touches no
+/// memory.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn image_clip_mask(
     local_x: __m512,
@@ -434,6 +495,14 @@ unsafe fn image_clip_mask(
     active & clip_mask
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`. For every lane `i` set in `active`, the 4 bytes at
+/// `destination.add(i * 4)` must be readable and writable and must not be
+/// referenced elsewhere for the call, since the separable modes view them as
+/// a `&mut [u8]`. The vector load and store are masked by `active` and the
+/// scalar path skips unset lanes, so other lanes are never accessed.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn blend_rgba8_vector(
     destination: *mut u8,
@@ -514,6 +583,10 @@ unsafe fn blend_rgba8_vector(
     _mm512_mask_storeu_epi32(destination.cast(), active, packed);
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f`. The
+/// function works only on register values and touches no memory.
 #[target_feature(enable = "avx512f")]
 unsafe fn mul_div_255_round(left: __m512i, right: __m512i) -> __m512i {
     let product = _mm512_mullo_epi32(left, right);

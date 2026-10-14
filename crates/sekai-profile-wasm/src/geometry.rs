@@ -6,8 +6,10 @@ use sekai_profile_core::sdf_glyph::outline_contours;
 
 /// # Safety
 ///
-/// `outline` must be a valid outline FreeType has just loaded: its point,
-/// tag and contour arrays must match their counts.
+/// `outline` must come from a face that has just loaded the glyph, so the
+/// points, tags and contours arrays it points to hold at least `n_points`,
+/// `n_points` and `n_contours` elements respectively and stay alive for the
+/// call.
 pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segment>> {
     let contour_ends = slice::from_raw_parts(outline.contours, outline.n_contours as usize);
     let points = slice::from_raw_parts(outline.points, outline.n_points as usize);

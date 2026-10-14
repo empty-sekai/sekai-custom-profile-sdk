@@ -824,6 +824,13 @@ fn rgba_segment_changed(before: &[u8], after: &[u8]) -> bool {
     before != after
 }
 
+/// # Safety
+///
+/// The caller must have established that the CPU supports `avx512f` and
+/// `avx512bw`, as [`rgba_segment_changed`] does before calling. Both slices
+/// must be exactly `64` bytes long, one 16-pixel RGBA8 macroblock row, so that
+/// each unaligned 64-byte load covers its whole slice and neither runs past
+/// the end; the loads require no more than byte alignment.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn rgba_segment_changed_avx512(before: &[u8], after: &[u8]) -> bool {

@@ -119,6 +119,10 @@ pub(crate) mod address_space {
         maximum: u64,
     }
 
+    // SAFETY: the signatures below match the host C ABI on glibc, whose
+    // `getrlimit(2)`/`setrlimit(2)` take the `RLIMIT_AS` selector and a
+    // two-`u64` limit struct. Every call site passes a live local of that
+    // exact layout.
     unsafe extern "C" {
         fn getrlimit(resource: i32, limit: *mut RLimit) -> i32;
         fn setrlimit(resource: i32, limit: *const RLimit) -> i32;
@@ -150,13 +154,21 @@ pub(crate) mod address_space {
             current: 0,
             maximum: 0,
         };
+        // SAFETY: the declaration above matches glibc's
+        // `getrlimit(resource, *mut RLimit)`; `RLIMIT_AS` is a valid resource
+        // selector and `&mut saved` is a live, properly aligned `RLimit`.
         assert_eq!(unsafe { getrlimit(RLIMIT_AS, &mut saved) }, 0, "getrlimit");
         let capped = RLimit {
             current: (mapped_bytes() + budget).min(saved.maximum),
             maximum: saved.maximum,
         };
+        // SAFETY: the declaration above matches glibc's
+        // `setrlimit(resource, *const RLimit)`; `&capped` is a live, properly
+        // aligned `RLimit` that the call only reads.
         assert_eq!(unsafe { setrlimit(RLIMIT_AS, &capped) }, 0, "setrlimit");
         let result = body();
+        // SAFETY: same contract as the call above; `&saved` is still live and
+        // still holds the limits `getrlimit` returned.
         assert_eq!(unsafe { setrlimit(RLIMIT_AS, &saved) }, 0, "restore rlimit");
         result
     }

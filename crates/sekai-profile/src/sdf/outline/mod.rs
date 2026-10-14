@@ -579,6 +579,9 @@ fn generate_outline_sdf_with_face_at_spread(
     if outline.n_contours <= 0 || outline.n_points <= 0 {
         return Err(format!("字符无轮廓: {ch}"));
     }
+    // SAFETY: `outline` borrows the face's slot, which the load on the
+    // preceding line filled; the face keeps its point, tag and contour arrays
+    // alive until the next load on this face.
     let contours = unsafe { extract_segments(outline) };
     if contours.is_empty() {
         return Err(format!("字符轮廓为空: {ch}"));

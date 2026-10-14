@@ -8,7 +8,14 @@ use sekai_profile_core::sdf_glyph::outline_contours;
 
 /// # Safety
 ///
-/// `outline` 必须是 FreeType 刚加载的有效轮廓（点、tag、轮廓端点数组与计数一致）。
+/// `outline` must describe a glyph FreeType has just loaded into a face's
+/// glyph slot, so that the face owns the storage behind it:
+/// `outline.points` must point to at least `outline.n_points` `FT_Vector`
+/// entries, `outline.tags` to at least `outline.n_points` tag bytes, and
+/// `outline.contours` to at least `outline.n_contours` contour end indices.
+/// All three arrays must stay alive and unmodified for the call, which the
+/// face guarantees until its next glyph load. `n_points` and `n_contours`
+/// must be non-negative, since both are cast to `usize` slice lengths.
 pub(super) unsafe fn extract_segments(outline: &ffi::FT_Outline) -> Vec<Vec<Segment>> {
     let contour_ends = slice::from_raw_parts(outline.contours, outline.n_contours as usize);
     let points = slice::from_raw_parts(outline.points, outline.n_points as usize);
