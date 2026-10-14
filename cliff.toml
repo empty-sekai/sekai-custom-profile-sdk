@@ -1,5 +1,5 @@
 # git-cliff config — drives CHANGELOG generation from conventional
-# commits, with a SemVer bump policy aligned to allium-deck.
+# commits, with a SemVer bump policy.
 
 [changelog]
 header = "# Changelog\n"

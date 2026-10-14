@@ -115,7 +115,7 @@ The authoring core retains at most 150 history transactions and validates the 15
 
 `createProfileScene()` performs the following work:
 
-1. WASM takes the page `pageIndex` selects (the first by default) from `profile.userCustomProfileCards` in ascending `seq` order and resolves it with the profile, locale, and masterdata session; the deprecated standalone `card` input is still accepted (without profile data);
+1. WASM takes the page `pageIndex` selects (the first by default) from `profile.userCustomProfileCards` in ascending `seq` order and resolves it with the profile, locale, and masterdata session.
 2. The shared semantic core collects scene-local localization demand, and the host provider returns an immutable text snapshot.
 3. WASM resolves authored elements and components with that snapshot and emits the font-family demand actually used by the scene.
 4. The main thread invokes the optional `FontProvider` through a bounded queue, hashes returned bytes, and fixes each family-to-hash mapping for the renderer lifetime. The host may instead call `registerFont()` before scene creation.

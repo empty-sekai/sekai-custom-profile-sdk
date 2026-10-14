@@ -26,12 +26,34 @@
 //! ```
 //!
 //! ## Modules
-//! - `renderer`: [`CustomProfileRenderer`], which renders pages and animations
-//! - `render_config` / `output` / `telemetry`: what a render does and returns
-//! - `atlas_dir` / `prepare`: installing and building the SDF atlases
-//! - `assets`: encoded asset cache, decoded on demand
-//! - `masterdata` / `profile` / `types`: master data, player data and cards
-//! - `semantic_resolve` / `profile_compositor`: backend-neutral command lowering and compositing
+//!
+//! | Module | Responsibility |
+//! | --- | --- |
+//! | [`renderer`] | [`CustomProfileRenderer`]: the render entry points, page and animation |
+//! | [`render_config`] | [`RenderConfig`], [`SdfExecutor`], [`RenderCapabilities`], [`PixelOcclusion`] |
+//! | [`output`] | [`RenderedPage`], [`EncodedPage`] and the JPEG/PNG options |
+//! | [`telemetry`] | Per-render counters and timings |
+//! | [`atlas_dir`] | The installed text, tier and shape SDF atlas directories |
+//! | [`prepare`] | Offline atlas construction from fonts and masterdata |
+//! | [`assets`] | Encoded asset cache, decoded on demand |
+//! | [`asset_keys`] | Resource keys a card or profile reads, and their storage paths |
+//! | [`compiled_profile`] | Card compilation into the ordered command list |
+//! | [`semantic_resolve`] | Resolving those commands against a render-object store |
+//! | [`profile_compositor`] | Software composition of the resolved commands |
+//! | [`render_object`] | The mmap-backed render-object store and its writer |
+//! | [`render_object_catalog`] | Describing a card's objects without a store |
+//! | [`sdf`] | Font lookup, glyph outline generation and the SDF atlas format |
+//! | [`text`] | TextMesh Pro layout and glyph placement |
+//! | [`elements`] | Authored element shapes and their layer order |
+//! | [`types`] | Card, profile and masterdata input shapes |
+//! | [`masterdata`] | Masterdata provider and lookups |
+//! | [`profile`] | Player profile data |
+//! | [`region`] | Region identifiers and their locale strings |
+//! | [`transform`] | Matrix and transform helpers |
+//! | [`codec`] | PNG encoding and decoding |
+//! | `jpeg_turbo` | The libjpeg-turbo encoder (feature `jpeg-turbo`) |
+//! | `animation` | Animation encoding and export (feature `animation-export`) |
+//! | [`core_shadow`] | Scene shadow built from [`core`] for diagnostics |
 
 #![deny(clippy::unwrap_used)]
 

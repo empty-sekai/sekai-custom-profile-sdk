@@ -221,6 +221,31 @@ feature 时 `to_jpeg` 输出 JPEG，常驻服务可用 `CustomProfileRenderer::e
 `RenderConfig::default()` 按 CPU 自动选择 SDF 执行器、白色背景；`Background::Transparent`
 保留透明背景。
 
+### 渲染配置
+
+| 字段 | 取值 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `executor` | `Auto`、`Simd`、`Scalar` | `Auto` | `Auto` 在 CPU 支持时走 `Simd`。CPU 缺 AVX-512 F / BW / VBMI 或 FMA 时指定 `Simd` 报错。 |
+| `background` | `White`、`Transparent` | `White` | 透明页只能编码成 PNG。 |
+| `tile_width` / `tile_height` | 8 到 128 的 2 的幂 | `32` | SDF 执行器按这个尺寸分块。 |
+| `pixel_occlusion` | `Off`、`Measure`、`Cull` | `Off` | `Measure` 统计被后续不透明图片完全覆盖的 SDF 像素数并写进 telemetry；`Cull` 跳过这些像素的绘制。两者都不改变页面最终像素。 |
+
+配置无法满足时 `render` 返回 `RenderError`：`InvalidTileSize` 带出被拒的尺寸，`SimdUnavailable`
+表示该 CPU 跑不了指定执行器，`Render` 承载渲染过程本身的错误文案。用
+`CustomProfileRenderer::capabilities` 可以预先查看该渲染器会怎么做：本 CPU 能否跑 SIMD 包执行器、
+装了几份文字图集，以及形状图集、render-object store、回退字形缓存是否在位。
+
+`render_batch` 由一次编译出的批量结果渲染一个 profile 的全部页面，返回 `RenderedBatch`，并带回
+`CompiledProfileBatch` 与预取的 render object，便于一次性渲染与缓存整个 profile。`render_animation`
+渲染动画而非页面，`animation_preflight` 在实际绘制任何一帧之前报告该动画需要什么。
+
+### 缓存已渲染的页面
+
+`CustomProfileRenderer::cache_identity` 返回一个键，凡影响像素的因素变化它都会变：`RenderConfig`、
+每一份已安装图集的 manifest、已发布的 render-object store。服务可用它作为已编码页面的缓存键，
+换图集或换 store 后不会取回旧页。多次渲染共用同一个钉住的 store 时用
+`cache_identity_pinned` 配 `RenderObjectGenerationPin`。
+
 ### 图集目录
 
 `with_atlas_dir` 安装的目录结构如下，由 `sekai_profile::prepare::prepare_atlas_dir`
@@ -318,6 +343,48 @@ native 在字体目录中查找各文件并打开表中的 face；浏览器经 `
 | `SEKAI_PROFILE_SDF_EDT` | 设为 `1`–`4` 时字形 SDF 改用距离变换生成，值为超采样倍数；未设置或其他值使用解析法 |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | `parallel` feature 下为图集缺失的字形即时生成 SDF 的线程数，`1`–`4`，默认 `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`、`SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | 设为 `1`、`true` 或 `yes` 时输出 TMP 排版探针与文本码位的 `tracing` debug 日志 |
+
+### 字体目录
+
+字体族按文件名解析。查找顺序是 `sekai_profile::set_font_dirs` 给出的目录、`SEKAI_PROFILE_FONT_DIR`、
+`FONT_DIR`，最后是 `assets/fonts`。图集记录了构建它的字体文件的 SHA-256，同名文件必须与之一致，
+因此 `set_font_dirs` 要在 `with_atlas_dir` 之前调用。
+
+`with_atlas_dir` 接受一个并不存在的目录且不会报错，这时渲染器没有装任何图集，启动不会失败但画不出东西。
+先构建图集，或在装好后检查 `capabilities().text_atlases`。
+
+## 从 0.6 迁移
+
+0.6 的 crate 名为 `sekai-profile-renderer`、`sekai-profile-renderer-host` 与
+`sekai-profile-renderer-core`，现在分别是 `sekai-profile`（并入了 host crate）、`sekai-profile` 与
+`sekai-profile-core`。
+
+| 0.6 | 0.7 |
+| --- | --- |
+| `ProfileBackendConfig` | `RenderConfig` |
+| `ProfileBackendConfig::surface` | 已删除；CPU 光栅路径是唯一的 surface |
+| `TextSdfExecutor` 与 `ShapeSdfExecutor` | 合并为一个 `SdfExecutor` |
+| `TextSdfExecutor::LegacySkia` | 已删除 |
+| `ShapeSdfExecutor::Auto` | `SdfExecutor::Auto` |
+| `ScalarOracle` | `SdfExecutor::Scalar` |
+| `ProfileJpegEncoder::Skia` | 已删除；改用 `JpegOptions` 配 `JpegEncoder::Standard` |
+| `ProfileJpegEncoder::LibJpegTurbo` | `JpegEncoder::Standard` |
+| `ProfileJpegEncoder::LibJpegTurboAvx512Yuv420` | `JpegEncoder::Avx512Yuv420` |
+| `BackendFallbackPolicy` | 已删除；执行器不可用即报错 |
+| `pixel_occlusion_dry_run` | `PixelOcclusion::Measure` |
+| `pixel_occlusion_execute` | `PixelOcclusion::Cull` |
+| `collect_telemetry` | 已删除；遥测始终采集 |
+| `render_page_with_backend(_generation)` | `render_pinned` |
+| `render_profile_batch_with_backend(_generation)` | `render_batch_pinned` |
+| `render_animation_with_profile_backend` | `render_animation_pinned` |
+| `animation_preflight_with_profile` | `animation_preflight` |
+| `profile_backend_capabilities()` | `capabilities()` |
+| `profile_backend_cache_identity(_for_generation)` | `cache_identity(_pinned)` |
+| `prewarm_profile_backend_resources()` | `prewarm()` |
+| `ProfileRenderTelemetry` | `RenderTelemetry`，schema `allium.profile-render.telemetry.v4` |
+
+渲染入口返回 `RenderedPage` 而不是已编码字节，由调用方用 `encode_png` 或 `encode_jpeg` 编码。
+0.6 缓存的页面不会被复用：缓存键前缀由 `profile-backend-` 改为 `profile-render-`，遥测 schema 同步变更。
 
 ## 缓存与资源所有权
 

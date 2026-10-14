@@ -106,8 +106,8 @@ const masterData = await renderer.loadMasterData(
 const scene = await renderer.createProfileScene({
   masterData,
   documentKey,
-  card,
   profile,
+  pageIndex,
   frameMode: "animate",
   sdf: { backend: "edt", persistence: "origin" },
 });

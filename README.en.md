@@ -228,6 +228,36 @@ use `CustomProfileRenderer::encode_jpeg` to reuse the encoder buffers. `RenderCo
 picks the SDF executor for the CPU and a white background; `Background::Transparent` keeps the
 background transparent.
 
+### Render configuration
+
+| Field | Values | Default | Notes |
+| --- | --- | --- | --- |
+| `executor` | `Auto`, `Simd`, `Scalar` | `Auto` | `Auto` runs `Simd` when the CPU has it. `Simd` is an error on a CPU without AVX-512 F, BW and VBMI plus FMA. |
+| `background` | `White`, `Transparent` | `White` | A transparent page encodes to PNG only. |
+| `tile_width` / `tile_height` | A power of two from 8 to 128 | `32` | The SDF executor works on tiles of this size. |
+| `pixel_occlusion` | `Off`, `Measure`, `Cull` | `Off` | `Measure` counts the SDF pixels that later opaque images cover and reports the count in the telemetry; `Cull` skips drawing them. Neither changes which pixels the page ends up with. |
+
+`render` returns `RenderError` when the config cannot be honoured: `InvalidTileSize` names the
+rejected pair, `SimdUnavailable` says the executor the config asked for is not what this CPU
+runs, and `Render` carries a message from the render itself. Check what a renderer will do with
+`CustomProfileRenderer::capabilities`, which reports whether this CPU runs the packet executor,
+how many text atlases are installed, and whether a shape atlas, a render-object store and a
+fallback glyph cache are present.
+
+`render_batch` renders every page of a profile from one compiled batch and returns a
+`RenderedBatch` alongside the `CompiledProfileBatch` and any prepared render objects, which lets
+a caller render and cache a whole profile from a single compile. `render_animation` renders an
+animation instead of a page, and `animation_preflight` reports what such a render needs before
+any frames are drawn.
+
+### Caching rendered pages
+
+`CustomProfileRenderer::cache_identity` returns a key that changes whenever anything that
+affects the pixels changes: the `RenderConfig`, every installed atlas manifest and the published
+render-object store. A service can use it as the cache key for encoded pages, so a changed atlas
+or a new store never serves a stale page. Use `cache_identity_pinned` with a
+`RenderObjectGenerationPin` when several renders share one pinned store.
+
 ### Atlas directory
 
 `with_atlas_dir` installs a directory laid out as follows, which
@@ -339,6 +369,51 @@ demonstration, not a profile-parity or visual acceptance baseline.
 | `SEKAI_PROFILE_SDF_EDT` | `1`–`4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas, `1`–`4`, default `2` |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true`, or `yes` emits `tracing` debug logs for TMP layout probes and text code points |
+
+### Font directories
+
+Font families are resolved by file name. `sekai_profile::set_font_dirs` sets the directories
+searched first, then `SEKAI_PROFILE_FONT_DIR`, then `FONT_DIR`, then `assets/fonts`. An atlas
+records the SHA-256 of the font it was built from and the file found under that family's name
+must match it, so `set_font_dirs` runs before `with_atlas_dir`.
+
+`with_atlas_dir` accepts a directory that does not exist and installs no atlas, leaving a
+renderer that draws nothing but cannot fail at startup. Build the atlases first, or check
+`capabilities().text_atlases` after installing them.
+
+## Migrating from 0.6
+
+0.6 named the crates `sekai-profile-renderer`, `sekai-profile-renderer-host` and
+`sekai-profile-renderer-core`; they are now `sekai-profile` (which absorbed the host crate),
+`sekai-profile` and `sekai-profile-core`.
+
+| 0.6 | 0.7 |
+| --- | --- |
+| `ProfileBackendConfig` | `RenderConfig` |
+| `ProfileBackendConfig::surface` | Removed; the CPU raster path is the only surface |
+| `TextSdfExecutor` and `ShapeSdfExecutor` | One `SdfExecutor` for both |
+| `TextSdfExecutor::LegacySkia` | Removed |
+| `ShapeSdfExecutor::Auto` | `SdfExecutor::Auto` |
+| `ScalarOracle` | `SdfExecutor::Scalar` |
+| `ProfileJpegEncoder::Skia` | Removed; use `JpegOptions` with `JpegEncoder::Standard` |
+| `ProfileJpegEncoder::LibJpegTurbo` | `JpegEncoder::Standard` |
+| `ProfileJpegEncoder::LibJpegTurboAvx512Yuv420` | `JpegEncoder::Avx512Yuv420` |
+| `BackendFallbackPolicy` | Removed; an unavailable executor is an error |
+| `pixel_occlusion_dry_run` | `PixelOcclusion::Measure` |
+| `pixel_occlusion_execute` | `PixelOcclusion::Cull` |
+| `collect_telemetry` | Removed; telemetry is always collected |
+| `render_page_with_backend(_generation)` | `render_pinned` |
+| `render_profile_batch_with_backend(_generation)` | `render_batch_pinned` |
+| `render_animation_with_profile_backend` | `render_animation_pinned` |
+| `animation_preflight_with_profile` | `animation_preflight` |
+| `profile_backend_capabilities()` | `capabilities()` |
+| `profile_backend_cache_identity(_for_generation)` | `cache_identity(_pinned)` |
+| `prewarm_profile_backend_resources()` | `prewarm()` |
+| `ProfileRenderTelemetry` | `RenderTelemetry`, schema `allium.profile-render.telemetry.v4` |
+
+The render entry points return a `RenderedPage` instead of encoded bytes, so a caller encodes
+with `encode_png` or `encode_jpeg`. Cached pages from 0.6 are not reused: the cache key prefix
+changed from `profile-backend-` to `profile-render-`, and the telemetry schema with it.
 
 ## Cache and resource ownership
 

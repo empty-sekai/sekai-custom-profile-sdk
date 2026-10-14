@@ -1,3 +1,39 @@
+//! FreeType, SDF and scene runtime behind the browser package.
+//!
+//! This crate is compiled to WebAssembly and shipped inside
+//! `@empty-sekai/sekai-custom-profile-sdk`; it is not published as a registry
+//! crate. The TypeScript wrapper drives it across a C ABI rather than through
+//! Rust types, so every export is `extern "C"` and every value crosses as a
+//! JSON string or a raw pointer with a paired length.
+//!
+//! # Calling convention
+//!
+//! Each group of exports follows the same shape:
+//!
+//! - A `*_create_json` or `*_import_*_json` call allocates a handle; the
+//!   matching `*_destroy` releases it. Handles are `u32` and an unknown handle
+//!   returns a negative status rather than trapping.
+//! - Calls that return data return a `*mut c_char` holding a
+//!   NUL-terminated JSON string owned by the caller's side of the boundary.
+//!   The string is released with [`sdf_layout_freetype_free_string`] and never
+//!   with the module's own allocator.
+//! - Calls that return bytes (`*_binary`, atlas pages) write into a buffer the
+//!   caller sized from a preceding length query, or expose a pointer and length
+//!   pair that stays valid until the next call on the same handle.
+//!
+//! The entry points are `unsafe` because they dereference the caller's
+//! pointers; the TypeScript wrapper is what guarantees those pointers and
+//! lengths came from the length query for the same handle.
+//!
+//! # Modules
+//!
+//! The contents are private: `scene` holds the scene and masterdata runtimes,
+//! `authoring_runtime` the authoring session state, `atlas` the SDF atlas
+//! handles, `layout` and `ugui_text` the text layout entry points, `glyph_plan`
+//! the glyph demand planner, `geometry` the outline conversion, and
+//! `shader_contract` the tests that keep the GLSL shaders and the Rust-side
+//! material parameters in agreement.
+
 mod atlas;
 mod authoring_runtime;
 mod geometry;
@@ -52,6 +88,15 @@ pub extern "C" fn sdf_layout_freetype_contract_json() -> *mut c_char {
     )
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// call; null for either is rejected with an error result. `region_ptr`,
+/// `family_ptr` and `font_source_hash_ptr` must each be null or point to a
+/// NUL-terminated string.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json(
     font_ptr: *const u8,
@@ -79,6 +124,15 @@ pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json(
     }))
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// call; null for either is rejected with an error result. `region_ptr`,
+/// `family_ptr` and `font_source_hash_ptr` must each be null or point to a
+/// NUL-terminated string.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json_edt(
     font_ptr: *const u8,
@@ -107,6 +161,15 @@ pub unsafe extern "C" fn sdf_layout_freetype_build_glyph_json_edt(
     }))
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// call; null for either is rejected with an error result. `region_ptr`,
+/// `family_ptr` and `font_source_hash_ptr` must each be null or point to a
+/// NUL-terminated string.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_map_glyphs_json(
     font_ptr: *const u8,
@@ -133,6 +196,15 @@ pub unsafe extern "C" fn sdf_layout_freetype_map_glyphs_json(
     }))
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// call; null for either is rejected with an error result. `region_ptr`,
+/// `family_ptr` and `font_source_hash_ptr` must each be null or point to a
+/// NUL-terminated string.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_plan_glyphs_json(
     font_ptr: *const u8,
@@ -167,6 +239,11 @@ pub unsafe extern "C" fn sdf_layout_freetype_plan_glyphs_json(
     }))
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_build_layout_json(
     input_json_ptr: *const u8,
@@ -191,6 +268,11 @@ pub unsafe extern "C" fn sdf_layout_freetype_build_layout_json(
     }))
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_glyph_demand_json(
     input_json_ptr: *const u8,
@@ -207,7 +289,7 @@ pub unsafe extern "C" fn sdf_layout_freetype_glyph_demand_json(
     }))
 }
 
-/// Lays out uGUI text commands; see [`ugui_text::layout_json`]. `fonts` holds
+/// Lays out uGUI text commands; see `ugui_text::layout_json`. `fonts` holds
 /// the font files the JSON input names by byte range.
 ///
 /// # Safety
@@ -235,6 +317,11 @@ pub unsafe extern "C" fn sdf_layout_ugui_text_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_atlas_create_json(
     input_json_ptr: *const u8,
@@ -250,6 +337,14 @@ pub unsafe extern "C" fn sdf_atlas_create_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_atlas_resolve_json(
     handle: u32,
@@ -264,6 +359,14 @@ pub unsafe extern "C" fn sdf_atlas_resolve_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_atlas_pages_since_json(
     handle: u32,
@@ -311,6 +414,11 @@ pub extern "C" fn sdf_atlas_destroy(handle: u32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_create_json(
     input_json_ptr: *const u8,
@@ -324,6 +432,11 @@ pub extern "C" fn sdf_renderer_authoring_create_blank_json() -> *mut c_char {
     core_json_call(authoring_runtime::create_blank)
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_import_profile_json(
     input_json_ptr: *const u8,
@@ -334,6 +447,11 @@ pub unsafe extern "C" fn sdf_renderer_authoring_import_profile_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_restore_checkpoint_json(
     input_json_ptr: *const u8,
@@ -345,6 +463,14 @@ pub unsafe extern "C" fn sdf_renderer_authoring_restore_checkpoint_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_apply_json(
     handle: u32,
@@ -357,6 +483,14 @@ pub unsafe extern "C" fn sdf_renderer_authoring_apply_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_select_json(
     handle: u32,
@@ -374,6 +508,14 @@ pub extern "C" fn sdf_renderer_authoring_elements_json(handle: u32) -> *mut c_ch
     core_json_call(|| authoring_runtime::elements(handle))
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_begin_gesture_json(
     handle: u32,
@@ -386,6 +528,14 @@ pub unsafe extern "C" fn sdf_renderer_authoring_begin_gesture_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_preview_gesture_json(
     handle: u32,
@@ -413,6 +563,14 @@ pub extern "C" fn sdf_renderer_authoring_append_page_json(handle: u32) -> *mut c
     core_json_call(|| authoring_runtime::append_page(handle))
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_duplicate_page_json(
     handle: u32,
@@ -425,6 +583,14 @@ pub unsafe extern "C" fn sdf_renderer_authoring_duplicate_page_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_delete_page_json(
     handle: u32,
@@ -437,6 +603,14 @@ pub unsafe extern "C" fn sdf_renderer_authoring_delete_page_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_authoring_move_page_json(
     handle: u32,
@@ -478,6 +652,11 @@ pub extern "C" fn sdf_renderer_authoring_destroy(handle: u32) -> i32 {
     }
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_profile_scene_create_json(
     input_json_ptr: *const u8,
@@ -488,6 +667,11 @@ pub unsafe extern "C" fn sdf_renderer_core_profile_scene_create_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_masterdata_create_json(
     input_json_ptr: *const u8,
@@ -498,6 +682,14 @@ pub unsafe extern "C" fn sdf_renderer_core_masterdata_create_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_masterdata_put_table_json(
     handle: u32,
@@ -515,6 +707,14 @@ pub extern "C" fn sdf_renderer_core_masterdata_seal_json(handle: u32) -> *mut c_
     core_json_call(|| masterdata_runtime::seal(handle))
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_profile_prepare_json(
     handle: u32,
@@ -527,6 +727,14 @@ pub unsafe extern "C" fn sdf_renderer_core_profile_prepare_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_profile_create_json(
     handle: u32,
@@ -558,6 +766,15 @@ pub extern "C" fn sdf_renderer_core_scene_advance_json(handle: u32, tick: u32) -
     core_json_call(|| scene::advance(handle, tick as u64))
 }
 
+/// Writes the binary delta for `handle` at `tick` into `output` and returns
+/// the number of bytes written, or `0` on any error.
+///
+/// # Safety
+///
+/// `output` must be null or point to `capacity` writable bytes of linear
+/// memory that nothing else references during the call. `capacity` must cover
+/// the scene's `40 + layer_count * 24`-byte worst case; a smaller buffer is
+/// rejected and left untouched.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_advance_binary(
     handle: u32,
@@ -565,9 +782,19 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_advance_binary(
     output: *mut u8,
     capacity: usize,
 ) -> usize {
+    // SAFETY: `output` and `capacity` come unchanged from this export's
+    // caller, whose contract above is the one `scene::advance_binary` requires.
     unsafe { scene::advance_binary(handle, tick as u64, output, capacity) }.unwrap_or_default()
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_set_mask_json(
     handle: u32,
@@ -580,6 +807,14 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_set_mask_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_set_masks_json(
     handle: u32,
@@ -591,6 +826,14 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_set_masks_json(
             .and_then(|input| scene::set_masks(handle, input))
     })
 }
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_set_tab_json(
     handle: u32,
@@ -603,6 +846,14 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_set_tab_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. An unknown `handle` yields an error result rather than
+/// undefined behaviour.
+/// The returned string must be released with
+/// `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_scene_scroll_json(
     handle: u32,
@@ -650,6 +901,11 @@ struct ProfileResolveRequest {
     snapshot: sekai_profile_core::profile_scene::ProfileResolveSnapshot,
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_resolve_locale_json(
     input_json_ptr: *const u8,
@@ -668,6 +924,11 @@ pub unsafe extern "C" fn sdf_renderer_core_resolve_locale_json(
     })
 }
 
+/// # Safety
+///
+/// `input_json_ptr` must point to `input_json_len` readable bytes of UTF-8
+/// JSON that stay unmodified for the call; a null pointer is rejected with an
+/// error result. The returned string must be released with `sdf_layout_freetype_free_string`.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_renderer_core_resolve_profile_json(
     input_json_ptr: *const u8,
@@ -687,6 +948,11 @@ pub unsafe extern "C" fn sdf_renderer_core_resolve_profile_json(
     })
 }
 
+/// # Safety
+///
+/// `ptr` must be null or a string returned by one of this module's exports
+/// that has not been released yet; it is freed here and must not be used
+/// afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn sdf_layout_freetype_free_string(ptr: *mut c_char) {
     if !ptr.is_null() {
@@ -715,6 +981,14 @@ where
     }))
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values; both are checked
+/// for null and copied before FreeType sees them, so they only need to stay
+/// valid for the call. `region_ptr`, `family_ptr` and `font_source_hash_ptr`
+/// must each be null or point to a NUL-terminated string, as
+/// [`read_c_string`] requires.
 unsafe fn build_glyph_batch_json(
     font_ptr: *const u8,
     font_len: usize,
@@ -818,6 +1092,13 @@ unsafe fn build_glyph_batch_json(
     .map_err(|err| format!("serialize glyph batch failed: {err}"))
 }
 
+/// # Safety
+///
+/// `font_ptr` must point to `font_len` readable bytes and `codepoints_ptr` to
+/// `codepoints_len` readable, 4-byte aligned `u32` values, both valid for the
+/// call; null for either is rejected and the font bytes are copied into the
+/// face. `region_ptr`, `family_ptr` and `font_source_hash_ptr` must each be
+/// null or point to a NUL-terminated string, as [`read_c_string`] requires.
 unsafe fn map_glyphs_json(
     font_ptr: *const u8,
     font_len: usize,
@@ -868,6 +1149,12 @@ fn duration_ms(start: Instant, end: Instant) -> f64 {
     (end - start).as_secs_f64() * 1000.0
 }
 
+/// # Safety
+///
+/// `ptr` must be null, which yields an empty string, or point to a
+/// NUL-terminated byte string that is readable up to and including its NUL and
+/// not written to during the call. The bytes are copied into the returned
+/// `String`.
 unsafe fn read_c_string(ptr: *const c_char) -> Result<String, String> {
     if ptr.is_null() {
         return Ok(String::new());
@@ -878,6 +1165,12 @@ unsafe fn read_c_string(ptr: *const c_char) -> Result<String, String> {
         .map_err(|err| format!("invalid utf8 string: {err}"))
 }
 
+/// # Safety
+///
+/// A null `ptr` is rejected with an error. Otherwise `ptr` must point to `len`
+/// readable bytes, with `len <= isize::MAX`, that remain valid and unmodified
+/// for the caller-chosen lifetime `'a`, because the returned `&'a str`
+/// borrows them in place.
 unsafe fn read_utf8_slice<'a>(ptr: *const u8, len: usize) -> Result<&'a str, String> {
     if ptr.is_null() {
         return Err("null utf8 pointer".to_string());
@@ -968,6 +1261,9 @@ fn build_glyph(
             metrics.advance,
         ));
     }
+    // SAFETY: `slot` borrows `face`, whose `load_glyph` above filled it, so the
+    // outline's point, tag and contour arrays are alive until the next load on
+    // this face; `has_outline` has just confirmed both counts are positive.
     let contours = unsafe { extract_segments(&slot.raw().outline) };
     if contours.is_empty() {
         return Ok(empty_metric_glyph(
