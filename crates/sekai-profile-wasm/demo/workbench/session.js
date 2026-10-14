@@ -311,11 +311,31 @@ export function defaultFontFamilies(fileName) {
   return [...(FONT_FAMILY_ALIASES.get(stem) ?? [stem])];
 }
 
+// Game data per region: the master tables a region ships are published under
+// `master/` in the matching repository.
+const REGION_MASTERDATA_REPOSITORY = {
+  jp: "Team-Haruki/haruki-sekai-master",
+  cn: "Team-Haruki/haruki-sekai-sc-master",
+  tw: "Team-Haruki/haruki-sekai-tc-master",
+  kr: "Team-Haruki/haruki-sekai-kr-master",
+  en: "Team-Haruki/haruki-sekai-en-master",
+};
+
+export const DEFAULT_MASTERDATA_REVISION = "main";
+
+/** Raw master-table base for `region` at git revision `revision`, without a trailing slash. */
+export function defaultMasterdataBase(region, revision = DEFAULT_MASTERDATA_REVISION) {
+  const key = String(region || "cn").toLowerCase();
+  const repository = REGION_MASTERDATA_REPOSITORY[key] ?? REGION_MASTERDATA_REPOSITORY.cn;
+  const ref = String(revision || DEFAULT_MASTERDATA_REVISION);
+  return `https://raw.githubusercontent.com/${repository}/${ref}/master`;
+}
+
 function normalizeConfig(config) {
   return {
     region: String(config.region || "cn").toLowerCase(),
-    revision: String(config.revision || "latest"),
-    masterdataBase: trimSlash(config.masterdataBase),
+    revision: String(config.revision || DEFAULT_MASTERDATA_REVISION),
+    masterdataBase: trimSlash(config.masterdataBase ?? defaultMasterdataBase(config.region, config.revision)),
     assetBase: trimSlash(config.assetBase),
     sdfBackend: config.sdfBackend === "analytic" ? "analytic" : "edt",
     persistence: config.persistence === "memory-only" ? "memory-only" : "origin",

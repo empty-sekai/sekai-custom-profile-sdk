@@ -38,14 +38,14 @@ The profile JSON and the font files are stored in IndexedDB for the page's origi
 
 ## Providers and settings
 
-The **Providers** panel sets the region (`cn`, `jp`, `tw`, `en`, `kr`), the masterdata revision, and two base URLs. Their initial values are:
+The **Providers** panel sets the region (`cn`, `jp`, `tw`, `en`, `kr`), the masterdata revision (a git branch, tag or commit, `main` by default), and two base URLs. Their initial values are:
 
 | Setting | Initial value |
 | --- | --- |
-| Masterdata base | `https://cdn.emptysekai.com/masterdata/<region>/<revision>` |
+| Masterdata base | `https://raw.githubusercontent.com/<repository>/<revision>/master` |
 | Asset base | `https://cdn.emptysekai.com/assets/<region>` |
 
-Changing the region rewrites both bases, and changing the revision rewrites the masterdata base; either field can then be edited. The masterdata loader fetches `<masterdata base>/<table>.json` for every table and skips an optional table that fails to load. The demo `ResourceProvider` in `workbench/emptySekaiResourceProvider.js` maps `assets` descriptors to paths under the asset base and `static` descriptors to `https://cdn.emptysekai.com/renderer-static/v0.2`, keeping `static` images in Cache Storage. It shows one mapping strategy; other hosts write providers for their own resource systems. The resource origins must allow CORS requests from the workbench's origin.
+The masterdata repository follows the region: `Team-Haruki/haruki-sekai-master` (`jp`), `Team-Haruki/haruki-sekai-sc-master` (`cn`), `Team-Haruki/haruki-sekai-tc-master` (`tw`), `Team-Haruki/haruki-sekai-kr-master` (`kr`) and `Team-Haruki/haruki-sekai-en-master` (`en`). Changing the region rewrites both bases, and changing the revision rewrites the masterdata base; either field can then be edited. The masterdata loader fetches `<masterdata base>/<table>.json` for every table and skips an optional table that fails to load. The demo `ResourceProvider` in `workbench/emptySekaiResourceProvider.js` maps `assets` descriptors to paths under the asset base and `static` descriptors to `https://cdn.emptysekai.com/renderer-static/v0.2`, keeping `static` images in Cache Storage. It shows one mapping strategy; other hosts write providers for their own resource systems. The resource origins must allow CORS requests from the workbench's origin.
 
 The settings below the panel choose the glyph SDF generator (`edt` or `analytic`), the glyph cache (`origin` or `memory-only`), and the telemetry level (`summary`, `trace`, or `off`).
 

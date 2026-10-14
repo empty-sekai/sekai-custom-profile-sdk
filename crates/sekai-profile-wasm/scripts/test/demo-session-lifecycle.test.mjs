@@ -14,8 +14,19 @@ if (typeof globalThis.CustomEvent === "undefined") {
 const {
   WorkbenchSession,
   defaultFontFamilies,
+  defaultMasterdataBase,
   normalizePages,
 } = await import("../../demo/workbench/session.js");
+
+test("each region reads master tables from its repository at the chosen revision", () => {
+  const raw = "https://raw.githubusercontent.com/Team-Haruki";
+  assert.equal(defaultMasterdataBase("jp"), `${raw}/haruki-sekai-master/main/master`);
+  assert.equal(defaultMasterdataBase("cn"), `${raw}/haruki-sekai-sc-master/main/master`);
+  assert.equal(defaultMasterdataBase("tw"), `${raw}/haruki-sekai-tc-master/main/master`);
+  assert.equal(defaultMasterdataBase("kr"), `${raw}/haruki-sekai-kr-master/main/master`);
+  assert.equal(defaultMasterdataBase("EN", "v6.0.1"), `${raw}/haruki-sekai-en-master/v6.0.1/master`);
+  assert.equal(defaultMasterdataBase("cn", ""), `${raw}/haruki-sekai-sc-master/main/master`);
+});
 
 test("profile input is the only accepted source of card pages", () => {
   const profile = {

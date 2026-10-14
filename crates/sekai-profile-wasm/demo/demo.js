@@ -1,4 +1,4 @@
-import { WorkbenchSession } from "./workbench/session.js?v=20260715-13";
+import { WorkbenchSession, defaultMasterdataBase } from "./workbench/session.js?v=20260715-13";
 import { SceneInspector } from "./workbench/inspector.js?v=20260715-13";
 import { InteractionOverlay, handleInteractionAction } from "./workbench/interactions.js?v=20260715-13";
 import { TelemetryPanel } from "./workbench/telemetry.js?v=20260715-13";
@@ -203,13 +203,13 @@ function bindInputs() {
   });
   elements.region.addEventListener("change", () => {
     const region = elements.region.value;
-    elements.masterdataBase.value = `https://cdn.emptysekai.com/masterdata/${region}/${elements.revision.value || "latest"}`;
+    elements.masterdataBase.value = defaultMasterdataBase(region, elements.revision.value);
     elements.assetBase.value = `https://cdn.emptysekai.com/assets/${region}`;
     updateProviderPreview();
   });
   elements.revision.addEventListener("change", () => {
     const region = elements.region.value;
-    elements.masterdataBase.value = `https://cdn.emptysekai.com/masterdata/${region}/${elements.revision.value || "latest"}`;
+    elements.masterdataBase.value = defaultMasterdataBase(region, elements.revision.value);
     updateProviderPreview();
   });
   elements.masterdataBase.addEventListener("input", updateProviderPreview);
