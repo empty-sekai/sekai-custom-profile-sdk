@@ -223,7 +223,7 @@ export class BrowserRenderer {
       premultipliedAlpha: true,
       preserveDrawingBuffer: false,
     }) as WebGL2RenderingContext | null;
-    if (!gl) throw new BrowserRendererError("WEBGL2_UNAVAILABLE", "WebGL2 is required by renderer-wasm 0.2");
+    if (!gl) throw new BrowserRendererError("WEBGL2_UNAVAILABLE", "WebGL2 is required");
     options.canvas.width = CARD_WIDTH;
     options.canvas.height = CARD_HEIGHT;
     const worker = await RendererWorkerClient.create(options);
