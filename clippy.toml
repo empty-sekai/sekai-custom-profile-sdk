@@ -1,0 +1,2 @@
+# Tests may unwrap; library code stays under the crate-level `unwrap_used` deny.
+allow-unwrap-in-tests = true

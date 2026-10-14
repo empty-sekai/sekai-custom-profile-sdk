@@ -42,9 +42,10 @@ jobs:
             libfreetype6-dev libx264-dev pkg-config fonts-dejavu-core
 
       - run: cargo fmt --all -- --check
-      # Engine crates set #![deny(...)] lints; cap them at warn so pre-existing
-      # lints don't gate the release without touching engine source.
-      - run: cargo clippy --workspace --all-targets -- --cap-lints warn
+      # Every lint is an error: library code, tests, examples and benches, with
+      # and without the optional features.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy -p sekai-profile --all-targets --no-default-features -- -D warnings
       - run: cargo test --workspace --all-features
       # Public API docs have to build without warnings before they are published.
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --exclude sekai-profile-cli
