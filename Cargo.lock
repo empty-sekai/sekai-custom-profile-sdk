@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -1244,7 +1244,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "clap",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bincode",
  "freetype-rs",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-profile-wasm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "freetype-rs",
