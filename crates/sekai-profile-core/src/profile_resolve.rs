@@ -114,6 +114,18 @@ pub enum AuthoredProfileResolveError {
     Scene(#[from] crate::profile_scene::ProfileResolveError),
 }
 
+/// The locale a profile resolves in, with the texts of its fixed panel labels
+/// supplied by the caller.
+#[derive(Clone, Copy, Debug)]
+pub struct ProfileLocalization<'a> {
+    /// Locale the label texts are written in.
+    pub locale: &'a str,
+    /// Label texts keyed by localization key, such as the keys of
+    /// [`crate::locale::GENERAL_LOCALIZATION_KEYS`]. A key missing from the
+    /// map is not filled in from master data or the bundled strings.
+    pub localized_text: &'a BTreeMap<String, String>,
+}
+
 /// Builds the complete environment-neutral resolve snapshot for all authored
 /// element kinds, including profile components and both honor variants.
 pub fn build_profile_snapshot(
@@ -125,18 +137,25 @@ pub fn build_profile_snapshot(
     resource_metadata: &impl ResourceMetadata,
     line_indent: BTreeMap<String, LineIndentSource>,
 ) -> Result<ProfileResolveSnapshot, AuthoredProfileResolveError> {
-    build_profile_snapshot_inner(
+    let snapshot = build_profile_snapshot_inner(
         card,
         profile,
         masterdata,
         document_key,
         locale,
         resource_metadata,
-        line_indent,
         None,
-    )
+    )?;
+    Ok(ProfileResolveSnapshot {
+        line_indent,
+        ..snapshot
+    })
 }
 
+/// Resolves every snapshot field except the line-indent programs, which stay
+/// empty. When `localized_text` is given, the label texts come from that map
+/// alone; otherwise they come from master data and the bundled strings of
+/// `locale`.
 fn build_profile_snapshot_inner(
     card: &CustomProfileCard,
     profile: Option<&ProfileData>,
@@ -144,13 +163,9 @@ fn build_profile_snapshot_inner(
     document_key: &str,
     locale: &str,
     resource_metadata: &impl ResourceMetadata,
-    line_indent: BTreeMap<String, LineIndentSource>,
     localized_text: Option<&BTreeMap<String, String>>,
 ) -> Result<ProfileResolveSnapshot, AuthoredProfileResolveError> {
-    let mut snapshot = ProfileResolveSnapshot {
-        line_indent,
-        ..ProfileResolveSnapshot::default()
-    };
+    let mut snapshot = ProfileResolveSnapshot::default();
     populate_authored_resources(
         card,
         masterdata,
@@ -201,9 +216,11 @@ fn build_profile_snapshot_inner(
                     value.id,
                     level,
                     value.full_size,
-                    value.word_id,
-                    value.inverse,
-                    value.use_unit_virtual_singer,
+                    BondsHonorView {
+                        word_id: value.word_id,
+                        inverse: value.inverse,
+                        use_unit_virtual_singer: value.use_unit_virtual_singer,
+                    },
                     masterdata,
                     resource_metadata,
                 ) {
@@ -333,26 +350,31 @@ pub fn compile_profile_scene(
     )?)
 }
 
+/// [`compile_profile_scene`] with the texts of the fixed panel labels supplied
+/// by the caller in `localization`, in place of the texts master data and the
+/// bundled strings give.
 pub fn compile_profile_scene_with_localizations(
     card: &CustomProfileCard,
     profile: Option<&ProfileData>,
     masterdata: &impl ProfileMasterData,
     document_key: &str,
-    locale: &str,
+    localization: ProfileLocalization<'_>,
     resource_metadata: &impl ResourceMetadata,
     line_indent: BTreeMap<String, LineIndentSource>,
-    localized_text: &BTreeMap<String, String>,
 ) -> Result<ResolvedProfileScene, AuthoredProfileResolveError> {
     let snapshot = build_profile_snapshot_inner(
         card,
         profile,
         masterdata,
         document_key,
-        locale,
+        localization.locale,
         resource_metadata,
-        line_indent,
-        Some(localized_text),
+        Some(localization.localized_text),
     )?;
+    let snapshot = ProfileResolveSnapshot {
+        line_indent,
+        ..snapshot
+    };
     Ok(crate::profile_scene::resolve_profile_scene(
         card,
         document_key,
@@ -405,7 +427,6 @@ fn prepare_profile_inner(
         document_key,
         locale,
         &(),
-        BTreeMap::new(),
         localized_text,
     )?;
     let mut fonts = snapshot.fonts.clone();
@@ -1148,9 +1169,11 @@ fn build_component(
                     slot.honor_id,
                     slot.honor_level,
                     index == 0,
-                    slot.bonds_honor_word_id.unwrap_or_default(),
-                    inverse,
-                    use_unit_virtual_singer,
+                    BondsHonorView {
+                        word_id: slot.bonds_honor_word_id.unwrap_or_default(),
+                        inverse,
+                        use_unit_virtual_singer,
+                    },
                     masterdata,
                     metadata,
                 )
@@ -1338,18 +1361,30 @@ fn standard_honor_visual(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// How a bonds honor is shown: the word art it carries, whether its two
+/// characters swap sides, and whether they appear as their virtual-singer
+/// unit variants.
+#[derive(Clone, Copy)]
+struct BondsHonorView {
+    word_id: i64,
+    inverse: bool,
+    use_unit_virtual_singer: bool,
+}
+
 fn bonds_honor_visual(
     source_field: &str,
     id: i32,
     level: i32,
     full_size: bool,
-    word_id: i64,
-    inverse: bool,
-    use_unit_virtual_singer: bool,
+    view: BondsHonorView,
     masterdata: &impl ProfileMasterData,
     metadata: &impl ResourceMetadata,
 ) -> Option<HonorVisualSnapshot> {
+    let BondsHonorView {
+        word_id,
+        inverse,
+        use_unit_virtual_singer,
+    } = view;
     let plan = crate::masterdata::bonds_honor_asset_plan(
         masterdata,
         id,

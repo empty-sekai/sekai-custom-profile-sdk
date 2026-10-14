@@ -1,9 +1,11 @@
 //! The character rank panel (types 11 and 15) and its mode tabs.
 
-use super::nodes::{image_node, item_region, layout_rect, localized_source, shape_node, text_node};
+use super::nodes::{
+    image_node, item_region, layout_rect, localized_source, shape_node, text_node, RecipeLayer,
+};
 use super::{
-    GeneralClip, GeneralGeometry, GeneralImageSampling, GeneralImageSource,
-    GeneralImageSourceConstraint, GeneralRecipeNode, GeneralTextAlign,
+    GeneralClip, GeneralGeometry, GeneralImageSource, GeneralImageSourceConstraint,
+    GeneralRecipeNode, GeneralTextAlign,
 };
 use crate::profile_scene::{
     ComponentControlSource, ComponentControlState, ProfileComponentSnapshot, ProfileResolveError,
@@ -21,6 +23,10 @@ pub(super) fn build_character_rank_recipe(
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
+    let layer = RecipeLayer {
+        layer_id,
+        source_key,
+    };
     let shift_y = if general_type == 15 { 150.0 } else { 0.0 };
     let shifted = |layout: crate::profile_layout::ElementLayout| {
         let mut bounds = layout_rect(layout);
@@ -34,10 +40,7 @@ pub(super) fn build_character_rank_recipe(
     let pill_left = (active.cx - active.w / 2.0).min(inactive.cx - inactive.w / 2.0);
     let pill_right = (active.cx + active.w / 2.0).max(inactive.cx + inactive.w / 2.0);
     nodes.push(shape_node(
-        layer_id,
-        source_key,
-        "tabs-background",
-        0,
+        layer.key("tabs-background", 0),
         shifted(crate::profile_layout::ElementLayout {
             cx: (pill_left + pill_right) / 2.0,
             cy: active.cy,
@@ -59,10 +62,7 @@ pub(super) fn build_character_rank_recipe(
         ),
     ] {
         let mut node = shape_node(
-            layer_id,
-            source_key,
-            role,
-            ordinal,
+            layer.key(role, ordinal),
             shifted(layout),
             GeneralGeometry::RoundedRect {
                 radius: [layout.h / 2.0; 2],
@@ -111,17 +111,12 @@ pub(super) fn build_character_rank_recipe(
         ),
     ] {
         let mut node = text_node(
-            layer_id,
-            source_key,
-            role,
-            ordinal,
+            layer.key(role, ordinal),
             shifted(layout),
             localized_source(snapshot, key)?,
             layout.h * 0.42,
             color,
             GeneralTextAlign::Center,
-            0.0,
-            false,
         );
         node.control_bindings
             .push(CommandControlBinding::TabOption {
@@ -206,10 +201,7 @@ pub(super) fn build_character_rank_recipe(
                 height: pill_height,
             };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                &format!("character-{character_id}-background"),
-                ordinal,
+                layer.key(&format!("character-{character_id}-background"), ordinal),
                 pill_bounds,
                 GeneralGeometry::RoundedRect {
                     radius: [pill_height / 2.0; 2],
@@ -224,10 +216,10 @@ pub(super) fn build_character_rank_recipe(
                 height: radius * 2.0,
             };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                &format!("character-{character_id}-avatar-background"),
-                ordinal,
+                layer.key(
+                    &format!("character-{character_id}-avatar-background"),
+                    ordinal,
+                ),
                 avatar_bounds,
                 GeneralGeometry::Ellipse,
                 [0.204, 0.863, 0.996, 1.0],
@@ -235,18 +227,12 @@ pub(super) fn build_character_rank_recipe(
             ordinal += 1;
             if let Some(descriptor) = &rank.avatar.descriptor {
                 nodes.push(image_node(
-                    layer_id,
-                    source_key,
-                    &format!("character-{character_id}-avatar"),
-                    ordinal,
+                    layer.key(&format!("character-{character_id}-avatar"), ordinal),
                     avatar_bounds,
-                    descriptor.resource.clone(),
-                    Some([descriptor.natural_width, descriptor.natural_height]),
-                    GeneralImageSource::WholeImageImplicit,
-                    GeneralImageSampling::Nearest,
-                    GeneralImageSourceConstraint::Implicit,
                     &rank.avatar,
-                    descriptor.provenance.clone(),
+                    descriptor,
+                    GeneralImageSource::WholeImageImplicit,
+                    GeneralImageSourceConstraint::Implicit,
                     vec![GeneralClip::Ellipse {
                         bounds: avatar_bounds,
                         anti_alias: true,
@@ -254,10 +240,10 @@ pub(super) fn build_character_rank_recipe(
                 ));
             } else {
                 nodes.push(shape_node(
-                    layer_id,
-                    source_key,
-                    &format!("character-{character_id}-avatar-placeholder"),
-                    ordinal,
+                    layer.key(
+                        &format!("character-{character_id}-avatar-placeholder"),
+                        ordinal,
+                    ),
                     avatar_bounds,
                     GeneralGeometry::Ellipse,
                     [0.85, 0.85, 0.85, 0.4],
@@ -282,10 +268,7 @@ pub(super) fn build_character_rank_recipe(
                 ),
             ] {
                 let mut node = text_node(
-                    layer_id,
-                    source_key,
-                    &format!("character-{character_id}-{mode}"),
-                    ordinal,
+                    layer.key(&format!("character-{character_id}-{mode}"), ordinal),
                     number_bounds,
                     TextSource::ProfileField {
                         field: format!("userProfile.{field}.{character_id}.rank"),
@@ -294,8 +277,6 @@ pub(super) fn build_character_rank_recipe(
                     22.0,
                     [0.0, 0.0, 0.0, 1.0],
                     GeneralTextAlign::Center,
-                    0.0,
-                    false,
                 );
                 node.control_bindings
                     .push(CommandControlBinding::TabOption {
@@ -376,10 +357,7 @@ pub(super) fn build_character_rank_recipe(
             height: viewport.height,
         };
         nodes.push(shape_node(
-            layer_id,
-            source_key,
-            "character-rank-scroll-track",
-            10_000,
+            layer.key("character-rank-scroll-track", 10_000),
             track_bounds,
             GeneralGeometry::RoundedRect { radius: [2.0; 2] },
             [0.25, 0.25, 0.25, 0.18],
@@ -391,10 +369,7 @@ pub(super) fn build_character_rank_recipe(
             ..track_bounds
         };
         let mut thumb = shape_node(
-            layer_id,
-            source_key,
-            "character-rank-scroll-thumb",
-            10_001,
+            layer.key("character-rank-scroll-thumb", 10_001),
             thumb_bounds,
             GeneralGeometry::RoundedRect { radius: [2.0; 2] },
             [0.25, 0.25, 0.25, 0.55],

@@ -39,7 +39,7 @@ use honor::build_honors_recipe;
 use music::{build_detailed_music_recipe, build_tabbed_music_recipe};
 use nodes::{
     count_source, image_node, image_node_without_source, item_region, layout_rect,
-    localized_source, localized_two_line_sources, shape_node, text_node,
+    localized_source, localized_two_line_sources, shape_node, text_node, RecipeLayer,
 };
 use story_favorite::build_story_favorite_recipe;
 
@@ -203,6 +203,10 @@ pub fn build_general_recipe(
     source_key: &str,
     snapshot: &ProfileComponentSnapshot,
 ) -> Result<Option<GeneralRecipe>, ProfileResolveError> {
+    let layer = RecipeLayer {
+        layer_id,
+        source_key,
+    };
     if !SUPPORTED_GENERAL_TYPES.contains(&general_type) {
         return Ok(None);
     }
@@ -269,36 +273,23 @@ pub fn build_general_recipe(
         2 => {
             let title_key = "custom_profile.general.total_power.title";
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "title",
-                0,
+                layer.key("title", 0),
                 layout_rect(TOTAL_POWER.elements[0]),
                 localized_source(snapshot, title_key)?,
                 TOTAL_POWER.elements[0].h,
                 [0.33, 0.33, 0.33, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "divider",
-                1,
+                layer.key("divider", 1),
                 layout_rect(TOTAL_POWER.elements[2]),
                 TextSource::Authored { value: "|".into() },
                 TOTAL_POWER.elements[2].h,
                 [0.67, 0.67, 0.67, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "value",
-                2,
+                layer.key("value", 2),
                 layout_rect(TOTAL_POWER.elements[3]),
                 TextSource::ProfileField {
                     field: "totalPower.totalPower".into(),
@@ -307,25 +298,17 @@ pub fn build_general_recipe(
                 TOTAL_POWER.elements[3].h,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
         }
         13 => {
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "textbox",
-                0,
+                layer.key("textbox", 0),
                 layout_rect(PLAYER_NAME.elements[0]),
                 GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
                 [0.922, 0.922, 0.941, 1.0],
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "player-name",
-                1,
+                layer.key("player-name", 1),
                 layout_rect(PLAYER_NAME.elements[1]),
                 TextSource::ProfileField {
                     field: "user.name".into(),
@@ -334,17 +317,12 @@ pub fn build_general_recipe(
                 PLAYER_NAME.elements[1].h,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
         }
         4 => {
             let textbox = COMMENT.elements[0];
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "textbox",
-                0,
+                layer.key("textbox", 0),
                 layout_rect(textbox),
                 GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
                 [0.922, 0.922, 0.941, 1.0],
@@ -356,10 +334,7 @@ pub fn build_general_recipe(
                 .cloned()
                 .ok_or_else(|| ProfileResolveError::MissingLocalizedText(key.into()))?;
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "title",
-                1,
+                layer.key("title", 1),
                 layout_rect(COMMENT.elements[1]),
                 TextSource::Localized {
                     key: key.into(),
@@ -369,8 +344,6 @@ pub fn build_general_recipe(
                 COMMENT.elements[1].h,
                 [0.53, 0.53, 0.53, 1.0],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             let content = crate::profile_layout::ElementLayout {
                 cx: textbox.cx,
@@ -379,10 +352,7 @@ pub fn build_general_recipe(
                 h: textbox.h - 36.0,
             };
             let mut content_node = text_node(
-                layer_id,
-                source_key,
-                "content",
-                2,
+                layer.key("content", 2),
                 layout_rect(content),
                 TextSource::ProfileField {
                     field: "userProfile.word".into(),
@@ -391,13 +361,16 @@ pub fn build_general_recipe(
                 26.0,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Left,
-                6.0,
-                true,
             );
             if let GeneralRecipePayload::Text {
-                render_baseline, ..
+                line_spacing,
+                wrap,
+                render_baseline,
+                ..
             } = &mut content_node.payload
             {
+                *line_spacing = 6.0;
+                *wrap = true;
                 // The measured General rectangle is a draw-anchor contract.
                 // The first-line baseline is the textbox top + 18px padding +
                 // 26px font size, expressed in TMP-local units.
@@ -414,32 +387,21 @@ pub fn build_general_recipe(
                 ..MVP_SUPERSTAR.elements[5]
             };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "divider",
-                0,
+                layer.key("divider", 0),
                 layout_rect(divider),
                 GeneralGeometry::Rect,
                 [0.78, 0.78, 0.78, 0.5],
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "title",
-                1,
+                layer.key("title", 1),
                 layout_rect(MVP_SUPERSTAR.elements[0]),
                 localized_source(snapshot, "custom_profile.general.multiplayer_live.title")?,
                 MVP_SUPERSTAR.elements[0].h,
                 [0.33, 0.33, 0.33, 1.0],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "mvp-background",
-                2,
+                layer.key("mvp-background", 2),
                 layout_rect(MVP_SUPERSTAR.elements[1]),
                 GeneralGeometry::RoundedRect {
                     radius: [16.0, 16.0],
@@ -447,36 +409,23 @@ pub fn build_general_recipe(
                 [0.62, 0.62, 0.65, 1.0],
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "mvp-label",
-                3,
+                layer.key("mvp-label", 3),
                 layout_rect(MVP_SUPERSTAR.elements[1]),
                 localized_source(snapshot, "custom_profile.general.multiplayer_live.mvp")?,
                 MVP_SUPERSTAR.elements[1].h * 0.55,
                 [1.0; 4],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "mvp-count",
-                4,
+                layer.key("mvp-count", 4),
                 layout_rect(MVP_SUPERSTAR.elements[2]),
                 count_source(snapshot, snapshot.mvp)?,
                 MVP_SUPERSTAR.elements[4].h,
                 [0.27, 0.27, 0.27, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "superstar-background",
-                5,
+                layer.key("superstar-background", 5),
                 layout_rect(MVP_SUPERSTAR.elements[3]),
                 GeneralGeometry::RoundedRect {
                     radius: [16.0, 16.0],
@@ -493,17 +442,12 @@ pub fn build_general_recipe(
                 "custom_profile.general.multiplayer_live.superstar",
             )?;
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "superstar-upper",
-                6,
+                layer.key("superstar-upper", 6),
                 layout_rect(upper),
                 superstar_upper,
                 18.0,
                 [1.0; 4],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             let lower = crate::profile_layout::ElementLayout {
                 cy: MVP_SUPERSTAR.elements[3].cy - 10.0,
@@ -511,62 +455,41 @@ pub fn build_general_recipe(
                 ..MVP_SUPERSTAR.elements[3]
             };
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "superstar-lower",
-                7,
+                layer.key("superstar-lower", 7),
                 layout_rect(lower),
                 superstar_lower,
                 18.0,
                 [1.0; 4],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "superstar-count",
-                8,
+                layer.key("superstar-count", 8),
                 layout_rect(MVP_SUPERSTAR.elements[4]),
                 count_source(snapshot, snapshot.superstar)?,
                 MVP_SUPERSTAR.elements[4].h,
                 [0.27, 0.27, 0.27, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
         }
         10 => {
             let els = &CHALLENGE_LIVE.elements;
             let divider = crate::profile_layout::ElementLayout { h: 2.0, ..els[4] };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "divider",
-                0,
+                layer.key("divider", 0),
                 layout_rect(divider),
                 GeneralGeometry::Rect,
                 [0.78, 0.78, 0.78, 0.5],
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "title",
-                1,
+                layer.key("title", 1),
                 layout_rect(els[0]),
                 localized_source(snapshot, "custom_profile.general.challenge_live.title")?,
                 els[0].h,
                 [0.33, 0.33, 0.33, 1.0],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "solo-background",
-                2,
+                layer.key("solo-background", 2),
                 layout_rect(els[1]),
                 GeneralGeometry::RoundedRect {
                     radius: [16.0, 16.0],
@@ -574,34 +497,23 @@ pub fn build_general_recipe(
                 [0.62, 0.62, 0.65, 1.0],
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "solo-label",
-                3,
+                layer.key("solo-label", 3),
                 layout_rect(els[1]),
                 localized_source(snapshot, "custom_profile.general.challenge_live.solo")?,
                 els[1].h * 0.55,
                 [1.0; 4],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             let avatar_bounds = layout_rect(els[2]);
             if let Some(image) = snapshot.challenge_avatar.as_ref() {
                 if let Some(descriptor) = image.descriptor.as_ref() {
                     nodes.push(image_node(
-                        layer_id,
-                        source_key,
-                        "challenge-avatar",
-                        4,
+                        layer.key("challenge-avatar", 4),
                         avatar_bounds,
-                        descriptor.resource.clone(),
-                        Some([descriptor.natural_width, descriptor.natural_height]),
-                        GeneralImageSource::WholeImageImplicit,
-                        GeneralImageSampling::Nearest,
-                        GeneralImageSourceConstraint::Implicit,
                         image,
-                        descriptor.provenance.clone(),
+                        descriptor,
+                        GeneralImageSource::WholeImageImplicit,
+                        GeneralImageSourceConstraint::Implicit,
                         vec![GeneralClip::Ellipse {
                             bounds: avatar_bounds,
                             anti_alias: true,
@@ -609,10 +521,7 @@ pub fn build_general_recipe(
                     ));
                 } else {
                     nodes.push(shape_node(
-                        layer_id,
-                        source_key,
-                        "challenge-avatar",
-                        4,
+                        layer.key("challenge-avatar", 4),
                         avatar_bounds,
                         GeneralGeometry::Ellipse,
                         [0.87, 0.87, 0.87, 1.0],
@@ -636,10 +545,7 @@ pub fn build_general_recipe(
                 ));
             }
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "challenge-score",
-                5,
+                layer.key("challenge-score", 5),
                 layout_rect(els[3]),
                 TextSource::ProfileField {
                     field: "userProfile.challengeScore".into(),
@@ -648,8 +554,6 @@ pub fn build_general_recipe(
                 els[3].h,
                 [0.27, 0.27, 0.27, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
         }
         12 => build_detailed_music_recipe(layer_id, source_key, snapshot, &mut nodes)?,
@@ -669,10 +573,7 @@ pub fn build_general_recipe(
                 height: 52.0,
             };
             let mut background = shape_node(
-                layer_id,
-                source_key,
-                "background",
-                0,
+                layer.key("background", 0),
                 pill,
                 GeneralGeometry::RoundedRect {
                     radius: [26.0, 26.0],
@@ -687,10 +588,7 @@ pub fn build_general_recipe(
             }
             nodes.push(background);
             nodes.push(image_node_without_source(
-                layer_id,
-                source_key,
-                "rank-icon",
-                1,
+                layer.key("rank-icon", 1),
                 Rect {
                     x: -94.0,
                     y: -16.0,
@@ -703,10 +601,7 @@ pub fn build_general_recipe(
                 },
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "label",
-                2,
+                layer.key("label", 2),
                 Rect {
                     x: -54.0,
                     y: -13.0,
@@ -717,14 +612,9 @@ pub fn build_general_recipe(
                 26.0,
                 [0.70, 0.70, 0.75, 1.0],
                 GeneralTextAlign::Left,
-                0.0,
-                false,
             ));
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                "rank",
-                3,
+                layer.key("rank", 3),
                 Rect {
                     x: -90.0,
                     y: -13.0,
@@ -738,8 +628,6 @@ pub fn build_general_recipe(
                 26.0,
                 [1.0; 4],
                 GeneralTextAlign::Right,
-                0.0,
-                false,
             ));
         }
         18 => {
@@ -750,10 +638,7 @@ pub fn build_general_recipe(
                 height: 180.0,
             };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                "avatar-background",
-                0,
+                layer.key("avatar-background", 0),
                 avatar_bounds,
                 GeneralGeometry::Ellipse,
                 [0.85, 0.85, 0.9, 1.0],
@@ -761,23 +646,17 @@ pub fn build_general_recipe(
             if let Some(image) = snapshot.player_avatar.as_ref() {
                 if let Some(descriptor) = image.descriptor.as_ref() {
                     nodes.push(image_node(
-                        layer_id,
-                        source_key,
-                        "avatar",
-                        1,
+                        layer.key("avatar", 1),
                         avatar_bounds,
-                        descriptor.resource.clone(),
-                        Some([descriptor.natural_width, descriptor.natural_height]),
+                        image,
+                        descriptor,
                         GeneralImageSource::Pixels(cover_source_rect(
                             descriptor.natural_width,
                             descriptor.natural_height,
                             avatar_bounds.width,
                             avatar_bounds.height,
                         )),
-                        GeneralImageSampling::Nearest,
                         GeneralImageSourceConstraint::Fast,
-                        image,
-                        descriptor.provenance.clone(),
                         vec![GeneralClip::Ellipse {
                             bounds: avatar_bounds,
                             anti_alias: true,
@@ -802,10 +681,7 @@ pub fn build_general_recipe(
                 ));
             }
             let mut border = shape_node(
-                layer_id,
-                source_key,
-                "avatar-border",
-                2,
+                layer.key("avatar-border", 2),
                 Rect {
                     x: -88.0,
                     y: -88.0,

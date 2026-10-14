@@ -7,7 +7,8 @@ use sekai_profile_core::masterdata::{
 use sekai_profile_core::profile_data::ProfileData;
 use sekai_profile_core::profile_resolve::{
     compile_profile_scene, compile_profile_scene_with_localizations, prepare_profile,
-    prepare_profile_with_localizations, ResourceAvailability, ResourceMetadata, ResourceMetric,
+    prepare_profile_with_localizations, ProfileLocalization, ResourceAvailability,
+    ResourceMetadata, ResourceMetric,
 };
 use sekai_profile_core::profile_source::{profile_page_order, CustomProfileCard};
 use sekai_profile_core::{LineIndentSource, ResourceKey};
@@ -345,10 +346,12 @@ pub fn create_scene(handle: u32, input: &str) -> Result<String, String> {
                 profile.as_ref(),
                 &session.data,
                 &request.document_key,
-                locale,
+                ProfileLocalization {
+                    locale,
+                    localized_text,
+                },
                 &metrics,
                 line_indent,
-                localized_text,
             ),
             None => compile_profile_scene(
                 &card,

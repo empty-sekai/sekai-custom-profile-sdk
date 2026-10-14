@@ -1016,8 +1016,12 @@ fn bonds_honor_word_art_follows_the_honor_rarity() {
         (1, "bonds_honor/word/honorname_0102_01_01"),
         (2, "bonds_honor/word/honorname_0102_01_02"),
     ] {
-        let visual =
-            super::bonds_honor_visual("bonds", id, 1, true, 9, false, false, &data, &()).unwrap();
+        let view = super::BondsHonorView {
+            word_id: 9,
+            inverse: false,
+            use_unit_virtual_singer: false,
+        };
+        let visual = super::bonds_honor_visual("bonds", id, 1, true, view, &data, &()).unwrap();
         let HonorVisualKind::Bonds { word, .. } = visual.visual else {
             panic!("bonds visual expected");
         };

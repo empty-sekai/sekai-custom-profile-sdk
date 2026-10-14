@@ -436,9 +436,11 @@ pub fn lower_omikuji(
             TITLE_FONT_SIZE,
             1.0,
             white,
-            TITLE_RECT,
-            [0.0, 0.0],
-            [centre[0] + TITLE_POSITION[0], centre[1] + TITLE_POSITION[1]],
+            TextRect {
+                size: TITLE_RECT,
+                pivot: [0.0, 0.0],
+                position: [centre[0] + TITLE_POSITION[0], centre[1] + TITLE_POSITION[1]],
+            },
         );
         source.backdrop = Some(UguiTextBackdrop {
             color: visual.title_background,
@@ -459,9 +461,11 @@ pub fn lower_omikuji(
             visual.summary_font_size,
             BODY_LINE_SPACING,
             grey,
-            SUMMARY_RECT,
-            [0.0, 1.0],
-            [right_edge + SUMMARY_POSITION[0], SUMMARY_POSITION[1]],
+            TextRect {
+                size: SUMMARY_RECT,
+                pivot: [0.0, 1.0],
+                position: [right_edge + SUMMARY_POSITION[0], SUMMARY_POSITION[1]],
+            },
         ),
     ));
     for (index, (description, position)) in visual
@@ -479,25 +483,34 @@ pub fn lower_omikuji(
                 DESCRIPTION_FONT_SIZE,
                 BODY_LINE_SPACING,
                 grey,
-                DESCRIPTION_RECT,
-                [0.0, 1.0],
-                [right_edge + position[0], position[1]],
+                TextRect {
+                    size: DESCRIPTION_RECT,
+                    pivot: [0.0, 1.0],
+                    position: [right_edge + position[0], position[1]],
+                },
             ),
         ));
     }
     commands
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Rect of a slip text node in slip space (+y up): its size, its pivot as a
+/// fraction of the size from the bottom-left corner, and the position of
+/// the pivot.
+#[derive(Clone, Copy)]
+struct TextRect {
+    size: [f32; 2],
+    pivot: [f32; 2],
+    position: [f32; 2],
+}
+
 fn text_source(
     visual: &OmikujiVisualSnapshot,
     text: &str,
     font_size: i32,
     line_spacing: f32,
     color: [f32; 4],
-    rect_size: [f32; 2],
-    pivot: [f32; 2],
-    position: [f32; 2],
+    rect: TextRect,
 ) -> UguiTextSource {
     UguiTextSource {
         text: text.into(),
@@ -506,9 +519,9 @@ fn text_source(
         font_size,
         line_spacing,
         color,
-        rect_size,
-        pivot,
-        node_matrix: text_node_matrix(position),
+        rect_size: rect.size,
+        pivot: rect.pivot,
+        node_matrix: text_node_matrix(rect.position),
         vertical: Some(visual.vertical.clone()),
         backdrop: None,
     }

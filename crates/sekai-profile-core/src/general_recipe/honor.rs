@@ -1,11 +1,13 @@
 //! The honor panel (type 6): standard and bonds honors and their stars.
 
-use super::nodes::{group_node, item_region, shape_node, text_node};
+use super::nodes::{group_node, item_region, shape_node, text_node, NodeKey, RecipeLayer};
 use super::{
-    recipe_node_id, GeneralGeometry, GeneralGroupPhase, GeneralImageSampling, GeneralImageSource,
+    GeneralGeometry, GeneralGroupPhase, GeneralImageSampling, GeneralImageSource,
     GeneralImageSourceConstraint, GeneralRecipeNode, GeneralRecipePayload, GeneralTextAlign,
 };
-use crate::profile_scene::ProfileComponentSnapshot;
+use crate::profile_scene::{
+    HonorVisualKind, HonorVisualSnapshot, ProfileComponentSnapshot, ResourceDescriptor,
+};
 use crate::{BlendMode, InteractionRegionSource, ParameterValue, Rect, StableId, TextSource};
 
 pub(super) fn build_honors_recipe(
@@ -15,11 +17,12 @@ pub(super) fn build_honors_recipe(
     nodes: &mut Vec<GeneralRecipeNode>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) {
-    nodes.push(shape_node(
+    let layer = RecipeLayer {
         layer_id,
         source_key,
-        "honors-background",
-        0,
+    };
+    nodes.push(shape_node(
+        layer.key("honors-background", 0),
         Rect {
             x: -392.0,
             y: -90.5,
@@ -43,63 +46,12 @@ pub(super) fn build_honors_recipe(
         };
         let base = 1 + slot as u32 * 64;
         match &honor.visual {
-            crate::profile_scene::HonorVisualKind::Standard {
-                honor_type,
-                has_star,
-                is_live_master,
-                progress,
-                background,
-                frame_candidates,
-                overlay,
-                star,
-                star_high,
-                ..
-            } => build_standard_honor_recipe(
-                layer_id,
-                source_key,
-                honor,
-                honor_type,
-                *has_star,
-                *is_live_master,
-                *progress,
-                background.as_ref(),
-                frame_candidates,
-                overlay.as_ref(),
-                star.as_ref(),
-                star_high.as_ref(),
-                cx,
-                cy,
-                bounds,
-                base,
-                nodes,
-            ),
-            crate::profile_scene::HonorVisualKind::Bonds {
-                character_ids,
-                backgrounds,
-                characters,
-                mask,
-                frame,
-                word,
-                star,
-                star_high,
-            } => build_bonds_honor_recipe(
-                layer_id,
-                source_key,
-                honor,
-                *character_ids,
-                backgrounds,
-                characters,
-                mask.as_ref(),
-                frame.as_ref(),
-                word.as_ref(),
-                star.as_ref(),
-                star_high.as_ref(),
-                cx,
-                cy,
-                bounds,
-                base,
-                nodes,
-            ),
+            HonorVisualKind::Standard { .. } => {
+                build_standard_honor_recipe(layer, honor, cx, cy, bounds, base, nodes);
+            }
+            HonorVisualKind::Bonds { .. } => {
+                build_bonds_honor_recipe(layer, honor, cx, cy, bounds, base, nodes);
+            }
         }
         let mut data = std::collections::BTreeMap::from([
             (
@@ -116,7 +68,7 @@ pub(super) fn build_honors_recipe(
             ),
             ("full_size".into(), ParameterValue::Bool(honor.full_size)),
         ]);
-        if let crate::profile_scene::HonorVisualKind::Bonds {
+        if let HonorVisualKind::Bonds {
             character_ids,
             word,
             ..
@@ -146,32 +98,35 @@ pub(super) fn build_honors_recipe(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Background, frame, overlay and level stars of a standard honor. A live
+/// master honor shows its mission progress in place of the stars.
 fn build_standard_honor_recipe(
-    layer_id: StableId,
-    source_key: &str,
-    honor: &crate::profile_scene::HonorVisualSnapshot,
-    honor_type: &str,
-    has_star: bool,
-    is_live_master: bool,
-    progress: i32,
-    background: Option<&crate::profile_scene::ResourceDescriptor>,
-    frame_candidates: &[Option<crate::profile_scene::ResourceDescriptor>],
-    overlay: Option<&crate::profile_scene::ResourceDescriptor>,
-    star: Option<&crate::profile_scene::ResourceDescriptor>,
-    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    layer: RecipeLayer<'_>,
+    honor: &HonorVisualSnapshot,
     cx: f32,
     cy: f32,
     bounds: Rect,
     base: u32,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) {
+    let HonorVisualKind::Standard {
+        honor_type,
+        has_star,
+        is_live_master,
+        progress,
+        background,
+        frame_candidates,
+        overlay,
+        star,
+        star_high,
+        ..
+    } = &honor.visual
+    else {
+        unreachable!("standard honor recipe received a bonds honor");
+    };
     if let Some(value) = background {
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("honor-{}-background", honor.honor_id),
-            base,
+            layer.key(&format!("honor-{}-background", honor.honor_id), base),
             bounds,
             value,
             GeneralImageSource::WholeImageExplicit,
@@ -181,10 +136,7 @@ fn build_standard_honor_recipe(
     }
     if let Some(value) = frame_candidates.iter().flatten().next() {
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("honor-{}-frame", honor.honor_id),
-            base + 1,
+            layer.key(&format!("honor-{}-frame", honor.honor_id), base + 1),
             Rect {
                 x: cx - value.natural_width / 2.0,
                 y: cy - 40.0,
@@ -198,7 +150,7 @@ fn build_standard_honor_recipe(
         ));
     }
     if let Some(value) = overlay {
-        let (dx, dy) = if is_live_master {
+        let (dx, dy) = if *is_live_master {
             if honor.full_size {
                 (218.0, 3.0)
             } else {
@@ -220,10 +172,7 @@ fn build_standard_honor_recipe(
             (34.0, 42.0)
         };
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("honor-{}-overlay", honor.honor_id),
-            base + 2,
+            layer.key(&format!("honor-{}-overlay", honor.honor_id), base + 2),
             Rect {
                 x: bounds.x + dx,
                 y: bounds.y + dy,
@@ -236,14 +185,11 @@ fn build_standard_honor_recipe(
             BlendMode::SrcOver,
         ));
     }
-    if is_live_master {
+    if *is_live_master {
         let font_size = 20.0;
         let baseline = cy + 30.0;
         nodes.push(text_node(
-            layer_id,
-            source_key,
-            &format!("honor-{}-progress", honor.honor_id),
-            base + 3,
+            layer.key(&format!("honor-{}-progress", honor.honor_id), base + 3),
             Rect {
                 x: cx + if honor.full_size { 40.0 } else { -40.0 },
                 y: baseline - font_size * 0.35 - font_size / 2.0,
@@ -257,16 +203,13 @@ fn build_standard_honor_recipe(
             font_size,
             [1.0; 4],
             GeneralTextAlign::Center,
-            0.0,
-            false,
         ));
-    } else if has_star {
+    } else if *has_star {
         build_honor_star_nodes(
-            layer_id,
-            source_key,
+            layer,
             honor,
-            star,
-            star_high,
+            star.as_ref(),
+            star_high.as_ref(),
             bounds,
             base + 16,
             nodes,
@@ -274,30 +217,32 @@ fn build_standard_honor_recipe(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The two character halves of a bonds honor, isolated and masked as one
+/// group, then its frame, word art and level stars.
 fn build_bonds_honor_recipe(
-    layer_id: StableId,
-    source_key: &str,
-    honor: &crate::profile_scene::HonorVisualSnapshot,
-    _character_ids: [i32; 2],
-    backgrounds: &[Option<crate::profile_scene::ResourceDescriptor>; 2],
-    characters: &[Option<crate::profile_scene::ResourceDescriptor>; 2],
-    mask: Option<&crate::profile_scene::ResourceDescriptor>,
-    frame: Option<&crate::profile_scene::ResourceDescriptor>,
-    word: Option<&crate::profile_scene::ResourceDescriptor>,
-    star: Option<&crate::profile_scene::ResourceDescriptor>,
-    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    layer: RecipeLayer<'_>,
+    honor: &HonorVisualSnapshot,
     cx: f32,
     cy: f32,
     bounds: Rect,
     base: u32,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) {
+    let HonorVisualKind::Bonds {
+        backgrounds,
+        characters,
+        mask,
+        frame,
+        word,
+        star,
+        star_high,
+        ..
+    } = &honor.visual
+    else {
+        unreachable!("bonds honor recipe received a standard honor");
+    };
     nodes.push(group_node(
-        layer_id,
-        source_key,
-        &format!("bonds-{}-isolation-begin", honor.honor_id),
-        base,
+        layer.key(&format!("bonds-{}-isolation-begin", honor.honor_id), base),
         bounds,
         GeneralGroupPhase::Begin,
     ));
@@ -319,10 +264,10 @@ fn build_bonds_honor_recipe(
                 }
             };
             nodes.push(honor_image_node(
-                layer_id,
-                source_key,
-                &format!("bonds-{}-background-{index}", honor.honor_id),
-                base + 1 + index as u32,
+                layer.key(
+                    &format!("bonds-{}-background-{index}", honor.honor_id),
+                    base + 1 + index as u32,
+                ),
                 Rect {
                     x: bounds.x + index as f32 * bounds.width / 2.0,
                     y: bounds.y,
@@ -361,10 +306,10 @@ fn build_bonds_honor_recipe(
                 height: value.natural_height,
             };
             nodes.push(honor_image_node(
-                layer_id,
-                source_key,
-                &format!("bonds-{}-character-{index}", honor.honor_id),
-                base + 3 + index as u32,
+                layer.key(
+                    &format!("bonds-{}-character-{index}", honor.honor_id),
+                    base + 3 + index as u32,
+                ),
                 Rect {
                     x: left,
                     y: cy + 40.0 - sh,
@@ -380,10 +325,7 @@ fn build_bonds_honor_recipe(
     }
     if let Some(value) = mask {
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("bonds-{}-mask", honor.honor_id),
-            base + 5,
+            layer.key(&format!("bonds-{}-mask", honor.honor_id), base + 5),
             bounds,
             value,
             GeneralImageSource::WholeImageImplicit,
@@ -392,19 +334,13 @@ fn build_bonds_honor_recipe(
         ));
     }
     nodes.push(group_node(
-        layer_id,
-        source_key,
-        &format!("bonds-{}-isolation-end", honor.honor_id),
-        base + 6,
+        layer.key(&format!("bonds-{}-isolation-end", honor.honor_id), base + 6),
         bounds,
         GeneralGroupPhase::End,
     ));
     if let Some(value) = frame {
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("bonds-{}-frame", honor.honor_id),
-            base + 7,
+            layer.key(&format!("bonds-{}-frame", honor.honor_id), base + 7),
             Rect {
                 x: cx - value.natural_width / 2.0,
                 y: cy - 40.0,
@@ -419,10 +355,7 @@ fn build_bonds_honor_recipe(
     }
     if let Some(value) = word {
         nodes.push(honor_image_node(
-            layer_id,
-            source_key,
-            &format!("bonds-{}-word", honor.honor_id),
-            base + 8,
+            layer.key(&format!("bonds-{}-word", honor.honor_id), base + 8),
             Rect {
                 x: cx - value.natural_width / 2.0,
                 y: cy - value.natural_height / 2.0,
@@ -436,11 +369,10 @@ fn build_bonds_honor_recipe(
         ));
     }
     build_honor_star_nodes(
-        layer_id,
-        source_key,
+        layer,
         honor,
-        star,
-        star_high,
+        star.as_ref(),
+        star_high.as_ref(),
         bounds,
         base + 16,
         nodes,
@@ -448,11 +380,10 @@ fn build_bonds_honor_recipe(
 }
 
 fn build_honor_star_nodes(
-    layer_id: StableId,
-    source_key: &str,
-    honor: &crate::profile_scene::HonorVisualSnapshot,
-    star: Option<&crate::profile_scene::ResourceDescriptor>,
-    star_high: Option<&crate::profile_scene::ResourceDescriptor>,
+    layer: RecipeLayer<'_>,
+    honor: &HonorVisualSnapshot,
+    star: Option<&ResourceDescriptor>,
+    star_high: Option<&ResourceDescriptor>,
     bounds: Rect,
     base: u32,
     nodes: &mut Vec<GeneralRecipeNode>,
@@ -467,10 +398,10 @@ fn build_honor_star_nodes(
     if let Some(value) = star {
         for index in 0..level.min(5) {
             nodes.push(honor_image_node(
-                layer_id,
-                source_key,
-                &format!("honor-{}-star-{index}", honor.honor_id),
-                base + index as u32,
+                layer.key(
+                    &format!("honor-{}-star-{index}", honor.honor_id),
+                    base + index as u32,
+                ),
                 Rect {
                     x: x + index as f32 * 16.0,
                     y,
@@ -488,10 +419,10 @@ fn build_honor_star_nodes(
         if let Some(value) = star_high {
             for index in 0..(level - 5) {
                 nodes.push(honor_image_node(
-                    layer_id,
-                    source_key,
-                    &format!("honor-{}-star-high-{index}", honor.honor_id),
-                    base + 8 + index as u32,
+                    layer.key(
+                        &format!("honor-{}-star-high-{index}", honor.honor_id),
+                        base + 8 + index as u32,
+                    ),
                     Rect {
                         x: x + index as f32 * 16.0,
                         y,
@@ -508,28 +439,18 @@ fn build_honor_star_nodes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Honor sprite drawn from its resolved descriptor with nearest filtering.
 fn honor_image_node(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    ordinal: u32,
+    key: NodeKey<'_>,
     bounds: Rect,
-    descriptor: &crate::profile_scene::ResourceDescriptor,
+    descriptor: &ResourceDescriptor,
     source: GeneralImageSource,
     source_constraint: GeneralImageSourceConstraint,
     blend_mode: BlendMode,
 ) -> GeneralRecipeNode {
-    GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
+    key.node(
         bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        clips: Vec::new(),
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Image {
+        GeneralRecipePayload::Image {
             resource: descriptor.resource.clone(),
             natural_size: Some([descriptor.natural_width, descriptor.natural_height]),
             source,
@@ -541,5 +462,5 @@ fn honor_image_node(
             provenance: descriptor.provenance.clone(),
             blend_mode,
         },
-    }
+    )
 }

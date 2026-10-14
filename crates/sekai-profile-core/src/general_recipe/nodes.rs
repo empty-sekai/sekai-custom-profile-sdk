@@ -6,156 +6,156 @@ use super::{
     GeneralImageSampling, GeneralImageSource, GeneralImageSourceConstraint, GeneralRecipeNode,
     GeneralRecipePayload, GeneralTextAlign,
 };
-use crate::profile_scene::{ProfileComponentSnapshot, ProfileResolveError};
+use crate::profile_scene::{
+    ComponentImageSnapshot, ProfileComponentSnapshot, ProfileResolveError, ResourceDescriptor,
+};
 use crate::{
     BlendMode, FontRole, InteractionRegionSource, ParameterValue, Rect, ResourceKey, StableId,
     TextSource,
 };
 
-pub(super) fn shape_node(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
+/// The panel a recipe builds nodes for: the layer its nodes are drawn on and
+/// the source key their ids derive from.
+#[derive(Clone, Copy)]
+pub(super) struct RecipeLayer<'a> {
+    pub(super) layer_id: StableId,
+    pub(super) source_key: &'a str,
+}
+
+impl<'a> RecipeLayer<'a> {
+    /// Key of the node with `role`. `ordinal` tells apart the ids of nodes
+    /// that share a role.
+    pub(super) fn key(self, role: &'a str, ordinal: u32) -> NodeKey<'a> {
+        NodeKey {
+            layer: self,
+            role,
+            ordinal,
+        }
+    }
+}
+
+/// Identity of one recipe node: the panel it belongs to, its role, and the
+/// ordinal its id derives from together with the role.
+#[derive(Clone, Copy)]
+pub(super) struct NodeKey<'a> {
+    layer: RecipeLayer<'a>,
+    role: &'a str,
     ordinal: u32,
+}
+
+impl NodeKey<'_> {
+    /// Node drawing `payload` in `bounds`, untransformed, with no clip and
+    /// no control binding.
+    pub(super) fn node(self, bounds: Rect, payload: GeneralRecipePayload) -> GeneralRecipeNode {
+        GeneralRecipeNode {
+            id: recipe_node_id(self.layer.source_key, self.role, self.ordinal),
+            layer_id: self.layer.layer_id,
+            role: self.role.into(),
+            parent_id: None,
+            bounds,
+            local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            clips: Vec::new(),
+            control_bindings: Vec::new(),
+            payload,
+        }
+    }
+}
+
+pub(super) fn shape_node(
+    key: NodeKey<'_>,
     bounds: Rect,
     geometry: GeneralGeometry,
     color: [f32; 4],
 ) -> GeneralRecipeNode {
-    GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
+    key.node(
         bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        clips: Vec::new(),
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Shape {
+        GeneralRecipePayload::Shape {
             geometry,
             fill: GeneralFill::Solid(color),
             stroke: None,
         },
-    }
+    )
 }
 
 pub(super) fn group_node(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    ordinal: u32,
+    key: NodeKey<'_>,
     bounds: Rect,
     phase: GeneralGroupPhase,
 ) -> GeneralRecipeNode {
-    GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
+    key.node(
         bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        clips: Vec::new(),
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Group {
+        GeneralRecipePayload::Group {
             isolation: true,
             phase,
         },
-    }
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Text in the region font 1 that does not wrap and adds no line spacing. A
+/// paragraph sets `wrap` and `line_spacing` on the payload of the returned
+/// node.
 pub(super) fn text_node(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    ordinal: u32,
+    key: NodeKey<'_>,
     bounds: Rect,
     source: TextSource,
     font_size: f32,
     color: [f32; 4],
     align: GeneralTextAlign,
-    line_spacing: f32,
-    wrap: bool,
 ) -> GeneralRecipeNode {
-    GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
+    key.node(
         bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        clips: Vec::new(),
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Text {
+        GeneralRecipePayload::Text {
             source,
             font_role: FontRole::RegionFontId(1),
             font_size,
             color,
             align,
-            line_spacing,
-            wrap,
+            line_spacing: 0.0,
+            wrap: false,
             render_baseline: None,
         },
-    }
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Player-data image, sampled with nearest filtering. `descriptor` is the
+/// resolved descriptor of `image`.
 pub(super) fn image_node(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    ordinal: u32,
+    key: NodeKey<'_>,
     bounds: Rect,
-    resource: ResourceKey,
-    natural_size: Option<[f32; 2]>,
+    image: &ComponentImageSnapshot,
+    descriptor: &ResourceDescriptor,
     source: GeneralImageSource,
-    sampling: GeneralImageSampling,
     source_constraint: GeneralImageSourceConstraint,
-    image: &crate::profile_scene::ComponentImageSnapshot,
-    provenance: std::collections::BTreeMap<String, ParameterValue>,
     clips: Vec<GeneralClip>,
 ) -> GeneralRecipeNode {
     GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
-        bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
         clips,
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Image {
-            resource,
-            natural_size,
-            source,
-            sampling,
-            source_constraint,
-            tint: [1.0; 4],
-            source_field: Some(image.source_field.clone()),
-            source_id: Some(image.source_id.clone()),
-            provenance,
-            blend_mode: BlendMode::SrcOver,
-        },
+        ..key.node(
+            bounds,
+            GeneralRecipePayload::Image {
+                resource: descriptor.resource.clone(),
+                natural_size: Some([descriptor.natural_width, descriptor.natural_height]),
+                source,
+                sampling: GeneralImageSampling::Nearest,
+                source_constraint,
+                tint: [1.0; 4],
+                source_field: Some(image.source_field.clone()),
+                source_id: Some(image.source_id.clone()),
+                provenance: descriptor.provenance.clone(),
+                blend_mode: BlendMode::SrcOver,
+            },
+        )
     }
 }
 
 pub(super) fn image_node_without_source(
-    layer_id: StableId,
-    source_key: &str,
-    role: &str,
-    ordinal: u32,
+    key: NodeKey<'_>,
     bounds: Rect,
     resource: ResourceKey,
 ) -> GeneralRecipeNode {
-    GeneralRecipeNode {
-        id: recipe_node_id(source_key, role, ordinal),
-        layer_id,
-        role: role.into(),
-        parent_id: None,
+    key.node(
         bounds,
-        local_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-        clips: Vec::new(),
-        control_bindings: Vec::new(),
-        payload: GeneralRecipePayload::Image {
+        GeneralRecipePayload::Image {
             resource,
             natural_size: None,
             source: GeneralImageSource::WholeImageExplicit,
@@ -167,7 +167,7 @@ pub(super) fn image_node_without_source(
             provenance: std::collections::BTreeMap::new(),
             blend_mode: BlendMode::SrcOver,
         },
-    }
+    )
 }
 
 /// Source rectangle that covers a `target_width` x `target_height` box with a

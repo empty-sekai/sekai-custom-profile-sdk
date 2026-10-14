@@ -1,6 +1,6 @@
 //! The detailed (type 12) and tabbed (type 16) music clear panels.
 
-use super::nodes::{layout_rect, localized_source, shape_node, text_node};
+use super::nodes::{layout_rect, localized_source, shape_node, text_node, RecipeLayer};
 use super::{
     GeneralFill, GeneralGeometry, GeneralRecipeNode, GeneralRecipePayload, GeneralTextAlign,
 };
@@ -33,6 +33,10 @@ pub(super) fn build_detailed_music_recipe(
     snapshot: &ProfileComponentSnapshot,
     nodes: &mut Vec<GeneralRecipeNode>,
 ) -> Result<(), ProfileResolveError> {
+    let layer = RecipeLayer {
+        layer_id,
+        source_key,
+    };
     let results = snapshot.music_results.clone().unwrap_or_default();
     let difficulties = [
         ("easy", results.easy),
@@ -72,10 +76,7 @@ pub(super) fn build_detailed_music_recipe(
     {
         let bubble = MUSIC_CLEAR.elements[*bubble_index];
         nodes.push(shape_node(
-            layer_id,
-            source_key,
-            &format!("{group_role}-heading-background"),
-            ordinal,
+            layer.key(&format!("{group_role}-heading-background"), ordinal),
             layout_rect(bubble),
             GeneralGeometry::RoundedRect {
                 radius: [bubble.h / 2.0, bubble.h / 2.0],
@@ -84,17 +85,12 @@ pub(super) fn build_detailed_music_recipe(
         ));
         ordinal += 1;
         nodes.push(text_node(
-            layer_id,
-            source_key,
-            &format!("{group_role}-heading"),
-            ordinal,
+            layer.key(&format!("{group_role}-heading"), ordinal),
             layout_rect(bubble),
             localized_source(snapshot, heading_key)?,
             bubble.h * 0.42,
             [1.0; 4],
             GeneralTextAlign::Center,
-            0.0,
-            false,
         ));
         ordinal += 1;
         let bar = MUSIC_CLEAR.elements[*bar_index];
@@ -110,20 +106,17 @@ pub(super) fn build_detailed_music_recipe(
                 h: 28.0,
             };
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                &format!("{group_role}-{difficulty_role}-label-background"),
-                ordinal,
+                layer.key(
+                    &format!("{group_role}-{difficulty_role}-label-background"),
+                    ordinal,
+                ),
                 layout_rect(label),
                 GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
                 colors[difficulty_index],
             ));
             ordinal += 1;
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                &format!("{group_role}-{difficulty_role}-label"),
-                ordinal,
+                layer.key(&format!("{group_role}-{difficulty_role}-label"), ordinal),
                 layout_rect(label),
                 localized_source(
                     snapshot,
@@ -132,8 +125,6 @@ pub(super) fn build_detailed_music_recipe(
                 28.0 * 0.55,
                 [1.0; 4],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             ordinal += 1;
             let number = crate::profile_layout::ElementLayout {
@@ -148,10 +139,7 @@ pub(super) fn build_detailed_music_recipe(
                 _ => values.all_perfect,
             };
             nodes.push(text_node(
-                layer_id,
-                source_key,
-                &format!("{group_role}-{difficulty_role}-count"),
-                ordinal,
+                layer.key(&format!("{group_role}-{difficulty_role}-count"), ordinal),
                 layout_rect(number),
                 TextSource::ProfileField {
                     field: format!("userMusicDifficultyClearCount.{difficulty_role}.{field_name}"),
@@ -160,8 +148,6 @@ pub(super) fn build_detailed_music_recipe(
                 22.0,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             ));
             ordinal += 1;
         }
@@ -177,6 +163,10 @@ pub(super) fn build_tabbed_music_recipe(
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
+    let layer = RecipeLayer {
+        layer_id,
+        source_key,
+    };
     let control_id = StableId::derive(
         "general-control-v1",
         format!("{source_key}\0music-result-mode").as_bytes(),
@@ -207,10 +197,7 @@ pub(super) fn build_tabbed_music_recipe(
     {
         let label = MUSIC_CLEAR_TAB.elements[*label_index];
         let mut background = shape_node(
-            layer_id,
-            source_key,
-            &format!("{role}-label-background"),
-            ordinal,
+            layer.key(&format!("{role}-label-background"), ordinal),
             layout_rect(label),
             GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
             colors[difficulty_index],
@@ -233,10 +220,7 @@ pub(super) fn build_tabbed_music_recipe(
         nodes.push(background);
         ordinal += 1;
         nodes.push(text_node(
-            layer_id,
-            source_key,
-            &format!("{role}-label"),
-            ordinal,
+            layer.key(&format!("{role}-label"), ordinal),
             layout_rect(label),
             localized_source(
                 snapshot,
@@ -245,8 +229,6 @@ pub(super) fn build_tabbed_music_recipe(
             label.h * 0.55,
             [1.0; 4],
             GeneralTextAlign::Center,
-            0.0,
-            false,
         ));
         ordinal += 1;
         let number = MUSIC_CLEAR_TAB.elements[*number_index];
@@ -257,10 +239,7 @@ pub(super) fn build_tabbed_music_recipe(
                 _ => ("allPerfect", values.all_perfect),
             };
             let mut node = text_node(
-                layer_id,
-                source_key,
-                &format!("{role}-{option}-count"),
-                ordinal,
+                layer.key(&format!("{role}-{option}-count"), ordinal),
                 layout_rect(number),
                 TextSource::ProfileField {
                     field: format!("userMusicDifficultyClearCount.{role}.{field}"),
@@ -269,8 +248,6 @@ pub(super) fn build_tabbed_music_recipe(
                 number.h,
                 [0.2, 0.2, 0.2, 1.0],
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             );
             node.control_bindings
                 .push(CommandControlBinding::TabOption {
@@ -283,10 +260,7 @@ pub(super) fn build_tabbed_music_recipe(
     }
     let separator = MUSIC_CLEAR_TAB.elements[11];
     nodes.push(shape_node(
-        layer_id,
-        source_key,
-        "append-separator",
-        ordinal,
+        layer.key("append-separator", ordinal),
         Rect {
             x: separator.cx - 1.0,
             y: -separator.cy - separator.h / 2.0,
@@ -299,10 +273,7 @@ pub(super) fn build_tabbed_music_recipe(
     ordinal += 1;
     let tab = MUSIC_CLEAR_TAB.elements[0];
     nodes.push(shape_node(
-        layer_id,
-        source_key,
-        "tab-background",
-        ordinal,
+        layer.key("tab-background", ordinal),
         layout_rect(tab),
         GeneralGeometry::RoundedRect {
             radius: [tab.h / 2.0, tab.h / 2.0],
@@ -324,10 +295,7 @@ pub(super) fn build_tabbed_music_recipe(
             h: tab.h,
         };
         let mut selected_node = shape_node(
-            layer_id,
-            source_key,
-            &format!("tab-{active}-selected"),
-            ordinal,
+            layer.key(&format!("tab-{active}-selected"), ordinal),
             layout_rect(selected),
             GeneralGeometry::RoundedRect {
                 radius: [tab.h / 2.0, tab.h / 2.0],
@@ -350,10 +318,7 @@ pub(super) fn build_tabbed_music_recipe(
                 h: tab.h,
             };
             let mut text = text_node(
-                layer_id,
-                source_key,
-                &format!("tab-{active}-{label_option}-label"),
-                ordinal,
+                layer.key(&format!("tab-{active}-{label_option}-label"), ordinal),
                 layout_rect(label),
                 localized_source(snapshot, key)?,
                 tab.h * 0.42,
@@ -363,8 +328,6 @@ pub(super) fn build_tabbed_music_recipe(
                     [1.0; 4]
                 },
                 GeneralTextAlign::Center,
-                0.0,
-                false,
             );
             text.control_bindings
                 .push(CommandControlBinding::TabOption {

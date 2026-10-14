@@ -1,9 +1,11 @@
 //! The story favorite panel (type 14) and its scrolling list.
 
-use super::nodes::{image_node, item_region, layout_rect, localized_source, shape_node, text_node};
+use super::nodes::{
+    image_node, item_region, layout_rect, localized_source, shape_node, text_node, RecipeLayer,
+};
 use super::{
-    GeneralClip, GeneralGeometry, GeneralImageSampling, GeneralImageSource,
-    GeneralImageSourceConstraint, GeneralRecipeNode, GeneralTextAlign,
+    GeneralClip, GeneralGeometry, GeneralImageSource, GeneralImageSourceConstraint,
+    GeneralRecipeNode, GeneralTextAlign,
 };
 use crate::profile_scene::{
     ComponentControlSource, ComponentControlState, ProfileComponentSnapshot, ProfileResolveError,
@@ -18,25 +20,21 @@ pub(super) fn build_story_favorite_recipe(
     controls: &mut Vec<ComponentControlSource>,
     interaction_regions: &mut Vec<InteractionRegionSource>,
 ) -> Result<(), ProfileResolveError> {
-    let panel = &crate::profile_layout::STORY_FAVORITE;
-    nodes.push(text_node(
+    let layer = RecipeLayer {
         layer_id,
         source_key,
-        "title",
-        0,
+    };
+    let panel = &crate::profile_layout::STORY_FAVORITE;
+    nodes.push(text_node(
+        layer.key("title", 0),
         layout_rect(panel.elements[0]),
         localized_source(snapshot, "custom_profile.general.story_favorite.title")?,
         panel.elements[0].h,
         [0.33, 0.33, 0.33, 1.0],
         GeneralTextAlign::Center,
-        0.0,
-        false,
     ));
     nodes.push(shape_node(
-        layer_id,
-        source_key,
-        "separator",
-        1,
+        layer.key("separator", 1),
         Rect {
             height: 2.0,
             ..layout_rect(panel.elements[1])
@@ -69,10 +67,7 @@ pub(super) fn build_story_favorite_recipe(
             .filter(|favorite| favorite.story_id > 0)
         else {
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                &format!("{role}-empty"),
-                2 + index as u32,
+                layer.key(&format!("{role}-empty"), 2 + index as u32),
                 bounds,
                 GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
                 [0.82, 0.82, 0.82, 0.4],
@@ -81,26 +76,17 @@ pub(super) fn build_story_favorite_recipe(
         };
         if let Some(descriptor) = &favorite.image.descriptor {
             nodes.push(image_node(
-                layer_id,
-                source_key,
-                &role,
-                2 + index as u32,
+                layer.key(&role, 2 + index as u32),
                 bounds,
-                descriptor.resource.clone(),
-                Some([descriptor.natural_width, descriptor.natural_height]),
-                GeneralImageSource::WholeImageImplicit,
-                GeneralImageSampling::Nearest,
-                GeneralImageSourceConstraint::Implicit,
                 &favorite.image,
-                descriptor.provenance.clone(),
+                descriptor,
+                GeneralImageSource::WholeImageImplicit,
+                GeneralImageSourceConstraint::Implicit,
                 Vec::new(),
             ));
         } else {
             nodes.push(shape_node(
-                layer_id,
-                source_key,
-                &format!("{role}-placeholder"),
-                2 + index as u32,
+                layer.key(&format!("{role}-placeholder"), 2 + index as u32),
                 bounds,
                 GeneralGeometry::RoundedRect { radius: [8.0, 8.0] },
                 [0.82, 0.82, 0.82, 0.4],
@@ -167,10 +153,7 @@ pub(super) fn build_story_favorite_recipe(
             height: viewport.height,
         };
         nodes.push(shape_node(
-            layer_id,
-            source_key,
-            "story-scroll-track",
-            10_000,
+            layer.key("story-scroll-track", 10_000),
             track_bounds,
             GeneralGeometry::RoundedRect { radius: [2.0, 2.0] },
             [0.25, 0.25, 0.25, 0.18],
@@ -182,10 +165,7 @@ pub(super) fn build_story_favorite_recipe(
             ..track_bounds
         };
         let mut thumb = shape_node(
-            layer_id,
-            source_key,
-            "story-scroll-thumb",
-            10_001,
+            layer.key("story-scroll-thumb", 10_001),
             thumb_bounds,
             GeneralGeometry::RoundedRect { radius: [2.0, 2.0] },
             [0.25, 0.25, 0.25, 0.55],
