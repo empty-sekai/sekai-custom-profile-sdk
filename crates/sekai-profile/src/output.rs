@@ -12,18 +12,23 @@ pub struct RenderedPage {
     pub(crate) height: u32,
     pub(crate) rgba: Vec<u8>,
     pub(crate) background: Background,
+    /// Counters and timings of the render that produced the page.
     pub telemetry: RenderTelemetry,
 }
 
 impl RenderedPage {
+    /// Page width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Page height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// The background the page was rendered on, from
+    /// [`RenderConfig::background`](crate::RenderConfig::background).
     pub fn background(&self) -> Background {
         self.background
     }
@@ -40,15 +45,28 @@ impl RenderedPage {
         straight
     }
 
-    /// Encodes the page as PNG.
+    /// Encodes the page as an RGBA PNG of its straight pixels.
+    ///
+    /// To keep the pixel buffer for the next render, use
+    /// [`CustomProfileRenderer::encode_png`](crate::CustomProfileRenderer::encode_png)
+    /// instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when PNG encoding fails.
     pub fn to_png(&self) -> Result<Vec<u8>, String> {
         crate::codec::png::encode_rgba(self.width, self.height, &self.to_straight_rgba())
             .map_err(|error| format!("PNG encoding failed: {error}"))
     }
 
     /// Encodes the page as a baseline JPEG at `quality` (1 to 100) with the
-    /// standard encoder. A page with a transparent background has no JPEG
-    /// form.
+    /// standard encoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the page has a transparent background (it has
+    /// no JPEG form), when `quality` is outside 1 to 100, or when encoding
+    /// fails.
     #[cfg(feature = "jpeg-turbo")]
     pub fn to_jpeg(&self, quality: u8) -> Result<Vec<u8>, String> {
         self.jpeg_input()?;
@@ -100,8 +118,9 @@ pub enum JpegEncoder {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JpegOptions {
-    /// 1 to 100.
+    /// Quality from 1 to 100; 90 by default.
     pub quality: u8,
+    /// The encoder implementation; [`JpegEncoder::Standard`] by default.
     pub encoder: JpegEncoder,
 }
 
@@ -127,11 +146,18 @@ impl JpegOptions {
     }
 }
 
-/// An encoded page and the telemetry of its render and encoding.
+/// An encoded page and the telemetry of its render and encoding, as
+/// [`CustomProfileRenderer::encode_png`](crate::CustomProfileRenderer::encode_png)
+/// and `CustomProfileRenderer::encode_jpeg` return it.
 pub struct EncodedPage {
+    /// Page width in pixels.
     pub width: u32,
+    /// Page height in pixels.
     pub height: u32,
+    /// The encoded PNG or JPEG file.
     pub bytes: Vec<u8>,
+    /// Render telemetry with the encoding time and output size added; its
+    /// `jpeg` field holds the options of a JPEG encoding.
     pub telemetry: RenderTelemetry,
 }
 
@@ -144,6 +170,8 @@ pub struct RenderedBatch {
     pub prepared_render_objects: Option<crate::compiled_profile::PreparedRenderObjectBatch>,
     /// Each page with its `seq`, in ascending `seq` order.
     pub pages: Vec<(i32, RenderedPage)>,
+    /// What the fallback glyph cache generated for the batch; `None` when no
+    /// fallback cache is installed.
     pub fallback_glyph_cache: Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>,
 }
 

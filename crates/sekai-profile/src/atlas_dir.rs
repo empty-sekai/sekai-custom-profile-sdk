@@ -38,6 +38,7 @@ pub struct InstalledAtlases {
     pub text: Vec<Arc<MappedSdfAtlas>>,
     /// Atlases of the same faces at larger point sizes.
     pub tiers: Vec<Arc<MappedSdfAtlas>>,
+    /// The shape atlas, when `<root>/shape/manifest.json` exists.
     pub shape: Option<Arc<MappedShapeSdfAtlas>>,
     /// Cache of glyphs generated from the fallback face for characters the
     /// game fonts lack; see [`AtlasDir::open_fallback_cache`].
@@ -45,10 +46,13 @@ pub struct InstalledAtlases {
 }
 
 impl AtlasDir {
+    /// An atlas directory rooted at `root`. Nothing is read until
+    /// [`Self::open`] or another accessor touches the disk.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// The root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -74,6 +78,7 @@ impl AtlasDir {
         self.root.join(TEXT_DIR).join(name)
     }
 
+    /// Directory of the shape atlas, `<root>/shape`.
     pub fn shape_dir(&self) -> PathBuf {
         self.root.join(SHAPE_DIR)
     }
@@ -121,6 +126,13 @@ impl AtlasDir {
     /// atlas are generated from that font while rendering. A tier must extend
     /// a base atlas of the same face at a smaller point size. The fallback
     /// glyph cache is opened as [`Self::open_fallback_cache`] describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the file when a manifest or atlas cannot be
+    /// read or fails its checks, when a text atlas's font file is missing or
+    /// differs from the one it was built from, when a tier extends no base
+    /// atlas, or when the fallback cache cannot be opened.
     pub fn open(&self) -> Result<InstalledAtlases, String> {
         let mut installed = InstalledAtlases::default();
         for manifest in self.text_manifests()? {

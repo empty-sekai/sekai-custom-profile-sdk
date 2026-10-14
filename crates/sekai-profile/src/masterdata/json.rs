@@ -1,10 +1,11 @@
-//! JSON 表驱动的 MasterDataProvider。
+//! A [`MasterDataProvider`] backed by the game's JSON tables.
 //!
-//! 读取的表：cards / stamps / honors / honorGroups /
-//! bondsHonors / bondsHonorWords / gameCharacterUnits / 7 张 customProfile*
-//! 资源表 / eventStories / unitStoryEpisodeGroups，以及可缺的表
-//! （[`OPTIONAL_TABLES`]）：只有部分 region 提供的 3 张图标资源表与御神签
-//! 收藏品读取的 `omikujis`。
+//! It reads `cards`, `stamps`, `honors`, `honorGroups`, `bondsHonors`,
+//! `bondsHonorWords`, `gameCharacterUnits`, the `customProfile*` color, font
+//! and resource tables, `eventStories` and `unitStoryEpisodeGroups`
+//! ([`REQUIRED_TABLES`]), plus the tables a set may lack
+//! ([`OPTIONAL_TABLES`]): three icon resource tables that only some regions
+//! ship, and `omikujis`, read by omikuji collection items.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,7 +20,7 @@ use crate::types::{BondsHonorEntry, BondsHonorWordEntry, CardEntry, HonorEntry, 
 
 use super::table::Table;
 
-/// 名片渲染所需的全部表名。
+/// Names of the tables card rendering reads.
 pub const REQUIRED_TABLES: &[&str] = &[
     "cards",
     "stamps",
@@ -41,18 +42,29 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "unitStoryEpisodeGroups",
 ];
 
-/// 表集合可以没有的表，与 core 的可选表同一份。缺表时引用它的元素按缺行
-/// 处理、不绘制，也不计入 [`JsonMasterDataProvider::missing_tables`]。
+/// Tables a set may lack; the same list as
+/// `sekai_profile_core::masterdata::PROFILE_OPTIONAL_MASTERDATA_TABLES`. When
+/// one is missing, elements that reference it are treated as referencing a
+/// missing row and are not drawn, and the table is not reported by
+/// [`JsonMasterDataProvider::missing_tables`].
 pub const OPTIONAL_TABLES: &[&str] = crate::core::masterdata::PROFILE_OPTIONAL_MASTERDATA_TABLES;
 
-/// 从 JSON 表集合构建的 MasterDataProvider。
+/// A [`MasterDataProvider`] built from a set of JSON tables.
+///
+/// Load a directory of `<table>.json` files with
+/// [`JsonMasterDataProvider::from_dir`], or start from
+/// [`JsonMasterDataProvider::empty`] and add tables with
+/// [`JsonMasterDataProvider::insert_table`]. Set the game region with
+/// [`JsonMasterDataProvider::with_region`]; it defaults to
+/// [`Region::Cn`], and decides how font names map to font families.
 pub struct JsonMasterDataProvider {
     tables: HashMap<String, Arc<Table>>,
     region: Region,
 }
 
 impl JsonMasterDataProvider {
-    /// 从已解析的表集合构建，region 默认为国服。
+    /// Builds a provider from parsed tables keyed by table name. The region
+    /// is [`Region::Cn`].
     pub fn new(tables: HashMap<String, Arc<Table>>) -> Self {
         Self {
             tables,
@@ -60,16 +72,18 @@ impl JsonMasterDataProvider {
         }
     }
 
-    /// 设置 region（链式 builder）。
+    /// Sets the region of the game client the tables come from.
     ///
-    /// region 是 provider 元数据，经 [`MasterDataProvider::region`] 暴露给
-    /// 引擎；面板标签本地化由 `sekai_profile_core::locale` 提供。
+    /// The renderer reads it through [`MasterDataProvider::region`]. It also
+    /// selects the font family names [`MasterDataProvider::resolve_font`]
+    /// returns. Panel label text comes from `sekai_profile_core::locale`.
     pub fn with_region(mut self, region: Region) -> Self {
         self.region = region;
         self
     }
 
-    /// 空 provider（逐张 [`Self::insert_table`] 注入时的起点）。默认国服。
+    /// An empty provider, the starting point for adding tables one by one with
+    /// [`Self::insert_table`]. The region is [`Region::Cn`].
     pub fn empty() -> Self {
         Self {
             tables: HashMap::new(),
@@ -77,15 +91,28 @@ impl JsonMasterDataProvider {
         }
     }
 
-    /// 注入或替换一张表（JSON 字符串）。
+    /// Adds or replaces the table `name` from its JSON text: an array of rows;
+    /// any other JSON value is stored as a single row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `json` is not valid JSON.
     pub fn insert_table(&mut self, name: &str, json: &str) -> Result<(), String> {
         let table = Table::from_json(json).map_err(|e| format!("解析表 {name} 失败: {e}"))?;
         self.tables.insert(name.to_string(), Arc::new(table));
         Ok(())
     }
 
-    /// 从目录加载 `<dir>/<table>.json`。缺失的表记 warning 跳过，
-    /// 渲染时对应元素按缺映射处理；[`OPTIONAL_TABLES`] 缺失时不记 warning。
+    /// Loads `<dir>/<table>.json` for every name in [`REQUIRED_TABLES`] and
+    /// [`OPTIONAL_TABLES`]. A missing required table is skipped with a
+    /// warning, and elements that need it are treated as unmapped; a missing
+    /// optional table is skipped without a warning. [`Self::missing_tables`]
+    /// lists the required tables that were skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a table file cannot be read or parsed, or when
+    /// `dir` contains none of the known tables.
     pub fn from_dir(dir: &Path) -> Result<Self, String> {
         let mut provider = Self::empty();
         for name in REQUIRED_TABLES.iter().chain(OPTIONAL_TABLES) {
@@ -111,12 +138,12 @@ impl JsonMasterDataProvider {
         Ok(provider)
     }
 
-    /// 已加载的表名（缺表诊断用）。
+    /// Names of the loaded tables, in no particular order.
     pub fn loaded_tables(&self) -> Vec<&str> {
         self.tables.keys().map(|s| s.as_str()).collect()
     }
 
-    /// 缺失的必需表名。
+    /// Names in [`REQUIRED_TABLES`] that are not loaded.
     pub fn missing_tables(&self) -> Vec<&'static str> {
         REQUIRED_TABLES
             .iter()
@@ -125,13 +152,14 @@ impl JsonMasterDataProvider {
             .collect()
     }
 
-    /// 已加载的表。
+    /// The loaded table `name`, if any.
     pub fn table(&self, name: &str) -> Option<&Table> {
         self.tables.get(name).map(Arc::as_ref)
     }
 
-    /// `customProfileTextFonts` 引用的字体族，按渲染器在当前 region 下解析出的名字，
-    /// 排序去重。
+    /// Font families the `customProfileTextFonts` table references, named as
+    /// the renderer resolves them for the current region, sorted and
+    /// deduplicated.
     pub fn text_font_families(&self) -> Vec<String> {
         let Some(table) = self.table("customProfileTextFonts") else {
             return Vec::new();
@@ -151,11 +179,11 @@ impl JsonMasterDataProvider {
         self.table(table)?.typed(id)
     }
 
-    /// FOT 日文字体名 → CN 服方正字体名。
+    /// Maps an FOT font name to the FZ family the CN client uses.
     ///
-    /// 仅 [`Region::Cn`] 做映射（CN 服本地字体文件是方正系列，而 masterdata
-    /// `fontName` 字段沿用日服 FOT 名）。其余 region 原样返回 FOT 名——
-    /// JP/EN/KR/TC 服字体文件本身就是 FOT 系列，无需映射。
+    /// Only [`Region::Cn`] maps: its font files are FZ faces, while the
+    /// masterdata `fontName` field keeps the FOT names. Other regions return
+    /// the FOT name unchanged, since their font files are the FOT faces.
     fn map_font_name<'a>(&self, name: &'a str) -> &'a str {
         if !self.region.is_cn() {
             return name;

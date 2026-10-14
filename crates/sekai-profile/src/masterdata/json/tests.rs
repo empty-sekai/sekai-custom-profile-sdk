@@ -25,7 +25,8 @@ fn maps_fot_font_names_to_cn() {
         "customProfileTextFonts",
         r#"[{"id": 1, "fontName": "FOT-RodinNTLGPro-DB"}, {"id": 9, "fontName": "Custom"}]"#,
     );
-    // 默认 region=Cn，FOT 名映射成 FZ 名；非 FOT 名原样返回。
+    // The default region is Cn: FOT names map to FZ names, other names pass
+    // through.
     assert_eq!(p.resolve_font(1).as_deref(), Some("FZLanTingHei-DB-GBK"));
     assert_eq!(p.resolve_font(9).as_deref(), Some("Custom"));
 }
@@ -37,7 +38,7 @@ fn non_cn_region_does_not_map_font_names() {
         r#"[{"id": 1, "fontName": "FOT-RodinNTLGPro-DB"}, {"id": 4, "fontName": "FOT-HummingPro-B"}]"#,
     )
     .with_region(Region::Jp);
-    // JP 服字体文件本身就是 FOT 系列，原样返回 FOT 名。
+    // The JP font files are the FOT faces, so FOT names pass through.
     assert_eq!(p.resolve_font(1).as_deref(), Some("FOT-RodinNTLGPro-DB"));
     assert_eq!(p.resolve_font(4).as_deref(), Some("FOT-HummingPro-B"));
     assert_eq!(p.region(), Region::Jp);

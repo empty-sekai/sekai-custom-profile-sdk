@@ -28,8 +28,11 @@ pub const DEFAULT_SHAPE_GUTTER: u32 = 2;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeResource {
+    /// Shape ID (`id`).
     pub id: i32,
+    /// `fileName`.
     pub file_name: String,
+    /// `resourceLoadVal`.
     pub resource_load_val: String,
 }
 
@@ -45,11 +48,15 @@ impl ShapeResource {
 pub struct ShapeAtlasOptions {
     /// Directory the atlas is written to. It must be empty or absent.
     pub output: PathBuf,
+    /// Page edge in texels: a non-zero multiple of 8; 2048 by default.
     pub page_size: u32,
+    /// Empty texels around each shape, at most a quarter of the page size; 2
+    /// by default.
     pub gutter: u32,
 }
 
 impl ShapeAtlasOptions {
+    /// Default options writing to `output`.
     pub fn new(output: impl Into<PathBuf>) -> Self {
         Self {
             output: output.into(),

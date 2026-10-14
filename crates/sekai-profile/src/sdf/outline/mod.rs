@@ -1,4 +1,4 @@
-//! 基于 FreeType `NO_HINTING` 轮廓的动态 SDF glyph 生成器。
+//! On-demand SDF glyph generation from FreeType `NO_HINTING` outlines.
 
 mod geometry;
 
@@ -17,7 +17,7 @@ use ttf_parser::Face as TtfFace;
 use self::geometry::extract_segments;
 
 const TMP_POINT_SIZE: f32 = 75.0;
-/// TextMesh Pro 的 gradient scale：atlas padding（5）加一个 texel。
+/// TextMesh Pro gradient scale: the atlas padding (5) plus one texel.
 const TMP_SPREAD: f32 = 6.0;
 
 const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
@@ -70,7 +70,7 @@ const FONT_FILE_MAP: [(&str, &[&str]); 19] = [
     ),
 ];
 
-/// 生成好的单 glyph SDF。
+/// The SDF of one generated glyph.
 #[derive(Clone)]
 pub struct OutlineSdfGlyph {
     width: usize,
@@ -167,12 +167,13 @@ fn font_path_cache() -> &'static Mutex<HashMap<String, Option<PathBuf>>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// SDF glyph 缓存容量（条目数上限）。
+/// Capacity of the SDF glyph cache, in entries.
 ///
-/// 8 个字体 family × 常用 CJK/假名/拉丁字符集，4096 条目 ~25 MB，
-/// 远小于无界 HashMap 的数百 MB 增长风险。
-/// key 使用 `(PathBuf, char)` 而非 `(String, char)`，
-/// 消除别名 family（如 "FZLanTingHei-DB-GBK" 与 "FOT-RodinNTLGPro-DB" 指向同一文件）的重复缓存。
+/// 4096 entries cover the common CJK, kana and Latin characters of the
+/// installed families in about 25 MB, and keep the cache bounded. The key is
+/// `(PathBuf, char)` rather than `(String, char)`, so alias families that name
+/// the same file (such as "FZLanTingHei-DB-GBK" and "FOT-RodinNTLGPro-DB")
+/// share entries.
 const GLYPH_CACHE_CAPACITY: usize = 4096;
 
 /// A codepoint of one font file, the key of the per-glyph caches.
@@ -291,11 +292,14 @@ fn resolve_glyph_id(font_path: &Path, ch: char) -> Option<u32> {
     resolved
 }
 
-/// EDT 加速开关 + 超采样因子（运行时配置，默认关闭走解析法）。
+/// EDT generation switch and supersampling factor, read once at runtime. The
+/// analytic method is the default.
 ///
-/// `SEKAI_PROFILE_SDF_EDT` 未设/为 0 → 解析法（亚像素精确，默认）。
-/// 设为 1-4 → EDT 法，值即超采样因子（按该倍数的点阵光栅化后做距离变换，
-/// 倍数越高边缘越精确、光栅化越慢）。
+/// `SEKAI_PROFILE_SDF_EDT` unset or `0` selects the analytic method (subpixel
+/// exact, the default). `1`–`4` selects the EDT method with that
+/// supersampling factor: the glyph is rasterized at that multiple of the
+/// point size and then distance-transformed. Higher factors give more accurate
+/// edges and slower rasterization.
 fn edt_supersample() -> Option<usize> {
     static CFG: OnceLock<Option<usize>> = OnceLock::new();
     *CFG.get_or_init(|| {
@@ -305,15 +309,18 @@ fn edt_supersample() -> Option<usize> {
     })
 }
 
-/// 查询或生成一个 glyph 的 SDF。
+/// Returns the SDF of `ch` in `font_family`, generating and caching it on
+/// first use.
 ///
-/// 内部用 `(PathBuf, char)` 作为缓存 key，而非 `(family_name, char)`，
-/// 避免别名 family（指向同一字体文件的不同名称）产生重复 SDF。
+/// Returns `None` when no family is given, the family's font file is not
+/// found, or the glyph cannot be generated. The cache key is
+/// `(PathBuf, char)` rather than `(family_name, char)`, so alias families
+/// that name the same font file share one SDF.
 pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<OutlineSdfGlyph>> {
     let family = font_family?;
     let path = resolve_font_path(family)?;
 
-    // 用 (font_path, char) 作为 key，消除别名重复
+    // Key by (font_path, char) so aliases share an entry.
     let key = (path.clone(), ch);
     if let Some(cached) = glyph_cache()
         .lock()
@@ -325,7 +332,7 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
 
     let glyph = match edt_supersample() {
         Some(ss) => generate_outline_sdf_edt(&path, ch, ss)
-            .or_else(|_| generate_outline_sdf(&path, ch)) // EDT 失败回退解析法
+            .or_else(|_| generate_outline_sdf(&path, ch)) // analytic fallback
             .ok()?,
         None => generate_outline_sdf(&path, ch).ok()?,
     };
@@ -336,10 +343,11 @@ pub fn lookup_or_generate(font_family: Option<&str>, ch: char) -> Option<Arc<Out
     Some(glyph)
 }
 
-/// 离线 atlas 构建使用的确定性生成方法。
+/// Deterministic generation method for offline atlas builds.
 ///
-/// 该入口不读取 `SEKAI_PROFILE_SDF_EDT`、不走 LRU cache，因此 manifest 可以准确记录生成契约，
-/// 且同一进程可以构建不同方法的候选 atlas。
+/// Offline generation does not read `SEKAI_PROFILE_SDF_EDT` and bypasses the
+/// LRU cache, so the manifest records the exact generation contract and one
+/// process can build atlases with different methods.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OfflineGenerationMethod {
     Analytic,
@@ -347,7 +355,8 @@ pub enum OfflineGenerationMethod {
 }
 
 impl OfflineGenerationMethod {
-    /// 写入 atlas manifest 的生成契约；生成算法改变输出时随之变化。
+    /// The generation contract written to the atlas manifest. It changes
+    /// whenever the algorithm's output changes.
     pub fn contract(self) -> String {
         match self {
             Self::Analytic => "outline-analytic-v1".into(),
@@ -358,11 +367,13 @@ impl OfflineGenerationMethod {
     }
 }
 
-/// 持久化 FreeType library/face 的离线 atlas glyph 生成器。
+/// Offline atlas glyph generator that keeps its FreeType library and face open.
 ///
-/// 全字体构建会依次处理数万个 cmap codepoint；复用 face 避免每个 glyph 重开字体文件。
-/// EDT 光栅化用的超采样 face 按超采样因子首次使用时打开并复用。
-/// 该类型不进入请求期，也不共享给动态 glyph cache。
+/// A whole-font build walks tens of thousands of cmap codepoints; reusing the
+/// face avoids reopening the font file for every glyph. The supersampled face
+/// for EDT rasterization is opened on first use of each factor and reused. The
+/// generator is meant for offline builds and does not share the on-demand
+/// glyph cache.
 pub struct OfflineAtlasGlyphGenerator {
     face: freetype::Face,
     supersampled_faces: RefCell<Vec<(usize, freetype::Face)>>,
@@ -414,8 +425,9 @@ impl OfflineAtlasGlyphGenerator {
         })
     }
 
-    /// 返回值中的 `bool` 表示 EDT 是否失败并回退到解析法。回退必须逐 codepoint
-    /// 记录到 manifest，不能悄悄混入另一种生成方法。
+    /// The returned `bool` is `true` when EDT failed and the analytic method
+    /// was used instead. Callers record such fallbacks per codepoint in the
+    /// manifest, so no codepoint silently uses a different method.
     pub fn generate(
         &self,
         ch: char,
@@ -479,9 +491,11 @@ impl OfflineAtlasGlyphGenerator {
     }
 }
 
-/// 对比工具专用：生成同一 glyph 的解析法 vs EDT 版 SDF，返回两者 + 耗时。
+/// Generates the analytic and the EDT SDF of the same glyph and returns both
+/// with their generation times, for comparison tools.
 ///
-/// 不走缓存，每次都重新生成以测量真实性能。`supersample` 为 EDT 超采样因子。
+/// Bypasses the cache so every call measures a full generation. `supersample`
+/// is the EDT supersampling factor.
 #[cfg(feature = "dev")]
 pub fn benchmark_methods(
     font_family: &str,
@@ -506,7 +520,7 @@ pub fn benchmark_methods(
     Some((analytic, analytic_dur, edt, edt_dur))
 }
 
-/// 以 72 dpi 打开字体并设置采样点阵大小。
+/// Opens a font at 72 dpi and sets the sampling point size.
 fn open_face(
     library: &Library,
     font_path: &Path,
@@ -520,7 +534,7 @@ fn open_face(
     Ok(face)
 }
 
-/// 采样点阵下的 glyph metrics（像素）。
+/// Glyph metrics at the sampling point size, in pixels.
 #[derive(Clone, Copy)]
 struct SamplingMetrics {
     bearing_x: f32,
@@ -576,7 +590,8 @@ fn generate_outline_sdf(font_path: &Path, ch: char) -> Result<OutlineSdfGlyph, S
     generate_outline_sdf_with_face_at_spread(&face, glyph_id, ch, TMP_SPREAD)
 }
 
-/// 解析法：对轮廓求每个 texel 中心的精确符号距离。
+/// Analytic method: the exact signed distance from the outline to every texel
+/// center.
 fn generate_outline_sdf_with_face_at_spread(
     face: &freetype::Face,
     glyph_id: u32,
@@ -603,11 +618,13 @@ fn generate_outline_sdf_with_face_at_spread(
     Ok(metrics.into_glyph(grid, sdf_glyph::analytic_sdf(&contours, grid, spread)))
 }
 
-/// EDT 版 SDF 生成（FreeType 超采样光栅化 + 欧几里得距离变换）。
+/// EDT SDF generation: FreeType supersampled rasterization followed by a
+/// Euclidean distance transform.
 ///
-/// 与解析法对齐到相同的 width/height/bearing 网格，仅像素填充算法不同。
-/// `supersample` 为超采样因子：按该倍数的点阵光栅化，每个 texel 由
-/// `supersample`² 个单元求得，倍数越高边缘越精确。
+/// Uses the same width/height/bearing grid as the analytic method; only the
+/// pixel fill differs. `supersample` is the supersampling factor: the glyph is
+/// rasterized at that multiple of the point size and each texel is computed
+/// from `supersample`² cells. Higher factors give more accurate edges.
 fn generate_outline_sdf_edt(
     font_path: &Path,
     ch: char,
@@ -672,8 +689,9 @@ fn generate_outline_sdf_edt_at_point_size(
     )
 }
 
-/// `face` 处于采样点阵，提供 metrics 与网格；`raster_face` 处于
-/// `supersample` 倍点阵，其覆盖率位图的像素与网格的超采样单元一一对齐。
+/// `face` is set to the sampling point size and provides the metrics and the
+/// grid; `raster_face` is set to `supersample` times that size, so each pixel
+/// of its coverage bitmap lines up with one supersampled cell of the grid.
 fn generate_outline_sdf_edt_with_faces(
     face: &freetype::Face,
     raster_face: &freetype::Face,
@@ -682,8 +700,9 @@ fn generate_outline_sdf_edt_with_faces(
     supersample: usize,
     spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
-    // 与解析法一致用 NO_HINTING，保证 metrics 和轮廓网格对齐（hinting 会
-    // 网格对齐字形、改变 width/height，导致与解析法尺寸不匹配）。
+    // NO_HINTING, as in the analytic method, keeps the metrics and the outline
+    // grid aligned: hinting snaps the glyph to the pixel grid and changes its
+    // width and height, so it would not match the analytic size.
     face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
         .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
     let metrics = SamplingMetrics::from_slot(face.glyph());

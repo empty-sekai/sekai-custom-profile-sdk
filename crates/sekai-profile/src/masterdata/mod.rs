@@ -1,4 +1,6 @@
-//! MasterData 查询抽象，以及从 JSON 表构建的 [`JsonMasterDataProvider`]。
+//! Masterdata lookups the renderer needs ([`MasterDataProvider`]), the
+//! [`MasterData`] handle it renders with, and [`JsonMasterDataProvider`], which
+//! answers them from the game's JSON tables.
 
 use std::sync::Arc;
 
@@ -11,21 +13,26 @@ pub use json::{JsonMasterDataProvider, OPTIONAL_TABLES, REQUIRED_TABLES};
 pub use sekai_profile_core::masterdata::{CollectionResourceType, OmikujiRow};
 pub use table::Table;
 
-/// 解析后的颜色值（RGBA）。
+/// A resolved RGBA color.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedColor {
+    /// Red channel.
     pub r: u8,
+    /// Green channel.
     pub g: u8,
+    /// Blue channel.
     pub b: u8,
+    /// Alpha channel; 255 when the source has no alpha.
     pub a: u8,
 }
 
 impl ResolvedColor {
-    /// 从 `#RRGGBB` 或 `#RRGGBBAA` 格式解析颜色。
+    /// Parses `#RRGGBB` or `#RRGGBBAA`; the `#` is optional. Returns `None`
+    /// for any other length or a non-hex digit.
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim_start_matches('#');
-        // 字节级解析：长度按字节计，字符串切片遇到非字符边界会 panic；
-        // 非法输入返回 None。
+        // Parse bytes: the length counts bytes, and slicing a string at a
+        // non-character boundary would panic. Invalid input returns None.
         let bytes = hex.as_bytes();
         let len = bytes.len();
         if len != 6 && len != 8 {
@@ -44,11 +51,14 @@ impl ResolvedColor {
     }
 }
 
-/// 资源信息。
+/// A row of one of the `customProfile*Resources` tables.
 #[derive(Debug, Clone)]
 pub struct ResourceInfo {
+    /// `fileName`.
     pub file_name: String,
+    /// `resourceLoadVal`: the directory part of the asset key.
     pub load_val: String,
+    /// `customProfileResourceType`.
     pub resource_type: String,
     /// `customProfileResourceCollectionType` of a collection row; other rows
     /// carry [`CollectionResourceType::None`].
@@ -62,17 +72,30 @@ impl ResourceInfo {
     }
 }
 
-/// 解析后的 Honor 渲染信息。
+/// A standard honor resolved from the `honors` and `honorGroups` tables for one
+/// level.
 #[derive(Debug, Clone)]
 pub struct ResolvedHonor {
+    /// Asset bundle of the honor image.
     pub asset_bundle_name: String,
+    /// `honorRarity` (`low`, `middle`, `high` or `highest`); `low` when the
+    /// row has none.
     pub honor_rarity: String,
+    /// `honorType` of the honor group; `normal` when the group has none.
     pub honor_type: String,
+    /// `backgroundAssetbundleName` of the honor group, when present.
     pub background_asset_bundle_name: Option<String>,
+    /// `frameName` of the honor group, when present.
     pub frame_name: Option<String>,
+    /// Whether this is a Live Master honor: it has a mission type and takes
+    /// its image and rarity from the level row.
     pub is_live_master: bool,
+    /// Whether the honor has more than one level; see
+    /// [`Self::draws_level_stars`].
     pub has_star: bool,
+    /// The level the honor was resolved for.
     pub honor_level: i32,
+    /// `honorMissionType`, used to look up mission progress.
     pub honor_mission_type: Option<String>,
 }
 
@@ -133,6 +156,7 @@ impl ResolvedHonor {
         )
     }
 
+    /// Whether the honor draws a rank overlay on top of its degree layer.
     pub fn has_rank_overlay(&self) -> bool {
         sekai_profile_core::masterdata::honor_has_rank_overlay(
             &self.honor_type,
@@ -180,50 +204,84 @@ mod resolved_honor_tests {
     }
 }
 
-/// 渲染引擎所需的最小 MasterData 查询契约。
+/// The masterdata lookups the renderer performs.
+///
+/// Implement it to serve masterdata from your own storage, or use
+/// [`JsonMasterDataProvider`], which reads the game's JSON tables. A lookup
+/// returns `None` when its table or row is missing.
 pub trait MasterDataProvider: Send + Sync {
+    /// Asset key of the banner of a favorite story: `story_type` is
+    /// `event_story` or `unit_story`, `story_id` the `eventStories` or
+    /// `unitStoryEpisodeGroups` row.
     fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String>;
+    /// The `cards` row `card_id`.
     fn get_card(&self, card_id: i32) -> Option<CardEntry>;
+    /// The `customProfileTextColors` row `color_id`, parsed from `colorCode`.
     fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor>;
-    /// `customProfileTextColors` 首行颜色；表为空或未加载时返回 `None`（默认实现）。
+    /// Color of the first `customProfileTextColors` row, or `None` when the
+    /// table is empty or not loaded (the default).
     fn default_color(&self) -> Option<ResolvedColor> {
         None
     }
+    /// Font family name of the `customProfileTextFonts` row `font_id`, as the
+    /// renderer looks it up in its font directories.
     fn resolve_font(&self, font_id: i32) -> Option<String>;
+    /// Asset bundle name of the `stamps` row `stamp_id`.
     fn resolve_stamp(&self, stamp_id: i32) -> Option<String>;
+    /// Row `id` of the resource table named by `res_type`: `shape`, `etc`,
+    /// `collection`, `general_bg`, `standing`, `player_info`, `story_bg`,
+    /// `character_icon`, `material` or `user_interface_icon`.
     fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo>;
+    /// The standard honor `honor_id` resolved for `honor_level`, from the
+    /// `honors` row and its `honorGroups` row.
     fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor>;
+    /// The `bondsHonors` row `id`.
     fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry>;
+    /// The `bondsHonorWords` row `word_id`.
     fn get_bonds_honor_word(&self, word_id: i64) -> Option<BondsHonorWordEntry>;
+    /// The `honors` row `honor_id`.
     fn get_honor(&self, honor_id: i32) -> Option<HonorEntry>;
+    /// The `gameCharacterUnits` ID a bonds honor shows for character unit
+    /// `self_id` when its view type asks for the unit's virtual singer. A
+    /// virtual singer paired with `partner_id` takes the unit entry of the
+    /// partner's unit; any other character, or a lookup that fails, keeps
+    /// `self_id`.
     fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32;
+    /// Number of `customProfileTextFonts` rows.
     fn font_count(&self) -> usize;
+    /// Number of `customProfileTextColors` rows.
     fn color_count(&self) -> usize;
 
-    /// 当前 region，默认实现为国服。
+    /// Region of the game client the tables come from. Defaults to
+    /// [`Region::Cn`](crate::region::Region::Cn).
     fn region(&self) -> crate::region::Region {
         crate::region::Region::Cn
     }
 
-    /// 查 `customProfilePlayerInfoResources[id].name` 取面板标题本地化文本。
-    ///
-    /// 用于 general 面板标题（综合力 / 个性签名 / 挑战演出 / 多人演出 /
-    /// 最喜欢的剧情 / 玩家名称）。默认实现返回 `None`，由 host 侧
-    /// provider 覆盖（直接查原始 JSON 表的 `name` 字段）。
+    /// The `name` of `customProfilePlayerInfoResources` row `id`: the
+    /// localized title of a player info panel. Returns `None` by default.
     fn resolve_player_info_label(&self, _id: i32) -> Option<String> {
         None
     }
 
+    /// Localized text for a General panel label key, overriding the built-in
+    /// strings of `sekai_profile_core::locale`. Returns `None` by default,
+    /// which keeps the built-in text.
     fn resolve_localized_text(&self, _key: &str) -> Option<String> {
         None
     }
 
-    /// 查 `omikujis[id]`：御神签收藏品显示的签文。表或行缺失时返回
-    /// `None`（默认实现），该收藏品不绘制。
+    /// The `omikujis` row `id`: the fortune an omikuji collection item shows.
+    /// Returns `None` when the table or the row is missing (the default); the
+    /// item is then not drawn.
     fn resolve_omikuji(&self, _id: i32) -> Option<OmikujiRow> {
         None
     }
 
+    /// Asset path (`<key>.png`) of an element image. For resource-backed types
+    /// (`etc`, `collection`, `general_bg`, `standing`, `player_info`,
+    /// `story_bg`) the key comes from [`Self::resolve_resource`]; other types,
+    /// and resources the table lacks, use `<element_type>/<id>.png`.
     fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         match element_type {
             "etc" | "collection" | "general_bg" | "standing" | "player_info" | "story_bg" => {
@@ -241,32 +299,40 @@ pub trait MasterDataProvider: Send + Sync {
     }
 }
 
-/// 渲染时使用的 MasterData 快照包装。
+/// A cheaply clonable handle to a [`MasterDataProvider`], which the renderer
+/// holds and passes to every lookup.
+///
+/// Each method forwards to the provider method of the same name; the
+/// `*_or_default` methods add the game's fallback rules.
 #[derive(Clone)]
 pub struct MasterData {
     provider: Arc<dyn MasterDataProvider>,
 }
 
 impl MasterData {
-    /// 从 provider 构建快照。
+    /// Wraps a provider.
     pub fn new(provider: Arc<dyn MasterDataProvider>) -> Self {
         Self { provider }
     }
 
+    /// See [`MasterDataProvider::resolve_story_banner`].
     pub fn resolve_story_banner(&self, story_type: &str, story_id: i32) -> Option<String> {
         self.provider.resolve_story_banner(story_type, story_id)
     }
 
+    /// See [`MasterDataProvider::get_card`].
     pub fn get_card(&self, card_id: i32) -> Option<CardEntry> {
         self.provider.get_card(card_id)
     }
 
+    /// See [`MasterDataProvider::resolve_color`].
     pub fn resolve_color(&self, color_id: i32) -> Option<ResolvedColor> {
         self.provider.resolve_color(color_id)
     }
 
-    /// 元素实际绘制的颜色：未知 colorId 回退颜色表首行，规则见
-    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_color_or_default`]。
+    /// Color an element draws with: an unknown `colorId` falls back to the
+    /// first row of the color table. See
+    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_color_or_default`].
     pub fn resolve_color_or_default(&self, color_id: i32) -> Option<ResolvedColor> {
         sekai_profile_core::masterdata::ProfileMasterData::resolve_color_or_default(self, color_id)
             .map(|value| ResolvedColor {
@@ -277,71 +343,84 @@ impl MasterData {
             })
     }
 
+    /// See [`MasterDataProvider::resolve_font`].
     pub fn resolve_font(&self, font_id: i32) -> Option<String> {
         self.provider.resolve_font(font_id)
     }
 
-    /// 文本元素实际使用的字体：未知 fontId 保持默认字体，规则见
-    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_font_or_default`]。
+    /// Font family a text element draws with: an unknown `fontId` keeps the
+    /// default font. See
+    /// [`sekai_profile_core::masterdata::ProfileMasterData::resolve_font_or_default`].
     pub fn resolve_font_or_default(&self, font_id: i32) -> Option<String> {
         sekai_profile_core::masterdata::ProfileMasterData::resolve_font_or_default(self, font_id)
     }
 
+    /// See [`MasterDataProvider::resolve_stamp`].
     pub fn resolve_stamp(&self, stamp_id: i32) -> Option<String> {
         self.provider.resolve_stamp(stamp_id)
     }
 
+    /// See [`MasterDataProvider::resolve_resource`].
     pub fn resolve_resource(&self, res_type: &str, id: i32) -> Option<ResourceInfo> {
         self.provider.resolve_resource(res_type, id)
     }
 
+    /// See [`MasterDataProvider::resolve_honor`].
     pub fn resolve_honor(&self, honor_id: i32, honor_level: i32) -> Option<ResolvedHonor> {
         self.provider.resolve_honor(honor_id, honor_level)
     }
 
+    /// See [`MasterDataProvider::get_bonds_honor`].
     pub fn get_bonds_honor(&self, id: i32) -> Option<BondsHonorEntry> {
         self.provider.get_bonds_honor(id)
     }
 
+    /// See [`MasterDataProvider::get_bonds_honor_word`].
     pub fn get_bonds_honor_word(&self, word_id: i64) -> Option<BondsHonorWordEntry> {
         self.provider.get_bonds_honor_word(word_id)
     }
 
+    /// See [`MasterDataProvider::get_honor`].
     pub fn get_honor(&self, honor_id: i32) -> Option<HonorEntry> {
         self.provider.get_honor(honor_id)
     }
 
+    /// See [`MasterDataProvider::resolve_unit_vs_sd`].
     pub fn resolve_unit_vs_sd(&self, self_id: i32, partner_id: i32) -> i32 {
         self.provider.resolve_unit_vs_sd(self_id, partner_id)
     }
 
+    /// See [`MasterDataProvider::font_count`].
     pub fn font_count(&self) -> usize {
         self.provider.font_count()
     }
 
+    /// See [`MasterDataProvider::color_count`].
     pub fn color_count(&self) -> usize {
         self.provider.color_count()
     }
 
+    /// See [`MasterDataProvider::resolve_asset_path`].
     pub fn resolve_asset_path(&self, element_type: &str, id: i32) -> String {
         self.provider.resolve_asset_path(element_type, id)
     }
 
-    /// 当前 region。见 [`MasterDataProvider::region`]。
+    /// See [`MasterDataProvider::region`].
     pub fn region(&self) -> crate::region::Region {
         self.provider.region()
     }
 
-    /// 面板标题本地化文本。见 [`MasterDataProvider::resolve_player_info_label`]。
+    /// See [`MasterDataProvider::resolve_player_info_label`].
     pub fn resolve_player_info_label(&self, id: i32) -> Option<String> {
         self.provider.resolve_player_info_label(id)
     }
 
+    /// See [`MasterDataProvider::resolve_localized_text`].
     pub fn resolve_localized_text(&self, key: &str) -> Option<String> {
         self.provider.resolve_localized_text(key)
     }
 
-    /// 签文行。见 [`MasterDataProvider::resolve_omikuji`]。
+    /// See [`MasterDataProvider::resolve_omikuji`].
     pub fn resolve_omikuji(&self, id: i32) -> Option<OmikujiRow> {
         self.provider.resolve_omikuji(id)
     }

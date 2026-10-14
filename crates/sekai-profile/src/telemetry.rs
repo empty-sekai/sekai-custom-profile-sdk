@@ -7,10 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::render_config::{RenderConfig, SdfExecutor};
 
+/// Schema of [`RenderTelemetry`], recorded in [`RenderTelemetry::schema`].
 pub const PROFILE_RENDER_TELEMETRY_SCHEMA: &str = "allium.profile-render.telemetry.v4";
 /// Schema of the identity [`crate::CustomProfileRenderer::cache_identity`]
 /// returns.
 pub const PROFILE_RENDER_CACHE_SCHEMA: &str = "allium.profile-render.cache.v8";
+/// The render contract every page render records in
+/// [`RenderTelemetry::render_contract`].
 pub const PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS: &str =
     "allium.profile-render.ordered-sdf-runs.v1";
 
@@ -359,31 +362,52 @@ impl RealtimeEdtBatchTelemetry {
     }
 }
 
+/// Telemetry of one render, carried by [`crate::RenderedPage::telemetry`] and
+/// [`crate::EncodedPage::telemetry`]. It serializes to JSON.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RenderTelemetry {
+    /// [`PROFILE_RENDER_TELEMETRY_SCHEMA`].
     pub schema: String,
+    /// The config the render was asked to run with.
     pub requested: RenderConfig,
     /// The executor that ran, with [`crate::SdfExecutor::Auto`] resolved.
     pub executor: SdfExecutor,
     /// The JPEG encoding applied to the page, when it was encoded as JPEG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jpeg: Option<crate::output::JpegOptions>,
+    /// [`PROFILE_RENDER_CONTRACT_ORDERED_SDF_RUNS`].
     pub render_contract: String,
+    /// Contract of the atlas set the page sampled.
     pub atlas_contract: Option<String>,
+    /// Pixel format, alpha type and color space of the page surface.
     #[serde(default)]
     pub surface_identity: SurfaceIdentity,
+    /// The atlases installed when the render ran.
     #[serde(default)]
     pub atlas_identities: Vec<AtlasIdentity>,
+    /// Glyphs generated from their font during the render because no
+    /// installed atlas tier was large enough.
     #[serde(default)]
     pub realtime_edt_glyphs: Vec<RealtimeEdtGlyphTelemetry>,
+    /// How oversized glyph placements were served: from installed tiers,
+    /// generated during the render, or by a fallback.
     #[serde(default)]
     pub realtime_edt_batch: RealtimeEdtBatchTelemetry,
+    /// Time spent per stage.
     pub timings: RenderTimings,
+    /// Amount of work done: pages, elements, runs and fragments.
     pub work: RenderWork,
+    /// Bytes mapped, allocated and produced.
     pub bytes: RenderBytes,
+    /// Cache hits and misses.
     pub caches: RenderCaches,
+    /// Counters per command kind.
     pub commands: Vec<CommandTelemetry>,
+    /// Parts of the render that took a slower path, and why.
     pub fallbacks: Vec<FallbackEvent>,
+    /// What the fallback glyph cache generated for a single-page render.
+    /// `None` when no fallback cache is installed, and for pages of a batch,
+    /// whose report is [`crate::RenderedBatch::fallback_glyph_cache`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_glyph_cache: Option<crate::sdf::fallback_cache::PersistentFallbackSdfCacheReport>,
 }

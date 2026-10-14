@@ -1,8 +1,8 @@
-//! General 面板渲染模块。
+//! General panel rendering.
 //!
-//! 每个 general 面板是自定义名片的可选组件，
-//! 通过 objectData 控制位置/旋转/缩放。
-//! 面板内部内容从 ProfileData 动态填充。
+//! Each General panel is an optional component of a custom card, placed,
+//! rotated and scaled by its `objectData`. The panel content is filled in from
+//! [`ProfileData`](crate::profile::ProfileData).
 
 pub(crate) mod layout;
 pub(crate) mod sdf_text;

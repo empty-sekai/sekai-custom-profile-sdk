@@ -1,8 +1,9 @@
-//! 渲染侧使用的最小 MasterData 条目类型。
+//! Typed masterdata rows the renderer reads. Field names follow the game's
+//! JSON tables in snake case.
 
 use serde::Deserialize;
 
-/// 颜色映射条目。
+/// A `customProfileTextColors` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColorEntry {
@@ -12,7 +13,7 @@ pub struct ColorEntry {
     pub seq: i32,
 }
 
-/// 字体映射条目。
+/// A `customProfileTextFonts` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FontEntry {
@@ -21,7 +22,7 @@ pub struct FontEntry {
     pub name: String,
 }
 
-/// 通用资源条目。
+/// A row of one of the `customProfile*Resources` tables.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceEntry {
@@ -39,7 +40,7 @@ pub struct ResourceEntry {
     pub pronunciation: Option<String>,
 }
 
-/// 称号等级条目。
+/// One level of an honor (`honors[].levels[]`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HonorLevelEntry {
@@ -49,7 +50,7 @@ pub struct HonorLevelEntry {
     pub description: Option<String>,
 }
 
-/// 贴纸条目。
+/// A `stamps` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StampEntry {
@@ -57,7 +58,7 @@ pub struct StampEntry {
     pub assetbundle_name: String,
 }
 
-/// 称号条目。
+/// An `honors` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HonorEntry {
@@ -70,7 +71,7 @@ pub struct HonorEntry {
     pub honor_mission_type: Option<String>,
 }
 
-/// 称号分组条目。
+/// An `honorGroups` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HonorGroupEntry {
@@ -80,7 +81,7 @@ pub struct HonorGroupEntry {
     pub frame_name: Option<String>,
 }
 
-/// 羁绊称号条目。
+/// A `bondsHonors` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BondsHonorEntry {
@@ -92,7 +93,7 @@ pub struct BondsHonorEntry {
     pub configurable_unit_virtual_singer: bool,
 }
 
-/// 羁绊称号文字条目。
+/// A `bondsHonorWords` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BondsHonorWordEntry {
@@ -103,7 +104,7 @@ pub struct BondsHonorWordEntry {
     pub seq: i32,
 }
 
-/// 活动剧情条目。
+/// An `eventStories` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventStoryEntry {
@@ -112,7 +113,7 @@ pub struct EventStoryEntry {
     pub assetbundle_name: String,
 }
 
-/// 组合剧情组条目。
+/// A `unitStoryEpisodeGroups` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnitStoryGroupEntry {
@@ -121,7 +122,7 @@ pub struct UnitStoryGroupEntry {
     pub unit: String,
 }
 
-/// 卡牌条目。
+/// A `cards` row.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardEntry {

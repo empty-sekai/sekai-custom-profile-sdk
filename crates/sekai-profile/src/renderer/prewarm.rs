@@ -18,6 +18,8 @@ impl CustomProfileRenderer {
         self.build_general_base_objects_for_store(scene, authored_index, store)
     }
 
+    /// [`Self::build_general_base_objects`] against `store` instead of the
+    /// published render-object store.
     pub fn build_general_base_objects_for_store(
         &self,
         scene: &sekai_profile_core::profile_scene::ResolvedProfileScene,
@@ -40,6 +42,13 @@ impl CustomProfileRenderer {
     /// pay for it: decodes and checks each shape source against the shape
     /// atlas, faults in atlas and render-object pages, resolves the atlas
     /// fonts, and allocates the page and encoder scratch buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when a shape atlas is installed without an asset
+    /// store, when a shape source is missing or differs from the one the
+    /// atlas was built from, when an atlas font cannot be resolved, or when
+    /// the shape programs or the JPEG encoder cannot be prepared.
     pub fn prewarm(&self) -> Result<PrewarmReport, String> {
         let started = std::time::Instant::now();
         let mut report = PrewarmReport::default();
@@ -190,35 +199,71 @@ impl CustomProfileRenderer {
 
 /// What [`CustomProfileRenderer::prewarm`] touched.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+///
+/// Counts are zero for resources that are not installed. Each checksum folds
+/// the bytes read while touching pages: it keeps the reads observable and
+/// serves as a compact diagnostic, not as a content hash.
 pub struct PrewarmReport {
+    /// Shape sources decoded and checked against the shape atlas.
     pub shape_source_count: u64,
+    /// RGBA bytes of the decoded shape sources.
     pub shape_decoded_bytes: u64,
+    /// Render objects touched in the pinned store.
     pub render_object_count: u64,
+    /// Bytes of those render objects.
     pub render_object_bytes: u64,
+    /// Memory pages touched in the render-object store.
     pub render_object_page_touch_count: u64,
+    /// Checksum of the render-object bytes read.
     pub render_object_checksum: u64,
+    /// Text atlases touched.
     pub text_atlas_count: u64,
+    /// Pages of those atlases.
     pub text_atlas_page_count: u64,
+    /// Mapped bytes of those atlases.
     pub text_atlas_mapped_bytes: u64,
+    /// Memory pages touched in the text atlases.
     pub text_atlas_page_touch_count: u64,
+    /// Checksum of the text atlas bytes read.
     pub text_atlas_checksum: u64,
+    /// Font families resolved to font files.
     pub font_family_count: u64,
+    /// Time spent resolving those families, in nanoseconds.
     pub font_resolve_ns: u64,
+    /// Shape atlases touched (0 or 1).
     pub shape_atlas_count: u64,
+    /// Pages of the shape atlas.
     pub shape_atlas_page_count: u64,
+    /// Mapped bytes of the shape atlas.
     pub shape_atlas_mapped_bytes: u64,
+    /// Memory pages touched in the shape atlas.
     pub shape_atlas_page_touch_count: u64,
+    /// Checksum of the shape atlas bytes read.
     pub shape_atlas_checksum: u64,
+    /// Shape row programs built.
     pub shape_row_program_count: u64,
+    /// Runs in those programs.
     pub shape_row_program_run_count: u64,
+    /// Resident bytes of those programs.
     pub shape_row_program_bytes: u64,
+    /// Time spent building them, in nanoseconds.
     pub shape_row_program_build_ns: u64,
+    /// Bytes of the page surface scratch buffer.
     pub profile_surface_scratch_bytes: u64,
+    /// Memory pages touched in that buffer.
     pub profile_surface_page_touch_count: u64,
+    /// Time spent initializing the page surface, in nanoseconds.
     pub profile_surface_init_ns: u64,
+    /// Size of the probe JPEG the standard encoder produced (feature
+    /// `jpeg-turbo`).
     pub jpeg_encoder_prewarm_bytes: u64,
+    /// Size of the probe JPEG the AVX-512 YUV 4:2:0 encoder produced; 0 when
+    /// that encoder is unavailable.
     pub jpeg_yuv420_prewarm_bytes: u64,
+    /// Bytes of the YUV 4:2:0 scratch buffer.
     pub jpeg_yuv420_scratch_bytes: u64,
+    /// Memory pages touched in that buffer.
     pub jpeg_yuv420_scratch_page_touch_count: u64,
+    /// Total prewarm time, in nanoseconds.
     pub elapsed_ns: u64,
 }

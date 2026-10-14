@@ -1,4 +1,5 @@
-//! 渲染相关数据结构定义。
+//! Input shapes: the custom card, its elements and the masterdata rows the
+//! renderer reads.
 
 mod card;
 mod elements;

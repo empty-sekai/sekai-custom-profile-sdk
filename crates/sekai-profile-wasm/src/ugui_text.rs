@@ -617,8 +617,9 @@ mod tests {
 
     #[test]
     fn each_character_comes_from_the_first_face_of_its_chain_that_maps_it() {
-        // "AB关Z": the text's font maps only A; the Latin face maps B (the
-        // collection maps it too, later); the collection's face 2 maps 关;
+        // "AB\u{5173}Z": the text's font maps only A; the Latin face maps B
+        // (the collection maps it too, later); the collection's face 2 maps
+        // U+5173;
         // no face maps Z, which keeps an empty cell.
         let (source, laid_out, placements) = fallback_text("chain");
         assert_eq!(source.text, "AB关Z");
@@ -639,7 +640,7 @@ mod tests {
             face_metrics("ugui-fixture-latin.ttf", 0, 'A', 40),
             metrics_of(&placements[0])
         );
-        // Without fallback faces B and 关 are missing too.
+        // Without fallback faces B and U+5173 are missing too.
         let (_, alone, _) = fallback_text("no-fallback");
         assert_eq!(alone["quads"].as_array().unwrap().len(), 1);
         assert!(laid_out["preferredWidth"].as_f64() > alone["preferredWidth"].as_f64());
@@ -659,7 +660,7 @@ mod tests {
                 metrics
             })
             .collect::<Vec<_>>();
-        // The four faces draw 关 differently.
+        // The four faces draw U+5173 differently.
         for (index, a) in metrics.iter().enumerate() {
             for b in &metrics[index + 1..] {
                 assert_ne!(a, b);

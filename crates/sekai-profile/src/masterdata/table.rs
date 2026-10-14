@@ -1,19 +1,24 @@
-//! 已解析的 MasterData 表。
+//! A parsed masterdata table.
 //!
-//! JSON 数组解析为 `Vec<Value>` 并对 `id` 字段建索引，O(1) 查找。
+//! A JSON array is parsed into `Vec<Value>` with an index on the `id` field,
+//! so lookups by ID take constant time.
 
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// 一张已解析的 MasterData 表。
+/// A parsed masterdata table.
 pub struct Table {
     records: Vec<Value>,
     id_index: HashMap<i64, usize>,
 }
 
 impl Table {
-    /// 从 JSON 字符串解析。数组建表并索引 `id` 字段；
-    /// 单个对象作为一条记录存入。
+    /// Parses a table from JSON text. An array becomes the rows, indexed by
+    /// their `id` field; any other value is stored as a single row.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parser error when `json` is not valid JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         let raw: Value = serde_json::from_str(json)?;
         let records = match raw {
@@ -30,30 +35,31 @@ impl Table {
         Ok(Self { records, id_index })
     }
 
-    /// 按 id 查找记录。
+    /// The row whose `id` is `id`.
     pub fn by_id(&self, id: i64) -> Option<&Value> {
         self.id_index.get(&id).map(|&i| &self.records[i])
     }
 
-    /// 全部记录。
+    /// All rows, in source order.
     pub fn all(&self) -> &[Value] {
         &self.records
     }
 
-    /// 记录数量。
+    /// Number of rows.
     pub fn len(&self) -> usize {
         self.records.len()
     }
 
-    /// 是否为空。
+    /// Whether the table has no rows.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
-    /// 按 id 反序列化为强类型记录。
+    /// Deserializes the row `id` into `T`.
     ///
-    /// 行存在但字段与 schema 不符时返回 `None` 并记 warning：数据缺陷
-    /// 不应与「id 不存在」不可区分。
+    /// Returns `None` when the row is missing. A row that exists but does not
+    /// match `T` also returns `None` and logs a warning, so a data defect can
+    /// be told apart from a missing ID.
     pub fn typed<T: serde::de::DeserializeOwned>(&self, id: i64) -> Option<T> {
         let value = self.by_id(id)?;
         match serde_json::from_value(value.clone()) {

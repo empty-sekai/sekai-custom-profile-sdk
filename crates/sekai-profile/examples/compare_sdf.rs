@@ -1,18 +1,25 @@
-//! SDF 生成精度 + 性能对比：解析法（真值）vs EDT 法。
+//! Compares the accuracy and speed of SDF generation: the analytic method
+//! (the reference) against the EDT method.
 //!
-//! 用法:
-//!   compare-sdf <font_family> <chars> [supersample]
+//! Usage:
+//!   cargo run -p sekai-profile --features dev --example compare_sdf -- \
+//!     <font_family> <chars> [supersample]
 //!
-//! 例:
-//!   compare-sdf FOT-RodinNTLGPro-DB "永和あ国A1" 2
+//! Example:
+//!   cargo run -p sekai-profile --features dev --example compare_sdf -- \
+//!     FOT-RodinNTLGPro-DB "Ag1" 2
 //!
-//! 环境变量: SEKAI_PROFILE_FONT_DIR 字体目录
+//! Without arguments it compares `FOT-RodinNTLGPro-DB` on a few kanji and
+//! Latin characters at 2x supersampling. Fonts are looked up in the
+//! directories `SEKAI_PROFILE_FONT_DIR` and `FONT_DIR` name. With `DUMP` set,
+//! it prints both SDFs of the first character as ASCII art instead.
 //!
-//! 解析法是渲染默认使用的方法，作为真值；EDT 法误差越小越好。
+//! The renderer uses the analytic method by default, so it serves as the
+//! reference; a smaller EDT error is better.
 
 use sekai_profile::sdf::outline::benchmark_methods;
 
-/// 把 0-255 gray 映射成 ASCII 浓淡，便于在终端目视 SDF 结构。
+/// Maps a 0–255 gray value to an ASCII shade, to inspect an SDF in a terminal.
 fn gray_ch(g: u8) -> char {
     let ramp = [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'];
     ramp[(g as usize * (ramp.len() - 1)) / 255]
@@ -22,7 +29,7 @@ fn dump_ascii(label: &str, glyph: &sekai_profile::sdf::outline::OutlineSdfGlyph)
     println!("--- {label} {}x{} ---", glyph.width(), glyph.height());
     let px = glyph.pixels();
     let (w, h) = (glyph.width(), glyph.height());
-    // 行列各抽样到 ≤40 宽 / ≤24 高，避免刷屏
+    // Subsample rows and columns to at most 40 wide and 24 high.
     let step_x = (w / 40).max(1);
     let step_y = (h / 24).max(1);
     for y in (0..h).step_by(step_y) {
@@ -50,7 +57,7 @@ fn main() {
     let dump = std::env::var("DUMP").is_ok();
 
     if dump {
-        // dump 模式：可视化第一个字符的两种 SDF
+        // Dump mode: show both SDFs of the first character.
         if let Some(ch) = chars.chars().next() {
             if let Some((analytic, _, edt, _)) = benchmark_methods(&family, ch, supersample) {
                 println!("字符 '{ch}' 超采样={supersample}x");
@@ -99,8 +106,10 @@ fn main() {
         let n = ap.len();
         let mut sum_abs = 0.0f64;
         let mut max_abs = 0.0f32;
-        // 误差归类：边缘过渡带（解析法 gray 在 [0.15,0.85]，喂给 shader 后是
-        // 抗锯齿软边，误差无害）vs 平坦区（纯内/纯外，误差会变成可见瑕疵）。
+        // Split the error by region: the edge band (analytic gray in
+        // [0.15, 0.85], which the shader turns into the antialiased soft edge,
+        // so errors there are harmless) and the flat region (fully inside or
+        // outside, where errors become visible artifacts).
         let mut err_edge = 0.0f64;
         let mut err_flat = 0.0f64;
         let mut flat_max = 0.0f32;

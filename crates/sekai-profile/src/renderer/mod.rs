@@ -28,6 +28,11 @@ use std::sync::{Arc, RwLock};
 
 /// Immutable render-object generation pinned for one external render request.
 /// Cloning this token clones only the `Arc`, never the mapped pages.
+///
+/// Get one from [`CustomProfileRenderer::pin_render_object_generation`] and
+/// pass it to the `*_pinned` render methods so every page of a request reads
+/// the same store, even when a new store is published meanwhile. The default
+/// pin holds no store.
 #[derive(Clone, Default)]
 pub struct RenderObjectGenerationPin {
     store: Option<Arc<crate::render_object::MappedRenderObjectStore>>,
@@ -40,14 +45,17 @@ impl RenderObjectGenerationPin {
         Self { store: Some(store) }
     }
 
+    /// The pinned store, or `None` when no render-object store is installed.
     pub fn store(&self) -> Option<&crate::render_object::MappedRenderObjectStore> {
         self.store.as_deref()
     }
 
+    /// SHA-256 of the pinned store's manifest.
     pub fn manifest_sha256(&self) -> Option<&str> {
         self.store.as_deref().map(|store| store.manifest_sha256())
     }
 
+    /// The source identity recorded in the pinned store's manifest.
     pub fn source_identity(&self) -> Option<&str> {
         self.store
             .as_deref()
@@ -112,6 +120,7 @@ impl CustomProfileRenderer {
         self
     }
 
+    /// Installs a complete text atlas set, replacing the installed one.
     pub fn with_sdf_atlases(self, atlases: Arc<crate::sdf::atlas::MappedSdfAtlasSet>) -> Self {
         self.sdf_atlases.store(atlases);
         self
@@ -138,6 +147,8 @@ impl CustomProfileRenderer {
         (!atlases.is_empty()).then_some(atlases)
     }
 
+    /// Installs the shape SDF atlas. Without one, rendering a card that has
+    /// shape elements fails.
     pub fn with_shape_sdf_atlas(
         mut self,
         atlas: Arc<crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
@@ -146,6 +157,9 @@ impl CustomProfileRenderer {
         self
     }
 
+    /// Installs a render-object store and publishes it as the current
+    /// generation. Images the store holds are drawn from it instead of being
+    /// decoded from the asset store.
     pub fn with_render_object_store(
         mut self,
         store: Arc<crate::render_object::MappedRenderObjectStore>,
@@ -158,6 +172,11 @@ impl CustomProfileRenderer {
 
     /// Installs every atlas in `dir`, laid out as [`crate::atlas_dir::AtlasDir`]
     /// describes. See [`crate::atlas_dir::AtlasDir::open`] for the checks made.
+    ///
+    /// # Errors
+    ///
+    /// Returns the message of [`crate::atlas_dir::AtlasDir::open`], or of
+    /// [`Self::with_installed_atlases`] when two atlases of one family conflict.
     pub fn with_atlas_dir(self, dir: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let installed = crate::atlas_dir::AtlasDir::new(dir.as_ref()).open()?;
         self.with_installed_atlases(installed)
@@ -168,6 +187,11 @@ impl CustomProfileRenderer {
     /// With tier atlases installed, a glyph larger than every tier samples
     /// the largest tier that holds it; without tiers, such a glyph is
     /// generated from its font during the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when two atlases claim the same font family with
+    /// different identities; see [`Self::with_sdf_atlas`].
     pub fn with_installed_atlases(
         mut self,
         atlases: crate::atlas_dir::InstalledAtlases,
@@ -218,6 +242,8 @@ impl CustomProfileRenderer {
         Ok(self)
     }
 
+    /// Installs a render-object generation manager shared with other
+    /// renderers, so a store published through it reaches all of them.
     pub fn with_render_object_generation_manager(
         mut self,
         manager: Arc<crate::render_object::RenderObjectGenerationManager>,
@@ -226,12 +252,16 @@ impl CustomProfileRenderer {
         self
     }
 
+    /// The installed render-object generation manager, through which a new
+    /// store can be published while the renderer serves requests.
     pub fn render_object_generation_manager(
         &self,
     ) -> Option<Arc<crate::render_object::RenderObjectGenerationManager>> {
         self.render_object_generations.clone()
     }
 
+    /// Pins the render-object store published now, for use with the
+    /// `*_pinned` render methods. Without an installed store the pin is empty.
     pub fn pin_render_object_generation(&self) -> RenderObjectGenerationPin {
         RenderObjectGenerationPin {
             store: self
@@ -291,6 +321,10 @@ impl CustomProfileRenderer {
 
     /// An identity for caching rendered pages: it changes whenever `config`,
     /// an installed atlas or the published render-object store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `config` cannot be serialized.
     pub fn cache_identity(&self, config: &RenderConfig) -> Result<String, String> {
         let generation = self.pin_render_object_generation();
         self.cache_identity_pinned(config, &generation)

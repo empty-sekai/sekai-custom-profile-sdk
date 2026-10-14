@@ -1,11 +1,12 @@
-//! 场景元素渲染模块。
+//! Authored card elements and their layer order.
 
 pub mod generals;
 pub mod shape;
 
 use crate::types::*;
 
-/// 扁平化后的渲染元素（统一不同类型以便排序）。
+/// One authored element of a card, with every element kind under one type so
+/// the elements can be sorted together.
 #[derive(Debug)]
 pub enum RenderElement<'a> {
     Text(&'a TextElement),
@@ -55,7 +56,9 @@ impl<'a> RenderElement<'a> {
     }
 }
 
-/// 从 CustomProfileCard 提取所有元素，按 layer 升序排序。
+/// Collects every element of `card` and sorts them by ascending layer. The
+/// sort is stable: elements on the same layer keep the order of their kind's
+/// list in the card, kinds in the order of [`RenderElement`]'s variants.
 pub fn flatten_and_sort(card: &CustomProfileCard) -> Vec<RenderElement<'_>> {
     let mut elements: Vec<RenderElement<'_>> = Vec::with_capacity(card.element_count());
 

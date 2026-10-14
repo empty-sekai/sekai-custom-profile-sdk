@@ -1,7 +1,8 @@
-//! 渲染素材存储（编码字节缓存）
+//! Asset storage for rendering: a cache of encoded bytes.
 //!
-//! `AssetStore` 使用单一 LRU 缓存保存素材的编码字节（PNG），统一字节预算，
-//! 超限按 LRU 驱逐；静态素材进入不占预算的常驻池。
+//! [`AssetStore`] keeps the encoded bytes (PNG) of assets in one LRU cache with
+//! a single byte budget, evicting the least recently used entries when the
+//! budget is exceeded. Static assets go to a pinned pool outside the budget.
 //!
 //! Pixels are decoded on demand by `crate::codec` and premultiplied as
 //! `round(value * alpha / 255)` (see [`crate::codec::premultiply_channel`]).
@@ -48,10 +49,10 @@ fn shape_sdf_source_identity_from_png(
     })
 }
 
-/// 将缓存 key 规范化为磁盘文件名（`/` → `__`）。
+/// Maps a cache key to a disk file name (`/` → `__`).
 ///
-/// 多数 key 不含 `/`（如 `honor`、`stamp_123`），此时直接借用原串零分配；
-/// 仅含 `/` 的 key（如 `honor/bonds/17`）才分配新 String。
+/// Most keys contain no `/` (such as `honor` or `stamp_123`) and are borrowed
+/// as is; only keys with `/` (such as `honor/bonds/17`) allocate a new string.
 fn normalize_disk_key(key: &str) -> std::borrow::Cow<'_, str> {
     if key.contains('/') {
         std::borrow::Cow::Owned(key.replace('/', "__"))
@@ -60,7 +61,7 @@ fn normalize_disk_key(key: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// 统一字节预算的 LRU 缓存，保存编码字节。
+/// LRU cache of encoded bytes under one byte budget.
 struct ByteLru {
     cache: LruCache<String, Arc<Vec<u8>>>,
     current_bytes: usize,
@@ -138,7 +139,7 @@ impl ByteLru {
         self.current_bytes += data_len;
     }
 
-    /// 移出 LRU（释放字节预算）。
+    /// Removes an entry from the LRU and releases its share of the budget.
     fn pop(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
         let data = self.cache.pop(key)?;
         self.current_bytes = self.current_bytes.saturating_sub(data.len());
@@ -146,25 +147,35 @@ impl ByteLru {
     }
 }
 
-/// 渲染用素材存储。
+/// Asset storage for rendering.
 ///
-/// 单一 LRU 缓存保存编码字节，统一字节预算（磁盘缓存独立持久化）。
-/// 常驻池（pinned）不受预算约束。
+/// Keeps encoded asset bytes, keyed by asset key (for example
+/// `honor/frame_degree_m_1`), and decodes pixels on demand. Two tiers hold the
+/// bytes:
+///
+/// - an LRU cache under one byte budget, optionally backed by a disk cache
+///   directory ([`AssetStore::set_disk_cache_dir`]);
+/// - a pinned pool of static assets ([`AssetStore::load_static_dir`]) that
+///   takes no part in the budget and is never evicted.
+///
+/// Apart from [`AssetStore::set_disk_cache_dir`], the methods take `&self`, so
+/// one store can be shared behind an `Arc` by a renderer and its callers.
 pub struct AssetStore {
-    /// 编码字节缓存（字节预算驱动驱逐）
+    /// Encoded bytes, evicted by the byte budget.
     cache: Mutex<ByteLru>,
     /// Keys pinned as static assets, so resource resolution can consult them.
     pinned_static_keys: Mutex<BTreeSet<String>>,
-    /// 静态素材常驻池（保存编码字节，不走 LRU，不占预算）
+    /// Pinned encoded bytes of static assets, outside the LRU and the budget.
     pinned_bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     shape_sdf_identities: Mutex<HashMap<String, ShapeSdfSourceIdentity>>,
 }
 
 impl AssetStore {
-    /// 创建素材存储
+    /// Creates an empty store.
     ///
-    /// `max_mb` 为总缓存预算（MB），所有素材共享此额度；
-    /// 超出 `usize` 字节数的预算按不限处理。
+    /// `max_mb` is the byte budget of the LRU cache in MiB, shared by all
+    /// cached assets. A budget larger than `usize` bytes is treated as
+    /// unlimited.
     pub fn new(max_mb: usize) -> Self {
         Self {
             cache: Mutex::new(ByteLru::new(max_mb.saturating_mul(1024 * 1024))),
@@ -200,13 +211,17 @@ impl AssetStore {
         Some((decoded.width, decoded.height, pixels))
     }
 
-    /// 设置磁盘缓存目录（S3 下载的资源持久化到磁盘，重启不丢失）。
+    /// Sets a disk cache directory, created if missing. Every later
+    /// [`AssetStore::put`] also writes the bytes there, and a cache miss falls
+    /// back to reading the file, so downloaded assets survive a restart.
     ///
-    /// 目录即缓存的作用域。命中只按 key 查找同名文件，不校验内容版本，
-    /// 因此调用方需保证同一目录内 key 到字节的映射稳定：当上游同 key 的资源
-    /// 已经换了内容，请改用另一个目录，或在设置前自行清理该目录。
-    /// 注意 [`AssetStore::contains`] 把磁盘命中也算作已存在，
-    /// 用它决定是否回源的调用方不会重新拉取陈旧文件。
+    /// The directory is the scope of the cache. A hit looks up the file named
+    /// after the key and does not check a content version, so the caller must
+    /// keep the key-to-bytes mapping stable within one directory: when the
+    /// upstream content of a key changes, use another directory or clear this
+    /// one before setting it. [`AssetStore::contains`] counts disk hits as
+    /// present, so a caller that uses it to decide whether to fetch will not
+    /// refetch a stale file.
     pub fn set_disk_cache_dir(&mut self, dir: std::path::PathBuf) {
         self.cache
             .lock()
@@ -214,7 +229,8 @@ impl AssetStore {
             .set_disk_cache_dir(dir);
     }
 
-    /// 检查 key 是否存在于常驻池、缓存或磁盘中。
+    /// Whether `key` is in the pinned pool, the LRU cache or the disk cache
+    /// directory.
     pub fn contains(&self, key: &str) -> bool {
         if self
             .pinned_bytes
@@ -230,6 +246,8 @@ impl AssetStore {
             .contains(key)
     }
 
+    /// Whether `key` was pinned as a static asset by
+    /// [`AssetStore::load_static_dir`].
     pub fn is_pinned_static(&self, key: &str) -> bool {
         self.pinned_static_keys
             .lock()
@@ -237,9 +255,11 @@ impl AssetStore {
             .contains(key)
     }
 
-    /// 将素材的编码字节放入缓存（设置了磁盘缓存目录时同时写盘）。
+    /// Puts an asset's encoded bytes into the LRU cache, and into the disk
+    /// cache directory when one is set.
     ///
-    /// 同一 key 的旧内容被替换；字节能否解码在读取像素时校验。
+    /// Earlier content under the same key is replaced. Whether the bytes decode
+    /// is checked when pixels are read.
     pub fn put(&self, key: String, data: Vec<u8>) {
         self.shape_sdf_identities
             .lock()
@@ -251,9 +271,11 @@ impl AssetStore {
             .put(key, data);
     }
 
-    /// 获取编码字节。
+    /// Returns the encoded bytes of `key`, or `None` when the store does not
+    /// hold it.
     ///
-    /// 查找顺序：常驻池 → LRU 缓存 → 磁盘回退。
+    /// Lookup order: pinned pool, then LRU cache, then the disk cache
+    /// directory.
     pub fn get(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         if let Some(data) = self
             .pinned_bytes
@@ -284,6 +306,11 @@ impl AssetStore {
     /// Only PNG files are read, the one format the renderer decodes. Images
     /// beyond the byte budget evict earlier ones as any other put does, so
     /// size the store to hold the directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the path when a directory or file cannot be
+    /// read.
     pub fn load_png_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
         let files = read_png_dir(dir)?;
         let count = files.len();
@@ -296,7 +323,13 @@ impl AssetStore {
     /// Loads every PNG under `dir` into the static pool, keyed as
     /// [`AssetStore::load_png_dir`] keys them. Static assets take no part in
     /// the byte budget, are never evicted, and are reported by
-    /// [`AssetStore::is_pinned_static`]. Returns the number of files read.
+    /// [`AssetStore::is_pinned_static`]. Returns the number of files read; a
+    /// file whose PNG header the decoder rejects is skipped with a warning.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the path when a directory or file cannot be
+    /// read.
     pub fn load_static_dir(&self, dir: &std::path::Path) -> Result<usize, String> {
         let files = read_png_dir(dir)?;
         let count = files.len();
@@ -329,10 +362,12 @@ impl AssetStore {
         Ok(identity)
     }
 
-    /// 将已加载的静态素材移入常驻池，返回进入常驻池的数量。
+    /// Moves loaded static assets into the pinned pool and returns how many
+    /// were pinned.
     ///
-    /// 保存编码字节，按解码器接受的 PNG 头校验后常驻；
-    /// 调用后这些素材不占用 LRU 预算，永不被驱逐。
+    /// The encoded bytes are pinned once their PNG header passes the decoder's
+    /// checks. Pinned assets take no part in the LRU budget and are never
+    /// evicted.
     fn pin_static(&self, keys_and_data: Vec<(String, Vec<u8>)>) -> usize {
         let mut count = 0usize;
         let mut pinned = self.pinned_bytes.lock().unwrap_or_else(|e| e.into_inner());

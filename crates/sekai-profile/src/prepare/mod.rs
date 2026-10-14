@@ -40,12 +40,15 @@ pub struct PrepareOptions {
 pub struct PrepareReport {
     /// Text atlases by font family.
     pub text: BTreeMap<String, Prepared>,
+    /// The shape atlas; `None` when shapes were skipped or the masterdata has
+    /// no shape resources.
     pub shape: Option<Prepared>,
     /// Font families with no installed font file. Cards that use them cannot
     /// be rendered until the font is installed and the atlas built.
     pub missing_fonts: Vec<String>,
 }
 
+/// What happened to one atlas in [`prepare_atlas_dir`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Prepared {
     /// The atlas was written by this call.
@@ -66,6 +69,15 @@ pub enum Prepared {
 /// unless one already exists or [`PrepareOptions::skip_shapes`] is set. Every
 /// atlas is written to a temporary directory first and moved into place once
 /// complete.
+///
+/// A family whose font file is not installed is listed in
+/// [`PrepareReport::missing_fonts`] rather than failing the call.
+///
+/// # Errors
+///
+/// Returns a message when a font file cannot be read, an atlas cannot be
+/// built or moved into place, or a `customProfileShapeResources` row does not
+/// parse.
 pub fn prepare_atlas_dir(
     dir: &AtlasDir,
     masterdata: &JsonMasterDataProvider,

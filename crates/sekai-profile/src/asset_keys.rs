@@ -1,4 +1,5 @@
-//! 素材 key 收集模块。
+//! Collecting the asset keys a card or profile reads, and mapping keys to
+//! storage paths.
 
 use crate::masterdata::MasterData;
 use crate::profile::ProfileData;
@@ -90,10 +91,12 @@ fn card_asset_requirements(
 ) -> AssetRequirements {
     let mut keys = AssetRequirements::default();
 
-    // 图片类元素（形状 / 卡面 / 贴纸 / customProfile*Resources）按 core 的
-    // 资源规则取 key；隐藏元素与 masterdata 缺行的元素游戏不会构建，不计入；
-    // 罐徽章另需静态法线贴图；御神签收藏品计入签面与运势两张图，未排版的
-    // 签预制体不绘制也不计入。
+    // Image elements (shapes, card artwork, stamps, customProfile*Resources)
+    // take their keys from the core resource rules. Hidden elements and
+    // elements whose masterdata row is missing are not built by the game and
+    // are not counted. Lit badges also need a static normal map. Omikuji
+    // collection items count both the slip and the fortune image; an omikuji
+    // prefab without layout is not drawn and not counted.
     for element in ordered_profile_elements(card, "asset-keys") {
         if !element.object().visible {
             continue;
@@ -112,7 +115,8 @@ fn card_asset_requirements(
         }
     }
 
-    // 称号按玩家持有的等级取 key；隐藏或未持有的称号不绘制，不计入。
+    // Honors take their keys at the level the player owns; hidden or unowned
+    // honors are not drawn and not counted.
     let owned_honors = profile.map(|profile| &profile.owned_honors);
     for e in card.honors.iter().filter(|e| e.object_data.visible) {
         if let Some(level) =
@@ -146,7 +150,10 @@ fn card_asset_requirements(
     keys
 }
 
-/// 将 `cardId + type + training` 解析为卡面素材 key，规则见
+/// Resolves `cardId`, member type and training state to a card artwork asset
+/// key. `training` is `"after_training"` for the trained illustration; any
+/// other value selects the untrained one. Returns `None` when the card is not
+/// in the `cards` table. See
 /// [`sekai_profile_core::profile_resolve::card_artwork_key`]。
 pub fn resolve_card_member_key(
     card_id: i32,
@@ -185,14 +192,14 @@ fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRe
         } else {
             "normal"
         };
-        // player_avatar 组件使用缩略图
+        // Thumbnail for the player avatar.
         if let Some(card) = md.get_card(lc.card_id) {
             keys.push(format!(
                 "thumbnail/chara/{}_{}",
                 card.asset_bundle_name, suffix
             ));
         }
-        // deck 渲染使用完整卡面
+        // Full card artwork.
         if let Some(k) = resolve_card_member_key(lc.card_id, 2, suffix, md) {
             keys.push(k);
         }
@@ -209,7 +216,7 @@ fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRe
         }
     }
 
-    // player_level 组件素材
+    // Player rank icon.
     keys.push("sprite/icon/icon_playerRank".to_string());
 
     for slot in &profile.honor_slots {
@@ -235,7 +242,8 @@ fn profile_asset_requirements(profile: &ProfileData, md: &MasterData) -> AssetRe
         }
     }
 
-    // 最喜欢的剧情（type=14）的封面 banner，渲染时按 story_type/story_id 查 banner key。
+    // Banners of the favorite stories (type 14), looked up by story_type and
+    // story_id.
     for sf in &profile.story_favorites {
         if let Some(k) = md.resolve_story_banner(&sf.story_type, sf.story_id) {
             keys.push(k);
@@ -280,12 +288,14 @@ fn collect_bonds_honor_keys(
     }
 }
 
-/// 将渲染用的 asset key 映射为对象存储路径。
+/// Maps a render asset key to an object storage path.
 ///
-/// `ugc/editor_image/`、`ugc/avatar/`、`uploads/editor_image/`、`uploads/avatar/`
-/// 与 `presets/` 下的 key 本身就是完整对象路径：各段都非空、不是 `.`/`..` 且不含
-/// 反斜杠时原样返回。其余 key（包括这些前缀下含 `..` 段的 key）解析为
-/// `<prefix><key>.png`；羁绊称号的角色与文字素材按其素材包目录拼接。
+/// Keys under `ugc/editor_image/`, `ugc/avatar/`, `uploads/editor_image/`,
+/// `uploads/avatar/` and `presets/` are full object paths already: they are
+/// returned unchanged when every segment is non-empty, not `.` or `..`, and
+/// free of backslashes. Every other key (including keys under those prefixes
+/// with a `..` segment) becomes `<prefix><key>.png`; the character and word
+/// images of bonds honors add their asset bundle directory.
 pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     if (key.starts_with("ugc/editor_image/")
         || key.starts_with("ugc/avatar/")
@@ -306,7 +316,7 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     }
 }
 
-/// 每一段都非空、不是 `.`/`..`，且不含反斜杠。
+/// Every segment is non-empty and not `.` or `..`, and there is no backslash.
 fn is_plain_relative_key(key: &str) -> bool {
     !key.contains('\\')
         && key

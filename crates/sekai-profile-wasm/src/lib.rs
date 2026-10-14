@@ -67,6 +67,8 @@ const FONT_ENGINE_FINGERPRINT: &str = match option_env!("ALLIUM_FONT_ENGINE_FING
 };
 static PANIC_HOOK: Once = Once::new();
 
+/// Checks that FreeType initializes in this module: `1` on success, `-1`
+/// when FreeType cannot be initialized.
 #[no_mangle]
 pub extern "C" fn sdf_layout_freetype_probe() -> i32 {
     install_panic_hook();
@@ -75,6 +77,10 @@ pub extern "C" fn sdf_layout_freetype_probe() -> i32 {
         Err(_) => -1,
     }
 }
+/// Returns the FreeType build contract as JSON: `font_engine_fingerprint`,
+/// `freetype_version`, the compiled `modules` and the glyph `load_contract`.
+/// The returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_layout_freetype_contract_json() -> *mut c_char {
     into_c_string(
@@ -382,6 +388,9 @@ pub unsafe extern "C" fn sdf_atlas_pages_since_json(
     })
 }
 
+/// Pointer to the one-byte-per-texel pixels of atlas page `page`, or null
+/// for an unknown handle or page. Read [`sdf_atlas_page_pixels_len`] bytes
+/// from it; the pointer stays valid until the next call on the same handle.
 #[no_mangle]
 pub extern "C" fn sdf_atlas_page_pixels_ptr(handle: u32, page: usize) -> *const u8 {
     atlas::page_pixels(handle, page)
@@ -389,6 +398,8 @@ pub extern "C" fn sdf_atlas_page_pixels_ptr(handle: u32, page: usize) -> *const 
         .unwrap_or(std::ptr::null())
 }
 
+/// Length in bytes of the pixels [`sdf_atlas_page_pixels_ptr`] points to, or
+/// `0` for an unknown handle or page.
 #[no_mangle]
 pub extern "C" fn sdf_atlas_page_pixels_len(handle: u32, page: usize) -> usize {
     atlas::page_pixels(handle, page)
@@ -396,6 +407,9 @@ pub extern "C" fn sdf_atlas_page_pixels_len(handle: u32, page: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Releases a page lease a resolve call returned, unpinning its pages so they
+/// can be evicted again. Returns `1` when the lease was held, `0` when it was
+/// unknown, and `-1` for an unknown atlas handle.
 #[no_mangle]
 pub extern "C" fn sdf_atlas_release(handle: u32, lease: u32) -> i32 {
     match atlas::release(handle, lease) {
@@ -405,6 +419,7 @@ pub extern "C" fn sdf_atlas_release(handle: u32, lease: u32) -> i32 {
     }
 }
 
+/// Destroys an atlas handle. Returns `1` when it existed and `0` otherwise.
 #[no_mangle]
 pub extern "C" fn sdf_atlas_destroy(handle: u32) -> i32 {
     if atlas::destroy(handle) {
@@ -427,6 +442,10 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_create_json(
     core_json_call(|| read_utf8_slice(input_json_ptr, input_json_len).and_then(scene::create))
 }
 
+/// Opens an authoring session on a blank profile document and returns
+/// `{ handle, revision, document }` as JSON, or `{ "error": ... }`. The
+/// returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_create_blank_json() -> *mut c_char {
     core_json_call(authoring_runtime::create_blank)
@@ -503,6 +522,9 @@ pub unsafe extern "C" fn sdf_renderer_authoring_select_json(
     })
 }
 
+/// Lists the elements of an authoring session with their IDs, pages,
+/// categories and indices, as JSON. The returned string must be released
+/// with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_elements_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::elements(handle))
@@ -548,16 +570,25 @@ pub unsafe extern "C" fn sdf_renderer_authoring_preview_gesture_json(
     })
 }
 
+/// Commits the active gesture as one undoable edit and returns the resulting
+/// delta as JSON, or an error when no gesture is active. The returned string
+/// must be released with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_commit_gesture_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::commit_gesture(handle))
 }
 
+/// Cancels the active gesture, restoring the document to its state before the
+/// gesture, and returns the delta as JSON. The returned string must be
+/// released with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_cancel_gesture_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::cancel_gesture(handle))
 }
 
+/// Appends a blank page to the document as one undoable edit and returns the
+/// delta as JSON. The returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_append_page_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::append_page(handle))
@@ -623,26 +654,40 @@ pub unsafe extern "C" fn sdf_renderer_authoring_move_page_json(
     })
 }
 
+/// Undoes the latest edit and returns its delta as JSON, or `null` when there
+/// is nothing to undo. The returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_undo_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::undo(handle))
 }
 
+/// Redoes the latest undone edit and returns its delta as JSON, or `null`
+/// when there is nothing to redo. The returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_redo_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::redo(handle))
 }
 
+/// Exports the session's document as game profile JSON. The returned string
+/// must be released with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_export_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::export(handle))
 }
 
+/// Exports a checkpoint of the session (document, revision, undo and redo
+/// history, selection) as JSON, which
+/// [`sdf_renderer_authoring_restore_checkpoint_json`] restores. The returned
+/// string must be released with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_checkpoint_json(handle: u32) -> *mut c_char {
     core_json_call(|| authoring_runtime::checkpoint(handle))
 }
 
+/// Destroys an authoring session. Returns `1` when it existed and `0`
+/// otherwise.
 #[no_mangle]
 pub extern "C" fn sdf_renderer_authoring_destroy(handle: u32) -> i32 {
     if authoring_runtime::destroy(handle) {
@@ -702,6 +747,10 @@ pub unsafe extern "C" fn sdf_renderer_core_masterdata_put_table_json(
     })
 }
 
+/// Seals a masterdata session: no more tables can be added, and profile
+/// preparation and scene creation become available. Returns the session
+/// stats as JSON. The returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_masterdata_seal_json(handle: u32) -> *mut c_char {
     core_json_call(|| masterdata_runtime::seal(handle))
@@ -747,11 +796,16 @@ pub unsafe extern "C" fn sdf_renderer_core_profile_create_json(
     })
 }
 
+/// Returns a masterdata session's `handle`, `region`, `revision`, `sealed`
+/// state and loaded `tables` as JSON. The returned string must be released
+/// with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_masterdata_stats_json(handle: u32) -> *mut c_char {
     core_json_call(|| masterdata_runtime::stats(handle))
 }
 
+/// Destroys a masterdata session. Returns `1` when it existed and `0`
+/// otherwise.
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_masterdata_destroy(handle: u32) -> i32 {
     if masterdata_runtime::destroy(handle) {
@@ -761,6 +815,9 @@ pub extern "C" fn sdf_renderer_core_masterdata_destroy(handle: u32) -> i32 {
     }
 }
 
+/// Advances a scene to `tick` and returns the resulting delta as JSON. The
+/// returned string must be released with
+/// [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_scene_advance_json(handle: u32, tick: u32) -> *mut c_char {
     core_json_call(|| scene::advance(handle, tick as u64))
@@ -866,11 +923,15 @@ pub unsafe extern "C" fn sdf_renderer_core_scene_scroll_json(
     })
 }
 
+/// Returns a snapshot of a scene as JSON: its layer table and tree,
+/// revisions, interaction regions and telemetry. The returned string must be
+/// released with [`sdf_layout_freetype_free_string`].
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_scene_dump_json(handle: u32) -> *mut c_char {
     core_json_call(|| scene::dump(handle))
 }
 
+/// Destroys a scene. Returns `1` when it existed and `0` otherwise.
 #[no_mangle]
 pub extern "C" fn sdf_renderer_core_scene_destroy(handle: u32) -> i32 {
     if scene::destroy(handle) {

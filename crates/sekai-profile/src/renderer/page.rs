@@ -16,7 +16,17 @@ impl CustomProfileRenderer {
     /// publishes.
     ///
     /// Images the render-object store lacks, or every image when no store is
-    /// installed, are decoded from the asset store.
+    /// installed, are decoded from the asset store. `profile` supplies the
+    /// player data that profile-driven components, such as the General
+    /// panels, read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::InvalidTileSize`] or
+    /// [`RenderError::SimdUnavailable`] when `config` cannot run on this
+    /// machine, and [`RenderError::Render`] when the card's scene cannot be
+    /// resolved or drawn, for example when it has shape elements and no shape
+    /// atlas is installed.
     pub fn render(
         &self,
         card: &CustomProfileCard,
@@ -231,6 +241,10 @@ impl CustomProfileRenderer {
     }
 
     /// Encodes `page` as PNG, keeping its pixel buffer for the next render.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::Render`] when PNG encoding fails.
     pub fn encode_png(&self, page: RenderedPage) -> Result<EncodedPage, RenderError> {
         let started = std::time::Instant::now();
         let bytes = page.to_png()?;
@@ -239,6 +253,13 @@ impl CustomProfileRenderer {
 
     /// Encodes `page` as JPEG, keeping its pixel buffer and the encoder's
     /// scratch for the next render.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::Render`] when the quality is outside 1 to 100,
+    /// the page has a transparent background, or encoding fails (including
+    /// [`crate::output::JpegEncoder::Avx512Yuv420`] on a CPU without
+    /// AVX-512).
     #[cfg(feature = "jpeg-turbo")]
     pub fn encode_jpeg(
         &self,
@@ -303,6 +324,12 @@ impl CustomProfileRenderer {
     /// them.
     ///
     /// `batch_key` and `locale` identify the batch in its compiled form.
+    /// `pages` pairs each card with its `seq`; the result lists the pages in
+    /// ascending `seq` order.
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`Self::render`] does, for the first page that fails.
     pub fn render_batch<'a>(
         &self,
         batch_key: &str,

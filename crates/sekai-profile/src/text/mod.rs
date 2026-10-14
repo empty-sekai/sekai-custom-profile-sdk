@@ -1,6 +1,7 @@
-//! 文本渲染相关模块。
+//! Text measurement and glyph placement.
 //!
-//! 富文本规则、断行与缺字替换都来自 core 的 `tmp_text`；这里只做度量与字形排布。
+//! Rich-text rules, line breaking and missing-glyph substitution come from
+//! `sekai_profile_core::tmp_text`; this module measures text and places glyphs.
 
 pub(crate) mod simple_raster;
 pub(crate) mod ugui_glyphs;
@@ -14,7 +15,7 @@ use sekai_profile_core::tmp_text::{
     DEFAULT_LINE_SPACING_FACTOR, PROFILE_FACE,
 };
 
-/// TMP FontAsset 全局缩放因子 (m_FaceInfo.m_Scale)。
+/// Global TMP font asset scale (`m_FaceInfo.m_Scale`).
 pub const TEXT_SCALE: f32 = PROFILE_FACE.scale;
 
 /// Final draw-space placement for text that has already been laid out by the
@@ -389,10 +390,12 @@ struct DrawCharOp {
     y: f32,
     pivot_x: f32,
     pivot_y: f32,
-    /// SDF footprint 的半展，与 `pivot_*` 同坐标系：墨迹盒各边外扩 atlas spread
-    /// 后的一半，也就是光栅器实际采样的 atlas 矩形。footprint 绕墨迹中心对称，
-    /// 而 `glyph_local_affine` 的局部原点正是墨迹中心，故可直接作局部盒半展。
-    /// 无轮廓字形为 0——它不会被光栅化，footprint 也就不存在。
+    /// Half extents of the SDF footprint, in the same space as `pivot_*`: half
+    /// of the ink box grown by the atlas spread on every side, which is the
+    /// atlas rectangle the rasterizer samples. The footprint is symmetric about
+    /// the ink center, and the local origin of `glyph_local_affine` is that
+    /// center, so these are the half extents of the local box. They are 0 for a
+    /// glyph without an outline: it is not rasterized and has no footprint.
     half_w: f32,
     half_h: f32,
     shear_cx: f32,
@@ -541,20 +544,24 @@ fn capture_elapsed_ns(started: Option<std::time::Instant>) -> u64 {
         .unwrap_or(0)
 }
 
-/// 单字形的局部仿射变换 `[sx, ky, kx, sy, tx, ty]`（相对当前设备变换的增量）。
-/// 捕获与 debug 顶点输出都只走这一处，保证 debug 数值 == 实际渲染。
+/// Local affine transform of one glyph, `[sx, ky, kx, sy, tx, ty]`, applied on
+/// top of the current device transform. Capture and the debug vertex output
+/// both go through this function, so the debug values match what is drawn.
 ///
-/// 复合顺序对齐 TMP 的 FX 矩阵（`v' = C + M·(v−C)`，`M = Rotate·Scale`）：
-/// 绕 glyph center（= anchor）施加 **R 外层、S 内层**，italic skew 最内层（TMP
-/// 在 FX 前先改顶点）。即：
+/// The composition order follows the TMP FX matrix (`v' = C + M·(v−C)`,
+/// `M = Rotate·Scale`): around the glyph center (the anchor), **R is outer and
+/// S inner**, and the italic skew is innermost (TMP shears the vertices before
+/// the FX step):
 ///   T(anchor) · R(-rotate_deg) · S(scale_x,1) · Skew(skew_x)
-/// 字形随后画在 (-pivot_x, -pivot_y)，使 glyph center 落在 anchor 上。
-/// TMP `<rotate>` 是 Y-up/CCW，设备空间是 Y-down/CW，故角度取负。skew_x=0 时为
-/// `T·R·S`；scale_x=1 或 rotate_deg=0 时 `R·S = S·R`。
+/// The glyph is then drawn at (-pivot_x, -pivot_y), which puts the glyph
+/// center on the anchor. TMP `<rotate>` is Y-up/CCW and device space is
+/// Y-down/CW, so the angle is negated. With skew_x = 0 the result is `T·R·S`;
+/// with scale_x = 1 or rotate_deg = 0, `R·S = S·R`.
 ///
-/// 取整：T·R 的每一项都是精确值；S 是逐项 f32 乘法；italic skew 在 f64 中乘加后
-/// 一次舍入到 f32。sin/cos 按 f32 计算，radians = deg·(π/180)，结果绝对值
-/// ≤ 1/65536 时钳到 0；|rotate_deg| ≤ 0.001 时不旋转。
+/// Rounding: every term of T·R is exact; S is an element-wise f32 multiply; the
+/// italic skew is a multiply-add in f64 rounded once to f32. sin/cos are
+/// computed in f32 with radians = deg·(π/180), and results whose absolute
+/// value is ≤ 1/65536 snap to 0. |rotate_deg| ≤ 0.001 means no rotation.
 fn glyph_local_affine(op: &DrawCharOp) -> [f32; 6] {
     let tx = op.x + op.pivot_x + op.shear_cx;
     let ty = op.y + op.pivot_y;
@@ -581,14 +588,17 @@ fn glyph_local_affine(op: &DrawCharOp) -> [f32; 6] {
     m
 }
 
-/// 计算字形 footprint 四角经 `glyph_local_affine` 变换后的设备前坐标（TMP 等效坐标系，
-/// 乘 TEXT_SCALE）。footprint 取绕 glyph center 的 ±(size/2 + spread) 盒，即 atlas
-/// 矩形——`pivot` 是墨迹中心偏移而非半展，拿它当半展会系统性偏离；刚性旋转下保持矩形，
-/// 复合产生剪切时退化为平行四边形——四角即可直接量化剪切。
-/// 返回 [TL, TR, BR, BL] 各 (x, y)。
+/// Corners of the glyph footprint after `glyph_local_affine`, before the
+/// device transform (TMP-equivalent space, multiplied by `TEXT_SCALE`). The
+/// footprint is the ±(size/2 + spread) box around the glyph center, i.e. the
+/// atlas rectangle; `pivot` is the ink-center offset, not a half extent. A
+/// rigid rotation keeps the footprint a rectangle, and a composition that
+/// shears it gives a parallelogram, so the corners measure the shear directly.
+/// Returns (x, y) for [TL, TR, BR, BL].
 fn glyph_quad_corners(op: &DrawCharOp) -> [(f32, f32); 4] {
     let m = glyph_local_affine(op);
-    // 字形相对其 center（绘制原点在 -pivot）的局部盒。center 在原点。
+    // Local box of the glyph around its center (the glyph is drawn at
+    // -pivot); the center is the origin.
     let (hx, hy) = (op.half_w, op.half_h);
     let local = [(-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy)];
     let mut out = [(0.0f32, 0.0f32); 4];
@@ -909,9 +919,11 @@ fn layout_text_ops(
     let mut tmp_line_probes: Vec<TmpDebugLineProbe> = Vec::new();
     let mut tmp_char_probes: Vec<TmpDebugCharProbe> = Vec::new();
 
-    // 独立 caret 链：追踪 TMP 真实 xAdvance（乘 scale），与 CPV preferredWidth 链分离。
+    // Separate caret chain: tracks the real TMP xAdvance (scaled), apart from
+    // the preferredWidth chain.
     let mut final_caret_xadv_tmp = 0.0f32;
-    // vertical bounds 追踪：voffset 偏移后每个字形的上下极值（TMP 单位）。
+    // Vertical bounds: the top and bottom extremes of every glyph after its
+    // voffset shift (TMP units).
     let mut vbounds_max_top_tmp = f32::NEG_INFINITY;
     let mut vbounds_min_bottom_tmp = f32::INFINITY;
     capture_timings.layout_setup_ns = capture_elapsed_ns(layout_setup_started);
@@ -924,7 +936,8 @@ fn layout_text_ops(
         let mut cpv_xadv_tmp = 0.0f32;
         let mut max_cpv_width_tmp = 0.0f32;
         let mut has_chars = false;
-        // caret 链：<scale> 影响字符前进，与 CPV width 链独立。
+        // Caret chain: <scale> changes the advance, independently of the
+        // preferred-width chain.
         let mut caret_xadv_tmp = 0.0f32;
         let mut line_text = String::new();
 
@@ -950,7 +963,8 @@ fn layout_text_ops(
                     continue;
                 }
                 Some(CaretCommand::MoveTo(offset)) => {
-                    // TMP 在 <pos> 处重置 preferredWidth 追踪；百分比在此阶段没有容器宽度。
+                    // TMP resets preferredWidth tracking at <pos>; a percentage
+                    // has no container width at this stage.
                     let shift = tmp_layout::offset_draw_units(offset, 0.0) * TEXT_SCALE;
                     cpv_xadv_tmp = shift;
                     caret_xadv_tmp = shift;
@@ -963,7 +977,7 @@ fn layout_text_ops(
             let measure_size = seg.render_size();
             let cspace_raw_tmp = seg.character_spacing;
             let seg_scale = seg.scale.unwrap_or(1.0);
-            // voffset 用于 vertical bounds 追踪（TMP 单位，Y-up）。
+            // voffset feeds the vertical bounds (TMP units, Y-up).
             let voffset_tmp = seg.baseline_offset;
             let glyph_asc_tmp = face.font_scale(measure_size) * face.ascent_line;
             let glyph_des_tmp = -face.font_scale(measure_size) * face.descent_line;
@@ -990,7 +1004,7 @@ fn layout_text_ops(
                     glyph_hadv_tmp_layout,
                     ch,
                 );
-                // caret 链：字符前进乘以 scale。
+                // Caret chain: the advance is multiplied by the scale.
                 let glyph_hadv_tmp_caret = glyph_hadv_tmp_layout * seg_scale;
                 vbounds_max_top_tmp = vbounds_max_top_tmp.max(voffset_tmp + glyph_asc_tmp);
                 vbounds_min_bottom_tmp = vbounds_min_bottom_tmp.min(voffset_tmp - glyph_des_tmp);
@@ -1037,8 +1051,9 @@ fn layout_text_ops(
                 .unwrap_or(first_size);
         }
 
-        // TMP CENTER 对齐的 lineWidth = caret_xAdvance + trailing_cspace。
-        // 行末多算一个 cspace 使对齐基准正确。
+        // For TMP center alignment, lineWidth = caret_xAdvance +
+        // trailing_cspace: counting one extra cspace at the line end gives the
+        // correct alignment reference.
         if let Some(trailing_cspace) = prev_cspace {
             w_scaled += trailing_cspace;
         }
@@ -1050,7 +1065,8 @@ fn layout_text_ops(
         };
         rect_widths.push(rect_w);
         line_max_sizes.push(max_seg_size);
-        // 每行结束时记录 caret 链最终值（多行时取最后一行）。
+        // Record the caret chain at the end of each line; with several lines
+        // the last one wins.
         final_caret_xadv_tmp = caret_xadv_tmp;
         if debug_probe {
             tmp_line_probes.push(TmpDebugLineProbe {
@@ -1069,8 +1085,8 @@ fn layout_text_ops(
     let lh_override: Option<f32> = segments.iter().find_map(|segment| segment.line_height);
     let n_lines = line_max_sizes.len();
 
-    // TMP lineGap = m_LineHeight - (ascentLine - descentLine) + 0.625；0.625 是
-    // 与游戏行距对齐的经验修正项。
+    // TMP lineGap = m_LineHeight - (ascentLine - descentLine) + 0.625; the
+    // 0.625 is an empirical correction that matches the game's line spacing.
     let line_gap = face.line_height - (face.ascent_line - face.descent_line) + 0.625;
 
     let mut line_asc: Vec<f32> = Vec::with_capacity(n_lines);
@@ -1116,14 +1132,17 @@ fn layout_text_ops(
         }
     }
 
-    // TMP m_maxTextAscender: 首行 ascender（lineCount==0 时设置，后续不更新）。
-    // TMP m_ElementDescender: 末行 descender（每行覆盖，overflow 后停止更新）。
+    // TMP m_maxTextAscender: the first line's ascender (set when
+    // lineCount == 0 and not updated afterwards).
+    // TMP m_ElementDescender: the last line's descender (overwritten on every
+    // line until the text overflows).
     let logical_max_asc = line_asc[0];
     let logical_min_des = line_des[n_lines - 1] - line_offsets[n_lines - 1];
 
-    // vbounds 扩展视觉范围（用于 preferredHeight/margin 报告），不影响 anchor。
-    // 当 line-height 标签存在时，vbounds 不应扩展 preferredHeight，因为 TMP 在
-    // line-height 压缩行距时使用 logical box（基于 line_offsets）而非 glyph bounds。
+    // The vertical bounds widen the visual extent (reported as preferredHeight
+    // and margins) without moving the anchor. With a line-height tag they do
+    // not widen preferredHeight: when line-height compresses the spacing, TMP
+    // uses the logical box (from line_offsets), not the glyph bounds.
     let effective_max_asc = if lh_override.is_none() && vbounds_max_top_tmp > f32::NEG_INFINITY {
         logical_max_asc.max(vbounds_max_top_tmp)
     } else {
@@ -1170,7 +1189,8 @@ fn layout_text_ops(
         .rev()
         .find(|offset| offset.abs() > 0.0001)
         .unwrap_or(0.0);
-    // xAdvance 使用测量循环中的独立 caret 链（乘 scale），不再依赖渲染循环 cursor。
+    // xAdvance comes from the separate caret chain of the measurement loop
+    // (scaled), not from the draw loop's cursor.
     let debug_final_x_advance_tmp = final_caret_xadv_tmp;
 
     if debug_probe {
@@ -1249,7 +1269,7 @@ fn layout_text_ops(
 
             let render_size = seg.render_size();
             let seg_scale = seg.scale.unwrap_or(1.0);
-            // TMP 基线偏移 Y-up；绘制空间 Y-down。
+            // TMP baseline offsets are Y-up; draw space is Y-down.
             let baseline_shift = -seg.baseline_offset / TEXT_SCALE;
             let cspace_px = seg.character_spacing / TEXT_SCALE;
             let [sr, sg, sb] = seg.color.unwrap_or([def_color.r, def_color.g, def_color.b]);
@@ -1266,7 +1286,8 @@ fn layout_text_ops(
                 else {
                     continue;
                 };
-                // 查询 SDF glyph，获取 FreeType 度量（与 TMP FontEngine 同源，NO_HINTING）
+                // Look up the SDF glyph for its FreeType metrics (the same
+                // source as the TMP FontEngine, NO_HINTING).
                 let sdf_glyph = if capture_atlases.is_some() {
                     None
                 } else {
@@ -1297,8 +1318,9 @@ fn layout_text_ops(
                 // A glyph with no FreeType metrics has no outline, so it is not
                 // rasterized and its pivot is never consumed.
                 let pivot_x = ft_pivot_x.unwrap_or(0.0);
-                // FreeType Y 中心：TMP 使用 FontEngine 的 bearingY - height/2
-                // 设备空间 Y-down 对应: -(bearing_y_75 - height_75/2) * ft_scale
+                // FreeType Y center: TMP uses the FontEngine's
+                // bearingY - height/2, which in Y-down device space is
+                // -(bearing_y - height/2) * ft_scale.
                 let ft_pivot_y = atlas_metrics
                     .map(|metrics| -(metrics.bearing_y - metrics.height / 2.0) * ft_scale)
                     .or_else(|| {
@@ -1307,8 +1329,9 @@ fn layout_text_ops(
                             .map(|g| -(g.plane_bearing_y() - g.plane_height() / 2.0) * ft_scale)
                     });
                 let pivot_y = ft_pivot_y.unwrap_or(0.0);
-                // SDF footprint：墨迹盒各边外扩 spread，即 atlas 矩形。绕墨迹中心
-                // 对称，所以半展直接就是 (size/2 + spread)。
+                // SDF footprint: the ink box grown by the spread on every side,
+                // i.e. the atlas rectangle. It is symmetric about the ink
+                // center, so the half extents are (size/2 + spread).
                 let ft_half_extents = atlas_metrics
                     .map(|metrics| {
                         (
@@ -1326,8 +1349,9 @@ fn layout_text_ops(
                         })
                     });
                 let (half_w, half_h) = ft_half_extents.unwrap_or((0.0, 0.0));
-                // TMP italic：顶点按 slope = angle / 100 剪切，零剪切线在
-                // midPoint = height/2 + spread 处。skew 绕墨迹中心施加，故中心需额外平移
+                // TMP italic shears the vertices by slope = angle / 100, with
+                // the zero-shear line at midPoint = height/2 + spread. The skew
+                // is applied around the ink center, so the center is shifted by
                 // shear_cx = slope * (bearingY - height - spread) * ft_scale。
                 let shear_cx = match italic_slope {
                     Some(slope) => {
@@ -1415,8 +1439,10 @@ fn layout_text_ops(
             padding_tmp: 64.0 / 8.0,
             outline_width_tmp: text.outline_size,
         };
-        // 输出每个字符的最终绘制中心坐标（TMP 等效坐标系：乘以 TEXT_SCALE），
-        // 与 TMP characterInfo 顶点中心同语义；行与行之间插入 \n 占位，其 center=(0,0)。
+        // Final draw center of every character (TMP-equivalent space, i.e.
+        // multiplied by TEXT_SCALE), with the same meaning as the TMP
+        // characterInfo vertex center. A `\n` placeholder with center (0, 0)
+        // separates lines.
         let char_positions: Vec<(String, f32, f32, f32, f32, f32)> = {
             let mut positions = Vec::new();
             for (line_index, range) in line_op_ranges.iter().enumerate() {
@@ -1445,8 +1471,10 @@ fn layout_text_ops(
                 )
             })
             .collect();
-        // 变换后字形 footprint 四角（[TL,TR,BR,BL]），用于剪切/尺寸的顶点级回归。
-        // 刚性旋转下为矩形；S·R 复合剪切时为平行四边形。与 glyph_local_affine 同源。
+        // Transformed glyph footprint corners ([TL, TR, BR, BL]) for
+        // vertex-level checks of shear and size. They form a rectangle under a
+        // rigid rotation and a parallelogram when S·R shears; they come from
+        // glyph_local_affine.
         let char_quads: Vec<(String, [(f32, f32); 4])> = draw_ops
             .iter()
             .map(|op| (op.ch.clone(), glyph_quad_corners(op)))

@@ -1,4 +1,4 @@
-//! FreeType 轮廓到共享分段表示的适配。
+//! Converts FreeType outlines into the shared segment representation.
 
 use std::slice;
 

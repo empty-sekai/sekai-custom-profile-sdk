@@ -104,6 +104,11 @@ impl CustomProfileRenderer {
     /// Reports whether a card animates, without rendering it: builds the
     /// scene the export would render and preflights its compiled programs up
     /// to `maximum_tick`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AnimationError`] when the scene cannot be built or its
+    /// programs fail the preflight.
     pub fn animation_preflight(
         &self,
         card: &CustomProfileCard,
@@ -132,6 +137,12 @@ impl CustomProfileRenderer {
     ///
     /// Images the render-object store lacks, or every image when no store is
     /// installed, are decoded from the asset store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AnimationError`] when `config` or `preset` cannot run, the
+    /// scene cannot be built, a frame cannot be rendered, the export exceeds
+    /// its budget, or encoding fails.
     pub fn render_animation(
         &self,
         card: &CustomProfileCard,

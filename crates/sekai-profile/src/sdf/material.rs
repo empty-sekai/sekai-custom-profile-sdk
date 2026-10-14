@@ -21,7 +21,8 @@ impl RuntimeLikeGlyphMeshCarrier {
     }
 }
 
-/// Underlay 参数。
+/// Underlay (outline) parameters of a glyph: straight RGBA color in unit
+/// range and the underlay dilation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SdfOutlineParams {
     pub outline_r: f32,

@@ -297,7 +297,7 @@ fn modifier_characters_skip_line_breaks_carriage_returns_and_spaces() {
     assert_eq!(mesh.quads.len(), 3);
     assert_eq!(mesh.quads[1].corners, [[40.0, 65.0]; 4]);
     assert!(mesh.quads[1].glyph.is_none());
-    // The second modifier character is 望, applied to the zero quad of
+    // The second modifier character is U+671B, applied to the zero quad of
     // the carriage return; the last quad is past the end and is left
     // unturned.
     assert_eq!(

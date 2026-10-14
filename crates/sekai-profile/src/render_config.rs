@@ -52,6 +52,7 @@ impl Background {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PixelOcclusion {
+    /// No occlusion pass. The default.
     #[default]
     Off,
     /// Count the covered pixels in the telemetry and draw them anyway.
@@ -70,12 +71,16 @@ impl PixelOcclusion {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RenderConfig {
+    /// The SDF executor; [`SdfExecutor::Auto`] by default.
     pub executor: SdfExecutor,
+    /// What the page is drawn over; [`Background::White`] by default.
     pub background: Background,
-    /// SDF tile width in pixels: a power of two from 8 to 128.
+    /// SDF tile width in pixels: a power of two from 8 to 128; 32 by default.
     pub tile_width: u16,
-    /// SDF tile height in pixels: a power of two from 8 to 128.
+    /// SDF tile height in pixels: a power of two from 8 to 128; 32 by
+    /// default.
     pub tile_height: u16,
+    /// The reverse pixel-occlusion pass; [`PixelOcclusion::Off`] by default.
     pub pixel_occlusion: PixelOcclusion,
 }
 
@@ -149,6 +154,7 @@ pub struct RenderCapabilities {
     pub simd: bool,
     /// Installed text atlases, counting each font family and sampling tier.
     pub text_atlases: usize,
+    /// A shape SDF atlas is installed.
     pub shape_atlas: bool,
     /// A render-object store is installed. Without one, images are decoded
     /// from the asset store during each render.
@@ -158,12 +164,24 @@ pub struct RenderCapabilities {
     pub fallback_glyphs: bool,
 }
 
+/// Why a render, or the encoding of its page, failed.
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum RenderError {
+    /// [`RenderConfig::tile_width`] or [`RenderConfig::tile_height`] is not a
+    /// power of two from 8 to 128.
     #[error("invalid SDF tile size {width}x{height}; expected powers of two from 8 to 128")]
-    InvalidTileSize { width: u16, height: u16 },
+    InvalidTileSize {
+        /// The configured tile width.
+        width: u16,
+        /// The configured tile height.
+        height: u16,
+    },
+    /// [`SdfExecutor::Simd`] was requested on a CPU that cannot run it; see
+    /// [`sdf_simd_available`].
     #[error("the SIMD executor needs an x86-64 CPU with AVX-512 F, BW and VBMI, and FMA")]
     SimdUnavailable,
+    /// Any other failure while resolving, drawing or encoding a page, with
+    /// its message.
     #[error("{0}")]
     Render(String),
 }

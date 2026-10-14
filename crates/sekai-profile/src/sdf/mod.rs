@@ -1,4 +1,6 @@
-//! SDF 文本渲染相关模块。
+//! Signed distance field rendering: font lookup and glyph outline SDF
+//! generation, the text, shape and fallback atlases, TMP materials, and the
+//! tile executor.
 
 pub mod atlas;
 pub mod fallback_cache;

@@ -1,14 +1,19 @@
-//! 从 URL 前缀拉取 masterdata 表与素材。
+//! Fetching masterdata tables and assets from URL prefixes.
 //!
-//! 三个 URL 各自是纯前缀，程序只在后面接 `/<table>.json` 或 `/<key>.png`，
-//! 不插入 region / latest / assets 等任何约定子路径——兼容任意镜像布局。
-//! 素材按内嵌静态清单分流：key 命中 `static_manifest` 走「静态」URL，否则
-//! 走「动态」URL。不能按首段前缀划分——`honor/` 等前缀既含静态边框
-//! （`honor/frame_degree_*`）又含动态图（`honor/<abn>/degree_*`）。
+//! Each of the three URLs is a plain prefix. The CLI appends only
+//! `/<table>.json`, or `/` and the asset path of the chosen
+//! [`AssetUrlLayout`], and inserts no conventional subpath such as a region,
+//! `latest` or `assets`, so any mirror layout works. Assets are routed by the
+//! embedded static manifest: a key listed in `static_manifest` goes to the
+//! static URL, any other key to the dynamic URL. A first-segment prefix cannot
+//! make that split, since prefixes such as `honor/` hold both static frames
+//! (`honor/frame_degree_*`) and dynamic images (`honor/<abn>/degree_*`).
 //!
-//! HTTP 走同步 `ureq`，并发由标准库线程池承担，每个请求带指数退避重试。
-//! 4xx（408 / 429 除外）表示对象不存在或不可读，不重试；5xx、408、429、
-//! 连接失败与响应体读取中断都按退避重试。
+//! HTTP uses blocking `ureq`; concurrency comes from scoped standard-library
+//! threads, and every request retries with exponential backoff. A 4xx status
+//! other than 408 and 429 means the object is absent or unreadable and is not
+//! retried; 5xx, 408, 429, connection failures and interrupted body reads are
+//! retried.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,22 +44,25 @@ impl AssetUrlLayout {
     }
 }
 
-/// 单个请求的重试次数（首次 + 重试），指数退避。
+/// Attempts per request (the first try plus retries), with exponential
+/// backoff.
 const MAX_ATTEMPTS: u32 = 4;
-/// 并发拉取素材的线程数。
+/// Number of threads that fetch assets concurrently.
 const CONCURRENCY: usize = 8;
 
-/// 去掉 URL 尾部斜杠，便于拼接。
+/// Strips trailing slashes from a URL so paths can be appended.
 fn trim_base(url: &str) -> &str {
     url.trim_end_matches('/')
 }
 
-/// 一次 GET 的失败。
+/// Failure of one GET.
 #[derive(Debug)]
 enum FetchError {
-    /// 服务端答复 4xx（408 / 429 除外）：对象不存在或不可读，未重试。
+    /// The server answered 4xx (other than 408 and 429): the object is absent
+    /// or unreadable. Not retried.
     Status(u16),
-    /// 重试用尽仍失败（5xx、408、429、连接失败、响应体读取中断）。
+    /// Still failing after every retry (5xx, 408, 429, connection failure or
+    /// an interrupted body read).
     Failed(String),
 }
 
@@ -67,13 +75,14 @@ impl std::fmt::Display for FetchError {
     }
 }
 
-/// 4xx 表示对象不存在或不可读（缺素材是常态），不重试；408 Request Timeout
-/// 与 429 Too Many Requests 是暂时性的，与 5xx 一样重试。
+/// A 4xx status means the object is absent or unreadable (missing assets are
+/// common) and is not retried. 408 Request Timeout and 429 Too Many Requests
+/// are transient and are retried like 5xx.
 fn is_final_status(code: u16) -> bool {
     (400..500).contains(&code) && code != 408 && code != 429
 }
 
-/// 带指数退避重试的 GET，返回响应体字节。
+/// GET with exponential-backoff retries; returns the response body.
 fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
     let mut last_err = String::new();
     for attempt in 0..MAX_ATTEMPTS {
@@ -91,7 +100,7 @@ fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
             Err(ureq::Error::Status(code, _)) => last_err = format!("HTTP {code}"),
             Err(e) => last_err = e.to_string(),
         }
-        // 最后一次失败后不再 sleep。
+        // No sleep after the last failure.
         if attempt + 1 < MAX_ATTEMPTS {
             let backoff_ms = 200u64 << attempt; // 200/400/800ms
             std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
@@ -100,11 +109,14 @@ fn get_bytes(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
     Err(FetchError::Failed(last_err))
 }
 
-/// 从 `masterdata_url` 逐表拉取，注入 provider，返回成功注入的表数。
+/// Fetches every table from `masterdata_url` into `provider` and returns the
+/// number of tables loaded.
 ///
-/// 与 `from_dir` 同一口径：服务端对某表答复 4xx 视为该表不存在，记 warning
-/// 跳过（[`OPTIONAL_TABLES`] 不记 warning）；表存在却拉不下来（重试用尽）、
-/// 不是 UTF-8 或解析失败时整体报错，不带着残缺的 masterdata 继续渲染。
+/// Follows the rules of `JsonMasterDataProvider::from_dir`: a 4xx answer for a
+/// table means the table is absent and it is skipped with a warning (without
+/// one for [`OPTIONAL_TABLES`]). A table that exists but cannot be fetched
+/// after every retry, is not UTF-8 or does not parse fails the whole load, so
+/// rendering never continues with incomplete masterdata.
 pub fn load_masterdata_url(
     provider: &mut sekai_profile::masterdata::JsonMasterDataProvider,
     masterdata_url: &str,
@@ -143,10 +155,11 @@ pub fn load_masterdata_url(
     Ok(loaded)
 }
 
-/// 并发拉取缺失素材 key，注入 AssetStore。
-/// `dynamic_url` 必填；`static_url` 可选（缺省时静态 key 也走 dynamic_url）。
-/// 响应体不是 PNG（渲染器只解码 PNG）时计为失败、不注入。
-/// 返回 (成功数, 失败数)。
+/// Fetches the given asset keys concurrently into the [`AssetStore`].
+/// `dynamic_url` is required; `static_url` is optional, and without it static
+/// keys are fetched from `dynamic_url` too. A response that is not a PNG (the
+/// renderer decodes only PNG) counts as a failure and is not stored.
+/// Returns `(succeeded, failed)`.
 pub fn load_assets_url(
     store: &Arc<AssetStore>,
     keys: &[String],

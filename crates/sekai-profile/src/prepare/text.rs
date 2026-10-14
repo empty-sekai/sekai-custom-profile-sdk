@@ -34,10 +34,18 @@ pub struct TextAtlasOptions {
     pub font_family: String,
     /// Directory the atlas is written to. It must be empty or absent.
     pub output: PathBuf,
+    /// Glyph SDF generation method; EDT at 2× supersampling by default.
     pub method: OfflineGenerationMethod,
+    /// Sampling point size, finite and positive; the renderer's sampling
+    /// point size by default.
     pub point_size: f32,
+    /// Distance field spread in texels, finite and positive; the renderer's
+    /// spread by default.
     pub spread: f32,
+    /// Page edge in texels: a non-zero multiple of 8; 2048 by default.
     pub page_size: u32,
+    /// Empty texels around each glyph, at most a quarter of the page size; 1
+    /// by default.
     pub gutter: u32,
     /// Codepoints to include; every codepoint the font maps when `None`.
     /// Requested codepoints the font does not map are listed as failures in

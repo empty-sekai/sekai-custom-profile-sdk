@@ -1,26 +1,28 @@
-//! 服务器 region 枚举。
+//! Game server regions.
 //!
-//! 供 CLI `--region` 参数与 host 侧 `MasterDataProvider::region()` 契约使用；
-//! 面板标签本地化由 `sekai_profile_core::locale` 提供。
+//! Used by the CLI `--region` option and by
+//! [`MasterDataProvider::region`](crate::masterdata::MasterDataProvider::region).
+//! Panel label text comes from `sekai_profile_core::locale`.
 
-/// sekai 5 个服务器 region。
+/// The five game server regions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Region {
-    /// 国服（简体中文，方正字体），默认值
+    /// Simplified Chinese server, whose text fonts are FZ faces. The default.
     #[default]
     Cn,
-    /// 日服
+    /// Japanese server.
     Jp,
-    /// 繁中服（台服）
+    /// Traditional Chinese server.
     Tw,
-    /// 韩服
+    /// Korean server.
     Kr,
-    /// 国际服（英文）
+    /// Global (English) server.
     En,
 }
 
 impl Region {
-    /// 字符串编码（用于 CLI `--region` / 日志 / 配置序列化）。
+    /// The region code: `cn`, `jp`, `tw`, `kr` or `en`, as the CLI
+    /// `--region` option, logs and configuration use it.
     pub fn as_str(self) -> &'static str {
         match self {
             Region::Cn => "cn",
@@ -31,7 +33,7 @@ impl Region {
         }
     }
 
-    /// 是否国服。
+    /// Whether this is [`Region::Cn`].
     pub fn is_cn(self) -> bool {
         matches!(self, Region::Cn)
     }
@@ -45,8 +47,8 @@ pub struct UnknownRegion(pub String);
 impl std::str::FromStr for Region {
     type Err = UnknownRegion;
 
-    /// 解析 region 编码，大小写不敏感；另接受 `sc`（国服）、`tc`（繁中服）与
-    /// `world`（国际服）。
+    /// Parses a region code, ignoring case. Also accepts `sc` for
+    /// [`Region::Cn`], `tc` for [`Region::Tw`] and `world` for [`Region::En`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "cn" | "sc" => Ok(Region::Cn),

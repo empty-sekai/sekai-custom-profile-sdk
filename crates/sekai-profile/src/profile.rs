@@ -1,43 +1,51 @@
-//! 玩家 Profile 数据模型（跨渲染管线共享）
+//! Player profile data read by the renderer.
 //!
-//! `ProfileData` 是从游戏 Profile API 响应中提取的玩家信息，
-//! 被 Path A（基础名片）和 Path B（自定义名片 generals 面板）共同使用。
+//! [`ProfileData`] holds the player information taken from a game profile API
+//! response. The profile-driven parts of a card, such as the General panels,
+//! read their content from it.
 //!
-//! ## 设计原则
-//! - 纯数据结构，不依赖任何渲染逻辑
-//! - JSON 解析规则只有 core 的
-//!   [`sekai_profile_core::profile_data::ProfileData::from_json`] 一份，
-//!   `ProfileData::from_json` 只做类型转换
-//! - 名片上称号的等级与持有判定由 core 的
-//!   [`sekai_profile_core::profile_data::placed_honor_level`] 决定
+//! - It is plain data with no rendering logic.
+//! - JSON parsing lives only in
+//!   [`sekai_profile_core::profile_data::ProfileData::from_json`];
+//!   [`ProfileData::from_json`] only converts that result into these types.
+//! - The level and ownership of an honor placed on a card are decided by
+//!   [`sekai_profile_core::profile_data::placed_honor_level`].
 
 use std::collections::HashMap;
 
 // ============================================================
-// 子类型定义
+// Panel data types
 // ============================================================
 
-/// 称号槽位数据（General 面板 type=6 使用）
+/// One honor slot, shown by the honor panel (General type 6).
 #[derive(Debug, Clone, Default)]
 pub struct HonorSlot {
-    /// 称号 ID（MasterData honors 或 bondsHonors 表主键）
+    /// Honor ID: the primary key of the masterdata `honors` or `bondsHonors`
+    /// table, depending on [`Self::profile_honor_type`].
     pub honor_id: i32,
-    /// 称号等级（决定星星数量）
+    /// Honor level; it sets the number of stars drawn.
     pub honor_level: i32,
-    /// 展示偏好标志（游戏 seq==2 的槽位为 true）。名片 semantic 路径把本
-    /// 字段当排序权重（大槽优先），排序后交换前两个槽位，最终渲染尺寸由
-    /// 交换后的槽位位置决定（第 0 槽 380×80 main，其余 180×80 sub）。
+    /// Display preference flag, `true` for the slot the game stores with
+    /// `seq == 2`. The semantic card path sorts slots by this flag (large slot
+    /// first) and then swaps the first two slots. The render size follows the
+    /// slot position after the swap: slot 0 is the 380×80 main slot, the others
+    /// are 180×80 sub slots.
     pub full_size: bool,
-    /// 称号类型（"normal" 或 "bonds"）
+    /// Honor type: `"normal"` or `"bonds"`.
     pub profile_honor_type: String,
-    /// bonds 称号的文字 ID（仅 bonds 类型有效）
+    /// Word ID of a bonds honor; only meaningful for the `bonds` type.
     pub bonds_honor_word_id: Option<i64>,
-    /// bonds 称号查看类型。可组合 `reverse`（交换左右角色）与 `unit_virtual_singer`
-    /// （改用组合虚拟歌手），如 `reverse_unit_virtual_singer`；见 [`Self::bonds_honor_view_flags`]。
+    /// View type of a bonds honor. It may combine `reverse` (swap the left and
+    /// right characters) and `unit_virtual_singer` (show the unit's virtual
+    /// singer instead), as in `reverse_unit_virtual_singer`; see
+    /// [`Self::bonds_honor_view_flags`].
     pub bonds_honor_view_type: Option<String>,
 }
 
 impl HonorSlot {
+    /// Decodes [`Self::bonds_honor_view_type`] into `(reverse,
+    /// unit_virtual_singer)` flags. A missing view type yields
+    /// `(false, false)`.
     pub fn bonds_honor_view_flags(&self) -> (bool, bool) {
         sekai_profile_core::profile_data::bonds_honor_view_flags(
             self.bonds_honor_view_type.as_deref(),
@@ -45,143 +53,161 @@ impl HonorSlot {
     }
 }
 
-/// 队长卡面数据（General 面板 type=5 使用）
+/// The leader card, shown by the leader member panel (General type 5).
 #[derive(Debug, Clone, Default)]
 pub struct LeaderCardInfo {
-    /// 卡牌 ID
+    /// Card ID.
     pub card_id: i32,
-    /// 是否使用特训后图片
+    /// Whether the card shows its trained illustration.
     pub after_training: bool,
-    /// 突破等级 (0-5)
+    /// Master rank (0–5).
     pub master_rank: i32,
 }
 
-/// 玩家卡牌状态信息。
+/// State of one card the player owns.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UserCardInfo {
-    /// 是否使用特训后图片。
+    /// Whether the card shows its trained illustration.
     pub after_training: bool,
-    /// 是否已完成特训（`specialTrainingStatus` 为 `done`），决定稀有度星标。
+    /// Whether the card has finished special training (`specialTrainingStatus`
+    /// is `done`); it decides the rarity stars.
     pub special_training_done: bool,
-    /// 突破等级。
+    /// Master rank.
     pub master_rank: i32,
-    /// 当前卡牌等级。
+    /// Current card level.
     pub level: i32,
 }
 
-/// 卡组成员（General 面板 type=3 主要组合使用）
+/// One deck member, shown by the deck panel (General type 3).
 #[derive(Debug, Clone, Default)]
 pub struct DeckMember {
-    /// 卡牌 ID
+    /// Card ID.
     pub card_id: i32,
-    /// 是否使用特训后图片
+    /// Whether the card shows its trained illustration.
     pub after_training: bool,
-    /// 是否已完成特训，决定稀有度星标
+    /// Whether the card has finished special training; it decides the rarity
+    /// stars.
     pub special_training_done: bool,
-    /// 突破等级 (0-5)
+    /// Master rank (0–5).
     pub master_rank: i32,
-    /// 当前卡牌等级
+    /// Current card level.
     pub level: i32,
 }
 
-/// 单难度歌曲统计（General 面板 type=12/16 使用）
+/// Music results for one difficulty, shown by the music clear panels (General
+/// types 12 and 16).
 #[derive(Debug, Clone, Default)]
 pub struct MusicDifficultyStats {
-    /// 已完成曲数
+    /// Number of songs cleared.
     pub clear: i32,
-    /// Full Combo 曲数
+    /// Number of songs with a Full Combo.
     pub full_combo: i32,
-    /// All Perfect 曲数
+    /// Number of songs with an All Perfect.
     pub all_perfect: i32,
 }
 
-/// 歌曲统计汇总（6 个难度）
+/// Music results for all six difficulties.
 #[derive(Debug, Clone, Default)]
 pub struct MusicResults {
+    /// Easy difficulty.
     pub easy: MusicDifficultyStats,
+    /// Normal difficulty.
     pub normal: MusicDifficultyStats,
+    /// Hard difficulty.
     pub hard: MusicDifficultyStats,
+    /// Expert difficulty.
     pub expert: MusicDifficultyStats,
+    /// Master difficulty.
     pub master: MusicDifficultyStats,
+    /// Append difficulty.
     pub append: MusicDifficultyStats,
 }
 
-/// 角色等级信息（General 面板 type=11 使用）
+/// A rank for one character, shown by the character rank panel (General
+/// types 11 and 15).
 #[derive(Debug, Clone, Default)]
 pub struct CharacterRankInfo {
-    /// 角色 ID
+    /// Character ID.
     pub character_id: i32,
-    /// 收藏等级
+    /// Rank value.
     pub rank: i32,
 }
 
-/// 剧情收藏信息（General 面板 type=14 使用）
+/// One favorite story, shown by the story favorite panel (General type 14).
 #[derive(Debug, Clone, Default)]
 pub struct StoryFavoriteInfo {
-    /// 剧情 ID（用于查找封面图）
+    /// Story ID, used to find the cover image.
     pub story_id: i32,
-    /// 剧情类型（用于构建素材路径）
+    /// Story type, used to build the asset path.
     pub story_type: String,
-    /// 面板格位（`shareNo`，从 1 开始）
+    /// One-based panel slot (`shareNo`).
     pub share_no: i32,
 }
 
 // ============================================================
-// ProfileData 主结构体
+// ProfileData
 // ============================================================
 
-/// 玩家 Profile 数据（不依赖渲染逻辑，跨管线共享）
+/// Player profile data: plain values with no rendering logic.
+///
+/// Build it from a profile API response with [`ProfileData::from_json`], or
+/// use [`neutral_preview_profile`] for previews.
 #[derive(Debug, Clone, Default)]
 pub struct ProfileData {
-    /// 玩家名称
+    /// Player name.
     pub user_name: String,
-    /// 玩家 Rank。
+    /// Player rank.
     pub user_rank: i32,
-    /// 综合力
+    /// Total power.
     pub total_power: i64,
-    /// 个性签名
+    /// Player comment (the profile "word").
     pub word: String,
-    /// MVP 次数
+    /// Number of MVP results.
     pub mvp: i32,
-    /// SUPERSTAR 次数
+    /// Number of SUPERSTAR results.
     pub superstar: i32,
-    /// 挑战演出分数
+    /// Challenge live score.
     pub challenge_score: i32,
-    /// 挑战演出角色 ID（type=10 头像使用）
+    /// Challenge live character ID; the challenge live panel (type 10) shows
+    /// this character's icon.
     pub challenge_character_id: i32,
-    /// 队长卡面信息（type=5 队长成员面板使用）
+    /// Leader card, for the leader member panel (type 5).
     pub leader_card: Option<LeaderCardInfo>,
-    /// 称号槽位（type=6 称号面板使用，最多 3 个）
+    /// Honor slots for the honor panel (type 6), at most three.
     pub honor_slots: Vec<HonorSlot>,
-    /// 卡组成员（type=3 主要组合面板使用，5 个成员）
+    /// Deck members for the deck panel (type 3), five members.
     pub deck_members: Vec<DeckMember>,
-    /// 歌曲统计（type=12/16 歌曲信息面板使用）
+    /// Music results for the music clear panels (types 12 and 16).
     pub music_results: Option<MusicResults>,
-    /// 角色等级（type=11 角色收藏等级面板使用）
+    /// Character ranks for the character rank panel (type 11).
     pub char_ranks: Vec<CharacterRankInfo>,
-    /// 各角色挑战演出等级（General type=11/15 第二个 tab）。
+    /// Per-character challenge live ranks, shown on the second tab of the
+    /// character rank panels (types 11 and 15).
     pub challenge_ranks: Vec<CharacterRankInfo>,
-    /// 最喜欢的剧情（type=14 最喜欢的剧情面板使用）
+    /// Favorite stories for the story favorite panel (type 14).
     pub story_favorites: Vec<StoryFavoriteInfo>,
-    /// 打歌 honor 完成进度映射：honorMissionType → progress（live_master 称号使用）
+    /// Live honor mission progress, keyed by `honorMissionType`; read by
+    /// `live_master` honors.
     pub user_honor_missions: HashMap<String, i32>,
-    /// 玩家拥有卡牌的运行时状态索引。
+    /// State of the player's cards, keyed by card ID.
     pub user_cards: HashMap<i32, UserCardInfo>,
-    /// 玩家持有的称号与羁绊称号等级（userHonors / userBondsHonors）。
+    /// Levels of the honors and bonds honors the player owns (`userHonors` /
+    /// `userBondsHonors`).
     pub owned_honors: sekai_profile_core::profile_data::OwnedHonorLevels,
 }
 
-/// 中性预览用 Profile 数据。
+/// Neutral profile data for previews.
 ///
-/// 这份数据只用于组件目录缩略图和模板本地预览，文本保持通用客观，不表达真实玩家身份。
+/// It is meant for component thumbnails and local template previews. The text
+/// is generic and does not describe a real player.
 pub fn neutral_preview_profile() -> ProfileData {
     let mut user_cards = HashMap::new();
-    let deck_card_ids = [3, 7, 11, 15, 4]; // 不同角色、不同稀有度、S3 资源确认存在
+    let deck_card_ids = [3, 7, 11, 15, 4]; // different characters and rarities
     for (i, &card_id) in deck_card_ids.iter().enumerate() {
         user_cards.insert(
             card_id,
             UserCardInfo {
-                after_training: false, // 只用 normal 确保 S3 一定有
+                after_training: false, // untrained illustrations only
                 special_training_done: false,
                 master_rank: (i + 1) as i32 % 5,
                 level: 60,
@@ -327,15 +353,17 @@ fn preview_music_stats(clear: i32, full_combo: i32, all_perfect: i32) -> MusicDi
 }
 
 // ============================================================
-// ProfileData 构建（JSON 解析规则只在 core 一份）
+// Construction (JSON parsing lives in sekai-profile-core)
 // ============================================================
 
 impl ProfileData {
-    /// 从 profile API 响应 JSON 构建 ProfileData
+    /// Builds profile data from a profile API response body.
     ///
-    /// 提取所有 generals 面板所需数据。解析规则只有
-    /// [`sekai_profile_core::profile_data::ProfileData::from_json`] 一份，
-    /// 浏览器与 native 后端对同一响应得到同一份数据。
+    /// Extracts everything the General panels read. Parsing is done once, by
+    /// [`sekai_profile_core::profile_data::ProfileData::from_json`], so the
+    /// browser and native renderers get the same data from the same response.
+    /// Missing or malformed fields fall back to their defaults; this function
+    /// does not fail.
     pub fn from_json(body: &serde_json::Value) -> Self {
         Self::from_core(sekai_profile_core::profile_data::ProfileData::from_json(
             body,
@@ -438,7 +466,8 @@ impl ProfileData {
         }
     }
 
-    /// 查询指定卡牌的玩家状态信息。
+    /// Returns the player's state for `card_id`, or `None` when the profile
+    /// does not list that card.
     pub fn user_card(&self, card_id: i32) -> Option<&UserCardInfo> {
         self.user_cards.get(&card_id)
     }
