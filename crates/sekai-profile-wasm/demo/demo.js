@@ -535,7 +535,7 @@ function exportDump() {
   const blob = new Blob([JSON.stringify(session.dump, null, 2)], { type: "application/json" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `allium-scene-${session.dump.scene_id}-tick-${session.dump.tick}.json`;
+  link.download = `scene-${session.dump.scene_id}-tick-${session.dump.tick}.json`;
   link.click();
   URL.revokeObjectURL(link.href);
   pushEvent("debug", "dump-export", { sceneId: session.dump.scene_id, tick: session.dump.tick });

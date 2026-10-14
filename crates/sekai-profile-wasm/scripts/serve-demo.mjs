@@ -70,6 +70,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     throw new Error(`invalid --port: ${port}`);
   }
   createDemoServer().listen(port, host, () => {
-    process.stdout.write(`Allium renderer demo: http://${host}:${port}/demo/\n`);
+    process.stdout.write(`Scene Workbench: http://${host}:${port}/demo/\n`);
   });
 }
