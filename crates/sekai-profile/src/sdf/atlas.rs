@@ -11,7 +11,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const ATLAS_MANIFEST_SCHEMA: &str = "allium.sdf-atlas-manifest.v1";
-pub const ATLAS_SET_CONTRACT: &str = "allium.sdf-atlas-set.v1";
 pub const SWIZZLED_PAGE_MAGIC: &[u8; 10] = b"ALLIUMSWZ8";
 pub const SWIZZLED_PAGE_VERSION: u32 = 1;
 pub const SWIZZLED_PAGE_HEADER_BYTES: usize = 64;

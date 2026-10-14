@@ -44,12 +44,13 @@ features = ["jpeg-turbo"]
 default = []
 # Bundled FreeType C sources for hosts without pkg-config.
 bundled-freetype = ["freetype-rs/bundled"]
-# Vendored libjpeg-turbo plus the raw-YUV encoder used by profile backends.
+# Vendored libjpeg-turbo and its raw-YUV 4:2:0 encoder, selected through
+# `JpegEncoder::Avx512Yuv420`.
 jpeg-turbo = ["dep:turbojpeg-sys"]
 # Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
 # Animation encoders. Layer rasterization runs through the ordered SDF path
-# selected by the profile backend config.
+# selected by `RenderConfig`.
 animation-export = ["dep:gif", "dep:color_quant", "dep:crc32fast", "dep:flate2", "dep:webp-animation"]
 # Diagnostics for the SDF generators (`compare_sdf`).
 dev = ["dep:tracing-subscriber"]

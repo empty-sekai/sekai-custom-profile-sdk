@@ -4,7 +4,6 @@
 mod animation_layer;
 mod authored;
 mod capture;
-mod debug;
 mod fallback;
 mod occlusion;
 mod page;

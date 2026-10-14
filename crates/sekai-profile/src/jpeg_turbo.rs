@@ -89,16 +89,6 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
     Ok(encoded)
 }
 
-pub fn encode_rgba_avx512_yuv420(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    quality: u32,
-) -> Result<Vec<u8>, String> {
-    let mut scratch = Vec::new();
-    encode_rgba_avx512_yuv420_with_scratch(rgba, width, height, quality, &mut scratch)
-}
-
 pub fn encode_rgba_avx512_yuv420_with_scratch(
     rgba: &[u8],
     width: u32,

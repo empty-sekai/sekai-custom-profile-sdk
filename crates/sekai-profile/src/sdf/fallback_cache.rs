@@ -36,13 +36,11 @@ use ttf_parser::Face;
 
 use super::atlas::{
     MappedSdfAtlas, SdfAtlasGenerationFailure, SdfAtlasGenerationReport, SdfAtlasGlyphManifest,
-    SdfAtlasManifest, SdfAtlasPageManifest, ATLAS_MANIFEST_SCHEMA,
-    PROFILE_TEXT_FALLBACK_FONT_FAMILY, SWIZZLED_BLOCK_HEIGHT, SWIZZLED_BLOCK_WIDTH,
-    SWIZZLED_PAGE_HEADER_BYTES, SWIZZLED_PAGE_MAGIC, SWIZZLED_PAGE_VERSION,
+    SdfAtlasManifest, SdfAtlasPageManifest, ATLAS_MANIFEST_SCHEMA, SWIZZLED_BLOCK_HEIGHT,
+    SWIZZLED_BLOCK_WIDTH, SWIZZLED_PAGE_HEADER_BYTES, SWIZZLED_PAGE_MAGIC, SWIZZLED_PAGE_VERSION,
 };
 use super::outline::{self, OfflineAtlasGlyphGenerator, OfflineGenerationMethod, OutlineSdfGlyph};
 
-pub const SOURCE_HAN_SANS_SC_FAMILY: &str = PROFILE_TEXT_FALLBACK_FONT_FAMILY;
 const POINTER_SCHEMA: &str = "allium.sdf-fallback-cache-pointer.v2";
 const POINTER_FILE: &str = "current.json";
 const LOCK_FILE: &str = "cache.lock";

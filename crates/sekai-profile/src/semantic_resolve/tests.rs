@@ -737,8 +737,10 @@ fn player_name_and_signature_lower_inside_original_general_layers() {
 
 #[test]
 fn page_without_generals_matches_full_profile_base_semantics() {
-    if crate::sdf::outline::load_font_bytes_for_family(crate::profile_compositor::theme::fonts::PRIMARY)
-        .is_none()
+    if crate::sdf::outline::load_font_bytes_for_family(
+        crate::profile_compositor::theme::fonts::PRIMARY,
+    )
+    .is_none()
     {
         eprintln!("skipping: FONT_DIR does not provide the test family");
         return;

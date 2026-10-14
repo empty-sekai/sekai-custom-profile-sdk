@@ -50,7 +50,7 @@ impl SdfTilePlan {
 
     /// Blends this ordered plan over an existing premultiplied RGBA8 target.
     /// This is the compositor contract used by SDF runs interleaved with
-    /// images and other legacy elements; untouched tiles remain byte-identical.
+    /// images and other non-SDF draws; untouched tiles remain byte-identical.
     pub fn execute_scalar_f32_over(
         &self,
         atlas: &impl SdfAtlasSource,

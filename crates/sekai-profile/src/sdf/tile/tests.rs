@@ -718,7 +718,7 @@ fn axis_aligned_shape_uses_row_program_without_sampling() {
 }
 
 #[test]
-fn atlas_glyph_builder_reuses_legacy_plane_geometry() {
+fn atlas_glyph_builder_reuses_manifest_plane_geometry() {
     let glyph = SdfAtlasGlyphManifest {
         codepoint: u32::from('A'),
         page: 3,
