@@ -228,8 +228,8 @@ pub(super) fn map_captured_sdf_commands(
     text_atlases: &crate::sdf::atlas::MappedSdfAtlasSet,
     shape_atlas: Option<&crate::sdf::shape_atlas::MappedShapeSdfAtlas>,
     source: &crate::sdf::tile::MixedSdfAtlasSource<'_>,
-    mut runtime_text_pages: Option<&mut Vec<crate::sdf::tile::RuntimeTextSdfPage>>,
-    mut realtime_edt_telemetry: Option<&mut Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>>,
+    runtime_text_pages: Option<&mut Vec<crate::sdf::tile::RuntimeTextSdfPage>>,
+    realtime_edt_telemetry: Option<&mut Vec<crate::telemetry::RealtimeEdtGlyphTelemetry>>,
     mut realtime_edt_batch_telemetry: Option<&mut crate::telemetry::RealtimeEdtBatchTelemetry>,
     mut prepared_entries_out: Option<
         &mut std::collections::BTreeMap<RealtimeEdtRequestKey, RealtimeEdtPreparedEntry>,
