@@ -24,6 +24,7 @@ mod scene;
 mod semantic_text;
 #[cfg(target_arch = "x86_64")]
 mod simd_x86;
+pub(crate) mod theme;
 mod ugui_text;
 
 pub use self::cache_variants::{

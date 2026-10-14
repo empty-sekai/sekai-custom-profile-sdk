@@ -44,10 +44,8 @@ pub mod assets;
 pub mod atlas_dir;
 pub mod codec;
 pub mod compiled_profile;
-pub mod context;
 pub mod core_shadow;
 pub mod elements;
-pub mod error;
 #[cfg(feature = "jpeg-turbo")]
 pub mod jpeg_turbo;
 pub mod masterdata;
@@ -60,14 +58,12 @@ pub mod render_config;
 pub mod render_object;
 pub mod render_object_catalog;
 pub mod renderer;
-pub mod resource_provider;
 pub mod sdf;
 pub mod semantic_resolve;
 pub mod telemetry;
 pub mod text;
 pub mod transform;
 pub mod types;
-pub mod widgets;
 
 pub use assets::AssetStore;
 pub use atlas_dir::{AtlasDir, InstalledAtlases};

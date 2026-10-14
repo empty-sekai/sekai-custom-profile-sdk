@@ -147,7 +147,7 @@ const PROGRESS_FACE_SHA256: &str =
 /// rendered with. Without it, or with another face, the pixel checks skip.
 fn progress_face_is_pinned() -> bool {
     let Some(bytes) = crate::sdf::outline::load_font_bytes_for_family(
-        crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        crate::profile_compositor::theme::fonts::LIVE_MASTER_PROGRESS,
     ) else {
         eprintln!("skipping: FONT_DIR does not provide the progress face");
         return false;

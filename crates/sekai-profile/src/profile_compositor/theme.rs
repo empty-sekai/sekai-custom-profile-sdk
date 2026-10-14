@@ -1,4 +1,4 @@
-//! Card render theme tokens.
+//! Font families the compositor draws profile text with.
 
 /// Font families declared by the game's custom profile assets.
 pub mod fonts {

@@ -496,7 +496,7 @@ impl MasterDataProvider for RegionalProvider {
         None
     }
     fn resolve_font(&self, _font_id: i32) -> Option<String> {
-        Some(crate::widgets::theme::fonts::PRIMARY.into())
+        Some(crate::profile_compositor::theme::fonts::PRIMARY.into())
     }
     fn resolve_stamp(&self, _stamp_id: i32) -> Option<String> {
         None

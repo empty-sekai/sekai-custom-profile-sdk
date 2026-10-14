@@ -66,7 +66,7 @@ pub(super) fn render_live_master_progress_text(
         destination,
         width,
         height,
-        crate::widgets::theme::fonts::LIVE_MASTER_PROGRESS,
+        crate::profile_compositor::theme::fonts::LIVE_MASTER_PROGRESS,
         text,
         20.0,
         matrix,
