@@ -65,7 +65,7 @@ impl Table {
         match serde_json::from_value(value.clone()) {
             Ok(typed) => Some(typed),
             Err(error) => {
-                tracing::warn!(%id, %error, "masterdata 行反序列化失败，按缺失处理");
+                tracing::warn!(%id, %error, "masterdata row does not deserialize; treated as missing");
                 None
             }
         }

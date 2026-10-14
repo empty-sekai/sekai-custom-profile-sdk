@@ -60,17 +60,17 @@ fn main() {
         // Dump mode: show both SDFs of the first character.
         if let Some(ch) = chars.chars().next() {
             if let Some((analytic, _, edt, _)) = benchmark_methods(&family, ch, supersample) {
-                println!("字符 '{ch}' 超采样={supersample}x");
-                dump_ascii("解析法(真值)", &analytic);
-                dump_ascii("EDT法", &edt);
+                println!("char '{ch}' supersample={supersample}x");
+                dump_ascii("analytic (reference)", &analytic);
+                dump_ascii("EDT", &edt);
             }
         }
         return;
     }
 
     println!(
-        "字体={family} 超采样={supersample}x\n{:<6} {:>9} {:>9} {:>8} {:>8} {:>9} {:>9} {:>7}",
-        "char", "解析us", "EDTus", "加速", "MAE", "最大误差", "尺寸匹配", "px数"
+        "font={family} supersample={supersample}x\n{:<6} {:>9} {:>9} {:>8} {:>8} {:>9} {:>9} {:>7}",
+        "char", "ana_us", "edt_us", "speedup", "MAE", "max_err", "size", "px"
     );
     println!("{}", "-".repeat(78));
 
@@ -85,14 +85,14 @@ fn main() {
     for ch in chars.chars() {
         let Some((analytic, a_dur, edt, e_dur)) = benchmark_methods(&family, ch, supersample)
         else {
-            println!("{ch:<6} 生成失败");
+            println!("{ch:<6} generation failed");
             continue;
         };
 
         let size_match = analytic.width() == edt.width() && analytic.height() == edt.height();
         if !size_match {
             println!(
-                "{ch:<6} 尺寸不匹配! 解析={}x{} EDT={}x{}",
+                "{ch:<6} size mismatch: analytic={}x{} EDT={}x{}",
                 analytic.width(),
                 analytic.height(),
                 edt.width(),
@@ -151,7 +151,7 @@ fn main() {
     if count > 0 {
         println!("{}", "-".repeat(78));
         println!(
-            "平均: MAE={:.2}/255 ({:.2}%)  最大误差={:.0}/255  平均加速={:.1}x  样本={}",
+            "mean: MAE={:.2}/255 ({:.2}%)  max error={:.0}/255  mean speedup={:.1}x  samples={}",
             total_mae / count as f64,
             total_mae / count as f64 / 255.0 * 100.0,
             total_max,
@@ -160,11 +160,11 @@ fn main() {
         );
         let total_err = total_err_flat + total_err_edge;
         println!(
-            "误差分布: 边缘过渡带={:.1}%  平坦区={:.1}%  平坦区最大误差={:.0}/255",
+            "error split: edge band={:.1}%  flat region={:.1}%  flat max error={:.0}/255",
             total_err_edge / total_err.max(1e-9) * 100.0,
             total_err_flat / total_err.max(1e-9) * 100.0,
             total_flat_max
         );
-        println!("（边缘带误差=抗锯齿软边，视觉无害；平坦区误差才会成为可见瑕疵）");
+        println!("(edge-band error falls in the antialiased soft edge; flat-region error shows as visible artifacts)");
     }
 }

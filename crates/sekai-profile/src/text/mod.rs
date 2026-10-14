@@ -846,7 +846,7 @@ fn layout_text_ops(
         line_count = lines.len(),
         raw_len = text.text.len(),
         raw_text = %text.text.chars().take(80).collect::<String>(),
-        "draw_text 入口"
+        "draw_text input"
     );
     capture_timings.rich_parse_ns = capture_elapsed_ns(rich_parse_started);
 
@@ -894,7 +894,7 @@ fn layout_text_ops(
         g = def_color.g,
         b = def_color.b,
         a = def_color.a,
-        "draw_text 颜色解析"
+        "draw_text default color"
     );
 
     // Font size of each line feed: a line without characters takes its

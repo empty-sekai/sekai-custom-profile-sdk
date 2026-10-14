@@ -394,7 +394,7 @@ impl OfflineAtlasGlyphGenerator {
         spread: f32,
     ) -> Result<Self, String> {
         let path = resolve_font_path(font_family)
-            .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
+            .ok_or_else(|| format!("no font file for family {font_family}"))?;
         Self::new_from_path_at_sampling(&path, point_size, spread)
     }
 
@@ -408,12 +408,13 @@ impl OfflineAtlasGlyphGenerator {
         spread: f32,
     ) -> Result<Self, String> {
         if !point_size.is_finite() || point_size <= 0.0 {
-            return Err("离线 atlas point size 非法".into());
+            return Err("invalid offline atlas point size".into());
         }
         if !spread.is_finite() || spread <= 0.0 {
-            return Err("离线 atlas spread 非法".into());
+            return Err("invalid offline atlas spread".into());
         }
-        let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+        let library =
+            Library::init().map_err(|err| format!("failed to initialize FreeType: {err:?}"))?;
         let face = open_face(&library, path, point_size)?;
         Ok(Self {
             face,
@@ -436,14 +437,14 @@ impl OfflineAtlasGlyphGenerator {
         let glyph_id = self
             .face
             .get_char_index(ch as usize)
-            .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+            .ok_or_else(|| format!("the font cmap has no glyph for {ch}"))?;
         let OfflineGenerationMethod::Edt { supersample } = method else {
             return generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
                 .map(|glyph| (glyph, false));
         };
         if !(1..=4).contains(&supersample) {
             return Err(format!(
-                "EDT supersample 必须在 1..=4，实际为 {supersample}"
+                "EDT supersample must be in 1..=4, got {supersample}"
             ));
         }
         let edt = if supersample == 1 {
@@ -484,7 +485,7 @@ impl OfflineAtlasGlyphGenerator {
                 generate_outline_sdf_with_face_at_spread(&self.face, glyph_id, ch, self.spread)
                     .map(|glyph| (glyph, true))
                     .map_err(|analytic_error| {
-                        format!("EDT 失败: {edt_error}; 解析法回退也失败: {analytic_error}")
+                        format!("EDT failed: {edt_error}; analytic fallback: {analytic_error}")
                     })
             }
         }
@@ -528,9 +529,9 @@ fn open_face(
 ) -> Result<freetype::Face, String> {
     let face = library
         .new_face(font_path, 0)
-        .map_err(|err| format!("加载字体失败: {err:?}"))?;
+        .map_err(|err| format!("failed to load the font: {err:?}"))?;
     face.set_char_size((point_size * 64.0).round() as isize, 0, 72, 72)
-        .map_err(|err| format!("设置点阵大小失败: {err:?}"))?;
+        .map_err(|err| format!("failed to set the pixel size: {err:?}"))?;
     Ok(face)
 }
 
@@ -583,10 +584,11 @@ impl SamplingMetrics {
 }
 
 fn generate_outline_sdf(font_path: &Path, ch: char) -> Result<OutlineSdfGlyph, String> {
-    let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+    let library =
+        Library::init().map_err(|err| format!("failed to initialize FreeType: {err:?}"))?;
     let face = open_face(&library, font_path, TMP_POINT_SIZE)?;
     let glyph_id = resolve_glyph_id(font_path, ch)
-        .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+        .ok_or_else(|| format!("the font cmap has no glyph for {ch}"))?;
     generate_outline_sdf_with_face_at_spread(&face, glyph_id, ch, TMP_SPREAD)
 }
 
@@ -599,19 +601,19 @@ fn generate_outline_sdf_with_face_at_spread(
     spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
     face.load_glyph(glyph_id, LoadFlag::NO_BITMAP | LoadFlag::NO_HINTING)
-        .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
+        .map_err(|err| format!("failed to load glyph {glyph_id}: {err:?}"))?;
 
     let glyph = face.glyph();
     let outline = &glyph.raw().outline;
     if outline.n_contours <= 0 || outline.n_points <= 0 {
-        return Err(format!("字符无轮廓: {ch}"));
+        return Err(format!("{ch} has no outline"));
     }
     // SAFETY: `outline` borrows the face's slot, which the load on the
     // preceding line filled; the face keeps its point, tag and contour arrays
     // alive until the next load on this face.
     let contours = unsafe { extract_segments(outline) };
     if contours.is_empty() {
-        return Err(format!("字符轮廓为空: {ch}"));
+        return Err(format!("{ch} has an empty outline"));
     }
     let metrics = SamplingMetrics::from_slot(glyph);
     let grid = metrics.grid(spread);
@@ -648,13 +650,13 @@ pub(crate) fn generate_realtime_edt(
     supersample: usize,
 ) -> Result<OutlineSdfGlyph, String> {
     if !point_size.is_finite() || point_size <= 0.0 {
-        return Err("实时 EDT point size 非法".into());
+        return Err("invalid realtime EDT point size".into());
     }
     if !spread.is_finite() || spread <= 0.0 {
-        return Err("实时 EDT spread 非法".into());
+        return Err("invalid realtime EDT spread".into());
     }
     let path = resolve_font_path(font_family)
-        .ok_or_else(|| format!("找不到字体 family: {font_family}"))?;
+        .ok_or_else(|| format!("no font file for family {font_family}"))?;
     generate_outline_sdf_edt_at_point_size(&path, ch, supersample, point_size, spread)
 }
 
@@ -665,7 +667,8 @@ fn generate_outline_sdf_edt_at_point_size(
     point_size: f32,
     spread: f32,
 ) -> Result<OutlineSdfGlyph, String> {
-    let library = Library::init().map_err(|err| format!("初始化 FreeType 失败: {err:?}"))?;
+    let library =
+        Library::init().map_err(|err| format!("failed to initialize FreeType: {err:?}"))?;
     let face = open_face(&library, font_path, point_size)?;
     let supersample = supersample.max(1);
     let supersampled_face = if supersample > 1 {
@@ -678,7 +681,7 @@ fn generate_outline_sdf_edt_at_point_size(
         None
     };
     let glyph_id = resolve_glyph_id(font_path, ch)
-        .ok_or_else(|| format!("无法从字体 cmap 解析 glyph id: {ch}"))?;
+        .ok_or_else(|| format!("the font cmap has no glyph for {ch}"))?;
     generate_outline_sdf_edt_with_faces(
         &face,
         supersampled_face.as_ref().unwrap_or(&face),
@@ -704,16 +707,16 @@ fn generate_outline_sdf_edt_with_faces(
     // grid aligned: hinting snaps the glyph to the pixel grid and changes its
     // width and height, so it would not match the analytic size.
     face.load_glyph(glyph_id, LoadFlag::NO_HINTING)
-        .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
+        .map_err(|err| format!("failed to load glyph {glyph_id}: {err:?}"))?;
     let metrics = SamplingMetrics::from_slot(face.glyph());
     let grid = metrics.grid(spread);
 
     raster_face
         .load_glyph(glyph_id, LoadFlag::NO_HINTING)
-        .map_err(|err| format!("按 glyph id 加载字符失败 (gid={glyph_id}): {err:?}"))?;
+        .map_err(|err| format!("failed to load glyph {glyph_id}: {err:?}"))?;
     let slot = raster_face.glyph();
     slot.render_glyph(RenderMode::Normal)
-        .map_err(|err| format!("光栅化失败 ({ch}): {err:?}"))?;
+        .map_err(|err| format!("failed to rasterize {ch}: {err:?}"))?;
     let bitmap = slot.bitmap();
     let width = bitmap.width().max(0) as usize;
     let rows = bitmap.rows().max(0) as usize;

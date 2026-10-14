@@ -68,10 +68,11 @@ pub(crate) fn draw_centered_white_text(
     let Some(bytes) = crate::sdf::outline::load_font_bytes_for_family(family) else {
         return Ok(false);
     };
-    let library = Library::init().map_err(|error| format!("初始化 FreeType 失败: {error:?}"))?;
+    let library =
+        Library::init().map_err(|error| format!("failed to initialize FreeType: {error:?}"))?;
     let face = library
         .new_memory_face2(bytes.as_slice(), 0)
-        .map_err(|error| format!("加载字体 {family} 失败: {error:?}"))?;
+        .map_err(|error| format!("failed to load font {family}: {error:?}"))?;
     set_char_size(&face, font_size, font_size)?;
 
     // Hinted advances at the source size feed both the measurement and the
@@ -79,7 +80,7 @@ pub(crate) fn draw_centered_white_text(
     let mut advances = Vec::new();
     for ch in text.chars() {
         face.load_char(ch as usize, LoadFlag::TARGET_NORMAL)
-            .map_err(|error| format!("加载字形 {ch:?} 失败: {error:?}"))?;
+            .map_err(|error| format!("failed to load glyph {ch:?}: {error:?}"))?;
         advances.push(face.glyph().raw().advance.x as f32 / 64.0);
     }
     let text_width: f32 = advances.iter().sum();
@@ -106,7 +107,7 @@ pub(crate) fn draw_centered_white_text(
     let mut pen_y = b * start + d * baseline + f;
     for (ch, advance) in text.chars().zip(advances) {
         face.load_char(ch as usize, flags | LoadFlag::RENDER)
-            .map_err(|error| format!("渲染字形 {ch:?} 失败: {error:?}"))?;
+            .map_err(|error| format!("failed to render glyph {ch:?}: {error:?}"))?;
         let glyph = face.glyph();
         let bitmap = glyph.bitmap();
         // No subpixel positioning: each glyph blits at its rounded pen point.
@@ -145,7 +146,7 @@ pub(crate) fn draw_centered_white_text(
 /// Sets the character size in points at 72 dpi, truncated to 26.6 fixed point.
 fn set_char_size<B>(face: &Face<B>, width: f32, height: f32) -> Result<(), String> {
     face.set_char_size((width * 64.0) as isize, (height * 64.0) as isize, 72, 72)
-        .map_err(|error| format!("设置字号失败: {error:?}"))
+        .map_err(|error| format!("failed to set the font size: {error:?}"))
 }
 
 /// How a text size is realized under a device transform: the character size,

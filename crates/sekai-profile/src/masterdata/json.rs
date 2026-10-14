@@ -98,7 +98,8 @@ impl JsonMasterDataProvider {
     ///
     /// Returns an error when `json` is not valid JSON.
     pub fn insert_table(&mut self, name: &str, json: &str) -> Result<(), String> {
-        let table = Table::from_json(json).map_err(|e| format!("解析表 {name} 失败: {e}"))?;
+        let table =
+            Table::from_json(json).map_err(|e| format!("failed to parse table {name}: {e}"))?;
         self.tables.insert(name.to_string(), Arc::new(table));
         Ok(())
     }
@@ -119,19 +120,19 @@ impl JsonMasterDataProvider {
             let path = dir.join(format!("{name}.json"));
             if !path.exists() {
                 if OPTIONAL_TABLES.contains(name) {
-                    tracing::debug!(table = name, path = %path.display(), "可选 masterdata 表不存在");
+                    tracing::debug!(table = name, path = %path.display(), "optional masterdata table not found");
                 } else {
-                    tracing::warn!(table = name, path = %path.display(), "masterdata 表缺失");
+                    tracing::warn!(table = name, path = %path.display(), "masterdata table missing");
                 }
                 continue;
             }
             let json = std::fs::read_to_string(&path)
-                .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+                .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
             provider.insert_table(name, &json)?;
         }
         if provider.tables.is_empty() {
             return Err(format!(
-                "目录 {} 内没有任何已知的 masterdata 表",
+                "{} contains no known masterdata table",
                 dir.display()
             ));
         }
