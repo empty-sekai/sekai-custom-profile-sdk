@@ -23,9 +23,6 @@ test("demo provider maps semantic descriptors to the configured bases", () => {
     [{ namespace: "assets", key: "character/member_small/example/card_normal" }, "https://assets.example.test/cn/character/member_small/example/card_normal.png"],
     [{ namespace: "assets", key: "bonds_honor/chr_sd_07_01" }, "https://assets.example.test/cn/bonds_honor/character/chr_sd_07_01/chr_sd_07_01.png"],
     [{ namespace: "assets", key: "bonds_honor/word/example_01" }, "https://assets.example.test/cn/bonds_honor/word/example_01/example_01.png"],
-    [{ namespace: "assets", key: "ugc/editor_image/2026-07/example.png" }, "https://assets.example.test/ugc/editor_image/2026-07/example.png"],
-    [{ namespace: "assets", key: "uploads/avatar/2026-07/example.png" }, "https://assets.example.test/uploads/avatar/2026-07/example.png"],
-    [{ namespace: "assets", key: "presets/stamp/example.png" }, "https://assets.example.test/presets/stamp/example.png"],
   ];
   for (const [resource, expected] of cases) {
     assert.equal(emptySekaiResourceUrl(resource, config), expected);

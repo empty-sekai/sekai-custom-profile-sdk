@@ -288,24 +288,10 @@ fn collect_bonds_honor_keys(
     }
 }
 
-/// Maps a render asset key to an object storage path.
-///
-/// Keys under `ugc/editor_image/`, `ugc/avatar/`, `uploads/editor_image/`,
-/// `uploads/avatar/` and `presets/` are full object paths already: they are
-/// returned unchanged when every segment is non-empty, not `.` or `..`, and
-/// free of backslashes. Every other key (including keys under those prefixes
-/// with a `..` segment) becomes `<prefix><key>.png`; the character and word
-/// images of bonds honors add their asset bundle directory.
+/// Maps a render asset key to an object storage path: `<prefix><key>.png`,
+/// where the character and word images of bonds honors add their asset bundle
+/// directory.
 pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
-    if (key.starts_with("ugc/editor_image/")
-        || key.starts_with("ugc/avatar/")
-        || key.starts_with("uploads/editor_image/")
-        || key.starts_with("uploads/avatar/")
-        || key.starts_with("presets/"))
-        && is_plain_relative_key(key)
-    {
-        return key.to_string();
-    }
     if let Some(filename) = key.strip_prefix("bonds_honor/chr_sd_") {
         let full = format!("chr_sd_{filename}");
         format!("{prefix}bonds_honor/character/{full}/{full}.png")
@@ -314,14 +300,6 @@ pub fn key_to_s3_path(key: &str, prefix: &str) -> String {
     } else {
         format!("{prefix}{key}.png")
     }
-}
-
-/// Every segment is non-empty and not `.` or `..`, and there is no backslash.
-fn is_plain_relative_key(key: &str) -> bool {
-    !key.contains('\\')
-        && key
-            .split('/')
-            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 /// Maps an indexed game-asset path back to the runtime key used by `AssetStore`.

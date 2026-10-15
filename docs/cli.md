@@ -170,11 +170,9 @@ With `--asset-url-layout flat`, a key is fetched from `<URL>/<key>.png`.
 `sekai_profile::asset_keys::key_to_s3_path` maps them: bonds honor character
 art `bonds_honor/chr_sd_<name>` is fetched from
 `bonds_honor/character/chr_sd_<name>/chr_sd_<name>.png`, bonds honor words
-`bonds_honor/word/<name>` from `bonds_honor/word/<name>/<name>.png`, keys
-under `ugc/editor_image/`, `ugc/avatar/`, `uploads/editor_image/`,
-`uploads/avatar/` and `presets/` are used as complete paths, and every other
-key is fetched from `<key>.png`. The layout changes only the URL; the asset
-keys the renderer uses stay the same.
+`bonds_honor/word/<name>` from `bonds_honor/word/<name>/<name>.png`, and
+every other key is fetched from `<key>.png`. The layout changes only the URL;
+the asset keys the renderer uses stay the same.
 
 ## Logging
 

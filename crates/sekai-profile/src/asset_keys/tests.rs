@@ -3,49 +3,7 @@ use super::{key_to_s3_path, logical_path_to_asset_key};
 const PREFIX: &str = "assets/cn/";
 
 #[test]
-fn listed_prefixes_are_read_literally() {
-    for key in [
-        "ugc/editor_image/2026-06/abc",
-        "ugc/avatar/2026-06/xyz",
-        "uploads/editor_image/2026-06/abc",
-        "uploads/avatar/2026-06/xyz",
-        "presets/stamp/stamp_miku_1",
-        "presets/mysekai/item_wood_1",
-    ] {
-        assert_eq!(
-            key_to_s3_path(key, PREFIX),
-            key,
-            "a key under a listed prefix is returned as is: {key}"
-        );
-    }
-}
-
-#[test]
-fn other_upload_paths_resolve_under_the_prefix() {
-    for key in [
-        "uploads/review/2026-06/abc",
-        "uploads/temp/2026-06/abc",
-        "uploads/editor_image", // no trailing slash, so not a listed prefix
-        "uploads/../secret",
-        "uploads/other/abc",
-        // A `..` segment under a listed prefix normalizes to a path outside it.
-        "ugc/editor_image/../../uploads/review/abc",
-        "presets/../uploads/temp/abc",
-    ] {
-        let got = key_to_s3_path(key, PREFIX);
-        assert_ne!(
-            got, key,
-            "a key outside the listed prefixes is not returned as is: {key}"
-        );
-        assert!(
-            got.starts_with(PREFIX),
-            "a key outside the listed prefixes resolves under the prefix: {key} -> {got}"
-        );
-    }
-}
-
-#[test]
-fn normal_game_assets_still_resolve() {
+fn game_assets_resolve_under_the_prefix() {
     assert_eq!(
         key_to_s3_path("character/member_small/abn/card_normal", PREFIX),
         "assets/cn/character/member_small/abn/card_normal.png"

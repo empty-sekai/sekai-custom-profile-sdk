@@ -1,13 +1,6 @@
 const DEFAULT_STATIC_BASE = "https://profile-assets.emptysekai.dev/game-profile/cn/6.0.0/renderer-static";
 const ASSET_REGIONS = new Set(["jp", "cn", "tw", "kr", "en"]);
 const STATIC_CACHE = "sekai-custom-profile-sdk-demo-static-v0.3";
-const ROOT_ASSET_PREFIXES = [
-  "ugc/editor_image/",
-  "ugc/avatar/",
-  "uploads/editor_image/",
-  "uploads/avatar/",
-  "presets/",
-];
 
 /** Game asset base for `region`: its asset tree on storage.pjsk.moe, without a trailing slash. */
 export function defaultAssetBase(region) {
@@ -45,25 +38,19 @@ export function emptySekaiResourceUrl(resource, config) {
   if (resource.namespace !== "assets") {
     throw new Error(`unsupported EmptySekai demo resource namespace ${resource.namespace}`);
   }
-  const objectPath = gameAssetObjectPath(rawKey, normalized.region);
-  const standardPrefix = `assets/${normalized.region}/`;
-  if (objectPath.startsWith(standardPrefix)) {
-    return `${normalized.assetBase}/${encodePath(objectPath.slice(standardPrefix.length))}`;
-  }
-  return `${new URL(normalized.assetBase).origin}/${encodePath(objectPath)}`;
+  return `${normalized.assetBase}/${encodePath(gameAssetPath(rawKey))}`;
 }
 
-function gameAssetObjectPath(key, region) {
-  if (ROOT_ASSET_PREFIXES.some((prefix) => key.startsWith(prefix))) return key;
+function gameAssetPath(key) {
   const normalized = stripPng(key);
   const character = normalized.match(/^bonds_honor\/chr_sd_(.+)$/);
   if (character) {
     const name = `chr_sd_${character[1]}`;
-    return `assets/${region}/bonds_honor/character/${name}/${name}.png`;
+    return `bonds_honor/character/${name}/${name}.png`;
   }
   const word = normalized.match(/^bonds_honor\/word\/(.+)$/);
-  if (word) return `assets/${region}/bonds_honor/word/${word[1]}/${word[1]}.png`;
-  return `assets/${region}/${normalized}.png`;
+  if (word) return `bonds_honor/word/${word[1]}/${word[1]}.png`;
+  return `${normalized}.png`;
 }
 
 function normalizeConfig(config) {
