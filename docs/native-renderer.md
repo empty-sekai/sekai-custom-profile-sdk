@@ -214,7 +214,7 @@ cargo run -p sekai-profile --example plain_canvas -- <font-file> <output.png>
 | --- | --- |
 | `bundled-freetype` | Builds the bundled FreeType sources instead of finding FreeType through pkg-config |
 | `jpeg-turbo` | JPEG encoding with the bundled libjpeg-turbo (`to_jpeg`, `encode_jpeg`) |
-| `parallel` | Rasterizes on a dedicated rayon thread pool; the output is byte-identical to a serial build |
+| `parallel` | Runs PNG encoding, realtime glyph SDF generation, and animation frame fills and blits on dedicated rayon thread pools; the output is byte-identical to a serial build |
 | `animation-export` | Animation rendering and the GIF, WebP, APNG and MP4 encoders; links libx264 |
 | `dev` | Diagnostics for the SDF generators, used by the `compare_sdf` example |
 
@@ -228,6 +228,7 @@ No feature is enabled by default.
 | `FONT_DIR` | Font directory searched after `SEKAI_PROFILE_FONT_DIR`; `assets/fonts` is searched last |
 | `SEKAI_PROFILE_SDF_EDT` | `1` to `4` generates glyph SDFs with a distance transform at that supersampling factor; unset or any other value uses the analytic method |
 | `SEKAI_PROFILE_REALTIME_EDT_THREADS` | With the `parallel` feature, the number of threads that generate SDFs for glyphs missing from the atlas: `1` to `4`, default `2` |
+| `SEKAI_PROFILE_RASTER_THREADS` | With the `parallel` feature, the number of threads that fill and blit animation frame regions: `1` to `8`, default the available parallelism capped at 4 |
 | `SEKAI_PROFILE_DEBUG_TMP_PROBE`, `SEKAI_PROFILE_DEBUG_TEXT_CODEPOINTS` | `1`, `true` or `yes` emits `tracing` debug events for TMP layout probes and text codepoints |
 
 The command line also reads `SEKAI_PROFILE_ATLAS_DIR`; see [command line](cli.md).

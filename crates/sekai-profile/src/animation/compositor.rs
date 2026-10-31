@@ -63,24 +63,75 @@ impl FrameRect {
     }
 }
 
-/// Opaque white, the animation canvas ground.
-const WHITE: [u8; 4] = [255, 255, 255, 255];
+/// Pixels a fill or blit must cover before its rows are spread across the
+/// raster pool; smaller regions cost less than the hand-off.
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_PIXELS: usize = 64 * 1024;
+
+/// The pool that rows of large fills and blits run on. `SEKAI_PROFILE_RASTER_THREADS`
+/// (1 to 8) sets its size; it defaults to the available parallelism, at most 4.
+#[cfg(feature = "parallel")]
+fn raster_pool() -> &'static rayon::ThreadPool {
+    use std::sync::OnceLock;
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::env::var("SEKAI_PROFILE_RASTER_THREADS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|threads| (1..=8).contains(threads))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(2, |count| count.get().min(4))
+            });
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("profile-raster-{index}"))
+            .build()
+            .expect("raster thread pool creation failed")
+    })
+}
+
+/// Calls `row` with the index and the bytes of every `row_bytes`-long chunk of
+/// `rows`. Rows are independent, so with the `parallel` feature a region of at
+/// least `PARALLEL_MIN_PIXELS` pixels is split across the raster pool and the
+/// output is identical to the serial order.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+fn for_each_row<F>(rows: &mut [u8], row_bytes: usize, pixels: usize, row: F)
+where
+    F: Fn(usize, &mut [u8]) + Sync + Send,
+{
+    #[cfg(feature = "parallel")]
+    {
+        if pixels >= PARALLEL_MIN_PIXELS {
+            use rayon::prelude::*;
+            raster_pool().install(|| {
+                rows.par_chunks_mut(row_bytes)
+                    .enumerate()
+                    .for_each(|(index, bytes)| row(index, bytes));
+            });
+            return;
+        }
+    }
+    for (index, bytes) in rows.chunks_mut(row_bytes).enumerate() {
+        row(index, bytes);
+    }
+}
 
 /// Fills `rect` of a premultiplied RGBA8 canvas with opaque white, replacing
 /// whatever was there. This is the `BlendMode::Src` clear the dirty-region
-/// redraw performs before recompositing.
-fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
+/// redraw performs before recompositing. Opaque white is `0xFF` in every
+/// byte, so each row is a single fill.
+pub(super) fn fill_white(canvas: &mut [u8], canvas_width: u32, rect: PixelRect) {
     if rect.is_empty() {
         return;
     }
     let row_bytes = canvas_width as usize * 4;
-    for y in rect.top..rect.bottom {
-        let start = y as usize * row_bytes + rect.left as usize * 4;
-        let end = start + (rect.right - rect.left) as usize * 4;
-        for pixel in canvas[start..end].as_chunks_mut::<4>().0 {
-            pixel.copy_from_slice(&WHITE);
-        }
-    }
+    let left = rect.left as usize * 4;
+    let right = rect.right as usize * 4;
+    let rows = &mut canvas[rect.top as usize * row_bytes..rect.bottom as usize * row_bytes];
+    let pixels = (rect.right - rect.left) as usize * (rect.bottom - rect.top) as usize;
+    for_each_row(rows, row_bytes, pixels, |_, row| {
+        row[left..right].fill(u8::MAX);
+    });
 }
 
 /// Premultiplied RGBA8 pixels, `width * 4` bytes per row.
@@ -142,14 +193,16 @@ pub(super) fn blit_layer(
     let v_scale = source_height as f32 / height;
     let row_bytes = canvas_width as usize * 4;
     let source_row_bytes = source_width as usize * 4;
-    for y in y0..y1 {
+    let rows = &mut destination[y0 as usize * row_bytes..y1 as usize * row_bytes];
+    let pixels = (x1 - x0) as usize * (y1 - y0) as usize;
+    for_each_row(rows, row_bytes, pixels, |index, row| {
+        let y = y0 + index as i32;
         // Nearest sampling: map the device pixel center into texel coordinates,
         // then take the texel whose center is closest, with an exact tie going
         // to the lower index — the reference sampler's rounding.
         let v = ((y as f32 + 0.5 - rect.top) * v_scale - 1.0).ceil() as i32;
         let v = v.clamp(0, source_height as i32 - 1) as usize;
         let source_row = v * source_row_bytes;
-        let destination_row = y as usize * row_bytes;
         for x in x0..x1 {
             let u = ((x as f32 + 0.5 - rect.left) * u_scale - 1.0).ceil() as i32;
             let u = u.clamp(0, source_width as i32 - 1) as usize;
@@ -158,9 +211,9 @@ pub(super) fn blit_layer(
             if alpha == 0 {
                 continue;
             }
-            let di = destination_row + x as usize * 4;
+            let di = x as usize * 4;
             if alpha == u8::MAX {
-                destination[di..di + 4].copy_from_slice(&source[si..si + 4]);
+                row[di..di + 4].copy_from_slice(&source[si..si + 4]);
                 continue;
             }
             // Source-over on premultiplied bytes with the 255->256 alpha
@@ -169,11 +222,11 @@ pub(super) fn blit_layer(
             let scale = u32::from(alpha) + 1;
             for channel in 0..4 {
                 let over = u32::from(source[si + channel]);
-                let under = u32::from(destination[di + channel]);
-                destination[di + channel] = (over + under - ((under * scale) >> 8)).min(255) as u8;
+                let under = u32::from(row[di + channel]);
+                row[di + channel] = (over + under - ((under * scale) >> 8)).min(255) as u8;
             }
         }
-    }
+    });
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

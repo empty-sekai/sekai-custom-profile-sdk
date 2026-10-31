@@ -163,7 +163,8 @@ pub(crate) fn export_profile_animation(
     let frame_bytes = frame_byte_len(width, height)?;
     let retained_layer_budget = preset
         .export_memory_budget_bytes
-        .saturating_sub(frame_bytes.saturating_mul(2));
+        .saturating_sub(frame_bytes.saturating_mul(2))
+        .saturating_sub(deferred_tile_cache_reserve(preset));
     let rasterizer = GroupRasterizer {
         renderer,
         card,
@@ -307,6 +308,22 @@ pub(crate) fn export_profile_animation(
             render_telemetry,
         },
     })
+}
+
+/// Bytes of an MP4 export's memory budget that retained layers may not use, so
+/// that layers rasterized window by window keep room for their tile cache. The
+/// reserve is also what the cache can draw on once a frame buffer is set aside.
+const DEFERRED_TILE_CACHE_RESERVE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The part of `preset`'s export budget kept out of the retained layers: the
+/// tile cache reserve for MP4, capped at a quarter of the budget, and nothing
+/// for formats that do not window their layers.
+pub(super) fn deferred_tile_cache_reserve(preset: &ResolvedAnimationPreset) -> usize {
+    if preset.format == AnimationFormat::Mp4 {
+        DEFERRED_TILE_CACHE_RESERVE_BYTES.min(preset.export_memory_budget_bytes / 4)
+    } else {
+        0
+    }
 }
 
 pub(super) fn animation_peak_export_bytes(layer_raster_bytes: usize, frame_bytes: usize) -> usize {

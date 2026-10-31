@@ -1,6 +1,10 @@
 //! Deferred SDF layers: the source window a dirty rect needs and the tile cache
 //! that serves it.
 
+use std::sync::Arc;
+
+use lru::LruCache;
+
 use super::compositor::{LayerFrameState, PixelRect, RasterLayer};
 use super::AnimationError;
 
@@ -16,17 +20,14 @@ pub(super) struct DeferredSdfTileKey {
     pub(super) height: u32,
 }
 
-pub(super) struct DeferredSdfTileCacheEntry {
-    pixels: Vec<u8>,
-    bytes: usize,
-}
-
+/// Least-recently-used tiles of deferred layers, bounded by a byte budget.
+///
+/// Tiles are shared by reference, so a hit copies no pixels out of the cache.
 pub(super) struct DeferredSdfTileCache {
     pub(super) budget_bytes: usize,
     pub(super) resident_bytes: usize,
     pub(super) peak_bytes: usize,
-    pub(super) entries: std::collections::HashMap<DeferredSdfTileKey, DeferredSdfTileCacheEntry>,
-    order: std::collections::VecDeque<DeferredSdfTileKey>,
+    pub(super) entries: LruCache<DeferredSdfTileKey, Arc<[u8]>>,
 }
 
 impl DeferredSdfTileCache {
@@ -37,8 +38,7 @@ impl DeferredSdfTileCache {
             budget_bytes,
             resident_bytes: 0,
             peak_bytes: 0,
-            entries: std::collections::HashMap::new(),
-            order: std::collections::VecDeque::new(),
+            entries: LruCache::unbounded(),
         }
     }
 
@@ -46,16 +46,14 @@ impl DeferredSdfTileCache {
         self.budget_bytes != 0
     }
 
-    pub(super) fn get(&mut self, key: DeferredSdfTileKey) -> Option<Vec<u8>> {
-        let pixels = self.entries.get(&key)?.pixels.clone();
-        if let Some(index) = self.order.iter().position(|value| *value == key) {
-            self.order.remove(index);
-        }
-        self.order.push_back(key);
-        Some(pixels)
+    /// The tile cached under `key`, marked as the most recently used.
+    pub(super) fn get(&mut self, key: DeferredSdfTileKey) -> Option<Arc<[u8]>> {
+        self.entries.get(&key).cloned()
     }
 
-    pub(super) fn insert(&mut self, key: DeferredSdfTileKey, pixels: Vec<u8>) {
+    /// Caches `pixels` under `key`, evicting the least recently used tiles until
+    /// it fits. A tile larger than the whole budget is not cached.
+    pub(super) fn insert(&mut self, key: DeferredSdfTileKey, pixels: Arc<[u8]>) {
         if !self.enabled() {
             return;
         }
@@ -63,28 +61,21 @@ impl DeferredSdfTileCache {
         if bytes == 0 || bytes > self.budget_bytes {
             return;
         }
-        if let Some(previous) = self.entries.remove(&key) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(previous.bytes);
-            if let Some(index) = self.order.iter().position(|value| *value == key) {
-                self.order.remove(index);
-            }
+        if let Some(previous) = self.entries.pop(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.len());
         }
         while self.resident_bytes.saturating_add(bytes) > self.budget_bytes {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some((_, evicted)) = self.entries.pop_lru() else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&oldest) {
-                self.resident_bytes = self.resident_bytes.saturating_sub(entry.bytes);
-            }
+            self.resident_bytes = self.resident_bytes.saturating_sub(evicted.len());
         }
         if self.resident_bytes.saturating_add(bytes) > self.budget_bytes {
             return;
         }
         self.resident_bytes = self.resident_bytes.saturating_add(bytes);
         self.peak_bytes = self.peak_bytes.max(self.resident_bytes);
-        self.order.push_back(key);
-        self.entries
-            .insert(key, DeferredSdfTileCacheEntry { pixels, bytes });
+        self.entries.put(key, pixels);
     }
 }
 
@@ -210,8 +201,8 @@ pub(super) fn render_deferred_animation_window_cached(
                 )?;
                 scratch_peak_bytes = scratch_peak_bytes.max(rendered.scratch_peak_bytes);
                 record_deferred_window_execution(render_telemetry, &rendered);
-                let pixels = rendered.pixels.clone();
-                cache.insert(key, pixels.clone());
+                let pixels: Arc<[u8]> = Arc::from(rendered.pixels);
+                cache.insert(key, Arc::clone(&pixels));
                 pixels
             };
             let visible_left = tile_left.max(window.left);

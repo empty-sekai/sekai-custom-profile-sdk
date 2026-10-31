@@ -48,7 +48,8 @@ bundled-freetype = ["freetype-rs/bundled"]
 # Vendored libjpeg-turbo and its raw-YUV 4:2:0 encoder, selected through
 # `JpegEncoder::Avx512Yuv420`.
 jpeg-turbo = ["dep:turbojpeg-sys"]
-# Dedicated rayon raster pool. Disabling it preserves byte-identical serial output.
+# Dedicated rayon raster pool for PNG encoding, realtime glyph SDF generation,
+# and animation fills and blits. Disabling it preserves byte-identical serial output.
 parallel = ["dep:rayon"]
 # Animation encoders. Layer rasterization runs through the ordered SDF path
 # selected by `RenderConfig`.

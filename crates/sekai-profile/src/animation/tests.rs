@@ -217,16 +217,209 @@ fn deferred_sdf_tile_cache_evicts_lru_entries_within_budget() {
         height: 4,
     };
     let mut cache = DeferredSdfTileCache::new(4 * 4 * 4 * 2);
-    cache.insert(key(1), rgba([255, 0, 0, 255]));
-    cache.insert(key(2), rgba([0, 255, 0, 255]));
+    cache.insert(key(1), rgba([255, 0, 0, 255]).into());
+    cache.insert(key(2), rgba([0, 255, 0, 255]).into());
     assert!(cache.get(key(1)).is_some());
-    cache.insert(key(3), rgba([0, 0, 255, 255]));
+    cache.insert(key(3), rgba([0, 0, 255, 255]).into());
 
-    assert!(cache.entries.contains_key(&key(1)));
-    assert!(!cache.entries.contains_key(&key(2)));
-    assert!(cache.entries.contains_key(&key(3)));
+    assert!(cache.entries.contains(&key(1)));
+    assert!(!cache.entries.contains(&key(2)));
+    assert!(cache.entries.contains(&key(3)));
     assert!(cache.resident_bytes <= cache.budget_bytes);
     assert_eq!(cache.peak_bytes, cache.budget_bytes);
+}
+
+fn tile_key(layer_index: usize) -> DeferredSdfTileKey {
+    DeferredSdfTileKey {
+        layer_index,
+        x: 0,
+        y: 0,
+        width: 4,
+        height: 4,
+    }
+}
+
+#[test]
+fn deferred_sdf_tile_cache_hit_shares_the_stored_pixels() {
+    let mut cache = DeferredSdfTileCache::new(1024);
+    let tile: std::sync::Arc<[u8]> = vec![7u8; 64].into();
+    cache.insert(tile_key(1), std::sync::Arc::clone(&tile));
+
+    let hit = cache.get(tile_key(1)).expect("the tile is cached");
+    assert!(std::sync::Arc::ptr_eq(&hit, &tile));
+    assert!(cache.get(tile_key(2)).is_none());
+}
+
+#[test]
+fn deferred_sdf_tile_cache_replaces_a_key_without_double_counting() {
+    let mut cache = DeferredSdfTileCache::new(128);
+    cache.insert(tile_key(1), vec![1u8; 64].into());
+    cache.insert(tile_key(1), vec![2u8; 96].into());
+
+    assert_eq!(cache.resident_bytes, 96);
+    assert_eq!(cache.get(tile_key(1)).expect("replaced tile")[0], 2);
+}
+
+#[test]
+fn deferred_sdf_tile_cache_rejects_tiles_it_cannot_hold() {
+    let mut disabled = DeferredSdfTileCache::new(0);
+    disabled.insert(tile_key(1), vec![1u8; 64].into());
+    assert!(disabled.get(tile_key(1)).is_none());
+    assert_eq!(disabled.resident_bytes, 0);
+
+    let mut small = DeferredSdfTileCache::new(32);
+    small.insert(tile_key(1), vec![1u8; 64].into());
+    small.insert(tile_key(2), Vec::new().into());
+    assert!(small.get(tile_key(1)).is_none());
+    assert!(small.get(tile_key(2)).is_none());
+    assert_eq!(small.peak_bytes, 0);
+}
+
+#[test]
+fn mp4_exports_reserve_memory_for_the_deferred_tile_cache() {
+    let mp4 = resolve_preset("qq", Some(AnimationFormat::Mp4)).unwrap();
+    let reserve = deferred_tile_cache_reserve(&mp4);
+    assert!(reserve > 0);
+    assert!(reserve <= mp4.export_memory_budget_bytes / 4);
+
+    let gif = resolve_preset("qq", Some(AnimationFormat::Gif)).unwrap();
+    assert_eq!(deferred_tile_cache_reserve(&gif), 0);
+}
+
+fn state_in(width: u32, height: u32, x: f32, y: f32, w: f32, h: f32) -> LayerFrameState {
+    let destination = FrameRect::from_xywh(x, y, w, h);
+    LayerFrameState {
+        visible: true,
+        destination,
+        pixel_bounds: pixel_bounds_for_destination(destination, width, height),
+    }
+}
+
+#[test]
+fn a_small_moving_layer_dirties_only_the_area_it_covers() {
+    let (width, height) = (64u32, 32u32);
+    let layers = vec![
+        solid_layer([0, 0, 255, 255], 0.0, 0.0, width, height, None),
+        solid_layer(
+            [255, 0, 0, 255],
+            10.0,
+            10.0,
+            4,
+            4,
+            Some(sekai_profile_core::StableId(1)),
+        ),
+    ];
+    let states_at = |x: f32| {
+        vec![
+            state_in(width, height, 0.0, 0.0, width as f32, height as f32),
+            state_in(width, height, x, 10.0, 4.0, 4.0),
+        ]
+    };
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let mut compositor = AnimationFrameCompositor::new(width, height, 1.0).unwrap();
+
+    let first = compositor
+        .composite_states(0, &layers, states_at(10.0), &mut rgba)
+        .unwrap();
+    assert_eq!(first, FrameCompositeUpdate::Full);
+
+    for (index, x) in [(1, 12.0), (2, 14.0)] {
+        let update = compositor
+            .composite_states(index, &layers, states_at(x), &mut rgba)
+            .unwrap();
+        assert!(matches!(update, FrameCompositeUpdate::Dirty(_)));
+    }
+    let unchanged = compositor
+        .composite_states(3, &layers, states_at(14.0), &mut rgba)
+        .unwrap();
+    assert_eq!(unchanged, FrameCompositeUpdate::Reused);
+
+    // Each move dirties the old and new position of the 4x4 layer plus a
+    // one-pixel guard, merged into one 8x6 region.
+    let telemetry = compositor.telemetry;
+    assert_eq!(telemetry.full_composites, 1);
+    assert_eq!(telemetry.dirty_composites, 2);
+    assert_eq!(telemetry.dirty_regions, 2);
+    assert_eq!(telemetry.reused_composites, 1);
+    assert_eq!(telemetry.dirty_pixels, 2 * 8 * 6);
+    let frame_bytes = width as u64 * height as u64 * 4;
+    assert_eq!(telemetry.readback_bytes, frame_bytes + 2 * 8 * 6 * 4);
+
+    let mut oracle = AnimationFrameCompositor::new(width, height, 1.0).unwrap();
+    oracle.redraw_full_frame(&layers, &states_at(14.0)).unwrap();
+    assert_eq!(
+        read_frame(compositor.canvas(), width, height),
+        read_frame(oracle.canvas(), width, height)
+    );
+}
+
+#[test]
+fn blit_layer_matches_a_per_pixel_source_over_reference() {
+    // 76,800 pixels: past the size at which rows are spread across threads.
+    let (width, height) = (320usize, 240usize);
+    let (left, top) = (3usize, 5usize);
+    let (canvas_width, canvas_height) = (width + 8, height + 8);
+    let source = deterministic_rgba(width, height);
+    let mut destination = deterministic_rgba(canvas_width, canvas_height);
+    let mut expected = destination.clone();
+    for y in 0..height {
+        for x in 0..width {
+            let si = (y * width + x) * 4;
+            let di = ((y + top) * canvas_width + x + left) * 4;
+            let alpha = source[si + 3];
+            if alpha == 0 {
+                continue;
+            }
+            if alpha == u8::MAX {
+                expected[di..di + 4].copy_from_slice(&source[si..si + 4]);
+                continue;
+            }
+            let scale = u32::from(alpha) + 1;
+            for channel in 0..4 {
+                let over = u32::from(source[si + channel]);
+                let under = u32::from(expected[di + channel]);
+                expected[di + channel] = (over + under - ((under * scale) >> 8)).min(255) as u8;
+            }
+        }
+    }
+
+    blit_layer(
+        PixelsMut {
+            pixels: &mut destination,
+            width: canvas_width as u32,
+            height: canvas_height as u32,
+        },
+        PixelsRef {
+            pixels: &source,
+            width: width as u32,
+            height: height as u32,
+        },
+        FrameRect::from_xywh(left as f32, top as f32, width as f32, height as f32),
+        PixelRect::full(canvas_width as u32, canvas_height as u32),
+    );
+    assert!(destination == expected);
+}
+
+#[test]
+fn fill_white_covers_exactly_the_rect() {
+    // 71,300 pixels: past the size at which rows are spread across threads.
+    let (width, height) = (320u32, 240u32);
+    let rect = PixelRect {
+        left: 5,
+        top: 5,
+        right: 315,
+        bottom: 235,
+    };
+    let mut canvas = vec![0u8; width as usize * height as usize * 4];
+    fill_white(&mut canvas, width, rect);
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+            let at = (y as usize * width as usize + x as usize) * 4;
+            let expected = if inside { [u8::MAX; 4] } else { [0; 4] };
+            assert_eq!(&canvas[at..at + 4], &expected, "pixel ({x}, {y})");
+        }
+    }
 }
 
 #[test]
