@@ -174,7 +174,7 @@ test("animation ticks update inspector data without rebuilding the layer tree", 
 
 test("workbench exposes readback and control hooks for quantitative runtime verification", async () => {
   const source = await readFile(new URL("../../demo/demo.js", import.meta.url), "utf8");
-  assert.match(source, /__ALLIUM_RENDERER_WORKBENCH__/);
+  assert.match(source, /__SEKAI_PROFILE_WORKBENCH__/);
   assert.match(source, /dump: \(\) => session\.dump/);
   assert.match(source, /draw: \(\) => session\.draw/);
   assert.match(source, /tab: \(controlId, value\) => session\.setTab/);

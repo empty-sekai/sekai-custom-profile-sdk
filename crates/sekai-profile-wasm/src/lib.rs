@@ -61,7 +61,7 @@ use self::geometry::extract_segments;
 
 const TMP_POINT_SIZE: f32 = 75.0;
 const TMP_SPREAD: f32 = 6.0;
-const FONT_ENGINE_FINGERPRINT: &str = match option_env!("ALLIUM_FONT_ENGINE_FINGERPRINT") {
+const FONT_ENGINE_FINGERPRINT: &str = match option_env!("SEKAI_PROFILE_FONT_ENGINE_FINGERPRINT") {
     Some(value) => value,
     None => "freetype-unknown:dev",
 };

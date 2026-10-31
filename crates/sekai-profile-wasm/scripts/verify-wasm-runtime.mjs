@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import createAlliumRenderer from "../dist/sekai_profile_wasm.js";
+import createProfileRuntime from "../dist/sekai_profile_wasm.js";
 
-const module = await createAlliumRenderer({ noInitialRun: true });
+const module = await createProfileRuntime({ noInitialRun: true });
 assert.equal(typeof module._sdf_layout_freetype_plan_glyphs_json, "function");
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();

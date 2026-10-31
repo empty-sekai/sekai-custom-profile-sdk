@@ -56,7 +56,7 @@ const elements = {
 };
 
 const session = new WorkbenchSession(elements.canvas);
-Object.defineProperty(globalThis, "__ALLIUM_RENDERER_WORKBENCH__", {
+Object.defineProperty(globalThis, "__SEKAI_PROFILE_WORKBENCH__", {
   configurable: true,
   value: Object.freeze({
     dump: () => session.dump,

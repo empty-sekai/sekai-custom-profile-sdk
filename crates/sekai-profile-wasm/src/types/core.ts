@@ -64,7 +64,7 @@ export type CoreLayerTableEntry = {
 };
 
 export type CoreSceneDump = {
-  schema: "allium.scene-dump";
+  schema: "sekai-profile.scene-dump";
   schema_major: number;
   schema_minor: number;
   coordinate_space: "card-device-v1";

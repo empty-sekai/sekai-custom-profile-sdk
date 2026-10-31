@@ -10,9 +10,9 @@ typedef struct {
     size_t output_capacity;
     int width;
     int height;
-} allium_x264_encoder;
+} sekai_profile_x264_encoder;
 
-static int copy_nals(allium_x264_encoder *state,
+static int copy_nals(sekai_profile_x264_encoder *state,
                      x264_nal_t *nals,
                      int nal_count,
                      const uint8_t **output,
@@ -43,11 +43,11 @@ static int copy_nals(allium_x264_encoder *state,
     return 0;
 }
 
-allium_x264_encoder *allium_x264_create(int width, int height, int fps, int qp) {
+sekai_profile_x264_encoder *sekai_profile_x264_create(int width, int height, int fps, int qp) {
     if (width <= 0 || height <= 0 || fps <= 0 || qp < 0 || qp > 51) {
         return NULL;
     }
-    allium_x264_encoder *state = (allium_x264_encoder *)calloc(1, sizeof(*state));
+    sekai_profile_x264_encoder *state = (sekai_profile_x264_encoder *)calloc(1, sizeof(*state));
     if (!state) {
         return NULL;
     }
@@ -112,7 +112,7 @@ allium_x264_encoder *allium_x264_create(int width, int height, int fps, int qp) 
     return state;
 }
 
-int allium_x264_encode(allium_x264_encoder *state,
+int sekai_profile_x264_encode(sekai_profile_x264_encoder *state,
                        const uint8_t *yuv420p,
                        const uint8_t *mb_info,
                        int64_t pts,
@@ -139,7 +139,7 @@ int allium_x264_encode(allium_x264_encoder *state,
     return encoded;
 }
 
-int allium_x264_flush(allium_x264_encoder *state,
+int sekai_profile_x264_flush(sekai_profile_x264_encoder *state,
                       const uint8_t **output,
                       size_t *output_size) {
     if (!state || !output || !output_size) {
@@ -155,11 +155,11 @@ int allium_x264_flush(allium_x264_encoder *state,
     return encoded;
 }
 
-int allium_x264_delayed_frames(const allium_x264_encoder *state) {
+int sekai_profile_x264_delayed_frames(const sekai_profile_x264_encoder *state) {
     return state ? x264_encoder_delayed_frames(state->encoder) : 0;
 }
 
-void allium_x264_destroy(allium_x264_encoder *state) {
+void sekai_profile_x264_destroy(sekai_profile_x264_encoder *state) {
     if (!state) {
         return;
     }

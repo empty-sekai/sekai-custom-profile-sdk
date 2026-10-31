@@ -11,10 +11,10 @@ use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
 //
 // # Safety
 //
-// `allium_jpeg_encode_rgba` reads `height` rows of `width * 4` bytes from
+// `sekai_profile_jpeg_encode_rgba` reads `height` rows of `width * 4` bytes from
 // `rgba`, so `rgba` must be valid for `width * height * 4` bytes of RGBA8.
 //
-// `allium_jpeg_encode_yuv420` reads `height` luma rows `y_stride` bytes apart
+// `sekai_profile_jpeg_encode_yuv420` reads `height` luma rows `y_stride` bytes apart
 // from `y_plane` and `height / 2` chroma rows `chroma_stride` bytes apart
 // from each of `cb_plane` and `cr_plane`. Raw-data compression reads every
 // row in whole 8-sample DCT blocks, so each luma row must be readable for
@@ -29,10 +29,10 @@ use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
 // writes. On success the encoder has allocated the output buffer itself and
 // stored its address in `*output` and its byte count in `*output_length`;
 // the caller then owns that buffer and must release it with exactly one
-// `allium_jpeg_free` call, and with no other deallocator. On a failed encode
+// `sekai_profile_jpeg_free` call, and with no other deallocator. On a failed encode
 // the library frees any partial buffer and stores null and 0. On a rejected
 // argument it writes neither, so the caller's initial values remain.
-// `allium_jpeg_free` calls `free`, so a null pointer is a no-op.
+// `sekai_profile_jpeg_free` calls `free`, so a null pointer is a no-op.
 //
 // `error_message` is either null or writable for `error_capacity` bytes. When
 // libjpeg reports an error, its `format_message` writes the diagnostic into
@@ -42,7 +42,7 @@ use std::ffi::{c_char, c_int, c_ulong, c_void, CStr};
 // `error_capacity - 1`. Every other status leaves the buffer untouched, so a
 // caller that reads it back as a C string must NUL-initialize it first.
 unsafe extern "C" {
-    fn allium_jpeg_encode_rgba(
+    fn sekai_profile_jpeg_encode_rgba(
         rgba: *const u8,
         width: u32,
         height: u32,
@@ -52,7 +52,7 @@ unsafe extern "C" {
         error_message: *mut c_char,
         error_capacity: usize,
     ) -> c_int;
-    fn allium_jpeg_encode_yuv420(
+    fn sekai_profile_jpeg_encode_yuv420(
         y_plane: *const u8,
         cb_plane: *const u8,
         cr_plane: *const u8,
@@ -66,7 +66,7 @@ unsafe extern "C" {
         error_message: *mut c_char,
         error_capacity: usize,
     ) -> c_int;
-    fn allium_jpeg_free(output: *mut c_void);
+    fn sekai_profile_jpeg_free(output: *mut c_void);
 }
 
 pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result<Vec<u8>, String> {
@@ -95,7 +95,7 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
     // null (the library stores null after a failed encode and leaves it alone
     // for a rejected argument) and the early return below has nothing to free.
     let status = unsafe {
-        allium_jpeg_encode_rgba(
+        sekai_profile_jpeg_encode_rgba(
             rgba.as_ptr(),
             width,
             height,
@@ -128,20 +128,20 @@ pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u32) -> Result
         Err(_) => {
             // SAFETY: `output` is the non-null buffer the successful encode
             // allocated and handed to the caller, and this early return is the
-            // only `allium_jpeg_free` it receives.
-            unsafe { allium_jpeg_free(output.cast()) };
+            // only `sekai_profile_jpeg_free` it receives.
+            unsafe { sekai_profile_jpeg_free(output.cast()) };
             return Err("libjpeg-turbo output length overflow".into());
         }
     };
     // SAFETY: the successful encode stored a non-null `output` addressing
     // `output_length` initialized bytes, and `length` is that count converted
-    // to `usize`. The buffer stays allocated until the `allium_jpeg_free`
+    // to `usize`. The buffer stays allocated until the `sekai_profile_jpeg_free`
     // below, after `to_vec` has copied it.
     let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
     // SAFETY: `output` is the non-null buffer the successful encode allocated,
-    // nothing borrows it any more, and this is the only `allium_jpeg_free` it
+    // nothing borrows it any more, and this is the only `sekai_profile_jpeg_free` it
     // receives on this path.
-    unsafe { allium_jpeg_free(output.cast()) };
+    unsafe { sekai_profile_jpeg_free(output.cast()) };
     Ok(encoded)
 }
 
@@ -210,7 +210,7 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
         // length. `output` starts null, so on any non-zero status it is still
         // null and the early return below has nothing to free.
         let status = unsafe {
-            allium_jpeg_encode_yuv420(
+            sekai_profile_jpeg_encode_yuv420(
                 yuv.y_plane().as_ptr(),
                 yuv.cb_plane().as_ptr(),
                 yuv.cr_plane().as_ptr(),
@@ -247,20 +247,20 @@ pub fn encode_rgba_avx512_yuv420_with_scratch(
             Err(_) => {
                 // SAFETY: `output` is the non-null buffer the successful
                 // encode allocated and handed to the caller, and this early
-                // return is the only `allium_jpeg_free` it receives.
-                unsafe { allium_jpeg_free(output.cast()) };
+                // return is the only `sekai_profile_jpeg_free` it receives.
+                unsafe { sekai_profile_jpeg_free(output.cast()) };
                 return Err("libjpeg-turbo raw YUV output length overflow".into());
             }
         };
         // SAFETY: the successful encode stored a non-null `output` addressing
         // `output_length` initialized bytes, and `length` is that count
         // converted to `usize`. The buffer stays allocated until the
-        // `allium_jpeg_free` below, after `to_vec` has copied it.
+        // `sekai_profile_jpeg_free` below, after `to_vec` has copied it.
         let encoded = unsafe { std::slice::from_raw_parts(output, length) }.to_vec();
         // SAFETY: `output` is the non-null buffer the successful encode
         // allocated, nothing borrows it any more, and this is the only
-        // `allium_jpeg_free` it receives on this path.
-        unsafe { allium_jpeg_free(output.cast()) };
+        // `sekai_profile_jpeg_free` it receives on this path.
+        unsafe { sekai_profile_jpeg_free(output.cast()) };
         Ok(encoded)
     }
 }

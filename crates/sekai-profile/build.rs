@@ -11,7 +11,7 @@ fn main() {
             .warnings(true)
             .extra_warnings(true)
             .flag_if_supported("-Werror")
-            .compile("allium_jpeg_turbo_encoder");
+            .compile("sekai_profile_jpeg_turbo_encoder");
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             println!("cargo:rustc-link-lib=static=jpeg-static");
         } else {
@@ -25,7 +25,7 @@ fn main() {
             .warnings(true)
             .extra_warnings(true)
             .flag_if_supported("-Werror")
-            .compile("allium_x264_encoder");
+            .compile("sekai_profile_x264_encoder");
         println!("cargo:rustc-link-lib=dylib=x264");
     }
 }

@@ -765,7 +765,7 @@ impl Scene {
 
     pub fn dump(&self) -> SceneDump {
         SceneDump {
-            schema: "allium.scene-dump".into(),
+            schema: "sekai-profile.scene-dump".into(),
             schema_major: SCHEMA_MAJOR,
             schema_minor: SCHEMA_MINOR,
             coordinate_space: "card-device-v1".into(),

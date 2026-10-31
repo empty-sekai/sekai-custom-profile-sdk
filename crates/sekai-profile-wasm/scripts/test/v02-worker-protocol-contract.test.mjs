@@ -7,7 +7,7 @@ const rendererUrl = new URL("../../src/renderer.ts", import.meta.url);
 
 test("worker protocol version 2 owns glyph, layout, scene, and interaction requests", async () => {
   const source = await readFile(protocolUrl, "utf8");
-  assert.match(source, /RENDERER_WORKER_PROTOCOL\s*=\s*"allium\.renderer-worker\/2"/);
+  assert.match(source, /RENDERER_WORKER_PROTOCOL\s*=\s*"sekai-profile\.renderer-worker\/2"/);
   for (const kind of [
     "contract",
     "registerFont",

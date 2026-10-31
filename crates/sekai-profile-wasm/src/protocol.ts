@@ -17,7 +17,7 @@ import type {
 import type { AuthoringCheckpoint, AuthoringCommand, AuthoringDelta, AuthoringSelection, GameProfileDocument } from "./types/authoring.js";
 import type { UguiTextLayout } from "./types/uguiText.js";
 
-export const RENDERER_WORKER_PROTOCOL = "allium.renderer-worker/2" as const;
+export const RENDERER_WORKER_PROTOCOL = "sekai-profile.renderer-worker/2" as const;
 
 export type RendererWorkerInit = {
   moduleUrl: string;

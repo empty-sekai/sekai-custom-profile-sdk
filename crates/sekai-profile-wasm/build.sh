@@ -15,7 +15,7 @@ fetch_freetype_source() {
   mkdir -p "$fetch_root/src"
   cat > "$fetch_root/Cargo.toml" <<'EOF'
 [package]
-name = "allium-freetype-source-fetch"
+name = "sekai-profile-freetype-source-fetch"
 version = "0.0.0"
 edition = "2021"
 
@@ -44,17 +44,17 @@ build_minimal_freetype() {
   cp "$script_dir/freetype-min/ftmodule.h" "$overlay/ftmodule.h"
 
   sed \
-    -e 's/^#define FT_CONFIG_OPTION_USE_LZW/\/\* allium-min: FT_CONFIG_OPTION_USE_LZW \*\//' \
-    -e 's/^#define FT_CONFIG_OPTION_USE_ZLIB/\/\* allium-min: FT_CONFIG_OPTION_USE_ZLIB \*\//' \
-    -e 's/^#define FT_CONFIG_OPTION_SVG/\/\* allium-min: FT_CONFIG_OPTION_SVG \*\//' \
-    -e 's/^#define FT_CONFIG_OPTION_MAC_FONTS/\/\* allium-min: FT_CONFIG_OPTION_MAC_FONTS \*\//' \
-    -e 's/^#define FT_CONFIG_OPTION_GUESSING_EMBEDDED_RFORK/\/\* allium-min: FT_CONFIG_OPTION_GUESSING_EMBEDDED_RFORK \*\//' \
-    -e 's/^#define FT_CONFIG_OPTION_INCREMENTAL/\/\* allium-min: FT_CONFIG_OPTION_INCREMENTAL \*\//' \
-    -e 's/^#define TT_CONFIG_OPTION_EMBEDDED_BITMAPS/\/\* allium-min: TT_CONFIG_OPTION_EMBEDDED_BITMAPS \*\//' \
-    -e 's/^#define TT_CONFIG_OPTION_COLOR_LAYERS/\/\* allium-min: TT_CONFIG_OPTION_COLOR_LAYERS \*\//' \
-    -e 's/^#define TT_CONFIG_OPTION_BYTECODE_INTERPRETER/\/\* allium-min: TT_CONFIG_OPTION_BYTECODE_INTERPRETER \*\//' \
-    -e 's/^#define TT_CONFIG_OPTION_SUBPIXEL_HINTING/\/\* allium-min: TT_CONFIG_OPTION_SUBPIXEL_HINTING \*\//' \
-    -e 's/^#define TT_CONFIG_OPTION_BDF/\/\* allium-min: TT_CONFIG_OPTION_BDF \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_USE_LZW/\/\* sekai-min: FT_CONFIG_OPTION_USE_LZW \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_USE_ZLIB/\/\* sekai-min: FT_CONFIG_OPTION_USE_ZLIB \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_SVG/\/\* sekai-min: FT_CONFIG_OPTION_SVG \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_MAC_FONTS/\/\* sekai-min: FT_CONFIG_OPTION_MAC_FONTS \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_GUESSING_EMBEDDED_RFORK/\/\* sekai-min: FT_CONFIG_OPTION_GUESSING_EMBEDDED_RFORK \*\//' \
+    -e 's/^#define FT_CONFIG_OPTION_INCREMENTAL/\/\* sekai-min: FT_CONFIG_OPTION_INCREMENTAL \*\//' \
+    -e 's/^#define TT_CONFIG_OPTION_EMBEDDED_BITMAPS/\/\* sekai-min: TT_CONFIG_OPTION_EMBEDDED_BITMAPS \*\//' \
+    -e 's/^#define TT_CONFIG_OPTION_COLOR_LAYERS/\/\* sekai-min: TT_CONFIG_OPTION_COLOR_LAYERS \*\//' \
+    -e 's/^#define TT_CONFIG_OPTION_BYTECODE_INTERPRETER/\/\* sekai-min: TT_CONFIG_OPTION_BYTECODE_INTERPRETER \*\//' \
+    -e 's/^#define TT_CONFIG_OPTION_SUBPIXEL_HINTING/\/\* sekai-min: TT_CONFIG_OPTION_SUBPIXEL_HINTING \*\//' \
+    -e 's/^#define TT_CONFIG_OPTION_BDF/\/\* sekai-min: TT_CONFIG_OPTION_BDF \*\//' \
     "$source_root/include/freetype/config/ftoption.h" > "$overlay/ftoption.h"
 
   local sources=(
@@ -84,8 +84,8 @@ prefix=$out
 libdir=\${prefix}/lib
 includedir=$source_root/include
 
-Name: FreeType 2 (Allium minimal)
-Description: Minimal TrueType/CFF/smooth FreeType build for Allium renderer WASM
+Name: FreeType 2 (minimal)
+Description: Minimal TrueType/CFF/smooth FreeType build for the profile WASM runtime
 Version: 26.1.20
 Libs: -L\${libdir} -lfreetype2
 Cflags: -I$out/include -I\${includedir}
@@ -118,7 +118,7 @@ build_inside_container() {
   export PKG_CONFIG_PATH="$freetype_min/lib/pkgconfig"
   export FREETYPE2_STATIC=1
   export CFLAGS_wasm32_unknown_emscripten="-D__WASM_SJLJ__ -fwasm-exceptions"
-  export ALLIUM_FONT_ENGINE_FINGERPRINT="freetype-2.13.2:min-v1"
+  export SEKAI_PROFILE_FONT_ENGINE_FINGERPRINT="freetype-2.13.2:min-v1"
   export CARGO_TARGET_DIR="$script_dir/target/browser-runtime"
 
   rm -rf "${output_dir:?}"
@@ -132,7 +132,7 @@ build_inside_container() {
     -c "$emscripten_root/system/lib/compiler-rt/emscripten_setjmp.c" \
     -o target/emscripten/emscripten_setjmp.o
 
-  export RUSTFLAGS="-C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_ES6=1 -C link-arg=-sEXPORT_NAME=createAlliumRenderer -C link-arg=-sALLOW_MEMORY_GROWTH=1 -C link-arg=-sSUPPORT_LONGJMP=wasm -C link-arg=-sENVIRONMENT=web,worker,node -C link-arg=-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_sdf_layout_freetype_probe','_sdf_layout_freetype_contract_json','_sdf_layout_freetype_map_glyphs_json','_sdf_layout_freetype_build_glyph_json','_sdf_layout_freetype_build_glyph_json_edt','_sdf_layout_freetype_build_layout_json','_sdf_layout_freetype_glyph_demand_json','_sdf_atlas_create_json','_sdf_atlas_resolve_json','_sdf_atlas_pages_since_json','_sdf_atlas_page_pixels_ptr','_sdf_atlas_page_pixels_len','_sdf_atlas_release','_sdf_atlas_destroy','_sdf_renderer_authoring_create_blank_json','_sdf_renderer_authoring_import_profile_json','_sdf_renderer_authoring_restore_checkpoint_json','_sdf_renderer_authoring_apply_json','_sdf_renderer_authoring_select_json','_sdf_renderer_authoring_begin_gesture_json','_sdf_renderer_authoring_preview_gesture_json','_sdf_renderer_authoring_commit_gesture_json','_sdf_renderer_authoring_cancel_gesture_json','_sdf_renderer_authoring_append_page_json','_sdf_renderer_authoring_duplicate_page_json','_sdf_renderer_authoring_delete_page_json','_sdf_renderer_authoring_move_page_json','_sdf_renderer_authoring_undo_json','_sdf_renderer_authoring_redo_json','_sdf_renderer_authoring_export_json','_sdf_renderer_authoring_checkpoint_json','_sdf_renderer_authoring_destroy','_sdf_renderer_core_scene_create_json','_sdf_renderer_core_profile_scene_create_json','_sdf_renderer_core_masterdata_create_json','_sdf_renderer_core_masterdata_put_table_json','_sdf_renderer_core_masterdata_seal_json','_sdf_renderer_core_profile_prepare_json','_sdf_renderer_core_profile_create_json','_sdf_renderer_core_masterdata_stats_json','_sdf_renderer_core_masterdata_destroy','_sdf_renderer_core_scene_advance_json','_sdf_renderer_core_scene_advance_binary','_sdf_renderer_core_scene_set_mask_json','_sdf_renderer_core_scene_set_masks_json','_sdf_renderer_core_scene_set_tab_json','_sdf_renderer_core_scene_scroll_json','_sdf_renderer_core_scene_dump_json','_sdf_renderer_core_scene_destroy','_sdf_renderer_core_resolve_locale_json','_sdf_renderer_core_resolve_profile_json','_sdf_layout_freetype_free_string'] -C link-arg=-sEXPORTED_RUNTIME_METHODS=['ccall','HEAPU8','HEAPU32'] -C link-arg=-sEXIT_RUNTIME=0 -C link-arg=-Wl,-Map=$script_dir/target/renderer-wasm.map -C link-arg=$script_dir/target/emscripten/emscripten_setjmp.o"
+  export RUSTFLAGS="-C link-arg=-sMODULARIZE=1 -C link-arg=-sEXPORT_ES6=1 -C link-arg=-sEXPORT_NAME=createProfileRuntime -C link-arg=-sALLOW_MEMORY_GROWTH=1 -C link-arg=-sSUPPORT_LONGJMP=wasm -C link-arg=-sENVIRONMENT=web,worker,node -C link-arg=-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_sdf_layout_freetype_probe','_sdf_layout_freetype_contract_json','_sdf_layout_freetype_map_glyphs_json','_sdf_layout_freetype_build_glyph_json','_sdf_layout_freetype_build_glyph_json_edt','_sdf_layout_freetype_build_layout_json','_sdf_layout_freetype_glyph_demand_json','_sdf_atlas_create_json','_sdf_atlas_resolve_json','_sdf_atlas_pages_since_json','_sdf_atlas_page_pixels_ptr','_sdf_atlas_page_pixels_len','_sdf_atlas_release','_sdf_atlas_destroy','_sdf_renderer_authoring_create_blank_json','_sdf_renderer_authoring_import_profile_json','_sdf_renderer_authoring_restore_checkpoint_json','_sdf_renderer_authoring_apply_json','_sdf_renderer_authoring_select_json','_sdf_renderer_authoring_begin_gesture_json','_sdf_renderer_authoring_preview_gesture_json','_sdf_renderer_authoring_commit_gesture_json','_sdf_renderer_authoring_cancel_gesture_json','_sdf_renderer_authoring_append_page_json','_sdf_renderer_authoring_duplicate_page_json','_sdf_renderer_authoring_delete_page_json','_sdf_renderer_authoring_move_page_json','_sdf_renderer_authoring_undo_json','_sdf_renderer_authoring_redo_json','_sdf_renderer_authoring_export_json','_sdf_renderer_authoring_checkpoint_json','_sdf_renderer_authoring_destroy','_sdf_renderer_core_scene_create_json','_sdf_renderer_core_profile_scene_create_json','_sdf_renderer_core_masterdata_create_json','_sdf_renderer_core_masterdata_put_table_json','_sdf_renderer_core_masterdata_seal_json','_sdf_renderer_core_profile_prepare_json','_sdf_renderer_core_profile_create_json','_sdf_renderer_core_masterdata_stats_json','_sdf_renderer_core_masterdata_destroy','_sdf_renderer_core_scene_advance_json','_sdf_renderer_core_scene_advance_binary','_sdf_renderer_core_scene_set_mask_json','_sdf_renderer_core_scene_set_masks_json','_sdf_renderer_core_scene_set_tab_json','_sdf_renderer_core_scene_scroll_json','_sdf_renderer_core_scene_dump_json','_sdf_renderer_core_scene_destroy','_sdf_renderer_core_resolve_locale_json','_sdf_renderer_core_resolve_profile_json','_sdf_layout_freetype_free_string'] -C link-arg=-sEXPORTED_RUNTIME_METHODS=['ccall','HEAPU8','HEAPU32'] -C link-arg=-sEXIT_RUNTIME=0 -C link-arg=-Wl,-Map=$script_dir/target/renderer-wasm.map -C link-arg=$script_dir/target/emscripten/emscripten_setjmp.o"
   RUSTFLAGS="${RUSTFLAGS/]/,'_sdf_layout_freetype_plan_glyphs_json']}"
   RUSTFLAGS="${RUSTFLAGS/]/,'_sdf_renderer_authoring_elements_json']}"
   RUSTFLAGS="${RUSTFLAGS/]/,'_sdf_layout_ugui_text_json']}"

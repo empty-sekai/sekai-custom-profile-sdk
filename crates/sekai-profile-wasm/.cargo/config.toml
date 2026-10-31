@@ -4,7 +4,7 @@
 rustflags = [
   "-C", "link-arg=-sMODULARIZE=1",
   "-C", "link-arg=-sEXPORT_ES6=1",
-  "-C", "link-arg=-sEXPORT_NAME=createAlliumRenderer",
+  "-C", "link-arg=-sEXPORT_NAME=createProfileRuntime",
   "-C", "link-arg=-sALLOW_MEMORY_GROWTH=1",
   "-C", "link-arg=-sSUPPORT_LONGJMP=wasm",
   "-C", "link-arg=-sENVIRONMENT=web,worker,node",

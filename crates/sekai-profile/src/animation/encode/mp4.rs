@@ -50,7 +50,7 @@ impl Default for H264EncoderConfig {
             yuv_converter: H264YuvConverter::Auto,
             require_avx512: false,
             validate_avx512: false,
-            encoder_revision: "direct-libx264-lazy-font-mp4-v9".into(),
+            encoder_revision: "direct-libx264-lazy-font-mp4-v10".into(),
         }
     }
 }
@@ -113,16 +113,16 @@ struct NativeX264Encoder {
 //
 // # Safety
 //
-// `allium_x264_create` returns either null or a heap-allocated handle that
+// `sekai_profile_x264_create` returns either null or a heap-allocated handle that
 // owns one open libx264 encoder, configured for `width` x `height` I420 input
 // at `fps`, with `crf` applied as a fixed quantizer (`X264_RC_CQP`), no
 // B-frames, no lookahead and one thread. It returns null for non-positive
 // dimensions or `fps`, a `crf` outside `0..=51`, or an encoder that fails to
 // open. A non-null handle must be released by exactly one
-// `allium_x264_destroy` call; no function here may receive it after that
+// `sekai_profile_x264_destroy` call; no function here may receive it after that
 // call, and two calls on it must never overlap.
 //
-// `allium_x264_encode` reads one complete frame from `yuv420p`: the
+// `sekai_profile_x264_encode` reads one complete frame from `yuv420p`: the
 // `width * height` byte luma plane followed by two chroma planes of
 // `width / 2 * height / 2` bytes, rows tightly packed. `mb_info` must hold
 // one flag byte per 16x16 macroblock, `width.div_ceil(16) *
@@ -132,25 +132,25 @@ struct NativeX264Encoder {
 // so both buffers need to stay valid only for that call. `pts` values must
 // increase from call to call.
 //
-// `allium_x264_encode` and `allium_x264_flush` write through `output` and
+// `sekai_profile_x264_encode` and `sekai_profile_x264_flush` write through `output` and
 // `output_size`, which must be valid for writes. On a non-negative return,
 // `*output` addresses `*output_size` bytes of Annex B NAL units in a buffer
 // the handle owns; `*output` may be null when `*output_size` is 0. The
 // buffer is reused, and may be reallocated, by the next
-// `allium_x264_encode` or `allium_x264_flush` call on the same handle and is
-// freed by `allium_x264_destroy`, so the bytes must be copied out before
+// `sekai_profile_x264_encode` or `sekai_profile_x264_flush` call on the same handle and is
+// freed by `sekai_profile_x264_destroy`, so the bytes must be copied out before
 // either. The caller never frees it. A negative return carries no output.
 //
-// `allium_x264_delayed_frames` reads the number of pictures the encoder
+// `sekai_profile_x264_delayed_frames` reads the number of pictures the encoder
 // still holds; it accepts a null handle and returns 0 for it.
 unsafe extern "C" {
-    fn allium_x264_create(
+    fn sekai_profile_x264_create(
         width: std::ffi::c_int,
         height: std::ffi::c_int,
         fps: std::ffi::c_int,
         crf: std::ffi::c_int,
     ) -> *mut NativeX264Encoder;
-    fn allium_x264_encode(
+    fn sekai_profile_x264_encode(
         encoder: *mut NativeX264Encoder,
         yuv420p: *const u8,
         mb_info: *const u8,
@@ -158,13 +158,13 @@ unsafe extern "C" {
         output: *mut *const u8,
         output_size: *mut usize,
     ) -> std::ffi::c_int;
-    fn allium_x264_flush(
+    fn sekai_profile_x264_flush(
         encoder: *mut NativeX264Encoder,
         output: *mut *const u8,
         output_size: *mut usize,
     ) -> std::ffi::c_int;
-    fn allium_x264_delayed_frames(encoder: *const NativeX264Encoder) -> std::ffi::c_int;
-    fn allium_x264_destroy(encoder: *mut NativeX264Encoder);
+    fn sekai_profile_x264_delayed_frames(encoder: *const NativeX264Encoder) -> std::ffi::c_int;
+    fn sekai_profile_x264_destroy(encoder: *mut NativeX264Encoder);
 }
 
 /// Owns one native libx264 handle for its whole lifetime.
@@ -182,12 +182,12 @@ struct DirectX264Encoder {
 
 impl DirectX264Encoder {
     fn new(spec: &AnimationEncodeSpec, config: &H264EncoderConfig) -> Result<Self, AnimationError> {
-        // SAFETY: `allium_x264_create` takes only integers and validates them,
+        // SAFETY: `sekai_profile_x264_create` takes only integers and validates them,
         // returning null on invalid input or failure. A null result becomes an
         // error below; a non-null one moves straight into `Self`, whose `Drop`
         // is then the only place that destroys it.
         let encoder = unsafe {
-            allium_x264_create(
+            sekai_profile_x264_create(
                 spec.width as std::ffi::c_int,
                 spec.height as std::ffi::c_int,
                 spec.fps as std::ffi::c_int,
@@ -236,7 +236,7 @@ impl DirectX264Encoder {
         // are local, writable output slots. `encode_mp4_into` passes the frame
         // index as `pts`, so frames arrive in increasing order.
         let encoded = unsafe {
-            allium_x264_encode(
+            sekai_profile_x264_encode(
                 self.handle,
                 yuv.as_ptr(),
                 mb_info.as_ptr(),
@@ -263,13 +263,13 @@ impl DirectX264Encoder {
         // SAFETY: `self.handle` is the non-null handle this wrapper owns and has
         // not destroyed; the call only reads the encoder's delayed-picture
         // count.
-        while unsafe { allium_x264_delayed_frames(self.handle) } > 0 {
+        while unsafe { sekai_profile_x264_delayed_frames(self.handle) } > 0 {
             let mut data = std::ptr::null();
             let mut size = 0usize;
             // SAFETY: `self.handle` is the non-null handle this wrapper owns and
             // has not destroyed, `&mut self` excludes any concurrent call on
             // it, and `data` and `size` are local, writable output slots.
-            let encoded = unsafe { allium_x264_flush(self.handle, &mut data, &mut size) };
+            let encoded = unsafe { sekai_profile_x264_flush(self.handle, &mut data, &mut size) };
             if encoded < 0 || (size != 0 && data.is_null()) {
                 return Err(mp4_error("flush direct libx264 encoder failed"));
             }
@@ -289,9 +289,9 @@ impl Drop for DirectX264Encoder {
     fn drop(&mut self) {
         // SAFETY: `self.handle` is the non-null handle `new` stored, it is never
         // copied out of this wrapper, and `drop` runs once, so this is the
-        // single `allium_x264_destroy` call for the handle and nothing uses
+        // single `sekai_profile_x264_destroy` call for the handle and nothing uses
         // the handle or its output buffer afterwards.
-        unsafe { allium_x264_destroy(self.handle) };
+        unsafe { sekai_profile_x264_destroy(self.handle) };
     }
 }
 
@@ -719,7 +719,7 @@ fn build_avc_moov(track: &AvcTrack<'_>) -> Result<Vec<u8>, AnimationError> {
         mp4_u32(output, 0);
         mp4_u16(output, 1);
         let mut compressor = [0u8; 32];
-        let name = b"allium libx264";
+        let name = b"sekai-profile libx264";
         compressor[0] = name.len() as u8;
         compressor[1..1 + name.len()].copy_from_slice(name);
         output.extend_from_slice(&compressor);

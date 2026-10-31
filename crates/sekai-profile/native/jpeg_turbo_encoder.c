@@ -12,10 +12,10 @@ typedef struct {
   jmp_buf jump;
   char *message;
   size_t message_capacity;
-} allium_jpeg_error;
+} sekai_profile_jpeg_error;
 
-static void allium_jpeg_error_exit(j_common_ptr common) {
-  allium_jpeg_error *error = (allium_jpeg_error *)common->err;
+static void sekai_profile_jpeg_error_exit(j_common_ptr common) {
+  sekai_profile_jpeg_error *error = (sekai_profile_jpeg_error *)common->err;
   if (error->message != NULL && error->message_capacity > 0) {
     common->err->format_message(common, error->message);
     error->message[error->message_capacity - 1] = '\0';
@@ -29,7 +29,7 @@ static void allium_jpeg_error_exit(j_common_ptr common) {
  * `output` can point at a buffer it has already freed. `term_destination`
  * writes the live buffer back first; it is only valid once jpeg_mem_dest has
  * returned. */
-static void allium_jpeg_discard_output(j_compress_ptr encoder,
+static void sekai_profile_jpeg_discard_output(j_compress_ptr encoder,
                                        int destination_ready,
                                        unsigned char **output,
                                        unsigned long *output_length) {
@@ -41,7 +41,7 @@ static void allium_jpeg_discard_output(j_compress_ptr encoder,
   *output_length = 0;
 }
 
-int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
+int sekai_profile_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
                             uint32_t height, int quality,
                             unsigned char **output,
                             unsigned long *output_length, char *error_message,
@@ -52,7 +52,7 @@ int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
   }
 
   struct jpeg_compress_struct encoder;
-  allium_jpeg_error error;
+  sekai_profile_jpeg_error error;
   volatile int encoder_created = 0;
   volatile int destination_ready = 0;
   memset(&encoder, 0, sizeof(encoder));
@@ -60,11 +60,11 @@ int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
   *output = NULL;
   *output_length = 0;
   encoder.err = jpeg_std_error(&error.base);
-  error.base.error_exit = allium_jpeg_error_exit;
+  error.base.error_exit = sekai_profile_jpeg_error_exit;
   error.message = error_message;
   error.message_capacity = error_capacity;
   if (setjmp(error.jump) != 0) {
-    allium_jpeg_discard_output(&encoder, destination_ready, output,
+    sekai_profile_jpeg_discard_output(&encoder, destination_ready, output,
                                output_length);
     if (encoder_created) {
       jpeg_destroy_compress(&encoder);
@@ -94,7 +94,7 @@ int allium_jpeg_encode_rgba(const uint8_t *rgba, uint32_t width,
   return 0;
 }
 
-int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
+int sekai_profile_jpeg_encode_yuv420(const uint8_t *y_plane,
                               const uint8_t *cb_plane,
                               const uint8_t *cr_plane, uint32_t width,
                               uint32_t height, uint32_t y_stride,
@@ -110,7 +110,7 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
   }
 
   struct jpeg_compress_struct encoder;
-  allium_jpeg_error error;
+  sekai_profile_jpeg_error error;
   volatile int encoder_created = 0;
   volatile int destination_ready = 0;
   memset(&encoder, 0, sizeof(encoder));
@@ -118,11 +118,11 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
   *output = NULL;
   *output_length = 0;
   encoder.err = jpeg_std_error(&error.base);
-  error.base.error_exit = allium_jpeg_error_exit;
+  error.base.error_exit = sekai_profile_jpeg_error_exit;
   error.message = error_message;
   error.message_capacity = error_capacity;
   if (setjmp(error.jump) != 0) {
-    allium_jpeg_discard_output(&encoder, destination_ready, output,
+    sekai_profile_jpeg_discard_output(&encoder, destination_ready, output,
                                output_length);
     if (encoder_created) {
       jpeg_destroy_compress(&encoder);
@@ -172,7 +172,7 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
           (JSAMPROW)(cr_plane + (size_t)source_row * chroma_stride);
     }
     if (jpeg_write_raw_data(&encoder, planes, 16) != 16) {
-      allium_jpeg_discard_output(&encoder, 1, output, output_length);
+      sekai_profile_jpeg_discard_output(&encoder, 1, output, output_length);
       jpeg_destroy_compress(&encoder);
       return 3;
     }
@@ -184,4 +184,4 @@ int allium_jpeg_encode_yuv420(const uint8_t *y_plane,
   return 0;
 }
 
-void allium_jpeg_free(void *output) { free(output); }
+void sekai_profile_jpeg_free(void *output) { free(output); }
