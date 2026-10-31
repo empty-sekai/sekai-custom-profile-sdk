@@ -161,6 +161,7 @@ impl ResolvedHonor {
         sekai_profile_core::masterdata::honor_has_rank_overlay(
             &self.honor_type,
             &self.asset_bundle_name,
+            self.background_asset_bundle_name.as_deref(),
             self.is_live_master,
         )
     }
